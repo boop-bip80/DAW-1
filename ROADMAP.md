@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (readiness by audience with hours to ~95 %) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (Ukrainian UI and language selection) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -96,7 +96,10 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#f
 | Korean | ko | none | 0 % |
 | Vietnamese | vi | none | 0 % |
 
-Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-parity.md).
+Other languages shipped: **Ukrainian (uk)**. It covers menus, command search, dialogs and built-in
+parameter captions, with system-language detection on desktop/web and a persisted desktop choice.
+Engine and external diagnostics retain their original wording. Detail:
+[localization-parity.md](docs/localization-parity.md).
 
 ## Upcoming
 
@@ -122,6 +125,8 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-10** — Ukrainian UI catalog and language selection, with English fallback, translated
+  command search and bundled Cyrillic glyph coverage.
 - **2026-10-10** — Stage re-normalized to **pre-alpha** by the core-workflow gate (interface recording, MIDI recording and session interchange fail). Full re-measure against Pro Tools Ultimate 2026.4.1 and the standard
   progress-docs set (this page, target-app parity, gaps, roadmap, UI/format/hardware/plugin/
   localization parity). v0.4.0 released. Community fixes: Cut All Automation, snap to neighbours,
@@ -142,6 +147,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Added Ukrainian UI and language selection to the reorganized language summary |
 | 2026-10-10 | minor | Readiness-by-audience table with hours: full 950–1,450 h, mainstream 380–600 h, essentials 110–200 h |
 | 2026-10-10 | minor | Added mainstream practitioner ~36 % and essentials user ~57 % to the headline numbers |
 | 2026-10-10 | minor | Stage alpha → pre-alpha: the core-workflow gate fails on interface recording, MIDI recording and session interchange; alpha distance added |
