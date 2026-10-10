@@ -57,18 +57,10 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
     // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    let events = key_presses(ctx, &mut app.v_pressed);
     if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
         return;
     }
-    let events: Vec<(Key, Modifiers)> = ctx.input(|i| {
-        i.events
-            .iter()
-            .filter_map(|e| match e {
-                egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => Some((*key, *modifiers)),
-                _ => None,
-            })
-            .collect()
-    });
     // Cmd and Ctrl are separate keys only on macOS (asked at runtime so the web build in a Mac browser agrees).
     let mac = ctx.os() == egui::os::OperatingSystem::Mac;
     for (key, mods) in events {
@@ -86,6 +78,31 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
             let _ = app.run(c.0, json!({}));
         }
     }
+}
+
+/// The desktop sends Cmd+X/C/V (and Windows' Shift+Delete, Ctrl+Insert, Shift+Insert) only as clipboard events, and
+/// drops Cmd+V's press while the clipboard holds no text, so a V release whose press never came counts as Cmd+V.
+fn key_presses(ctx: &egui::Context, v_pressed: &mut bool) -> Vec<(Key, Modifiers)> {
+    ctx.input(|i| {
+        let clipboard = |key| (!cfg!(target_arch = "wasm32")).then_some((key, if i.modifiers.command { i.modifiers } else { Modifiers::COMMAND }));
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
+                    *v_pressed |= *key == Key::V;
+                    Some((*key, *modifiers))
+                }
+                egui::Event::Key { key: Key::V, pressed: false, .. } if !std::mem::take(v_pressed) => clipboard(Key::V),
+                egui::Event::Cut => clipboard(Key::X),
+                egui::Event::Copy => clipboard(Key::C),
+                egui::Event::Paste(_) => {
+                    *v_pressed |= i.modifiers.command;
+                    clipboard(Key::V)
+                }
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {

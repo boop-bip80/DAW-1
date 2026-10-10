@@ -260,6 +260,8 @@ pub struct SoundApp {
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
     pub quit_requested: bool,
+    /// The V key's press arrived; see `shortcuts::key_presses`.
+    v_pressed: bool,
     /// Reset floating-window positions next frame (Window › Arrange).
     pub arrange_request: bool,
     /// Tracks whose automation was touched during this pass (Touch/Latch writing).
@@ -319,6 +321,7 @@ impl SoundApp {
             docking_context: None,
             sim: None,
             quit_requested: false,
+            v_pressed: false,
             arrange_request: false,
             touched: std::collections::HashSet::new(),
             last_write_at: i64::MIN,
