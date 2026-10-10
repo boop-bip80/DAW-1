@@ -159,6 +159,11 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             let _ = app.run("edit.tool", json!({"tool": tool}));
             true
         }
+        // Selected notes in an open MIDI editor take the key.
+        Key::Delete | Key::Backspace if plain && app.ui.window == MainWindow::Edit && (app.midi.selected.is_empty() || !app.ui.show_midi_editor) => {
+            let _ = app.run("edit.clear", json!({}));
+            true
+        }
         Key::Plus | Key::Minus if !m.command && app.ui.window == MainWindow::Edit => {
             let dir = if key == Key::Plus { 1 } else { -1 };
             let _ = app.run("edit.nudge", json!({"direction": dir}));

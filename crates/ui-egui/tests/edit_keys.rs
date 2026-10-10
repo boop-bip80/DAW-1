@@ -1,7 +1,7 @@
 use egui::os::OperatingSystem;
 use egui::{Event, Key, Modifiers, OutputCommand};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, shortcuts};
+use soundcraft_ui_egui::{MainWindow, Services, SoundApp, shortcuts};
 
 const MAC_CMD: Modifiers = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
 
@@ -64,5 +64,26 @@ fn the_desktop_clipboard_keys_cut_copy_and_paste_clips() {
         }
         select_first_kick_clip(&mut app);
         assert_eq!(ran(&ctx, &mut app, Event::Cut, cmd), ["edit.cut"], "{os:?} {cmd:?}");
+    }
+}
+
+#[test]
+fn delete_and_backspace_clear_the_selected_clip_unless_midi_notes_take_them() {
+    for key in [Key::Delete, Key::Backspace] {
+        for (window, editor, notes, cleared) in [
+            (MainWindow::Edit, false, vec![], true),
+            (MainWindow::Edit, false, vec![0], true),
+            (MainWindow::Edit, true, vec![], true),
+            (MainWindow::Edit, true, vec![0], false),
+            (MainWindow::Mix, false, vec![], false),
+        ] {
+            let mut app = demo();
+            let clips = kick_clips(&app);
+            select_first_kick_clip(&mut app);
+            (app.ui.window, app.ui.show_midi_editor, app.midi.selected) = (window, editor, notes);
+            let event = Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+            send(&egui::Context::default(), &mut app, event, Modifiers::NONE);
+            assert_eq!(kick_clips(&app), clips - usize::from(cleared), "{key:?} {window:?}, editor open: {editor}, notes: {:?}", app.midi.selected);
+        }
     }
 }
