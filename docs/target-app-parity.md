@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against Pro Tools Ultimate 2026.4.1; replaces the area table that lived in ROADMAP.md) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (stage re-normalized to pre-alpha by the core-workflow gate) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -16,7 +16,8 @@ summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimens
 | Menu breadth (engine + UI layer) | **482 / 512 menu leaves (94.1 %)** | **measured**: the 512-leaf catalog `crates/engine/catalog/menus.txt` against the command registry; engine alone 397 / 512 (77.5 %) from `cargo xtask parity` ([`parity-checklist.md`](parity-checklist.md)); the 85 UI-layer matches re-counted on 2026-10-10 from `crates/ui-egui/src/menus.rs` (`UI_COMMANDS`, `AUDIOSUITE`, `MENU_WINDOWS`, Mix Window Views) by script |
 | Feature breadth (menus plus everything not in a menu: plugins, hardware, formats, immersive, cloud) | **~70 %** | estimated (area table below, presence only) |
 | **Ready for real work** | **~40 %** | estimated (dimension table below) |
-| Stage | **alpha** | see [Stage](#stage) |
+| Stage | **pre-alpha** (core-workflow gate fails) | see [Stage](#stage) |
+| Remaining effort to alpha | **~110–180 Opus 5.5 agent-hours** | estimated: the failing gate rows |
 | Remaining effort to beta | **~350–570 Opus 5.5 agent-hours** | estimated, calibrated (below) |
 | Remaining effort to full parity | **~950–1,450 Opus 5.5 agent-hours** | estimated, calibrated (below) |
 
@@ -98,16 +99,21 @@ Weights by what Pro Tools users actually spend time on. **Breadth** = the featur
 
 ## Stage
 
-**Alpha.** Core workflows run end to end (record from the default device, edit, mix with built-in
-and hosted plugins, automate, bounce), on every platform we ship, at ~40 % ready for real work.
-It is not beta: it cannot open or save Pro Tools sessions or exchange them through AAF/OMF (the
-standard's "blocking gap in the main file format"), it cannot record MIDI, and it cannot pick an
-audio interface or a buffer size, which every tracking session needs.
+**Pre-alpha.** Readiness (~40 %) is at the alpha bar, but the core-workflow gate
+([`roadmap.md`](roadmap.md#alpha-gate)) fails three of six Pro Tools workflows on macOS, the main
+platform:
 
-**Distance to beta: ~35 points of readiness and ~350–570 agent-hours.** The beta list is in
-[`roadmap.md`](roadmap.md): hardware basics (device/buffer selection, duplex low latency, MIDI
-I/O), AAF/OMF interchange, disk streaming and record-to-disk, the open bug backlog, plugin hosting
-completeness on macOS, and a first fidelity harness against Pro Tools.
+- Tracking from a chosen interface at a chosen buffer size: **no**. Only the default devices are
+  used, the mix runs in fixed 512-sample blocks, input and output are separate streams, and
+  takes are held in RAM.
+- MIDI recording: **no**. There is no MIDI device layer.
+- Session interchange with Pro Tools or picture editors: **no**. No AAF/OMF/`.ptx`.
+
+Editing, mixing with plugins, bouncing, and saving and reopening pass (with known bugs).
+
+**Distance to alpha: ~5 points of readiness and ~110–180 agent-hours** (G-01, G-02, G-03, part
+of G-06, and the #153 entitlement). **Distance to beta: ~35 points and ~350–570 agent-hours**
+(beta also needs ~75 % ready). The beta plan is in [`roadmap.md`](roadmap.md).
 
 ## Effort and calibration
 
@@ -143,5 +149,6 @@ serializes more, because it needs hands-on testing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Stage alpha → pre-alpha under the core-workflow gate; alpha distance ~110–180 h |
 | 2026-10-10 | major | Full re-measure against Pro Tools Ultimate 2026.4.1: two numbers (breadth ~70 %, ready ~40 %), dimension and area tables with hours, stage alpha; hours re-calibrated from PR history (110–150 h → 950–1,450 h to full parity: the old figure counted presence only) |
 | 2026-10-07 | major | Area table and "~65 % overall, 110–150 h" estimate (then in ROADMAP.md) |

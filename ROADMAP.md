@@ -1,8 +1,8 @@
 # SoundCraft roadmap
 
-**Stage: alpha** · next: beta, ~35 points and ~350–570 h away
+**Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against Pro Tools Ultimate 2026.4.1; new progress-docs set) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (stage re-normalized to pre-alpha by the core-workflow gate) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -18,14 +18,18 @@ menu checklist).
 | Menu breadth | **482 / 512 Pro Tools menu leaves (94.1 %)**; engine alone 397 / 512 | measured (`cargo xtask parity` + UI-layer aliases) |
 | Feature breadth | **~70 %** | estimated (menus plus plugins, hardware, formats, immersive, cloud) |
 | **Ready for real work** | **~40 %** | estimated, weighted by dimension |
-| Remaining to beta | **~350–570 Opus 5.5 agent-hours** (~60–70 % parallelizable) | estimated, calibrated on PR history |
+| Remaining to alpha | **~110–180 Opus 5.5 agent-hours** (the failing gate rows) | estimated, calibrated on PR history |
+| Remaining to beta | **~350–570 Opus 5.5 agent-hours** (includes the alpha work; ~60–70 % parallelizable) | estimated |
 | Remaining to full parity | **~950–1,450 Opus 5.5 agent-hours** | estimated |
 
-**Why alpha:** record, edit, mix, automate and bounce work end to end on every platform, and
-releases ship (v0.4.0, 2026-10-10). Not beta: no session interchange with Pro Tools (no `.ptx`,
-AAF or OMF), no MIDI devices, no audio interface or buffer-size choice, and ~25 open correctness
-bugs. The 2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence; this
-one measures readiness and adds hardware, localization and field bug reports.
+**Why pre-alpha:** the core-workflow gate in [docs/roadmap.md](docs/roadmap.md#alpha-gate) fails.
+Editing, mixing, bouncing, and saving and reopening work end to end. But a Pro Tools user can't
+record from a chosen audio interface at a chosen buffer size (only the default devices, a fixed
+512-sample block, and takes held in RAM). They can't record MIDI from a keyboard (there is no
+MIDI device layer). And they can't bring a session in or hand one back (no AAF/OMF/`.ptx`).
+Readiness (~40 %) sits right at the alpha bar, but a gate failure keeps the app pre-alpha. The
+2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence. This one
+measures readiness and adds hardware, localization and field bug reports.
 
 ## By dimension
 
@@ -85,14 +89,14 @@ Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-p
 
 ## Upcoming
 
-Ranked; detail and the full beta plan in [docs/roadmap.md](docs/roadmap.md).
+Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadmap.md](docs/roadmap.md).
 
-1. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
-2. Audio interfaces: device and buffer-size choice, duplex stream, ASIO (G-01). 25–40 h.
-3. MIDI devices: record from keyboards, play instruments live, output and clock (G-02). 20–35 h.
-4. macOS plugin entitlement (#153) and AU editors (G-05). 15–25 h.
-5. PR CI running `cargo xtask ci` on three OSes (G-14). 5–10 h.
-6. AAF/OMF interchange; disk streaming and record to disk (G-03, G-06). 65–115 h.
+1. **Alpha blocker:** audio interfaces: device and buffer-size choice, duplex stream, ASIO; record to disk (G-01, G-06). 35–55 h.
+2. **Alpha blocker:** MIDI devices: record from keyboards, play instruments live, output (G-02). 20–35 h.
+3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
+4. macOS plugin entitlement (#153), then AU editors (G-05). 1 h for the entitlement (needed for the mix row), then 15–25 h.
+5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
+6. PR CI running `cargo xtask ci` on three OSes (G-14). 5–10 h.
 7. Fidelity harness against Pro Tools (G-07). 20–30 h.
 
 ## Robustness
@@ -107,7 +111,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
-- **2026-10-10** — Full re-measure against Pro Tools Ultimate 2026.4.1 and the standard
+- **2026-10-10** — Stage re-normalized to **pre-alpha** by the core-workflow gate (interface recording, MIDI recording and session interchange fail). Full re-measure against Pro Tools Ultimate 2026.4.1 and the standard
   progress-docs set (this page, target-app parity, gaps, roadmap, UI/format/hardware/plugin/
   localization parity). v0.4.0 released. Community fixes: Cut All Automation, snap to neighbours,
   tempo stretch, I/O Setup, clip export names, menu-only dialogs, playback stop on new session.
@@ -127,6 +131,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-10 | major | Rewritten to the progress-docs standard: stage alpha, two numbers (breadth ~70 %, ready ~40 %), dimension/feature/language tables, hours re-calibrated; area table moved to docs/target-app-parity.md, milestones to docs/roadmap.md |
+| 2026-10-10 | minor | Stage alpha → pre-alpha: the core-workflow gate fails on interface recording, MIDI recording and session interchange; alpha distance added |
+| 2026-10-10 | major | Rewritten to the progress-docs standard: stage alpha (re-normalized the same day), two numbers (breadth ~70 %, ready ~40 %), dimension/feature/language tables, hours re-calibrated; area table moved to docs/target-app-parity.md, milestones to docs/roadmap.md |
 | 2026-10-07 | major | Menu parity 94 %, ~65 % estimated feature parity, alpha list |
 | 2026-10-06 | minor | Alpha and parity estimates |
