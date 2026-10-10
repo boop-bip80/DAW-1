@@ -329,7 +329,7 @@ impl SlotCtx<'_> {
     /// A new instance for `ins` on track `t`, slot `idx`, prepared for `ch` channels.
     fn make(&mut self, t: TrackId, idx: usize, ins: &soundcraft_model::Insert, ch: usize) -> Option<PluginSlot> {
         let third = is_third_party(&ins.plugin);
-        let plugin = if third && self.external {
+        let mut plugin = if third && self.external {
             match self.adopt.remove(&(t, idx)) {
                 Some(p) if p.id == ins.plugin && p.ch == ch => Some(p.plugin),
                 Some(p) => {
@@ -342,6 +342,14 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch)
         }?;
+        if !third {
+            // A built-in's parameters are its whole state: start the new instance at the session's
+            // values (smoothers snapped) instead of gliding to them from its defaults.
+            for (k, v) in &ins.params {
+                plugin.set_param(k, *v);
+            }
+            plugin.reset();
+        }
         Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new() })
     }
 }
@@ -826,6 +834,11 @@ fn process_strip(
         }
         TrackKind::Instrument | TrackKind::Midi => {
             if let Some(inst) = &mut strip.instrument {
+                // A built-in instrument plays the session's parameters; a hosted one keeps the
+                // sound its own editor made (restored from its state), which `params` doesn't track.
+                if let Some(ins) = t.instrument.as_ref().filter(|i| !is_third_party(&i.plugin)) {
+                    apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
+                }
                 schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
@@ -1279,16 +1292,18 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
 }
 
 fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
-    let slot_u8 = u8::try_from(i).unwrap_or(0);
+    // Plugin automation lanes address insert slots; the instrument slot has none.
+    let slot_u8 = u8::try_from(i).ok();
     let automated = t.mixer.automation_mode.reads()
-        && t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == slot_u8) && !l.points.is_empty());
+        && t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if Some(*slot) == slot_u8) && !l.points.is_empty());
     if slot.applied.len() != ins.params.len() {
         slot.applied = vec![f32::NAN; ins.params.len()];
     }
     for ((k, v), last) in ins.params.iter().zip(slot.applied.iter_mut()) {
         let mut val = *v;
         if automated
-            && let Some(l) = t.automation.iter().find(|l| matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == slot_u8 && param == k))
+            && let Some(l) =
+                t.automation.iter().find(|l| matches!(&l.param, AutoParam::Plugin { slot, param } if Some(*slot) == slot_u8 && param == k))
             && !l.points.is_empty()
         {
             val = l.value_at(pos, val);
@@ -2011,6 +2026,58 @@ mod tests {
         // Offline (not external): unknown third-party plugins are simply absent.
         let out = render_range(&s, Range::new(0, 1024), 512);
         assert!(out[0][100] > 0.3);
+    }
+
+    /// An instrument track playing kick, snare and hat notes (half a second apart; any instrument
+    /// plays them) on `plugin` at `level` dB.
+    fn instrument_session(plugin: &str, level: f32) -> (Session, TrackId) {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let notes = [36u8, 38, 42]
+            .iter()
+            .zip(0i64..)
+            .map(|(&pitch, i)| soundcraft_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start: i * 960, length: 480 })
+            .collect();
+        let id = s.new_clip_id();
+        let tr = s.track_mut(t).unwrap();
+        let mut ins = Insert::new(plugin);
+        ins.params.insert("level".into(), level);
+        tr.instrument = Some(ins);
+        tr.playlist_mut().unwrap().clips.push(Clip::midi(id, "notes", 0, 96_000, soundcraft_midi::Sequence { notes, ctrls: Vec::new() }));
+        (s, t)
+    }
+
+    #[test]
+    fn built_in_instruments_play_their_session_params() {
+        for plugin in ["subtractive_synth", "drum_synth"] {
+            let (loud, _) = instrument_session(plugin, -6.0);
+            let (mut quiet, t) = instrument_session(plugin, -12.0);
+            // Insert automation (slot a) doesn't reach the instrument.
+            quiet.track_mut(t).unwrap().lane_mut(&AutoParam::Plugin { slot: 0, param: "level".into() }).set_point(0, -48.0);
+            let loud = render_range(&loud, Range::new(0, 96_000), 512);
+            let quiet = render_range(&quiet, Range::new(0, 96_000), 512);
+            assert!(loud[0].iter().any(|x| x.abs() > 0.01), "{plugin} is silent");
+            // 6 dB quieter from the first sample on (no glide from the default level).
+            let g = db_to_gain(-6.0);
+            for (n, (l, q)) in loud.iter().flatten().zip(quiet.iter().flatten()).enumerate() {
+                assert!((q - l * g).abs() < 1e-6, "{plugin} at {n}: {q} vs {}", l * g);
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_instruments_keep_their_own_sound() {
+        let (mut s, t) = instrument_session("clap:test.synth", -12.0);
+        s.track_mut(t).unwrap().instrument.as_mut().unwrap().params = [("gain".to_string(), -12.0)].into();
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.synth".into(), ch: 2, plugin: Box::new(fake) }]);
+        render_block(&mut eng, &s, 0);
+        render_block(&mut eng, &s, 512);
+        assert_eq!(eng.capture_states().len(), 1, "the hosted instrument is in place");
+        assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 0, "its editor's edits aren't overwritten by `params`");
     }
 
     #[test]
