@@ -11,6 +11,7 @@ pub mod docking;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
+pub mod i18n;
 pub mod icons;
 pub mod menus;
 pub mod midi_editor;
@@ -106,6 +107,8 @@ pub struct UiState {
     pub window_size: [f32; 2],
     pub window_maximized: bool,
     pub ui_scale: f32,
+    /// Interface language (`ui.language`): English by default.
+    pub language: i18n::Language,
 }
 
 impl Default for UiState {
@@ -161,6 +164,7 @@ impl Default for UiState {
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
+            language: i18n::Language::En,
         }
     }
 }
@@ -435,7 +439,7 @@ impl SoundApp {
     fn start_recording(&mut self) {
         let armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm);
         if !armed {
-            self.ui.status = "Record-enable a track first (the red button in its header).".into();
+            self.ui.status = i18n::tr("Record-enable a track first (the red button in its header).").into();
             return;
         }
         self.ensure_input();
@@ -569,7 +573,7 @@ impl SoundApp {
             }
             Err(e) => {
                 self.recorder_failed = true;
-                self.ui.status = format!("No audio input: {e}");
+                self.ui.status = i18n::trf("No audio input: {}", &[&e]);
             }
         }
     }
@@ -595,7 +599,8 @@ impl SoundApp {
                 "record",
             );
         }
-        self.ui.status = if looped { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
+        self.ui.status =
+            if looped { i18n::trf("Loop-recorded {} take(s)", &[&(ids.len() / tracks)]) } else { i18n::trf("Recorded {} clip(s)", &[&ids.len()]) };
         if let Some(p) = problem {
             log::warn!("recording: {p}");
             self.ui.status = format!("{} ({p})", self.ui.status);
@@ -798,6 +803,7 @@ impl SoundApp {
                 ctx.request_repaint();
             }
         }
+        i18n::set(self.ui.language);
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {
             theme::apply(ctx, light);

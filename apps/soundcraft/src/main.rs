@@ -20,6 +20,7 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
+use soundcraft_ui_egui::i18n::tr;
 use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
@@ -74,7 +75,7 @@ impl eframe::App for App {
                 "{}{} — SoundCraft — {}",
                 self.0.engine.session().name,
                 if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
+                tr(if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" })
             )
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
@@ -158,10 +159,10 @@ fn services() -> Services {
         pick_open: Some(Box::new(|purpose: &str, _exts: &[&str]| {
             let d = rfd::FileDialog::new();
             let d = match purpose {
-                "session.open" => d.add_filter("SoundCraft Session", &["scraft"]),
+                "session.open" => d.add_filter(tr("SoundCraft Session"), &["scraft"]),
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
-                    "Audio",
+                    tr("Audio"),
                     &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"],
                 ),
             };
@@ -169,7 +170,7 @@ fn services() -> Services {
         })),
         pick_save: Some(Box::new(|_purpose: &str, default: &str| {
             let path = std::path::Path::new(default);
-            let mut d = rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]);
+            let mut d = rfd::FileDialog::new().add_filter(tr("SoundCraft Session"), &["scraft"]);
             if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
                 d = d.set_file_name(n);
             }
