@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (stage re-normalized to pre-alpha by the core-workflow gate) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (mainstream-practitioner ~36 % and essentials-user ~57 % numbers added; full number unchanged at ~40 %) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -15,7 +15,9 @@ summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimens
 |---|---|---|
 | Menu breadth (engine + UI layer) | **482 / 512 menu leaves (94.1 %)** | **measured**: the 512-leaf catalog `crates/engine/catalog/menus.txt` against the command registry; engine alone 397 / 512 (77.5 %) from `cargo xtask parity` ([`parity-checklist.md`](parity-checklist.md)); the 85 UI-layer matches re-counted on 2026-10-10 from `crates/ui-egui/src/menus.rs` (`UI_COMMANDS`, `AUDIOSUITE`, `MENU_WINDOWS`, Mix Window Views) by script |
 | Feature breadth (menus plus everything not in a menu: plugins, hardware, formats, immersive, cloud) | **~70 %** | estimated (area table below, presence only) |
-| **Ready for real work** | **~40 %** | estimated (dimension table below) |
+| **Ready for real work** (whole of Pro Tools) | **~40 %** | estimated: written dimension weights × values = 40.6 % ([By dimension](#by-dimension)) |
+| **Mainstream practitioner** (a working tracking/mixing engineer) | **~36 %** | estimated: written area weights and discounts ([below](#mainstream-practitioner-and-essentials-user)) |
+| **Essentials user** (making a song or podcast with the core features) | **~57 %** | estimated: written feature weights and discounts ([below](#mainstream-practitioner-and-essentials-user)) |
 | Stage | **pre-alpha** (core-workflow gate fails) | see [Stage](#stage) |
 | Remaining effort to alpha | **~110–180 Opus 5.5 agent-hours** | estimated: the failing gate rows |
 | Remaining effort to beta | **~350–570 Opus 5.5 agent-hours** | estimated, calibrated (below) |
@@ -73,6 +75,82 @@ post-production, tracking) can switch. "Ready" is depth, correctness and fidelit
 
 Agent control is not weighted (Pro Tools has only its scripting SDK); SoundCraft is ahead there:
 every command is reachable from the CLI, the JSON control channel and MCP.
+
+## Mainstream practitioner and essentials user
+
+Both use the method in craftrules `standards/progress-docs.md`. Each multiplies a weighted depth
+average by written-down discounts. Depths come from the [Feature areas](#feature-areas) table and
+the evidence there; issue numbers are `storytold/soundcraft` GitHub issues.
+
+### Mainstream practitioner: ~36 %
+
+The typical Pro Tools professional is a music or post engineer who tracks through an audio
+interface, overdubs MIDI, edits, mixes with the stock plugins and bounces every week. This number
+leaves out third-party plugin hosting, Avid cloud services and AI, control surfaces and sync,
+immersive delivery, video, notation, and languages other than English.
+
+| Area (weekly use) | Weight | Depth |
+|---|---:|---:|
+| Recording and monitoring through an interface | 20 % | 40 % |
+| Editing (trim, fades, comping, Slip/Grid, nudge) | 22 % | 65 % |
+| Mixing and routing (faders, sends, busses, inserts, PDC) | 18 % | 60 % |
+| Automation | 10 % | 55 % |
+| Built-in plugins and AudioSuite | 12 % | 35 % |
+| MIDI recording, editing, instruments | 10 % | 30 % |
+| Bounce, save and reopen | 8 % | 60 % |
+| **Weighted depth** | 100 % | **50.6 %** |
+
+| Discount | Factor | Evidence |
+|---|---:|---|
+| Interaction fidelity | ×0.90 | Shortcut collisions and dead shortcuts (#140 Heal, #144 Mix/Edit vs zoom, #7 Export); Multitool handles don't adjust audio (#5); generic plugin parameter panels (#138, #139); clip deletion inconsistencies (#3, #4) |
+| Stability on real machines | ×0.92 | 26 open core-path bugs, e.g. bounce and latency (#59, #103), playback speed (#101), session saves (#86, #91), plus a launch failure (#142). Never-crash rules and property tests hold up: no crash reports on macOS since #16 |
+| File exchange with Pro Tools users | ×0.85 | Engineers trade sessions, not stems. No `.ptx`, AAF or OMF (#40); WAV/BWF stems and MIDI files do work, so the factor isn't lower |
+| **Result** | 50.6 × 0.90 × 0.92 × 0.85 = **35.6 % ≈ 36 %** | |
+
+This comes out *below* the full number (~40 %), which the standard says is unusual. The
+mainstream engineer's weekly core is interface recording and MIDI overdubs, exactly the
+alpha-gate failures. The full number gets partial credit from areas this user doesn't weight:
+editing breadth, five platforms built, agent control.
+
+**User evidence** (GitHub, 2026-10-10; all 69 issues are from 28 outside reporters, none from
+maintainers):
+- **Praise:** 0 threads, and no "switched from Pro Tools" reports.
+- **Open issues:** of 48 open, 26 are core-path bugs (editing, bounce, playback, sessions,
+  shortcuts, plugin loading, recording monitoring), 7 are niche-path bugs (web build, CLI/MCP,
+  Linux fonts and llvmpipe), and 15 are requests.
+- **Requests:** several ask for other DAWs' feel: Ableton shortcuts and layout (#71, #72), an
+  FL/Ableton port (#38), Audition-style file editing (#81, #82). AAX (#109), VST2/LV2 (#30),
+  Ukrainian (#67).
+- **Closed:** 21.
+- **Contributions:** 12 outside contributors have merged PRs in the first week. That's
+  engagement, not yet use on real projects.
+
+### Essentials user: ~57 %
+
+A user who needs only the essentials: makes a song, demo or podcast, records through the computer's default
+microphone or interface, uses default settings, and exports a file to share.
+
+| Core feature | Weight | Depth | Notes |
+|---|---:|---:|---|
+| New session, open a session, demo | 10 % | 80 % | |
+| Import audio (drag and drop, WAV/MP3/AAC/FLAC) | 10 % | 80 % | Reads every common format |
+| Record from the default device | 12 % | 65 % | Works on the default input; forced monitoring can feed back (#42) |
+| Play, stop, loop, scroll, zoom | 10 % | 75 % | Half-speed after Stop (#101) |
+| Basic editing: select, cut/copy/paste, split, trim, move, fades | 18 % | 70 % | #3, #5 |
+| Undo/redo | 5 % | 90 % | Every command undoable |
+| Volume, pan, mute, solo | 10 % | 85 % | |
+| Add a stock effect (EQ, compressor, reverb) and pick a preset | 10 % | 60 % | Generic panels, few presets |
+| Draw MIDI notes for a built-in synth | 5 % | 50 % | Two built-in instruments |
+| Save and reopen | 5 % | 80 % | Web build can drop unsaved edits (#136) |
+| Export / bounce a file to share | 5 % | 60 % | WAV/AIFF/FLAC only, no MP3/AAC |
+| **Weighted depth** | 100 % | **72.4 %** | |
+
+| Discount | Factor | Evidence |
+|---|---:|---|
+| Launch and stability | ×0.90 | Doesn't launch for one user (#142), X11 llvmpipe failure (#107), Linux symbols as boxes (#45), Windows shortcuts (#41); macOS is solid |
+| Discoverability and UI clarity | ×0.90 | Pro Tools' dense layout with no onboarding or user guide; shortcut collisions; plugin windows are bare sliders |
+| Opening files people send them | ×0.97 | These users get WAV/MP3, which work; only Pro Tools sessions fail |
+| **Result** | 72.4 × 0.90 × 0.90 × 0.97 = **56.9 % ≈ 57 %** | |
 
 ## Feature areas
 
@@ -149,6 +227,7 @@ serializes more, because it needs hands-on testing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Added the mainstream-practitioner (~36 %) and essentials-user (~57 %) numbers with written weights, discounts and user evidence. Checked the full ~40 %: it is the written dimension weights × values (40.6 %), so it doesn't move |
 | 2026-10-10 | minor | Stage alpha → pre-alpha under the core-workflow gate; alpha distance ~110–180 h |
 | 2026-10-10 | major | Full re-measure against Pro Tools Ultimate 2026.4.1: two numbers (breadth ~70 %, ready ~40 %), dimension and area tables with hours, stage alpha; hours re-calibrated from PR history (110–150 h → 950–1,450 h to full parity: the old figure counted presence only) |
 | 2026-10-07 | major | Area table and "~65 % overall, 110–150 h" estimate (then in ROADMAP.md) |
