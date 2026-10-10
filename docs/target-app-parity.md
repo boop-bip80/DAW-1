@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (mainstream-practitioner ~36 % and essentials-user ~57 % numbers added; full number unchanged at ~40 %) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (hours to ~95 % for each audience; full number confirmed as an additive weighted sum) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -22,6 +22,24 @@ summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimens
 | Remaining effort to alpha | **~110–180 Opus 5.5 agent-hours** | estimated: the failing gate rows |
 | Remaining effort to beta | **~350–570 Opus 5.5 agent-hours** | estimated, calibrated (below) |
 | Remaining effort to full parity | **~950–1,450 Opus 5.5 agent-hours** | estimated, calibrated (below) |
+
+### Readiness by audience
+
+| Audience | Ready % | Opus 5.5 agent wall-clock hours to ~95 % | Work that dominates |
+|---|---:|---:|---|
+| Full target (ready for real work) | ~40 % | ~950–1,450 h (~60–70 % parallelizable) | Hardware (interfaces, MIDI, surfaces, sync), the built-in plugin catalogue, AAF/OMF and immersive delivery, localization, fidelity against Pro Tools |
+| Mainstream practitioner | ~36 % | ~380–600 h (~60 % parallelizable) | Interface recording and MIDI devices, AAF/OMF exchange, stock-plugin depth, the core-path bug backlog, interaction feel |
+| Essentials user | ~57 % | ~110–200 h (~70 % parallelizable) | Launch and platform fixes, an onboarding and user guide, stock-effect panels and presets, MP3/AAC export, editing and transport bugs |
+
+Each audience's hours are for its own areas only, so essentials ⊂ mainstream ⊂ full. Calibration
+is the same as for the full estimate ([Effort and calibration](#effort-and-calibration)): bug fixes
+at 0.5–1.5 h each, features at about 200–300 tested lines per agent-hour, from the public-week PRs.
+- **Mainstream sum:** recording 40–60, MIDI 50–80, editing 40–60, mixing 35–50, automation 20–30,
+  stock plugins 80–120, AAF/OMF 50–90, compressed export 10–20, bug backlog 25–40, interaction
+  feel 30–50.
+- **Essentials sum:** default-device recording 10–15, transport 5–10, editing polish 15–25, effect
+  panels and presets 20–30, MP3/AAC export 10–20, built-in instrument 10–20, launch and platform
+  15–25, onboarding and user guide 15–25, save fixes 5–10.
 
 The previous figure in ROADMAP.md (2026-10-07: "~65 % overall feature parity", "110–150 h to 100 %")
 measured feature *presence*. This pass measures readiness, and found new evidence that pulls the
@@ -227,6 +245,7 @@ serializes more, because it needs hands-on testing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-10 | minor | Readiness-by-audience table: hours to ~95 % for full (950–1,450 h), mainstream (380–600 h) and essentials (110–200 h). The full number is already the additive weighted sum over the written dimension table (40.6 %); method unchanged |
 | 2026-10-10 | minor | Added the mainstream-practitioner (~36 %) and essentials-user (~57 %) numbers with written weights, discounts and user evidence. Checked the full ~40 %: it is the written dimension weights × values (40.6 %), so it doesn't move |
 | 2026-10-10 | minor | Stage alpha → pre-alpha under the core-workflow gate; alpha distance ~110–180 h |
 | 2026-10-10 | major | Full re-measure against Pro Tools Ultimate 2026.4.1: two numbers (breadth ~70 %, ready ~40 %), dimension and area tables with hours, stage alpha; hours re-calibrated from PR history (110–150 h → 950–1,450 h to full parity: the old figure counted presence only) |
