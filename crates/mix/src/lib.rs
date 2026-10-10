@@ -826,6 +826,14 @@ fn process_strip(
         }
         TrackKind::Instrument | TrackKind::Midi => {
             if let Some(inst) = &mut strip.instrument {
+                // #152: push the instrument's stored parameter values into the live plugin
+                // before processing, the same way inserts do below. Without this, the values
+                // loaded from a session (or set via `mix.insert_state`) never reach the plugin
+                // instance and the rendered audio matches the plugin's defaults — e.g. a saved
+                // `level = -12 dB` sounds the same as `level = -6 dB`.
+                if let Some(ins) = &t.instrument {
+                    apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
+                }
                 schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
