@@ -41,6 +41,19 @@ pub fn parse(s: &str) -> Option<(Modifiers, Key)> {
     key.map(|k| (m, k))
 }
 
+/// egui names the shifted symbol ("?" for Shift+/); shortcuts name the key under it.
+fn unshifted(key: Key) -> Key {
+    match key {
+        Key::Questionmark => Key::Slash,
+        Key::Colon => Key::Semicolon,
+        Key::Pipe => Key::Backslash,
+        Key::OpenCurlyBracket => Key::OpenBracket,
+        Key::CloseCurlyBracket => Key::CloseBracket,
+        Key::Exclamationmark => Key::Num1,
+        k => k,
+    }
+}
+
 /// Whether the held modifiers `got` fire a shortcut that asks for `want`.
 fn mods_match(want: Modifiers, got: Modifiers, mac: bool) -> bool {
     // Off macOS egui reports Ctrl as both `ctrl` and `command`: Ctrl is the shortcut's Cmd, and a shortcut's
@@ -90,7 +103,7 @@ fn key_presses(ctx: &egui::Context, v_pressed: &mut bool) -> Vec<(Key, Modifiers
             .filter_map(|e| match e {
                 egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
                     *v_pressed |= *key == Key::V;
-                    Some((*key, *modifiers))
+                    Some((if modifiers.shift { unshifted(*key) } else { *key }, *modifiers))
                 }
                 egui::Event::Key { key: Key::V, pressed: false, .. } if !std::mem::take(v_pressed) => clipboard(Key::V),
                 egui::Event::Cut => clipboard(Key::X),
