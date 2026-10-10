@@ -236,10 +236,14 @@ and layering checks and the WebAssembly build.
 
 ## Status and roadmap
 
-SoundCraft is **pre-alpha, and close to its first alpha**: it covers 94 % of the incumbent's menu
-items and roughly two thirds of its features in depth. The core works and is fun to use, and plenty is still missing. The
-honest status, what's next and our effort estimates are in [`ROADMAP.md`](ROADMAP.md); the
-menu-by-menu comparison is in [`docs/parity.md`](docs/parity.md). Bug reports and wish lists are
+SoundCraft is in **alpha**: it covers 94 % of the incumbent's menu items (measured), about 70 % of
+its features by presence, and is roughly 40 % of the way to replacing it for real work: record,
+edit, mix and bounce work end to end, while audio-interface and MIDI-device support, session
+interchange (AAF/OMF) and translations are still missing. The status, the stage and our effort
+estimates are in [`ROADMAP.md`](ROADMAP.md); the full assessment is in
+[`docs/target-app-parity.md`](docs/target-app-parity.md), the ranked list of what's missing in
+[`docs/gaps.md`](docs/gaps.md), and the menu-by-menu comparison in
+[`docs/parity-checklist.md`](docs/parity-checklist.md). Bug reports and wish lists are
 very welcome, in the issues or on Discord.
 
 ## Downloads

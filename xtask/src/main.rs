@@ -113,7 +113,7 @@ fn assets() -> Result<(), String> {
 }
 
 fn parity() -> Result<(), String> {
-    cargo(&["run", "-q", "-p", "soundcraft-cli", "--", "parity", "--write", "docs/parity.md"])
+    cargo(&["run", "-q", "-p", "soundcraft-cli", "--", "parity", "--write", "docs/parity-checklist.md"])
 }
 
 /// Crates that must compile for the web.

@@ -1,54 +1,99 @@
 # SoundCraft roadmap
 
+**Stage: alpha** · next: beta, ~35 points and ~350–570 h away
+
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against Pro Tools Ultimate 2026.4.1; new progress-docs set) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
-Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This file is
-the honest status: what works today, what is missing, and how far we are.
+Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
+the one-page summary; the detail is in [`docs/target-app-parity.md`](docs/target-app-parity.md)
+(assessment), [`docs/gaps.md`](docs/gaps.md) (ranked work list), [`docs/roadmap.md`](docs/roadmap.md)
+(milestones and beta plan) and [`docs/parity-checklist.md`](docs/parity-checklist.md) (generated
+menu checklist).
 
-## Where we are (2026-10-07)
+## Headline numbers
 
-| Measure | Value | How |
+| Number | Value | Kind |
 |---|---|---|
-| Menu-catalog parity (engine + UI) | **482 / 512 menu items (94 %)**; engine alone 397 / 512, see [`docs/parity.md`](docs/parity.md) | `cargo xtask parity` compares the incumbent's 512 menu leaves (names observed black-box) with our command registry. Most of what is left is Avid's online services (sign-in, cloud projects, collaboration, Splice, Learn), Dolby Atmos-specific items, HEAT and ARA |
-| Estimated overall feature parity | **~65 %** | judgement across the areas below, weighted by how much working engineers rely on them. Menu items are only the surface; depth (editing feel, plugin catalogue, MIDI and score editing, video) is where the gap is |
-| Distance to an **alpha** | **~85 % there, ~12–18 wall-clock hours** of Claude Opus 5.5 work | see [Alpha](#alpha) below |
-| Distance to **100 % parity** | **~110–150 wall-clock hours** of Claude Opus 5.5 work with a single agent; roughly 40–55 hours with 3–4 agents in parallel (the last three features in this session were built in parallel this way) | sum of the per-area estimates below |
+| Menu breadth | **482 / 512 Pro Tools menu leaves (94.1 %)**; engine alone 397 / 512 | measured (`cargo xtask parity` + UI-layer aliases) |
+| Feature breadth | **~70 %** | estimated (menus plus plugins, hardware, formats, immersive, cloud) |
+| **Ready for real work** | **~40 %** | estimated, weighted by dimension |
+| Remaining to beta | **~350–570 Opus 5.5 agent-hours** (~60–70 % parallelizable) | estimated, calibrated on PR history |
+| Remaining to full parity | **~950–1,450 Opus 5.5 agent-hours** | estimated |
 
-### Area by area
+**Why alpha:** record, edit, mix, automate and bounce work end to end on every platform, and
+releases ship (v0.4.0, 2026-10-10). Not beta: no session interchange with Pro Tools (no `.ptx`,
+AAF or OMF), no MIDI devices, no audio interface or buffer-size choice, and ~25 open correctness
+bugs. The 2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence; this
+one measures readiness and adds hardware, localization and field bug reports.
 
-| Area | Status | Parity | Remaining (h) |
-|---|---|---:|---:|
-| Session model, save/load, undo | Tracks, playlists, clips, fades, clip gain, automation, markers, groups, busses, video; JSON `.scraft` + Audio Files folder; plugin state; autosave; copy-on-write undo with gesture coalescing | 85 % | 8 |
-| Audio file I/O | WAV/BWF/RF64, AIFF/AIFC, FLAC (read/write); MP3, OGG, AAC, ALAC, CAF (read); peaks. Whole files are decoded into memory: disk streaming for very long sessions is still to do | 70 % | 12 |
-| Editing | Slip/Shuffle/Spot/Grid, cut/copy/paste/clear/duplicate/repeat/shift, Paste Special (merge MIDI, markers, clip gain/effects), separate/heal/trim/consolidate/strip silence, fades & crossfades, nudge, playlists with comping, every tool gesture, edit groups, clip groups (and `.scgrp` import/export) | 75 % | 20 |
-| Mixer & routing | Faders, pan, mute/solo (SIP, implicit solo), sends pre/post, busses, aux inputs, master faders, VCAs, routing folders, 10 inserts, plugin delay compensation, clip effects, preamp/instrument/object views | 75 % | 15 |
-| Automation | Breakpoint lanes for volume/pan/mute/sends/plugin params, trim automation; live Write/Touch/Latch passes; write/thin/glide/convert/coalesce. Surround-pan automation is still to do | 60 % | 15 |
-| Plugins (built-in) | 26 original processors + 2 instruments, AudioSuite offline processing for the whole AudioSuite menu | 45 % | 30 |
-| Third-party plugins | CLAP, VST3 and Audio Units (macOS): audio, parameters, latency, notes, state saved in sessions, instances created/destroyed off the audio thread, editors (floating CLAP GUIs, VST3 views on macOS, verified with Melodyne). Missing: AU editors, embedded CLAP GUIs, VST3 editors on Windows/Linux, ARA | 80 % | 10 |
-| MIDI & notation | MIDI/instrument tracks, SMF import/export, MIDI editor (piano roll, velocity, rubber-band select, keyboard transpose/move), event list, step input, quantize/transpose/velocity/duration, real-time properties, Score Editor, MusicXML export (Sibelius) and printable SVG score | 55 % | 20 |
-| Recording | Input capture, punch in/out (selection, on the fly, pre/post-roll), loop record into playlists, input monitoring through the channel strip, autosave and recovery | 60 % | 10 |
-| Elastic Audio / TCE / Beat Detective | Pitch-preserving warp on Elastic tracks, TCE to timeline, conform to tempo, Beat Detective and Identify Beat windows; audio-to-MIDI pitch detection | 45 % | 15 |
-| Surround | Main and bus formats from stereo to 9.1.6 and Ambisonics, surround panner with divergence/centre/LFE/height, ITU fold-down, multichannel bounce, Renderer window, object/bed routing | 60 % | 12 |
-| Video | Picture track with thumbnails, Video and Video Universe windows, H.264 (Baseline/Main/High), ProRes (all flavours) and Motion JPEG decoders in pure Rust, sync offset, relinking. Missing: HEVC/AV1/DNx, timecode-track placement, video export | 55 % | 15 |
-| UI fidelity | Edit + Mix windows, toolbar, rulers, track headers, menus for the whole catalog (macOS system menu bar), floating windows, dialogs (every file command has a path prompt), command palette | 70 % | 20 |
-| Agent control | CLI, JSON control channel, MCP server (headless + bridged), offscreen UI renders | 90 % (ahead of the incumbent) | 3 |
-| Release engineering | Signed macOS universal, Windows x64/x86, Linux AppImage/deb/rpm/tar/Flatpak, FreeBSD, Web/WASM on every push to `release` | 80 % | 3 |
+## By dimension
 
-## Alpha
+| Dimension | Ready | Remaining (h) | Doc |
+|---|---:|---:|---|
+| Features | ~45 % | 520–810 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
+| UI/UX fidelity | ~55 % | 60–100 | [ui-parity.md](docs/ui-parity.md) |
+| File formats | ~40 % | 70–120 | [file-format-parity.md](docs/file-format-parity.md) |
+| Hardware (interfaces, MIDI, surfaces, sync) | ~12 % | 110–180 | [hardware-parity.md](docs/hardware-parity.md) |
+| Localization | ~12 % (1 of Pro Tools' 8 languages) | 70–110 | [localization-parity.md](docs/localization-parity.md) |
+| Performance | ~35 % (unmeasured) | 40–70 | [hardware-parity.md](docs/hardware-parity.md#performance) |
+| Stability | ~45 % | 50–80 | [gaps.md](docs/gaps.md) |
+| Platforms | ~65 % (5 platforms built, macOS exercised) | 20–40 | [gaps.md](docs/gaps.md) |
+| Ecosystem / plugins | ~30 % | in Features + Hardware | [plugin-parity.md](docs/plugin-parity.md) |
+| AI features | ~5 % | 30–50 | [gaps.md](docs/gaps.md) |
+| Agent control | ahead of Pro Tools | 3 | [control-protocol.md](docs/control-protocol.md), [mcp.md](docs/mcp.md) |
 
-An alpha is a build people can download, open the demo or their own audio in, record, edit, mix
-and bounce without crashes or lost work. Feature-wise SoundCraft is past that bar; what is left is
-shipping and hardening:
+## Features
 
-1. **Publish the repository and cut the first release** (needs a decision from the maintainers:
-   the GitHub repo, the release secrets, and a push to the `release` branch). The pipelines exist
-   but have never run end to end. ~2 h once unblocked, mostly fixing what the first run finds.
-2. **Platform smoke tests** of the installers on Windows, Linux and FreeBSD (only macOS has been
-   exercised by hand). ~3–4 h.
-3. **Disk streaming** of long sources, so an hour-long multitrack session does not need all of its
-   audio in RAM. ~5–6 h.
-4. **A hands-on QA pass** in the live app: recording on real interfaces, long sessions, plugin-heavy
-   mixes, save/reopen loops. ~3–4 h.
-5. **Docs**: a short user guide next to the existing agent/CLI docs. ~1 h.
+| Area | Breadth | Ready | Remaining (h) |
+|---|---:|---:|---:|
+| Recording and monitoring | 75 % | 40 % | 40–60 |
+| Editing | 92 % | 65 % | 40–60 |
+| Mixing and routing | 85 % | 60 % | 35–50 |
+| Automation | 80 % | 55 % | 20–30 |
+| Built-in plugins and AudioSuite | 40 % | 35 % | 80–120 |
+| Third-party plugin hosting | 70 % | 45 % | 40–60 |
+| MIDI and instruments | 70 % | 30 % | 50–80 |
+| Score and notation | 60 % | 35 % | 20–30 |
+| Elastic Audio, TCE, Beat Detective | 70 % | 35 % | 40–60 |
+| Surround and immersive | 55 % | 35 % | 50–80 |
+| Video and post | 60 % | 40 % | 40–60 |
+| Session, file management, interchange | 55 % | 35 % | 60–100 |
+| Collaboration and cloud (Avid services) | 0 % | 0 % | owner decision |
+| Agent control | 100 % | 100 % | 3 |
+
+Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#feature-areas).
+
+## Languages
+
+| Language | Code | Status | Translated |
+|---|---|---|---:|
+| English | en | full | 100 % |
+| Simplified Chinese | zh-Hans | none | 0 % |
+| Spanish | es | none (PR #143 open) | 0 % |
+| Hindi | hi | none | 0 % |
+| Arabic | ar | none | 0 % |
+| French | fr | none (PR #143 open) | 0 % |
+| Portuguese | pt | none | 0 % |
+| Indonesian | id | none | 0 % |
+| Japanese | ja | none | 0 % |
+| German | de | none | 0 % |
+| Korean | ko | none | 0 % |
+| Vietnamese | vi | none | 0 % |
+
+Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-parity.md).
+
+## Upcoming
+
+Ranked; detail and the full beta plan in [docs/roadmap.md](docs/roadmap.md).
+
+1. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
+2. Audio interfaces: device and buffer-size choice, duplex stream, ASIO (G-01). 25–40 h.
+3. MIDI devices: record from keyboards, play instruments live, output and clock (G-02). 20–35 h.
+4. macOS plugin entitlement (#153) and AU editors (G-05). 15–25 h.
+5. PR CI running `cargo xtask ci` on three OSes (G-14). 5–10 h.
+6. AAF/OMF interchange; disk streaming and record to disk (G-03, G-06). 65–115 h.
+7. Fidelity harness against Pro Tools (G-07). 20–30 h.
 
 ## Robustness
 
@@ -57,22 +102,31 @@ command parameters through the engine and mixer; they have caught fade, overflow
 unbounded-allocation bugs. Every command also runs with empty parameters on empty and demo
 sessions. Hosted plugins live in isolated unsafe crates (`clap-host`, `vst3-host`, `au-host`) and
 are created, loaded and destroyed off the audio thread. The video decoders survive hundreds of
-mutated and truncated movies.
+mutated and truncated movies. Field reports from the first public week are tracked in
+[gaps.md](docs/gaps.md) (G-04).
 
-## Current focus
+## Progress log
 
-1. The alpha list above.
-2. Surround-pan automation; AU editor views.
-3. Built-in plugin depth (more processors, better UIs).
-4. MIDI and score editing depth.
+- **2026-10-10** — Full re-measure against Pro Tools Ultimate 2026.4.1 and the standard
+  progress-docs set (this page, target-app parity, gaps, roadmap, UI/format/hardware/plugin/
+  localization parity). v0.4.0 released. Community fixes: Cut All Automation, snap to neighbours,
+  tempo stretch, I/O Setup, clip export names, menu-only dialogs, playback stop on new session.
+- **2026-10-09** — Light theme and live system appearance, clip-gain fader and nudge, missing-media
+  warnings, session audio health, malformed-JSON and encoder-extension checks in the CLI, macOS
+  system menu bar, Windows DX12 default, Linux fontconfig, metronome click in playback.
+- **2026-10-08** — v0.2.x–v0.3.0 released (Flatpak, AppImage zsync); VST3 quit crash fixed;
+  Ctrl-as-Cmd shortcuts on Windows/Linux; plugin menus by vendor, AU inserts, instrument picker;
+  rotating log file; branded DMG.
+- **2026-10-07** — Repository published; About window credits; release CI on macOS runners.
+- **2026-10-06** — Video track, Audio Unit hosting, plugin state and editors, Renderer; Mix
+  window views; score export and print; surround mixing; VST3 hosting; property tests.
+- **2026-10-05** — Foundation crates, Edit and Mix windows, playback, CLI/MCP, parity report,
+  recording and punch, CLAP hosting, Elastic Audio, Beat Detective, release pipeline.
 
-## Milestones
+## Revision history
 
-- **M0–M4 (done):** workspace, gates, model, IO, DSP, mix engine, command engine, Edit/Mix UI, realtime playback, metering, plugins, bounce.
-- **M5 (done):** editing depth (tools, modes, playlists, fades, comping, clip groups).
-- **M6 (done for the first cut):** recording, punch, loop record, monitoring.
-- **M7 (in progress):** MIDI and notation editing.
-- **M8 (done):** CLI, control channel, MCP, agent acceptance test.
-- **M9 (in progress):** AudioSuite breadth (done), Elastic Audio, Beat Detective.
-- **M10 (next):** alpha release on all platforms.
-- **M11 (mostly done):** third-party plugin hosting (CLAP, VST3, AU), video, surround.
+| Date | Change | Summary |
+|---|---|---|
+| 2026-10-10 | major | Rewritten to the progress-docs standard: stage alpha, two numbers (breadth ~70 %, ready ~40 %), dimension/feature/language tables, hours re-calibrated; area table moved to docs/target-app-parity.md, milestones to docs/roadmap.md |
+| 2026-10-07 | major | Menu parity 94 %, ~65 % estimated feature parity, alpha list |
+| 2026-10-06 | minor | Alpha and parity estimates |
