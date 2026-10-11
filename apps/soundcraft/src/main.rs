@@ -51,16 +51,7 @@ impl eframe::App for App {
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
-        let title = if self.0.native_menu_bar {
-            format!(
-                "{}{} — SoundCraft — {}",
-                self.0.engine.session().name,
-                if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
-            )
-        } else {
-            format!("{} — SoundCraft", self.0.engine.session().name)
-        };
+        let title = if self.0.native_menu_bar { self.0.window_title() } else { format!("{} — SoundCraft", self.0.engine.session().name) };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -225,6 +216,12 @@ fn main() -> eframe::Result {
     if let Some(icon) = app_icon() {
         options.viewport = options.viewport.with_icon(icon);
     }
+    // macOS: the content runs under a transparent title bar that SoundCraft draws itself (title
+    // and performance readout); the system keeps the window buttons.
+    #[cfg(target_os = "macos")]
+    {
+        options.viewport = options.viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    }
     // Before eframe creates the wgpu instance: default Windows to DirectX 12 only (see graphics.rs).
     #[cfg(target_os = "windows")]
     graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
@@ -234,6 +231,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let player = if no_audio { None } else { Some(soundcraft_playback::Player::new(Arc::new(engine.session().clone()))) };
             let mut app = SoundApp::new(engine, player, services());
+            app.custom_title_bar = cfg!(target_os = "macos");
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             if let Some(ui) = load_prefs() {

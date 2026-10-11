@@ -212,6 +212,9 @@ pub struct SoundApp {
     pub services: Services,
     /// Set only by a desktop host after installing an OS menu bar.
     pub native_menu_bar: bool,
+    /// macOS: the window content extends under a transparent title bar, which SoundCraft draws
+    /// (title on the left, performance readout on the right).
+    pub custom_title_bar: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Folder for user plugin presets (native apps set it).
@@ -247,6 +250,8 @@ pub struct SoundApp {
     last_write_at: Samples,
     pub frame_ms: f32,
     last_frame: Option<f64>,
+    /// Audio load, memory and frame rate for the toolbar readout.
+    pub perf: PerfReadout,
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
 }
@@ -257,6 +262,54 @@ pub struct SoundApp {
 /// arithmetic keeps restarts and loop wraps overflow-free: the previous
 /// `(pos - last).abs()` panicked in debug builds on the first playing frame,
 /// when `last` is still `i64::MIN`.
+/// How often the performance readout is resampled (seconds): slow enough to read.
+const PERF_PERIOD: f64 = 0.5;
+
+/// The performance readout (top right, in the title or menu bar), resampled every `PERF_PERIOD`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PerfReadout {
+    /// Audio-thread load, 1.0 = the whole buffer budget (`None` without an audio engine).
+    pub audio: Option<f32>,
+    /// Resident memory of the process in bytes (`None` where the platform can't say).
+    pub ram: Option<u64>,
+    /// UI frames drawn per second over the last period (egui only redraws on change, so idle is low).
+    pub fps: f32,
+    since: Option<f64>,
+    frames: u32,
+}
+
+impl PerfReadout {
+    /// Counts a frame at `now`; resamples when a period has passed. True when it resampled.
+    fn tick(&mut self, now: f64, audio: Option<f32>) -> bool {
+        self.frames = self.frames.saturating_add(1);
+        let Some(since) = self.since else {
+            self.since = Some(now);
+            self.frames = 0;
+            return false;
+        };
+        let span = now - since;
+        if span.is_nan() || span < PERF_PERIOD {
+            return false;
+        }
+        self.fps = (f64::from(self.frames) / span) as f32;
+        self.frames = 0;
+        self.since = Some(now);
+        self.audio = audio.filter(|a| a.is_finite());
+        self.ram = resident_memory();
+        true
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resident_memory() -> Option<u64> {
+    memory_stats::memory_stats().and_then(|m| u64::try_from(m.physical_mem).ok())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resident_memory() -> Option<u64> {
+    None
+}
+
 fn automation_step_due(pos: Samples, last: Samples, step: Samples) -> bool {
     last == i64::MIN || pos.saturating_sub(last) >= step || last.saturating_sub(pos) >= step
 }
@@ -274,6 +327,7 @@ impl SoundApp {
             audio_health_report: None,
             services,
             native_menu_bar: false,
+            custom_title_bar: false,
             autosave_dir: None,
             preset_dir: None,
             last_autosave: 0.0,
@@ -302,6 +356,7 @@ impl SoundApp {
             last_write_at: i64::MIN,
             frame_ms: 0.0,
             last_frame: None,
+            perf: PerfReadout::default(),
             video: video_track::VideoPool::default(),
         }
     }
@@ -778,6 +833,9 @@ impl SoundApp {
         let dt = self.last_frame.map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.last_frame = Some(now);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
+        self.perf.tick(now, self.player.as_ref().map(Player::audio_load));
+        // Keep the readout live while nothing else is redrawing.
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(PERF_PERIOD));
         control::drain(self, ctx);
         self.apply_editor_edits();
         if !ctx.input(|i| i.pointer.any_down()) {
@@ -858,6 +916,9 @@ impl SoundApp {
             ctx.memory_mut(|m| m.reset_areas());
         }
         shortcuts::handle(self, &ctx);
+        if self.custom_title_bar {
+            menus::title_bar(self, ui);
+        }
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }
@@ -875,6 +936,16 @@ impl SoundApp {
         dialogs::show(self, &ctx);
     }
 
+    /// The window title: session, dirty mark, and which main window is showing.
+    pub fn window_title(&self) -> String {
+        format!(
+            "{}{} — SoundCraft — {}",
+            self.engine.session().name,
+            if self.engine.is_dirty() { " *" } else { "" },
+            if self.ui.window == MainWindow::Edit { "Edit" } else { "Mix" }
+        )
+    }
+
     /// UI state as JSON (control channel `ui.inspect`).
     pub fn inspect(&self, ctx: &egui::Context) -> Value {
         let size = ctx.content_rect().size();
@@ -885,6 +956,7 @@ impl SoundApp {
             "position": self.position(),
             "dialog": self.dialogs.open_name(),
             "frame_ms": self.frame_ms,
+            "perf": {"audio_load": self.perf.audio, "ram_bytes": self.perf.ram, "fps": self.perf.fps},
             "audio_device": self.player.as_ref().map(|p| p.device_name.clone()),
             "status": self.ui.status,
         })
@@ -920,8 +992,26 @@ fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Services, SoundApp, automation_step_due};
+    use super::{PERF_PERIOD, PerfReadout, Services, SoundApp, automation_step_due};
     use serde_json::json;
+
+    #[test]
+    fn perf_readout_resamples_once_per_period() {
+        let mut p = PerfReadout::default();
+        // The first frame only starts the clock.
+        assert!(!p.tick(10.0, Some(0.2)));
+        assert_eq!(p.audio, None);
+        for i in 1..30 {
+            assert!(!p.tick(10.0 + f64::from(i) * 0.01, Some(0.2)));
+        }
+        assert!(p.tick(10.0 + PERF_PERIOD, Some(0.2)));
+        assert_eq!(p.audio, Some(0.2));
+        assert!((p.fps - 60.0).abs() < 0.5, "fps {}", p.fps);
+        // A non-finite load is not shown; a clock that goes backwards never resamples.
+        assert!(p.tick(11.0, Some(f32::NAN)));
+        assert_eq!(p.audio, None);
+        assert!(!p.tick(5.0, Some(0.1)));
+    }
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {
