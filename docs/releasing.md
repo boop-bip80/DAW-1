@@ -50,9 +50,9 @@ web build and are checked, the signing jobs are refused, and no release is draft
 | Windows 11 ARM64 | `soundcraft-<v>-windows-arm64.msi`, `soundcraft-<v>-windows-arm64-portable.zip` | `windows-latest` (cross-compiled; `windows-arm64.yml` installs and runs it on ARM64) |
 | Linux x86_64 | `soundcraft-<v>-linux-x86_64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04` |
 | Linux aarch64 | `soundcraft-<v>-linux-aarch64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04-arm` |
-| Linux riscv64 | `soundcraft-<v>-linux-riscv64.tar.gz` | cross-compiled on `ubuntu-26.04` |
+| Linux riscv64 | `soundcraft-<v>-linux-riscv64.{deb,rpm,tar.gz}` | cross-compiled on `ubuntu-26.04` |
 | AppImage updates | `soundcraft-<v>-linux-{x86_64,aarch64}.AppImage.zsync` | with the AppImage |
-| Flatpak x86_64, aarch64 | `soundcraft-<v>-linux-{x86_64,aarch64}.flatpak` | `ubuntu-24.04`, `ubuntu-24.04-arm` (repackages the Linux tarball) |
+| Flatpak x86_64, aarch64 | `soundcraft-<v>-linux-{x86_64,aarch64}.flatpak` | `ubuntu-26.04`, `ubuntu-26.04-arm` (repackages the Linux tarball) |
 | FreeBSD 14 x86_64 | `soundcraft-<v>-freebsd-x86_64.tar.gz` (a `/usr/local` tree) | FreeBSD 14.3 VM on `ubuntu-latest` |
 | Web | `soundcraft-web-<v>.zip` (static site; see [`packaging/web/README.md`](../packaging/web/README.md)) | `ubuntu-latest` |
 
@@ -159,7 +159,7 @@ shared-mime-info file declaring `application/x-soundcraft-session` (`*.scraft`).
   `ai.storyteller.soundcraft.yml` builds from source for Flathub and needs vendored crates
   (`cargo-sources.json` from `flatpak-cargo-generator.py`); the commands are in its header.
 
-Binaries are built on Ubuntu 22.04 and need **glibc ≥ 2.35**. X11, Wayland, xkbcommon, Vulkan
+Binaries are built on Ubuntu 22.04 (riscv64 on Ubuntu 26.04) and need **glibc ≥ 2.35** (glibc ≥ 2.39 for riscv64). X11, Wayland, xkbcommon, Vulkan
 and EGL are loaded at runtime, so the packages declare them as dependencies or recommendations.
 
 Locally (on Linux): install nfpm, then `packaging/linux/package.sh` (or `--formats "deb tar"`).
