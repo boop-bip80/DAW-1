@@ -241,10 +241,84 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(title).color(t.text_dim));
+                    // The title bar carries the readout when SoundCraft draws it.
+                    if !app.custom_title_bar {
+                        ui.add_space(16.0);
+                        for (text, color) in perf_entries(app).into_iter().rev() {
+                            ui.label(egui::RichText::new(text).color(color));
+                            ui.add_space(8.0);
+                        }
+                    }
                 });
             });
         },
     );
+}
+
+/// Height of the macOS title bar SoundCraft draws under the transparent system one.
+pub const TITLE_BAR_H: f32 = 28.0;
+/// Room the system window buttons take at the title bar's left.
+const WINDOW_BUTTONS_W: f32 = 78.0;
+
+/// The macOS title bar (the content runs under the transparent system title bar, so the
+/// system's window buttons sit on this strip): the title after the buttons and the performance
+/// readout on the right. Dragging it moves the window; double-clicking zooms it.
+pub fn title_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
+    let t = crate::theme::Tokens::current();
+    egui::Panel::top("title_bar").exact_size(TITLE_BAR_H).frame(egui::Frame::NONE.fill(t.toolbar_bg)).show(ui, |ui| {
+        let r = ui.max_rect();
+        let resp = ui.interact(r, ui.id().with("title_drag"), egui::Sense::click_and_drag());
+        if resp.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if resp.double_clicked() {
+            let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
+        }
+        let painter = ui.painter();
+        let font = crate::theme::regular(12.0);
+        let mut x = r.max.x - 14.0;
+        for (text, color) in perf_entries(app).into_iter().rev() {
+            let g = painter.layout_no_wrap(text, font.clone(), color);
+            x -= g.size().x;
+            painter.galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, color);
+            x -= 18.0;
+        }
+        // The title gives way to the readout when the window is narrow: the full title, else the
+        // session name alone, else nothing.
+        let room = x - (r.min.x + WINDOW_BUTTONS_W) - 12.0;
+        let fits = [app.window_title(), app.engine.session().name.clone()]
+            .into_iter()
+            .map(|s| painter.layout_no_wrap(s, font.clone(), t.text_dim))
+            .find(|g| g.size().x <= room);
+        if let Some(g) = fits {
+            painter.galley(egui::pos2(r.min.x + WINDOW_BUTTONS_W, r.center().y - g.size().y / 2.0), g, t.text_dim);
+        }
+    });
+}
+
+/// The performance readout's entries (audio load, memory, frame rate), colored; audio load
+/// turns yellow, then red, as the audio thread nears its budget.
+fn perf_entries(app: &SoundApp) -> [(String, egui::Color32); 3] {
+    let t = crate::theme::Tokens::current();
+    let audio_color = match app.perf.audio {
+        Some(a) if a >= 0.8 => t.meter_red,
+        Some(a) if a >= 0.6 => t.meter_yellow,
+        _ => t.text_dim,
+    };
+    let [audio, ram, fps] = perf_text(&app.perf);
+    [(audio, audio_color), (ram, t.text_dim), (fps, t.text_dim)]
+}
+
+/// The readout's text: `AUDIO 1.5%`, `RAM 166 MB` (or `1.2 GB`), `FPS 56`; `–` when unknown.
+pub fn perf_text(p: &crate::PerfReadout) -> [String; 3] {
+    let audio = p.audio.map_or("AUDIO –".to_string(), |a| format!("AUDIO {:.1}%", a * 100.0));
+    let ram = match p.ram {
+        Some(b) if b >= 1 << 30 => format!("RAM {:.1} GB", b as f64 / f64::from(1u32 << 30)),
+        Some(b) => format!("RAM {} MB", b >> 20),
+        None => "RAM –".to_string(),
+    };
+    [audio, ram, format!("FPS {:.0}", p.fps)]
 }
 
 fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str, &str)]) {
@@ -592,6 +666,16 @@ pub fn parity() -> Value {
 mod tests {
     use super::*;
     use crate::{Services, SoundApp};
+
+    #[test]
+    fn perf_readout_text() {
+        let p = crate::PerfReadout { audio: Some(0.015), ram: Some(166 << 20), fps: 56.4, ..Default::default() };
+        assert_eq!(perf_text(&p), ["AUDIO 1.5%", "RAM 166 MB", "FPS 56"]);
+        let p = crate::PerfReadout { ram: Some(3 << 29), ..Default::default() };
+        assert_eq!(perf_text(&p), ["AUDIO –", "RAM 1.5 GB", "FPS 0"]);
+        let p = crate::PerfReadout::default();
+        assert_eq!(perf_text(&p)[1], "RAM –");
+    }
 
     #[test]
     fn mix_view_aliases_are_allocated_once() {

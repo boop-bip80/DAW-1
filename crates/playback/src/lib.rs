@@ -73,6 +73,9 @@ struct Shared {
     playing: AtomicBool,
     /// Speed × 1000.
     speed: AtomicU32,
+    /// Audio-thread load (`f32` bits): share of the audio's duration spent computing it, over the
+    /// last `LOAD_WINDOW` seconds.
+    load: AtomicU32,
     meters: Mutex<MeterSnapshot>,
 }
 
@@ -96,9 +99,18 @@ struct AudioState {
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
     recording: bool,
+    /// Seconds spent in callbacks, and seconds of audio they produced, in the current load window.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    busy: f64,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    budget: f64,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
 }
+
+/// Seconds of audio the load readout averages over.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const LOAD_WINDOW: f64 = 0.1;
 
 fn new_engine(sr: f32) -> MixEngine {
     let mut m = MixEngine::new(sr, BLOCK);
@@ -129,7 +141,32 @@ impl AudioState {
             device_rate,
             input: None,
             recording: false,
+            busy: 0.0,
+            budget: 0.0,
         }
+    }
+
+    /// `fill`, timed for the audio-load readout. Reading the monotonic clock neither blocks nor
+    /// allocates. Averaged over a window rather than per callback: the mix renders whole blocks,
+    /// so a callback that renders one overshoots its own slice while the next ones are nearly free.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fill_timed(&mut self, out: &mut [f32], channels: usize) {
+        let t0 = std::time::Instant::now();
+        self.fill(out, channels);
+        self.busy += t0.elapsed().as_secs_f64();
+        self.budget += (out.len() / channels.max(1)) as f64 / self.device_rate.max(1.0);
+        if self.budget >= LOAD_WINDOW {
+            let load = (self.busy / self.budget).clamp(0.0, 10.0) as f32;
+            self.shared.load.store(load.to_bits(), Ordering::Relaxed);
+            self.busy = 0.0;
+            self.budget = 0.0;
+        }
+    }
+
+    /// No monotonic clock on the web: untimed.
+    #[cfg(target_arch = "wasm32")]
+    fn fill_timed(&mut self, out: &mut [f32], channels: usize) {
+        self.fill(out, channels);
     }
 
     fn drain(&mut self) {
@@ -385,6 +422,7 @@ impl Player {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -406,7 +444,7 @@ impl Player {
                     &config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         mark_audio_thread();
-                        state.fill(data, channels);
+                        state.fill_timed(data, channels);
                     },
                     err_fn,
                     None,
@@ -479,7 +517,7 @@ impl Player {
                 last = now;
                 let n = (frames * 2).min(buf.len());
                 if let Some(b) = buf.get_mut(..n) {
-                    state.fill(b, 2);
+                    state.fill_timed(b, 2);
                 }
                 if Arc::strong_count(&state.shared) <= 1 {
                     break;
@@ -630,6 +668,12 @@ impl Player {
         self.shared.playing.load(Ordering::Relaxed)
     }
 
+    /// Audio-thread load: the share of the audio's duration spent rendering it, averaged over the
+    /// last tenth of a second (1.0 = the whole budget; above that the device underruns).
+    pub fn audio_load(&self) -> f32 {
+        f32::from_bits(self.shared.load.load(Ordering::Relaxed))
+    }
+
     pub fn meters(&self) -> MeterSnapshot {
         self.shared.meters.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
@@ -737,6 +781,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -746,6 +791,35 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(shared.position.load(Ordering::Relaxed) >= 1000);
         assert!(!shared.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn timed_fill_publishes_a_finite_load() {
+        let s = Arc::new(soundcraft_model::Session::default());
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
+        tx.send(Cmd::Play { from: 0, end: Some(48_000), looped: None }).unwrap();
+        // 512 frames at 48 kHz is ~10.7 ms: nothing is published before a full window.
+        let mut out = vec![0.0f32; 1024];
+        for _ in 0..9 {
+            st.fill_timed(&mut out, 2);
+        }
+        assert_eq!(shared.load.load(Ordering::Relaxed), 0);
+        st.fill_timed(&mut out, 2);
+        let load = f32::from_bits(shared.load.load(Ordering::Relaxed));
+        assert!(load.is_finite() && (0.0..=10.0).contains(&load), "load {load}");
+        // Empty buffers add no budget, so they never publish (or divide by zero).
+        for _ in 0..100 {
+            st.fill_timed(&mut [], 2);
+        }
+        assert_eq!(f32::from_bits(shared.load.load(Ordering::Relaxed)), load);
     }
 
     #[test]
@@ -763,6 +837,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -822,6 +897,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -885,6 +961,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            load: AtomicU32::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();

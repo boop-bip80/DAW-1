@@ -26,6 +26,9 @@ serde_json.workspace = true
 log.workspace = true
 image.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+memory-stats.workspace = true
+
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
 
