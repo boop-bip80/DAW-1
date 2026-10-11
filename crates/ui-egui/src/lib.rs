@@ -19,6 +19,7 @@ pub mod ops_windows;
 pub mod palette;
 pub mod panels;
 pub mod score_editor;
+pub mod shortcut_editor;
 pub mod shortcuts;
 pub mod theme;
 pub mod toolbar;
@@ -106,6 +107,8 @@ pub struct UiState {
     pub window_size: [f32; 2],
     pub window_maximized: bool,
     pub ui_scale: f32,
+    /// Shortcuts people chose in Setup › Keyboard Shortcuts (`ui.shortcuts`).
+    pub shortcuts: shortcuts::Custom,
 }
 
 impl Default for UiState {
@@ -161,6 +164,7 @@ impl Default for UiState {
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
+            shortcuts: shortcuts::Custom::new(),
         }
     }
 }
@@ -246,6 +250,7 @@ pub struct SoundApp {
     pub ops: ops_windows::OpsState,
     pub extra: extra_windows::ExtraState,
     pub palette: palette::PaletteState,
+    pub shortcut_editor: shortcut_editor::ShortcutEditor,
     pub synthetic: Vec<egui::Event>,
     synthetic_grace: u32,
     control_rx: Option<Receiver<ControlRequest>>,
@@ -310,6 +315,7 @@ impl SoundApp {
             ops: ops_windows::OpsState::default(),
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
+            shortcut_editor: shortcut_editor::ShortcutEditor::default(),
             synthetic: Vec::new(),
             synthetic_grace: 0,
             control_rx: None,
