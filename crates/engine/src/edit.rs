@@ -56,7 +56,7 @@ pub fn split_clip(clip: &Clip, at: Samples, new_id: ClipId, t: TimeCtx<'_>) -> O
         for n in &mut rs.notes {
             let end = n.end();
             n.start = n.start.max(boundary);
-            n.length = end.saturating_sub(n.start);
+            n.length = end.saturating_sub(n.start).max(1);
             n.start = n.start.saturating_sub(boundary);
         }
         for c in &mut rs.ctrls {
@@ -80,7 +80,7 @@ fn rebase_midi_start(clip: &mut Clip, old_start: Samples, t: TimeCtx<'_>) {
         for n in &mut sequence.notes {
             let end = n.end();
             n.start = n.start.max(delta);
-            n.length = end.saturating_sub(n.start);
+            n.length = end.saturating_sub(n.start).max(1);
             n.start = n.start.saturating_sub(delta);
         }
         for c in &mut sequence.ctrls {
@@ -885,7 +885,7 @@ mod tests {
         use soundcraft_midi::{Note, Sequence};
         let s = Session::default();
         let note = |start, length, pitch| Note { start, length, pitch, velocity: 100, release_velocity: 64, channel: 0 };
-        let seq = Sequence { notes: vec![note(0, 960, 60), note(0, 480, 62), note(480, 240, 64)], ..Sequence::default() };
+        let seq = Sequence { notes: vec![note(0, 960, 60), note(0, 480, 62), note(480, 240, 64), note(i64::MAX, 1, 67)], ..Sequence::default() };
         let at = s.tempo.tick_to_samples(480, s.sample_rate);
         let end = s.tempo.tick_to_samples(1920, s.sample_rate);
         let clip = Clip::midi(ClipId(100), "Keys", 0, end, seq);
@@ -893,7 +893,7 @@ mod tests {
         let ClipContent::Midi { sequence: ls } = left.content else { panic!("MIDI expected") };
         let ClipContent::Midi { sequence: rs } = right.content else { panic!("MIDI expected") };
         assert_eq!(ls.notes, vec![note(0, 480, 60), note(0, 480, 62)]);
-        assert_eq!(rs.notes, vec![note(0, 480, 60), note(0, 240, 64)]);
+        assert_eq!(rs.notes, vec![note(0, 480, 60), note(0, 240, 64), note(i64::MAX - 480, 1, 67)]);
         let mut trimmed = clip;
         trimmed.trim_start_to(at);
         rebase_midi_start(&mut trimmed, 0, TimeCtx::of(&s));
