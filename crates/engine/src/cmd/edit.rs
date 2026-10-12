@@ -254,6 +254,7 @@ fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
     let range = range_param(e, "edit.clear", p)?;
     let ids = clip_ids_param(e, p);
     let sh = shuffle(e.session());
+    let follow = e.session().edit.automation_follows_edit;
     let s = e.session_mut();
     let mut n = 0;
     if range.is_empty() && !ids.is_empty() {
@@ -268,6 +269,14 @@ fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
     } else {
         for t in &tracks {
             n += ops::clear_range(s, *t, range, sh).len();
+            if follow && let Some(tr) = s.track_mut(*t) {
+                for l in &mut tr.automation {
+                    l.clear_range(range.start, range.end);
+                    if sh {
+                        l.shift_from(range.end, -range.len());
+                    }
+                }
+            }
         }
     }
     Ok(json!({"removed": n}))
@@ -781,5 +790,31 @@ mod tests {
         assert_eq!(e.revision, rev);
         e.execute("edit.select", &json!({"tracks": [ids[0]], "start": 100, "end": 300})).unwrap();
         assert_ne!(e.revision, rev);
+    }
+
+    #[test]
+    fn shuffle_clear_moves_automation_like_cut() {
+        use soundcraft_model::{AutoParam, ChannelFormat, Clip, SourceId, TrackKind};
+        let run = |command: &str, follow: bool| {
+            let mut s = Session::default();
+            let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+            for start in [0, 20_000] {
+                let id = s.new_clip_id();
+                ops::place_clip(&mut s, t, Clip::audio(id, "c", SourceId(1), 0, start, 10_000));
+            }
+            let mut e = Engine::new(s);
+            for (at, value) in [(0, -1.0), (5_000, -2.0), (9_000, -3.0), (20_000, -5.0)] {
+                e.execute("automation.set_point", &json!({"track": t.0, "param": "volume", "at": at, "value": value})).unwrap();
+            }
+            e.execute("options.automation_follows_edit", &json!({"value": follow})).unwrap();
+            e.execute("edit.mode", &json!({"mode": "shuffle"})).unwrap();
+            e.execute("edit.select", &json!({"tracks": [t.0], "start": 4_000, "end": 6_000})).unwrap();
+            e.execute(command, &json!({})).unwrap();
+            let lane = e.session().track(t).unwrap().lane(&AutoParam::Volume).unwrap().clone();
+            lane.points.iter().map(|p| p.at).collect::<Vec<_>>()
+        };
+        assert_eq!(run("edit.clear", true), vec![0, 7_000, 18_000]);
+        assert_eq!(run("edit.clear", true), run("edit.cut", true));
+        assert_eq!(run("edit.clear", false), vec![0, 5_000, 9_000, 20_000]);
     }
 }
