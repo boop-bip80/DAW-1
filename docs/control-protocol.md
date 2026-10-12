@@ -105,3 +105,10 @@ A center `move` can include `before` (panel ID or null to append) for tab order.
 The equivalent `{"action": ...}` form accepts a serialized shared docking action;
 this is also the form emitted by the renderer. Protected-canvas and app-specific panel
 rules apply equally to both forms.
+
+## Interface language
+
+The interface language defaults to English. `ui.language {"lang":"fr"}` (or `"es"`, `"en"`) switches
+it, and `ui.language {}` reports the current one; the choice is saved with the UI prefs and is also
+offered under Setup › Appearance. Only what is drawn is translated: command ids, menu paths
+(`ui.menu.invoke`), parameters, results and error messages stay in English in every language.
