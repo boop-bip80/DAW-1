@@ -33,7 +33,7 @@ On AMD graphics do not set `WGPU_BACKEND` to `gl`: it can bring back the `atio6a
 
 On Windows, SoundCraft draws with DirectX 12 only. It leaves OpenGL out on purpose, because starting OpenGL can crash some graphics drivers (the README names AMD's `atio6axx.dll`) before the window appears.
 
-Version 0.5.0 also asks DirectX 12 to use a shader compiler file called `dxcompiler.dll`, which SoundCraft does not ship. On some PCs this ends with `Parent device is lost` right after the window appears ([issue 185](https://github.com/storytold/soundcraft/issues/185)). A change that uses the compiler built into Windows instead is merged after 0.5.0 and not in the 0.5.0 files. Until a newer release is out, use the Vulkan steps above.
+Version 0.5.0 also asks DirectX 12 to use a shader compiler file called `dxcompiler.dll`, which SoundCraft does not ship. On some PCs this ends with `Parent device is lost` right after the window appears ([issue 185](https://github.com/storytold/soundcraft/issues/185)). A change that uses the compiler built into Windows instead was merged after 0.5.0 and is not in the 0.5.0 files. Until a newer release is out, use the Vulkan steps above.
 
 ## Find the log file
 

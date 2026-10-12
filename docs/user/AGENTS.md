@@ -38,8 +38,7 @@ either. Write for a musician or audio editor, not a developer.
 
 Only `key: value` and `key: [a, b]` lines work. Quote values that start with a quote or contain ` #`.
 
-Set `verified` to the workspace `version` in `Cargo.toml` whenever you check a
-page against the current code.
+Set `verified` to the latest release (the newest release tag) after checking the page against that tag with `git show <tag>:<path>`. Pages describe the latest release users download, not unreleased code on main.
 
 ## Folders
 
