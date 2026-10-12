@@ -28,6 +28,7 @@ mod query;
 mod sampler;
 mod setup_more;
 mod surround;
+mod tag;
 mod track;
 mod track_more;
 mod transport;
@@ -128,6 +129,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(instrument::specs());
         v.extend(sampler::specs());
         v.extend(video::specs());
+        v.extend(tag::specs());
         v
     })
 }

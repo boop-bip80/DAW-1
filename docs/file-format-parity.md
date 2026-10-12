@@ -46,6 +46,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | Sound Designer / SD II | import (legacy) | ❌ | — | Rare today |
 | ReCycle / REX | import | ❌ | — | Loops |
 | MXF audio (OP-Atom, OP1a) | import | ❌ | ❌ | Avid media; FilmCraft has an MXF reader to learn from |
+| ID3v2.4 tags on MP3 (text, comment, link, cover, `CHAP`/`CTOC` chapters) | — | ❌ | ✅ | `audio-io::id3`, command `file.tag_mp3` (chapters from a list or the session's markers); tags MP3s encoded elsewhere until G-21 |
 | iXML / polyphonic field-recorder metadata | read | ❌ | ❌ | G-17 |
 | Peak overviews | `.wfm` cache | ✅ (own, in memory) | — | `audio-io::peaks`; not cached on disk |
 
