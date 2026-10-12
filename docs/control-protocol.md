@@ -59,6 +59,42 @@ Errors: `{"id": 1, "ok": false, "error": "bad parameters for `mix.volume`: no tr
 
 ## Positions and references
 
+### Edit and Mix windows
+
+`window.mix` and `window.edit` open or bring the requested main window to the front.
+Both views stay open and share the same session, selection, undo history, transport and audio
+engine. `window.toggle_mix_edit` (Cmd+=, Ctrl+= off macOS) switches focus between them.
+`window.close` closes the active main view when both are open, keeping the other view and
+session alive; the closed view can be reopened from the Window menu.
+
+`window.arrange_tile`, `window.arrange_tile_h`, `window.arrange_tile_v`, and
+`window.arrange_cascade` open both views and arrange them within the original main-window
+workspace. Horizontal tiles stack the views; vertical tiles place them side by side;
+automatic Tile chooses based on the workspace dimensions. Native hosts use separate OS
+windows; browser and offscreen hosts use movable, resizable windows within the canvas.
+
+`ui.inspect.main_windows` reports the primary and active view, whether Edit/Mix are open,
+and their last known rectangles. Native rectangles use desktop coordinates in egui points;
+embedded rectangles use canvas coordinates. `ui.window` identifies the active view and
+`ui.both_windows` records whether both are open. Existing preferences and `ui.set` requests
+that select a single view remain supported.
+
+Native views repaint independently. Focus-only shortcuts retain their latest destination
+without rebuilding the windows, and control/menu requests wake root logic explicitly even
+after the Mixer rendered last. Fresh native focus keys are consumed before rendering so an
+occluded root cannot delay or replay them.
+
+On macOS, a view fully covered by the other main view is temporarily hidden to
+avoid Metal drawable waits during focus transitions. Its viewport and session stay
+alive; focusing it restores visibility before activation. Partially overlapping
+and tiled windows stay visible together. `main_windows.parked` reports this state.
+
+`main_windows.perf` in `ui.inspect` provides diagnostic focus-command and per-view render
+counts, the most recent `root_ui_ms` / `secondary_ui_ms`, and `visible_mix_strips`.
+The UI timings measure CPU layout work, excluding GPU presentation and event-loop waiting.
+The existing `frame_ms` remains an interval estimate and includes idle time; it is not an
+input-latency benchmark. The Mixer borrows session snapshots and paints only visible strips.
+
 - Tracks: id (number) or name (`"Kick"`).
 - Clips: id (from `session.inspect`).
 - Positions: samples (`96000`), seconds (`{"seconds": 2.5}`), or a time string in any timebase,

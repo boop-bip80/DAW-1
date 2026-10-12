@@ -13,17 +13,17 @@
 
 mod config;
 mod control_server;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod graphics;
 mod logging;
 #[cfg(target_os = "macos")]
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs, native_host::NativeUiHost};
 use std::sync::Arc;
 
-struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App(NativeUiHost, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
 fn set_title(ctx: &egui::Context, title: String) {
@@ -40,61 +40,58 @@ impl eframe::App for App {
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
         }
+        let Ok(mut app) = self.0.state.try_borrow_mut() else {
+            ctx.request_repaint();
+            return;
+        };
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.2 {
-            menu.process(&mut self.0);
+            menu.process(&mut app);
         }
-        self.0.logic(ctx);
+        let closing_view = app.ui.both_windows && ctx.input(|i| i.viewport().close_requested());
+        app.logic(ctx);
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.2 {
-            menu.sync(&self.0);
+            menu.sync(&app);
         }
         // Files dropped on the window: sessions open, audio/MIDI import.
         let dropped: Vec<String> =
             ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect());
         for p in dropped {
-            open_path(&mut self.0, &p);
+            open_path(&mut app, &p);
         }
-        if self.0.quit_requested {
+        if app.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+        } else if !closing_view && ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut app, "app.quit", &serde_json::json!({}))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         soundcraft_ui_egui::fit_window_to_screen(ctx);
         let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
-        self.0.ui.window_maximized = maximized;
+        app.ui.window_maximized = maximized;
         if let Some(r) = inner.filter(|_| !maximized) {
-            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+            app.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
         }
-        self.0.ui.ui_scale = self.0.extra.ui_scale;
-        // With the system menu bar there is no egui bar showing the window and dirty state, so the
-        // title carries them; elsewhere the egui menu bar already does.
-        let title = if self.0.native_menu_bar {
-            format!(
-                "{}{} — SoundCraft — {}",
-                self.0.engine.session().name,
-                if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
-            )
-        } else {
-            format!("{} — SoundCraft", self.0.engine.session().name)
-        };
+        app.ui.ui_scale = app.extra.ui_scale;
+        let title = soundcraft_ui_egui::main_windows::title(&app, app.main_windows.primary(&app));
         set_title(ctx, title);
     }
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.0.raw_input_hook(raw);
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.0.raw_input_hook(ctx, raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.0.ui(ui);
     }
     fn on_exit(&mut self) {
-        save_prefs(&self.0.ui);
+        if let Ok(mut app) = self.0.state.try_borrow_mut() {
+            save_prefs(&app.ui);
+            app.player = None;
+        }
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
         }
         // The system Quit (⌘Q) ends the process from inside the event loop, so `run_native` never
         // returns: release the player's plugin instances and shut plugin hosting down here.
-        self.0.player = None;
         soundcraft_engine::shutdown_plugin_hosts();
     }
 }
@@ -251,6 +248,8 @@ fn main() -> eframe::Result {
     // Before eframe creates the wgpu instance: default Windows to DirectX 12 with FXC (see graphics.rs).
     #[cfg(target_os = "windows")]
     graphics::configure(&mut options, eframe::wgpu::Backends::from_env(), eframe::wgpu::Dx12Compiler::from_env());
+    #[cfg(target_os = "macos")]
+    graphics::configure_macos(&mut options);
     eframe::run_native(
         "SoundCraft",
         options,
@@ -281,7 +280,7 @@ fn main() -> eframe::Result {
                 }
             };
             Ok(Box::new(App(
-                app,
+                NativeUiHost::new(app).map_err(std::io::Error::other)?,
                 logger,
                 #[cfg(target_os = "macos")]
                 menu,
