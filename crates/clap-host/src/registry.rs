@@ -9,9 +9,14 @@ use soundcraft_dsp::{ParamInfo, Plugin, PluginInfo, Taper, Unit};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Most labels read for an enum parameter.
 const MAX_CHOICES: f64 = 128.0;
+
+/// A file that takes longer than this to load is named in the log (some plugins wait on a licence
+/// check or a network drive at load, and a scan of hundreds of files is slow without saying why).
+const SLOW_LOAD: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Registry {
@@ -51,9 +56,19 @@ pub fn load_bundle(path: &Path) -> Result<Vec<ClapDescriptor>, ClapError> {
 
 /// Scans `dirs` (uncached). Unloadable files are logged and skipped; the first plugin with a
 /// given id wins.
+///
+/// Each file is logged *before* it is loaded. Loading runs the plugin's own code in this process,
+/// and a plugin that crashes there (an access violation, or a C++ exception unwinding into Rust,
+/// which aborts) takes the app down before any error can be logged. The log file is written
+/// unbuffered, so the last `scanning` line then names the plugin that did it.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
+    let started = Instant::now();
     let mut out: Vec<ClapDescriptor> = Vec::new();
+    let (mut files, mut failed) = (0usize, 0usize);
     for path in paths::find_bundles(dirs) {
+        files = files.saturating_add(1);
+        log::info!("scanning CLAP plugin {}", path.display());
+        let one = Instant::now();
         match load_bundle(&path) {
             Ok(ds) => {
                 for d in ds {
@@ -62,10 +77,18 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
                     }
                 }
             }
-            Err(e) => log::warn!("{e}"),
+            Err(e) => {
+                failed = failed.saturating_add(1);
+                log::warn!("{e}");
+            }
+        }
+        let took = one.elapsed();
+        if took >= SLOW_LOAD {
+            log::warn!("CLAP plugin {} took {:.1} s to scan", path.display(), took.as_secs_f64());
         }
     }
     out.sort_by_key(|d| d.name.to_lowercase());
+    log::info!("CLAP scan: {} plugins from {files} files ({failed} failed) in {:.1} s", out.len(), started.elapsed().as_secs_f64());
     out
 }
 
