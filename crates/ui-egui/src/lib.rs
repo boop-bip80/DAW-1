@@ -560,7 +560,8 @@ impl SoundApp {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
             return;
         }
-        match soundcraft_playback::record::Recorder::open() {
+        let in_dev = self.engine.session().edit.text("engine.input_device");
+        match soundcraft_playback::record::Recorder::open_with_device(in_dev.as_deref()) {
             Ok(r) => {
                 if let Some(p) = &self.player {
                     p.set_input(std::sync::Arc::clone(&r.monitor));
@@ -733,6 +734,35 @@ impl SoundApp {
                 }
                 TransportRequest::Scrub(at) => self.engine.transport.position = at,
                 TransportRequest::AllNotesOff => {}
+                TransportRequest::ReconfigureAudio { device, input_device, buffer_size } => {
+                    let cfg = soundcraft_playback::PlaybackConfig {
+                        device_name: device.clone(),
+                        sample_rate: Some(self.engine.session().sample_rate.hz()),
+                        buffer_size,
+                        channels: None,
+                    };
+                    if let Some(p) = &mut self.player
+                        && let Err(e) = p.reconfigure(&cfg, self.engine.session_arc())
+                    {
+                        self.ui.status = format!("Audio device error: {e}");
+                    }
+                    if let Some(in_name) = input_device {
+                        match soundcraft_playback::record::Recorder::open_with_device(Some(&in_name)) {
+                            Ok(r) => {
+                                if let Some(p) = &self.player {
+                                    p.set_input(std::sync::Arc::clone(&r.monitor));
+                                }
+                                self.recorder = Some(r);
+                                self.recorder_failed = false;
+                            }
+                            Err(e) => {
+                                self.recorder = None;
+                                self.recorder_failed = true;
+                                self.ui.status = format!("Input device error: {e}");
+                            }
+                        }
+                    }
+                }
             }
         }
         // Read back the position.

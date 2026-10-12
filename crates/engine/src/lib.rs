@@ -66,6 +66,11 @@ pub enum TransportRequest {
     HalfSpeed,
     Scrub(Samples),
     AllNotesOff,
+    ReconfigureAudio {
+        device: Option<String>,
+        input_device: Option<String>,
+        buffer_size: Option<u32>,
+    },
 }
 
 /// Snapshot of the transport reported back by the host (playback position etc.).

@@ -88,12 +88,11 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Open the default input device. Errors when there is none (the caller shows a message).
+    /// Open the input device by name (or default if None).
     #[cfg(not(target_os = "freebsd"))]
-    pub fn open() -> Result<Recorder, String> {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("no audio input device")?;
+    pub fn open_with_device(device_name: Option<&str>) -> Result<Recorder, String> {
+        use cpal::traits::{DeviceTrait, StreamTrait};
+        let device = crate::device::find_input_device(device_name).ok_or("no audio input device")?;
         #[allow(deprecated)]
         let name = device.name().unwrap_or_else(|_| "Input".into());
         let cfg = device.default_input_config().map_err(|e| e.to_string())?;
@@ -130,6 +129,17 @@ impl Recorder {
             .map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
         Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate.0, channels, writer: None })
+    }
+
+    /// Open the default input device. Errors when there is none (the caller shows a message).
+    #[cfg(not(target_os = "freebsd"))]
+    pub fn open() -> Result<Recorder, String> {
+        Self::open_with_device(None)
+    }
+
+    #[cfg(target_os = "freebsd")]
+    pub fn open_with_device(_device_name: Option<&str>) -> Result<Recorder, String> {
+        Self::open()
     }
 
     #[cfg(target_os = "freebsd")]

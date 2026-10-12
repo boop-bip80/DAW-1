@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (alpha blockers marked after the core-workflow gate) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (G-01 audio device and buffer selection implemented; #42 resolved) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -15,7 +15,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 | # | Gap | Dimension | Doc | Est. (h) |
 |---|---|---|---|---:|
-| G-01 | **Alpha blocker.** No audio device, channel or buffer-size selection; no duplex low-latency path | Hardware | [hardware-parity.md](hardware-parity.md) | 25–40 |
+| G-01 | **Alpha blocker.** No audio device, channel or buffer-size selection; no duplex low-latency path (device & buffer selection implemented; duplex & channel routing remaining) | Hardware | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-02 | **Alpha blocker.** No MIDI device input or output | Hardware / MIDI | [hardware-parity.md](hardware-parity.md) | 20–35 |
 | G-03 | **Alpha blocker.** Cannot exchange sessions with Pro Tools (no AAF/OMF, no `.ptx`) | File formats | [file-format-parity.md](file-format-parity.md) | 50–90 |
 | G-04 | Open correctness bugs in features counted as done (~25 issues) | Stability | this file | 25–40 |
@@ -54,6 +54,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 - **Estimate:** ≈ 25–40 h (device enumeration and selection, buffer size, duplex stream with one
   clock, ASIO feature build, per-channel I/O mapping into I/O Setup, latency reporting and
   record-offset compensation). Needs hands-on hardware testing.
+- **Progress (2026-10-13):** Device enumeration (`soundcraft_playback::device`), input/output device selection, and configurable buffer sizes (64–2048 samples via `PlaybackConfig` and `cpal::BufferSize::Fixed`) are implemented and wired through `setup.playback_engine` and the Playback Engine window, resolving #42. Remaining: unified duplex stream on a single hardware clock, ASIO on Windows, per-channel physical routing, and latency compensation (≈ 15–25 h).
 
 ### G-02. MIDI devices
 

@@ -405,34 +405,66 @@ fn configurations(app: &mut SoundApp, ctx: &egui::Context) {
 /// Setup › Playback Engine / Hardware.
 pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_playback_engine;
-    win(ctx, &mut open, "Playback Engine", vec2(380.0, 220.0), |ui| {
-        egui::Grid::new("pe").num_columns(2).show(ui, |ui| {
+    win(ctx, &mut open, "Playback Engine", vec2(420.0, 260.0), |ui| {
+        let output_devices = soundcraft_playback::list_output_devices();
+        let input_devices = soundcraft_playback::list_input_devices();
+        let cur_out = app.player.as_ref().map(|p| p.device_name.clone()).unwrap_or_else(|| "none".into());
+        let cur_in = app.recorder.as_ref().map(|r| r.device_name.clone()).unwrap_or_else(|| "default".into());
+        let cur_buf = app.player.as_ref().map(|p| p.buffer_size).unwrap_or(512);
+
+        egui::Grid::new("pe").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Output device");
-            ui.label(app.player.as_ref().map_or("none".to_string(), |p| p.device_name.clone()));
+            egui::ComboBox::from_id_salt("out_dev").selected_text(&cur_out).show_ui(ui, |ui| {
+                for d in &output_devices {
+                    if ui.selectable_label(d.name == cur_out, &d.name).clicked() {
+                        let _ = app.run("setup.playback_engine", json!({"device": d.name}));
+                    }
+                }
+            });
             ui.end_row();
+
+            ui.label("Input device");
+            egui::ComboBox::from_id_salt("in_dev").selected_text(&cur_in).show_ui(ui, |ui| {
+                for d in &input_devices {
+                    if ui.selectable_label(d.name == cur_in, &d.name).clicked() {
+                        let _ = app.run("setup.playback_engine", json!({"input_device": d.name}));
+                    }
+                }
+            });
+            ui.end_row();
+
+            ui.label("Buffer size");
+            egui::ComboBox::from_id_salt("buf_sz").selected_text(format!("{cur_buf} samples")).show_ui(ui, |ui| {
+                for sz in [64, 128, 256, 512, 1024, 2048] {
+                    if ui.selectable_label(sz == cur_buf, format!("{sz} samples")).clicked() {
+                        let _ = app.run("setup.playback_engine", json!({"buffer_size": sz}));
+                    }
+                }
+            });
+            ui.end_row();
+
             ui.label("Device rate");
             ui.label(app.player.as_ref().map_or("-".to_string(), |p| format!("{} Hz", p.device_rate)));
             ui.end_row();
+
             ui.label("Session rate");
             ui.label(format!("{} Hz", app.engine.session().sample_rate.hz()));
             ui.end_row();
-            ui.label("Input device");
-            ui.label(
-                app.recorder
-                    .as_ref()
-                    .map_or("opened on first record".to_string(), |r| format!("{} ({} ch @ {} Hz)", r.device_name, r.channels, r.sample_rate)),
-            );
-            ui.end_row();
-            ui.label("Mix block size");
-            ui.label("512 samples (resampled to the device rate when they differ)");
-            ui.end_row();
         });
+
+        ui.add_space(8.0);
         let mut dc = app.engine.session().edit.delay_compensation;
         if ui.checkbox(&mut dc, "Delay compensation").changed() {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
         if ui.button("Reconnect audio device").clicked() {
-            app.player = Some(soundcraft_playback::Player::new(app.engine.session_arc()));
+            let cfg = soundcraft_playback::PlaybackConfig {
+                device_name: if cur_out == "none" { None } else { Some(cur_out) },
+                sample_rate: Some(app.engine.session().sample_rate.hz()),
+                buffer_size: Some(cur_buf),
+                channels: None,
+            };
+            app.player = Some(soundcraft_playback::Player::new_with_config(app.engine.session_arc(), cfg));
         }
     });
     app.ui.show_playback_engine = open;

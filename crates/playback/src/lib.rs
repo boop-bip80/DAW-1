@@ -22,7 +22,10 @@
 //! through handles taken from each instance before it leaves ([`Player::open_editor`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod device;
 pub mod record;
+
+pub use device::{AudioDeviceDescriptor, list_input_devices, list_output_devices};
 
 use soundcraft_dsp::{Plugin, PluginEditor};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
@@ -56,6 +59,7 @@ enum Cmd {
     /// A new snapshot plus the third-party instances it needs (created on the UI thread).
     Session(Arc<Session>, Vec<PreparedInstance>),
     /// Read every plugin state and reply.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     CaptureStates(Sender<PluginStates>),
     Input(Arc<record::InputRing>),
     Recording(bool),
@@ -344,6 +348,19 @@ impl Side {
     }
 }
 
+/// Configuration for opening or reconfiguring the audio playback output device.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PlaybackConfig {
+    /// Desired output device name (None = system default output).
+    pub device_name: Option<String>,
+    /// Desired sample rate (None = session rate).
+    pub sample_rate: Option<u32>,
+    /// Desired buffer size in samples (e.g. 64, 128, 256, 512, 1024, 2048).
+    pub buffer_size: Option<u32>,
+    /// Desired channel count (None = main channels of session).
+    pub channels: Option<u16>,
+}
+
 /// The transport and audio device.
 pub struct Player {
     shared: Arc<Shared>,
@@ -357,14 +374,22 @@ pub struct Player {
     pub device_rate: u32,
     /// Output channels the device was opened with (0 for the silent clock).
     pub device_channels: u16,
+    /// Buffer size in samples the device stream was opened with.
+    pub buffer_size: u32,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
+    pub config: PlaybackConfig,
 }
 
 impl Player {
     /// Open the default output device. Never fails: without a device it runs a silent clock.
     pub fn new(session: Arc<Session>) -> Player {
-        let p = Player::open(Arc::clone(&session));
+        Self::new_with_config(session, PlaybackConfig::default())
+    }
+
+    /// Open output device with specified configuration.
+    pub fn new_with_config(session: Arc<Session>, config: PlaybackConfig) -> Player {
+        let p = Player::open_with_config(Arc::clone(&session), config);
         // Hand the initial session's third-party plugins over.
         p.update_session(session);
         p
@@ -374,7 +399,7 @@ impl Player {
         self.side.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn open(session: Arc<Session>) -> Player {
+    fn open_with_config(session: Arc<Session>, config: PlaybackConfig) -> Player {
         let (gtx, grx) = channel();
         let side = Mutex::new(Side { shadow: HashMap::new(), rate: session.sample_rate.as_f64() as f32, editors: HashMap::new(), garbage: grx });
         let shared = Arc::new(Shared {
@@ -386,10 +411,14 @@ impl Player {
         let (tx, rx) = channel();
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
-        match open_device(want, want_ch) {
-            Ok((device, config, name)) => {
-                let rate = config.sample_rate.0;
-                let channels = usize::from(config.channels);
+        match open_device(&config, want, want_ch) {
+            Ok((device, stream_config, name)) => {
+                let rate = stream_config.sample_rate.0;
+                let channels = usize::from(stream_config.channels);
+                let buf_size = match stream_config.buffer_size {
+                    cpal::BufferSize::Fixed(n) => n,
+                    cpal::BufferSize::Default => config.buffer_size.unwrap_or(512),
+                };
                 let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
                 // cpal may call this on the audio thread (on ALSA in a loop while the device
                 // stays broken): marked, so the logger hands the record off instead of writing it.
@@ -399,7 +428,7 @@ impl Player {
                 };
                 use cpal::traits::{DeviceTrait, StreamTrait};
                 match device.build_output_stream(
-                    &config,
+                    &stream_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         mark_audio_thread();
                         state.fill(data, channels);
@@ -411,7 +440,7 @@ impl Player {
                         if let Err(e) = stream.play() {
                             log::warn!("audio stream failed to start: {e}");
                         }
-                        log::info!("audio device: {name} @ {rate} Hz, {channels} ch");
+                        log::info!("audio device: {name} @ {rate} Hz, {channels} ch, buffer {buf_size}");
                         Player {
                             shared,
                             tx,
@@ -419,8 +448,10 @@ impl Player {
                             _stream: Some(stream),
                             device_name: name,
                             device_rate: rate,
-                            device_channels: config.channels,
+                            device_channels: stream_config.channels,
+                            buffer_size: buf_size,
                             silent: false,
+                            config,
                         }
                     }
                     Err(e) => {
@@ -440,6 +471,63 @@ impl Player {
                 Player::silent_clock_with(s2, tx, rx, session, side, gtx)
             }
         }
+    }
+
+    /// Reconfigure the audio device and stream. Preserves position and active plugins.
+    pub fn reconfigure(&mut self, new_config: &PlaybackConfig, session: Arc<Session>) -> Result<(), String> {
+        let want = session.sample_rate.hz();
+        let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
+        let (device, stream_config, name) = open_device(new_config, want, want_ch)?;
+
+        let rate = stream_config.sample_rate.0;
+        let channels = usize::from(stream_config.channels);
+        let buf_size = match stream_config.buffer_size {
+            cpal::BufferSize::Fixed(n) => n,
+            cpal::BufferSize::Default => new_config.buffer_size.unwrap_or(512),
+        };
+
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        {
+            let mut side = self.side();
+            side.garbage = grx;
+            side.rate = session.sample_rate.as_f64() as f32;
+        }
+
+        let mut state = AudioState::new(rx, Arc::clone(&self.shared), Arc::clone(&session), f64::from(rate), gtx);
+        let err_fn = |e: cpal::StreamError| {
+            mark_audio_thread();
+            log::warn!("audio stream error: {e}");
+        };
+        use cpal::traits::{DeviceTrait, StreamTrait};
+        let stream = device
+            .build_output_stream(
+                &stream_config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    mark_audio_thread();
+                    state.fill(data, channels);
+                },
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("cannot open audio stream: {e}"))?;
+
+        if let Err(e) = stream.play() {
+            log::warn!("reconfigured audio stream failed to start: {e}");
+        }
+
+        self._stream = Some(stream);
+        self.tx = tx;
+        self.device_name = name;
+        self.device_rate = rate;
+        self.device_channels = stream_config.channels;
+        self.buffer_size = buf_size;
+        self.silent = false;
+        self.config = new_config.clone();
+
+        self.update_session(session);
+        log::info!("audio device reconfigured: {} @ {} Hz, buffer {}", self.device_name, self.device_rate, self.buffer_size);
+        Ok(())
     }
 
     fn silent_clock(
@@ -493,7 +581,9 @@ impl Player {
             device_name: "No audio device (silent)".into(),
             device_rate: rate,
             device_channels: 0,
+            buffer_size: 512,
             silent: true,
+            config: PlaybackConfig::default(),
         }
     }
 
@@ -514,7 +604,9 @@ impl Player {
             device_name: "No audio device".into(),
             device_rate: session.sample_rate.hz(),
             device_channels: 0,
+            buffer_size: 512,
             silent: true,
+            config: PlaybackConfig::default(),
         }
     }
 
@@ -709,41 +801,51 @@ fn fold_gains(s: &Session) -> [(f32, f32); MAX_CHANNELS] {
     g
 }
 
-/// Open the default output device: f32 at the session rate if possible, with as many channels as
-/// it offers up to `want_ch` (at least stereo when available).
-fn open_device(want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::StreamConfig, String), String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    let host = cpal::default_host();
-    let device = host.default_output_device().ok_or_else(|| "no default output device".to_string())?;
+/// Open the output device according to `config`: f32 at the requested rate if possible,
+/// with as many channels as requested up to `want_ch` (at least stereo when available).
+fn open_device(config: &PlaybackConfig, want_rate: u32, want_ch: u16) -> Result<(cpal::Device, cpal::StreamConfig, String), String> {
+    use cpal::traits::DeviceTrait;
+    let device = device::find_output_device(config.device_name.as_deref()).ok_or_else(|| "no output audio device found".to_string())?;
     #[allow(deprecated)]
     let name = device.name().unwrap_or_else(|_| "Audio device".into());
-    // Prefer an f32 config at the session rate; else the device default (we resample).
-    let want_ch = want_ch.max(2);
+    let rate = config.sample_rate.unwrap_or(want_rate);
+    let want_ch = config.channels.unwrap_or(want_ch).max(2);
     let mut chosen: Option<cpal::StreamConfig> = None;
     if let Ok(configs) = device.supported_output_configs() {
         for c in configs {
             if c.sample_format() == cpal::SampleFormat::F32
-                && c.min_sample_rate().0 <= want_rate
-                && c.max_sample_rate().0 >= want_rate
+                && c.min_sample_rate().0 <= rate
+                && c.max_sample_rate().0 >= rate
                 && c.channels() >= 2
                 && c.channels() <= want_ch
                 && chosen.as_ref().is_none_or(|x| c.channels() > x.channels)
             {
-                chosen = Some(c.with_sample_rate(cpal::SampleRate(want_rate)).config());
+                let mut sc = c.with_sample_rate(cpal::SampleRate(rate)).config();
+                if let Some(buf) = config.buffer_size {
+                    sc.buffer_size = cpal::BufferSize::Fixed(buf);
+                }
+                chosen = Some(sc);
             }
         }
     }
-    let config = match chosen {
+    let mut stream_config = match chosen {
         Some(c) => c,
         None => {
             let d = device.default_output_config().map_err(|e| e.to_string())?;
             if d.sample_format() != cpal::SampleFormat::F32 {
                 return Err(format!("unsupported device sample format {:?}", d.sample_format()));
             }
-            d.config()
+            let mut sc = d.config();
+            if let Some(buf) = config.buffer_size {
+                sc.buffer_size = cpal::BufferSize::Fixed(buf);
+            }
+            sc
         }
     };
-    Ok((device, config, name))
+    if let Some(buf) = config.buffer_size {
+        stream_config.buffer_size = cpal::BufferSize::Fixed(buf);
+    }
+    Ok((device, stream_config, name))
 }
 
 #[cfg(test)]

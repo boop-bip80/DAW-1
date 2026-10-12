@@ -223,6 +223,18 @@ impl EditState {
     pub fn value(&self, id: &str, default: f64) -> f64 {
         self.values.get(id).copied().filter(|v| v.is_finite()).unwrap_or(default)
     }
+    pub fn text(&self, key: &str) -> Option<String> {
+        let prefix = format!("{key}=");
+        self.flags.iter().find_map(|f| f.strip_prefix(&prefix).map(str::to_string))
+    }
+    pub fn set_text(&mut self, key: &str, value: Option<&str>) {
+        let prefix = format!("{key}=");
+        self.flags.retain(|f| !f.starts_with(&prefix));
+        if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
+            let v: String = v.chars().take(200).collect();
+            self.flags.insert(format!("{prefix}{v}"));
+        }
+    }
 }
 
 fn yes() -> bool {

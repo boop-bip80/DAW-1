@@ -5,7 +5,7 @@ use super::more_util::{set_text, store_value, text, toggle_flag, values_with_pre
 use super::*;
 use crate::cmd;
 use serde_json::json;
-use soundcraft_model::{BusId, ChannelFormat, ClipContent, OutputPath, Route, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
+use soundcraft_model::{ClipContent, Route, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
 use soundcraft_time::Timecode;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,24 +43,8 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             prepare_dpe
         ),
-        cmd!(noundo "setup.hardware", "Hardware...", ["Setup"], None, "{device?, buffer_size?: 16..8192} — audio interface settings (sample rate is the session's)", always, |e, p| engine_settings(e, p)),
-        cmd!(noundo "setup.playback_engine", "Playback Engine...", ["Setup"], None, "{device?, buffer_size?: 16..8192, delay_compensation?: bool}", always, |e, p| {
-            if let Some(v) = p.get("delay_compensation").and_then(Value::as_bool) {
-                e.session_mut().edit.delay_compensation = v;
-            }
-            engine_settings(e, p)
-        }),
         cmd!(noundo "setup.disk_allocation", "Disk Allocation...", ["Setup"], None, "{path?, track?} — the record folder for the session, or for one track", always, disk_allocation),
         cmd!(noundo "setup.peripherals", "Peripherals...", ["Setup"], None, "{settings?: {name: number|bool|string}} — control surface / sync device settings", always, peripherals),
-        cmd!(
-            "setup.io",
-            "I/O...",
-            ["Setup"],
-            None,
-            "{action?: list|create_bus|rename_bus|delete_bus|create_output|rename_output|delete_output, name?, new_name?, format?: stereo, first_channel?: 0}",
-            always,
-            io_setup
-        ),
         cmd!(
             "setup.current_timecode",
             "Current Timecode Position...",
@@ -155,24 +139,6 @@ fn prepare_dpe(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"prepared": n}))
 }
 
-fn engine_settings(e: &mut Engine, p: &Value) -> Result<Value> {
-    let s = e.session_mut();
-    if let Some(b) = p.get("buffer_size").and_then(Value::as_u64) {
-        let b = b.clamp(16, 8192).next_power_of_two().min(8192);
-        s.edit.values.insert("engine.buffer_size".into(), b as f64);
-    }
-    if let Some(d) = str_param(p, "device") {
-        set_text(&mut s.edit, "engine.device", Some(d));
-    }
-    Ok(json!({
-        "device": text(&s.edit, "engine.device"),
-        "buffer_size": s.edit.value("engine.buffer_size", 1024.0),
-        "sample_rate": s.sample_rate.hz(),
-        "bit_depth": s.bit_depth,
-        "delay_compensation": s.edit.delay_compensation,
-    }))
-}
-
 fn disk_allocation(e: &mut Engine, p: &Value) -> Result<Value> {
     let id = "setup.disk_allocation";
     let t = track_param(e, id, p, "track")?;
@@ -214,84 +180,6 @@ fn peripherals(e: &mut Engine, p: &Value) -> Result<Value> {
     }
     let flags: Vec<&String> = s.edit.flags.iter().filter(|f| f.starts_with("peripherals.")).collect();
     Ok(json!({"values": values_with_prefix(&s.edit, "peripherals."), "flags": flags}))
-}
-
-fn io_state(s: &Session) -> Value {
-    json!({"busses": s.busses, "outputs": s.outputs})
-}
-
-fn io_setup(e: &mut Engine, p: &Value) -> Result<Value> {
-    let id = "setup.io";
-    let action = str_param(p, "action").unwrap_or("list");
-    if action == "list" {
-        return Ok(io_state(e.session()));
-    }
-    let name = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| bad(id, "`name` required"))?.to_string();
-    let new_name = str_param(p, "new_name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
-    let format = match str_param(p, "format") {
-        Some(f) => ChannelFormat::from_id(f).ok_or_else(|| bad(id, format!("unknown format `{f}`")))?,
-        None => ChannelFormat::Stereo,
-    };
-    let s = e.session_mut();
-    match action {
-        "create_bus" => {
-            if s.bus_by_name(&name).is_some() {
-                return Err(bad(id, format!("a bus named `{name}` exists")));
-            }
-            s.add_bus(&name, format);
-        }
-        "rename_bus" => {
-            let to = new_name.ok_or_else(|| bad(id, "`new_name` required"))?;
-            if s.bus_by_name(&to).is_some() {
-                return Err(bad(id, format!("a bus named `{to}` exists")));
-            }
-            let b = s.busses.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&name)).ok_or_else(|| bad(id, format!("no bus `{name}`")))?;
-            b.name = to;
-        }
-        "delete_bus" => {
-            let bid: BusId = s.bus_by_name(&name).map(|b| b.id).ok_or_else(|| bad(id, format!("no bus `{name}`")))?;
-            s.busses.retain(|b| b.id != bid);
-            for t in &mut s.tracks {
-                if t.mixer.input == Route::Bus(bid) {
-                    t.mixer.input = Route::None;
-                }
-                if t.mixer.output == Route::Bus(bid) {
-                    t.mixer.output = Route::None;
-                }
-                for slot in &mut t.mixer.sends {
-                    if slot.as_ref().is_some_and(|x| x.target == Route::Bus(bid)) {
-                        *slot = None;
-                    }
-                }
-            }
-        }
-        "create_output" => {
-            if s.outputs.iter().any(|o| o.name.eq_ignore_ascii_case(&name)) {
-                return Err(bad(id, format!("an output named `{name}` exists")));
-            }
-            let first = i64_or(p, "first_channel", 0).clamp(0, 1023) as u16;
-            s.outputs.push(OutputPath { name, first_channel: first, format });
-        }
-        "rename_output" => {
-            let to = new_name.ok_or_else(|| bad(id, "`new_name` required"))?;
-            let o = s.outputs.iter_mut().find(|o| o.name.eq_ignore_ascii_case(&name)).ok_or_else(|| bad(id, format!("no output `{name}`")))?;
-            let old = std::mem::replace(&mut o.name, to.clone());
-            for t in &mut s.tracks {
-                if t.mixer.output == Route::Hardware(old.clone()) {
-                    t.mixer.output = Route::Hardware(to.clone());
-                }
-            }
-        }
-        "delete_output" => {
-            let before = s.outputs.len();
-            s.outputs.retain(|o| !o.name.eq_ignore_ascii_case(&name));
-            if s.outputs.len() == before {
-                return Err(bad(id, format!("no output `{name}`")));
-            }
-        }
-        other => return Err(bad(id, format!("unknown action `{other}`"))),
-    }
-    Ok(io_state(s))
 }
 
 fn current_timecode(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -540,7 +428,7 @@ mod tests {
                 || e.session()
                     .bus(match t.mixer.input {
                         Route::Bus(b) => b,
-                        _ => BusId(0),
+                        _ => soundcraft_model::BusId(0),
                     })
                     .is_some()
         }));

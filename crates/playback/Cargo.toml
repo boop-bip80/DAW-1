@@ -13,6 +13,7 @@ soundcraft-audio-io.workspace = true
 soundcraft-model.workspace = true
 soundcraft-mix.workspace = true
 soundcraft-dsp.workspace = true
+serde.workspace = true
 log.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -20,6 +21,9 @@ cpal.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 cpal = { workspace = true, features = ["wasm-bindgen"] }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

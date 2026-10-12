@@ -36,17 +36,11 @@ pub fn set_flags(e: &mut Engine, ids: &[&str], on: bool) -> Value {
 
 /// String settings live in `edit.flags` as `key=value` (one per key).
 pub fn set_text(edit: &mut EditState, key: &str, value: Option<&str>) {
-    let prefix = format!("{key}=");
-    edit.flags.retain(|f| !f.starts_with(&prefix));
-    if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
-        let v: String = v.chars().take(200).collect();
-        edit.flags.insert(format!("{prefix}{v}"));
-    }
+    edit.set_text(key, value);
 }
 
 pub fn text(edit: &EditState, key: &str) -> Option<String> {
-    let prefix = format!("{key}=");
-    edit.flags.iter().find_map(|f| f.strip_prefix(&prefix).map(str::to_string))
+    edit.text(key)
 }
 
 /// All `values` whose key starts with `prefix`, as a JSON object (prefix stripped).
