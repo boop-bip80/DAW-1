@@ -497,7 +497,9 @@ pub fn shortcuts_window(app: &mut SoundApp, ctx: &egui::Context) {
     win(ctx, &mut open, tr("Keyboard Shortcuts"), vec2(520.0, 480.0), |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("sc").num_columns(3).striped(true).show(ui, |ui| {
-                let engine = soundcraft_engine::command_specs().iter().map(|c| (c.shortcut, c.label, c.menu.iter().map(|m| tr(m)).collect::<Vec<_>>().join(" › ")));
+                let engine = soundcraft_engine::command_specs()
+                    .iter()
+                    .map(|c| (c.shortcut, c.label, c.menu.iter().map(|m| tr(m)).collect::<Vec<_>>().join(" › ")));
                 let windows = crate::menus::UI_COMMANDS.iter().map(|c| (c.3, c.1, c.2.split(" > ").map(tr).collect::<Vec<_>>().join(" › ")));
                 for (shortcut, label, menu) in engine.chain(windows) {
                     let Some(shortcut) = shortcut else { continue };

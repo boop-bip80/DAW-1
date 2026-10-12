@@ -416,7 +416,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     let file = soundcraft_engine::io::session_file(path);
                     let replaces = soundcraft_engine::io::replaces(&app.engine, cmd, &file);
                     if replaces {
-                        ui.label(crate::i18n::trf("“{}” already exists. Do you want to replace it?", &[&file.file_name().unwrap_or_default().to_string_lossy()]));
+                        ui.label(crate::i18n::trf(
+                            "“{}” already exists. Do you want to replace it?",
+                            &[&file.file_name().unwrap_or_default().to_string_lossy()],
+                        ));
                     }
                     if buttons(ui, if replaces { tr("Replace") } else { tr("OK") }, enter && !replaces) {
                         let mut v = json!({});
