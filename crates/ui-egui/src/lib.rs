@@ -12,9 +12,12 @@ pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
 pub mod icons;
+pub mod main_windows;
 pub mod menus;
 pub mod midi_editor;
 pub mod mix_window;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_host;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
@@ -44,14 +47,32 @@ pub enum MainWindow {
     Mix,
 }
 
+impl MainWindow {
+    pub fn other(self) -> Self {
+        match self {
+            Self::Edit => Self::Mix,
+            Self::Mix => Self::Edit,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit",
+            Self::Mix => "Mix",
+        }
+    }
+}
+
 /// UI state (serde, so agents can read and set it).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct UiState {
     pub docking: docking::Workspace,
     #[serde(default = "docking::mix_default")]
     pub mix_docking: docking::Workspace,
     pub window: MainWindow,
+    /// Both main windows share one session; `window` identifies the active one.
+    pub both_windows: bool,
     pub show_tracks_list: bool,
     pub show_clip_list: bool,
     pub show_transport: bool,
@@ -114,6 +135,7 @@ impl Default for UiState {
             docking: docking::Workspace::default(),
             mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
+            both_windows: false,
             show_tracks_list: true,
             show_clip_list: true,
             show_transport: false,
@@ -239,7 +261,7 @@ pub struct SoundApp {
     pub meters: HashMap<TrackId, MeterDisplay>,
     pub main_meter: MeterDisplay,
     /// Reused multichannel snapshot; populated at an adaptive rate by `logic`.
-    meter_snapshot: soundcraft_playback::MeterSnapshot,
+    pub(crate) meter_snapshot: std::sync::Arc<soundcraft_playback::MeterSnapshot>,
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
@@ -260,7 +282,7 @@ pub struct SoundApp {
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
     pub quit_requested: bool,
-    /// Reset floating-window positions next frame (Window › Arrange).
+    pub main_windows: main_windows::WindowState,
     pub arrange_request: bool,
     /// Tracks whose automation was touched during this pass (Touch/Latch writing).
     touched: std::collections::HashSet<TrackId>,
@@ -301,7 +323,7 @@ impl SoundApp {
             dialogs: dialogs::Dialogs::default(),
             meters: HashMap::new(),
             main_meter: MeterDisplay::default(),
-            meter_snapshot: soundcraft_playback::MeterSnapshot::default(),
+            meter_snapshot: std::sync::Arc::new(soundcraft_playback::MeterSnapshot::default()),
             gesture: None,
             edit_layout: edit_window::EditLayout::default(),
             midi: midi_editor::MidiEditorState::default(),
@@ -319,6 +341,7 @@ impl SoundApp {
             docking_context: None,
             sim: None,
             quit_requested: false,
+            main_windows: main_windows::WindowState::default(),
             arrange_request: false,
             touched: std::collections::HashSet::new(),
             last_write_at: i64::MIN,
@@ -748,7 +771,7 @@ impl SoundApp {
             let now = self.last_frame.unwrap_or_default();
             let meter_interval = if self.ui.window == MainWindow::Mix { 1.0 / 60.0 } else { 1.0 / 20.0 };
             if now - self.last_meter_poll >= meter_interval {
-                p.copy_meters(&mut self.meter_snapshot);
+                p.copy_meters(std::sync::Arc::make_mut(&mut self.meter_snapshot));
                 self.last_meter_poll = now;
             }
             let snap = &self.meter_snapshot;
@@ -788,6 +811,7 @@ impl SoundApp {
         if ctx.current_pass_index() > 0 {
             return;
         }
+        main_windows::handle_root_close(self, ctx);
         // Fonts set now take effect next frame, so draw only from the frame after.
         if !self.fonts_ready {
             if self.fonts_installed {
@@ -802,11 +826,32 @@ impl SoundApp {
         if self.theme_applied != Some(light) || theme::is_light() != light {
             theme::apply(ctx, light);
             self.theme_applied = Some(light);
+            main_windows::request_views_repaint(ctx);
         }
         let now = ctx.input(|i| i.time);
         let dt = self.last_frame.replace(now).map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         control::drain(self, ctx);
+        // A parked root may not receive another raw-input pass promptly. Apply
+        // queued global focus keys now, using the same dispatch as native input.
+        // Preserve ordering with synthetic pointer/text gestures ahead of them.
+        if self.main_windows.deferred {
+            let count = self
+                .synthetic
+                .iter()
+                .take_while(|event| {
+                    matches!(event,
+                        egui::Event::Key { key: egui::Key::Equals, modifiers, .. } if modifiers.command
+                    )
+                })
+                .count();
+            if count > 0 {
+                let mut events = self.synthetic.drain(..count).collect();
+                main_windows::consume_focus_keys(self, &mut events);
+                self.synthetic.splice(..0, events);
+            }
+        }
+        main_windows::process_requests(self, ctx);
         self.apply_editor_edits();
         if !ctx.input(|i| i.pointer.any_down()) {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
@@ -886,25 +931,11 @@ impl SoundApp {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());
         }
-        shortcuts::handle(self, &ctx);
-        if !self.native_menu_bar {
-            menus::menu_bar(self, ui);
-        }
-        match self.ui.window {
-            MainWindow::Edit => edit_window::show(self, ui),
-            MainWindow::Mix => mix_window::show(self, ui),
-        }
-        panels::floating(self, &ctx);
-        windows::show(self, &ctx);
-        video_window::show(self, &ctx);
-        ops_windows::show(self, &ctx);
-        extra_windows::show(self, &ctx);
-        score_editor::show(self, &ctx);
-        palette::show(self, &ctx);
-        dialogs::show(self, &ctx);
-        // Here, not in logic(): a covered or minimized window runs only logic(), with no vsync to pace it.
+        main_windows::show(self, ui);
+        // Keep upstream's paced UI refresh; hidden native roots tick logic at
+        // the existing idle rate, without running an unpaced animation loop.
         if self.meters_live() {
-            let hz = if self.ui.window == MainWindow::Mix { 60 } else { 30 };
+            let hz = if self.main_windows.primary(self) == MainWindow::Mix { 60 } else { 30 };
             ctx.request_repaint_after(std::time::Duration::from_millis(1000 / hz));
         } else if self.meters.values().any(|m| m.level[0] > 0.0001) {
             ctx.request_repaint_after(std::time::Duration::from_millis(80));
@@ -913,11 +944,23 @@ impl SoundApp {
         }
     }
 
+    pub(crate) fn floating_ui(&mut self, ctx: &egui::Context) {
+        panels::floating(self, ctx);
+        windows::show(self, ctx);
+        video_window::show(self, ctx);
+        ops_windows::show(self, ctx);
+        extra_windows::show(self, ctx);
+        score_editor::show(self, ctx);
+        palette::show(self, ctx);
+        dialogs::show(self, ctx);
+    }
+
     /// UI state as JSON (control channel `ui.inspect`).
     pub fn inspect(&self, ctx: &egui::Context) -> Value {
         let size = ctx.content_rect().size();
         json!({
             "ui": self.ui,
+            "main_windows": self.main_windows.inspect(self),
             "window_size": [size.x, size.y],
             "playing": self.is_playing(),
             "position": self.position(),

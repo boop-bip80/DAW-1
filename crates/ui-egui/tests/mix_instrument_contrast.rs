@@ -14,21 +14,21 @@ struct Slot {
 // Read the rectangle and foreground emitted by the real Mix drawing path, rather than
 // testing a palette token that a custom-painted control might never use.
 fn slot(output: &FullOutput, label: &str) -> Slot {
-    let text = output
+    // Edit can show the same plugin label in its track header while Mix is
+    // open alongside it. Select the label inside a real 15-point Mix slot.
+    let (text, rect) = output
         .shapes
         .iter()
-        .find_map(|shape| match &shape.shape {
+        .filter_map(|shape| match &shape.shape {
             Shape::Text(text) if text.galley.job.text == label => Some(text),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("missing painted label {label}"));
-    let center = text.visual_bounding_rect().center();
-    let rect = output
-        .shapes
-        .iter()
-        .find_map(|shape| match &shape.shape {
-            Shape::Rect(rect) if rect.rect.height() == 15.0 && rect.rect.contains(center) => Some(rect),
-            _ => None,
+        .find_map(|text| {
+            let center = text.visual_bounding_rect().center();
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                Shape::Rect(rect) if rect.rect.height() == 15.0 && rect.rect.contains(center) => Some((text, rect)),
+                _ => None,
+            })
         })
         .unwrap_or_else(|| panic!("missing painted slot for {label}"));
     let foreground = text.override_text_color.unwrap_or(text.galley.job.sections[0].format.color);

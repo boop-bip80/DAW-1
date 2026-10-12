@@ -1,13 +1,15 @@
-//! Windows graphics instance configuration, applied before wgpu can initialize any driver.
+//! Native graphics configuration applied before wgpu initializes surfaces.
 
+use eframe::NativeOptions;
+#[cfg(any(target_os = "windows", test))]
 use eframe::{
-    NativeOptions,
     egui_wgpu::WgpuSetup,
     wgpu::{Backends, Dx12Compiler},
 };
 
 /// Default to DirectX 12 with FXC before creating the wgpu instance. Explicit
 /// `WGPU_BACKEND` and `WGPU_DX12_COMPILER` choices, read by the caller, take precedence.
+#[cfg(any(target_os = "windows", test))]
 pub fn configure(options: &mut NativeOptions, backend_override: Option<Backends>, compiler_override: Option<Dx12Compiler>) {
     if let WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
         // eframe's default includes GL. Creating that backend can crash inside AMD's
@@ -27,6 +29,13 @@ pub fn configure(options: &mut NativeOptions, backend_override: Option<Backends>
             create.instance_descriptor.backend_options.dx12.shader_compiler
         );
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub fn configure_macos(options: &mut NativeOptions) {
+    // Allow a third Metal drawable while pending presents settle during
+    // focus/occlusion transitions. Keep the existing VSync mode.
+    options.wgpu_options.surface.desired_maximum_frame_latency = Some(2);
 }
 
 #[cfg(test)]
@@ -89,5 +98,14 @@ mod tests {
         for backends in [Backends::VULKAN, Backends::GL, Backends::DX12, Backends::VULKAN | Backends::DX12, Backends::empty()] {
             assert_eq!(configured_backends(Some(backends)), backends);
         }
+    }
+
+    #[test]
+    fn macos_focus_buffer_keeps_vsync_and_backend_selection() {
+        let mut options = NativeOptions::default();
+        let present = options.wgpu_options.surface.present_mode;
+        configure_macos(&mut options);
+        assert_eq!(options.wgpu_options.surface.present_mode, present);
+        assert_eq!(options.wgpu_options.surface.desired_maximum_frame_latency, Some(2));
     }
 }
