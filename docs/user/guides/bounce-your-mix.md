@@ -25,4 +25,4 @@ Bounce writes WAV, AIFF and FLAC. MP3 and AAC export are not available yet.
 
 ## Bounce without the window
 
-SoundCraft also ships a command-line tool, `soundcraft-cli`. Its `--bounce` option writes a file without opening the app. The README shows an example.
+SoundCraft also ships a command-line tool, `soundcraft-cli`. Its `--bounce` option writes a file without opening the app. The release has it for macOS only (`soundcraft-cli-<version>-macos-universal.zip`). The README shows an example.

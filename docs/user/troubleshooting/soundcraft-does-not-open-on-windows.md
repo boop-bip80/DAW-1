@@ -25,7 +25,9 @@ Start SoundCraft from PowerShell with the Vulkan graphics backend: run `$env:WGP
 
 4. If SoundCraft opens, you can keep starting it this way. The last line restores the default for later launches in that window.
 
-Do not set `WGPU_BACKEND` to `gl`. According to the README it can bring back a driver crash on some systems.
+On Intel graphics (UHD, Iris), use `gl` in place of `vulkan`. Intel's Vulkan driver (`igvk64.dll`) crashed other Craft apps at start. `gl` is reported to work on Intel graphics in other Craft apps.
+
+On AMD graphics do not set `WGPU_BACKEND` to `gl`: it can bring back the `atio6axx.dll` driver crash.
 
 ## Why this happens
 

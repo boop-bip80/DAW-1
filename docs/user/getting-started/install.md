@@ -14,7 +14,7 @@ Download the file for your system from the [latest release](https://github.com/s
 3. Run the file and follow the installer. It installs for all users, so Windows may ask for administrator approval.
 4. Start **SoundCraft** from the Start menu.
 
-The release also has an `arm64` installer for Snapdragon and other Arm PCs and an `x86` installer for 32-bit Windows. To run SoundCraft without installing, download `soundcraft-<version>-windows-x64-portable.zip` instead, unzip it and run `soundcraft.exe`.
+The release also has an `arm64` installer for Snapdragon and other Arm PCs. To run SoundCraft without installing, download `soundcraft-<version>-windows-x64-portable.zip` instead, unzip it and run `soundcraft.exe`.
 
 If the window never appears, see [SoundCraft does not open on Windows](../troubleshooting/soundcraft-does-not-open-on-windows.md).
 

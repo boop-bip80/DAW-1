@@ -28,7 +28,7 @@ Tick **Start from the demo session** only if you want the built-in demo song ins
 
 1. Choose **File > Save Session**.
 2. The first time, the **Save Session As** window asks for a path. Type one or click **Browse…**. The file name ends in `.scraft`.
-3. Click **OK**. If the file already exists, SoundCraft asks whether to replace it, and the button reads **Replace**.
+3. Click **OK**.
 
 To open a session later, choose **File > Open > Session...**.
 

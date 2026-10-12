@@ -26,7 +26,7 @@ On Windows and Linux the menus show `Ctrl` in place of the Mac `Cmd` key. Open *
 
 ## Save your work
 
-Choose **File > Save Session**. The first time, the **Save Session As** window asks for a path; sessions use the `.scraft` extension. SoundCraft also asks **Save changes to “name” before closing?** when you close a session with unsaved changes.
+Choose **File > Save Session**. The first time, the **Save Session As** window asks for a path; sessions use the `.scraft` extension. SoundCraft 0.5.0 does not ask before it closes or replaces a session, so unsaved edits are lost on Close, New, Open or Quit ([issue 136](https://github.com/storytold/soundcraft/issues/136)). Save first. A save prompt was added after 0.5.0 and is not in a release yet.
 
 ## Where the log file is
 

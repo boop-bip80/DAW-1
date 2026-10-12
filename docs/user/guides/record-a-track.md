@@ -5,14 +5,14 @@ order: 30
 verified: 0.5.0
 ---
 
-Click the red record-enable button in the track header, then press the Record button or `Ctrl+Space`. Press Stop (`Space`) to finish.
+Click the red record-enable button in the track header, then press the Record button or `Ctrl+Space` (`Cmd+Space` on macOS). Press Stop (`Space`) to finish.
 
 ## Steps
 
 1. Add an audio track if you have none. See [Create a session and add tracks](create-a-session-and-add-tracks.md).
 2. In the track's header, click the red round button. Its tooltip is **Record enable**. With the track selected, `Shift+R` does the same.
 3. Optional: click the **I** button in the header to hear the input through the track (**Input monitoring**).
-4. Press `Ctrl+Space`, or click the Record button in the transport controls.
+4. Press `Ctrl+Space` (`Cmd+Space` on macOS), or click the Record button in the transport controls.
 5. Play or sing. SoundCraft records from the current playhead.
 6. Press `Space` to stop. The status line reports how many clips were recorded.
 
