@@ -71,6 +71,9 @@ Push to the `release` branch to build signed installers for macOS (universal DMG
 ## Roadmap
 `ROADMAP.md` (committed) is the one-page summary (stage, numbers, dimensions, languages, progress log); milestones live in `docs/roadmap.md`. Update both whenever a milestone lands, and close or shrink the matching `docs/gaps.md` entry.
 
+## User docs
+User docs live in `docs/user/` and are published at https://getartcraft.com/docs/soundcraft. If a change alters something a user sees or does (menu or dialog labels, install, shortcuts, errors), update the matching page in `docs/user/` in the same PR, or add one. Rules: `docs/user/AGENTS.md`.
+
 ## Contributor credits (About window)
 
 - About ▸ Contributors/Models are compiled into the binary from `contributors/contributors.json`
