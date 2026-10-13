@@ -64,7 +64,10 @@ Errors: `{"id": 1, "ok": false, "error": "bad parameters for `mix.volume`: no tr
 - Positions: samples (`96000`), seconds (`{"seconds": 2.5}`), or a time string in any timebase,
   optionally prefixed: `"bars_beats:5|1|000"`, `"min_secs:0:12.500"`, `"timecode:00:00:10:00"`,
   `"samples:48000"`.
-- Ranges: `start` + `end` (or `start` + `length`); omitted = the current edit selection.
+- Ranges: `start` + `end` (or `start` + `length`); omitted = the current edit selection. An `end` or
+  `length` without `start` counts from the start of the edit selection (the insertion point). `end` and
+  `length` together must agree, and without `start` the range may not end before the insertion point;
+  otherwise the command fails instead of guessing.
 
 ## Examples
 
