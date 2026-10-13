@@ -4,10 +4,9 @@
 //! and streams parsed MIDI events into a preallocated, lock-free, allocation-free [`MidiInputRing`].
 //! The audio callback drains this ring without blocking or allocating.
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 use midir::{Ignore, MidiInput, MidiInputConnection};
@@ -15,7 +14,9 @@ use midir::{Ignore, MidiInput, MidiInputConnection};
 /// Default capacity for the lock-free MIDI input ring (power of two).
 pub const DEFAULT_RING_CAPACITY: usize = 2048;
 
-pub use soundcraft_midi::{LiveMidiEvent, parse_midi_message};
+use soundcraft_midi::{CtrlEvent, CtrlKind, Note, Sequence};
+pub use soundcraft_midi::{LiveMidiEvent, MidiTake, RecordedMidiEvent, parse_midi_message};
+use soundcraft_model::{Session, TrackId};
 
 struct Slot {
     sequence: AtomicUsize,
@@ -120,6 +121,277 @@ impl MidiInputRing {
     /// Returns `true` if the ring has no events queued.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+struct RecordSlot {
+    sequence: AtomicUsize,
+    track: AtomicU64,
+    at_sample: AtomicI64,
+    word: AtomicU32,
+    port: AtomicU32,
+    time: AtomicU64,
+}
+
+/// Lock-free, bounded multi-producer single-consumer ring buffer for [`RecordedMidiEvent`].
+/// Never blocks, never allocates during push/pop, and uses zero `unsafe`.
+pub struct MidiRecordRing {
+    slots: Box<[RecordSlot]>,
+    mask: usize,
+    head: AtomicUsize,
+    tail: AtomicUsize,
+    dropped: AtomicUsize,
+}
+
+impl MidiRecordRing {
+    pub fn new(capacity: usize) -> Arc<Self> {
+        let n = capacity.max(2).next_power_of_two();
+        let slots = (0..n)
+            .map(|i| RecordSlot {
+                sequence: AtomicUsize::new(i),
+                track: AtomicU64::new(0),
+                at_sample: AtomicI64::new(0),
+                word: AtomicU32::new(0),
+                port: AtomicU32::new(0),
+                time: AtomicU64::new(0),
+            })
+            .collect();
+        Arc::new(Self { slots, mask: n - 1, head: AtomicUsize::new(0), tail: AtomicUsize::new(0), dropped: AtomicUsize::new(0) })
+    }
+
+    /// Push a recorded event into the ring.
+    /// Thread-safe for real-time audio threads.
+    pub fn push(&self, event: RecordedMidiEvent) -> bool {
+        let word = event.event.pack_word();
+        let port = event.event.port_id;
+        let time = event.event.timestamp_us;
+        let track = event.track_id;
+        let at_sample = event.at_sample;
+        let mut head = self.head.load(Ordering::Relaxed);
+        loop {
+            let idx = head & self.mask;
+            let Some(slot) = self.slots.get(idx) else {
+                return false;
+            };
+            let seq = slot.sequence.load(Ordering::Acquire);
+            let diff = (seq as isize).wrapping_sub(head as isize);
+            if diff == 0 {
+                match self.head.compare_exchange_weak(head, head.wrapping_add(1), Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => {
+                        slot.track.store(track, Ordering::Relaxed);
+                        slot.at_sample.store(at_sample, Ordering::Relaxed);
+                        slot.word.store(word, Ordering::Relaxed);
+                        slot.port.store(port, Ordering::Relaxed);
+                        slot.time.store(time, Ordering::Relaxed);
+                        slot.sequence.store(head.wrapping_add(1), Ordering::Release);
+                        return true;
+                    }
+                    Err(actual) => head = actual,
+                }
+            } else if diff < 0 {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return false;
+            } else {
+                head = self.head.load(Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Pop a single recorded event from the ring.
+    pub fn pop(&self) -> Option<RecordedMidiEvent> {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let idx = tail & self.mask;
+        let slot = self.slots.get(idx)?;
+        let seq = slot.sequence.load(Ordering::Acquire);
+        let diff = (seq as isize).wrapping_sub(tail.wrapping_add(1) as isize);
+        if diff == 0 {
+            let track_id = slot.track.load(Ordering::Relaxed);
+            let at_sample = slot.at_sample.load(Ordering::Relaxed);
+            let word = slot.word.load(Ordering::Relaxed);
+            let port = slot.port.load(Ordering::Relaxed);
+            let time = slot.time.load(Ordering::Relaxed);
+            slot.sequence.store(tail.wrapping_add(self.mask).wrapping_add(1), Ordering::Release);
+            self.tail.store(tail.wrapping_add(1), Ordering::Release);
+            let event = LiveMidiEvent::unpack_word(port, time, word);
+            Some(RecordedMidiEvent { track_id, at_sample, event })
+        } else {
+            None
+        }
+    }
+
+    /// Drain all pending events calling `f` for each event in order.
+    pub fn drain(&self, mut f: impl FnMut(RecordedMidiEvent)) {
+        while let Some(ev) = self.pop() {
+            f(ev);
+        }
+    }
+
+    /// Total events dropped due to a full buffer.
+    pub fn dropped(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Current approximate number of queued events.
+    pub fn len(&self) -> usize {
+        let head = self.head.load(Ordering::Relaxed);
+        let tail = self.tail.load(Ordering::Relaxed);
+        head.saturating_sub(tail)
+    }
+
+    /// Returns `true` if the ring has no events queued.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Manages active MIDI recording for armed tracks, translating captured events
+/// into timeline-aligned notes and controllers.
+pub struct MidiRecorder {
+    ring: Arc<MidiRecordRing>,
+    armed_tracks: Vec<TrackId>,
+    record_start: i64,
+    active_notes: HashMap<(TrackId, u8, u8), (i64, u8)>,
+    notes: HashMap<TrackId, Vec<(i64, i64, u8, u8, u8, u8)>>,
+    ctrls: HashMap<TrackId, Vec<(i64, u8, CtrlKind, i32)>>,
+}
+
+impl MidiRecorder {
+    pub fn new(ring: Arc<MidiRecordRing>, armed_tracks: Vec<TrackId>, record_start: i64) -> Self {
+        Self { ring, armed_tracks, record_start, active_notes: HashMap::new(), notes: HashMap::new(), ctrls: HashMap::new() }
+    }
+
+    pub fn poll(&mut self, s: &Session) {
+        while let Some(ev) = self.ring.pop() {
+            self.process_event(s, ev);
+        }
+    }
+
+    pub fn process_event(&mut self, s: &Session, ev: RecordedMidiEvent) {
+        let track_id = TrackId(ev.track_id);
+        if !self.armed_tracks.contains(&track_id) {
+            return;
+        }
+
+        if (ev.event.is_note_on() || ev.event.is_note_off()) && s.edit.flag("midi.filter.notes") {
+            return;
+        }
+        if ev.event.is_control_change() && s.edit.flag("midi.filter.cc") {
+            return;
+        }
+        if ev.event.is_pitch_bend() && s.edit.flag("midi.filter.pitch_bend") {
+            return;
+        }
+        if ev.event.is_channel_pressure() && s.edit.flag("midi.filter.mono_aftertouch") {
+            return;
+        }
+        if ev.event.is_poly_pressure() && s.edit.flag("midi.filter.poly_aftertouch") {
+            return;
+        }
+        if ev.event.is_program_change() && s.edit.flag("midi.filter.program") {
+            return;
+        }
+
+        if ev.event.is_note_on() {
+            let pitch = ev.event.note_pitch();
+            let vel = ev.event.note_velocity();
+            let ch = ev.event.channel();
+            if let Some((start, old_vel)) = self.active_notes.remove(&(track_id, ch, pitch)) {
+                let len = (ev.at_sample.saturating_sub(start)).max(1);
+                self.notes.entry(track_id).or_default().push((start, len, pitch, old_vel, 64, ch));
+            }
+            self.active_notes.insert((track_id, ch, pitch), (ev.at_sample, vel));
+        } else if ev.event.is_note_off() {
+            let pitch = ev.event.note_pitch();
+            let rel_vel = ev.event.note_velocity();
+            let ch = ev.event.channel();
+            if let Some((start, vel)) = self.active_notes.remove(&(track_id, ch, pitch)) {
+                let len = (ev.at_sample.saturating_sub(start)).max(1);
+                self.notes.entry(track_id).or_default().push((start, len, pitch, vel, rel_vel, ch));
+            }
+        } else if ev.event.is_control_change() {
+            let ctrl = ev.event.cc_controller();
+            let val = ev.event.cc_value() as i32;
+            self.ctrls.entry(track_id).or_default().push((ev.at_sample, ev.event.channel(), CtrlKind::Cc(ctrl), val));
+        } else if ev.event.is_pitch_bend() {
+            let val = ev.event.pitch_bend_value();
+            self.ctrls.entry(track_id).or_default().push((ev.at_sample, ev.event.channel(), CtrlKind::PitchBend, val));
+        } else if ev.event.is_channel_pressure() {
+            let val = (ev.event.data[1] & 0x7F) as i32;
+            self.ctrls.entry(track_id).or_default().push((ev.at_sample, ev.event.channel(), CtrlKind::ChannelPressure, val));
+        } else if ev.event.is_poly_pressure() {
+            let pitch = ev.event.data[1] & 0x7F;
+            let val = (ev.event.data[2] & 0x7F) as i32;
+            self.ctrls.entry(track_id).or_default().push((ev.at_sample, ev.event.channel(), CtrlKind::PolyPressure(pitch), val));
+        } else if ev.event.is_program_change() {
+            let val = (ev.event.data[1] & 0x7F) as i32;
+            self.ctrls.entry(track_id).or_default().push((ev.at_sample, ev.event.channel(), CtrlKind::Program, val));
+        }
+    }
+
+    /// Query the current live notes (both completed and sounding) for visualization.
+    pub fn live_notes(&self, track: TrackId, current_pos: i64) -> Vec<(i64, i64, u8)> {
+        let mut out = Vec::new();
+        if let Some(list) = self.notes.get(&track) {
+            for &(start, len, pitch, _, _, _) in list {
+                out.push((start, len, pitch));
+            }
+        }
+        for (&(t, _, pitch), &(start, _)) in &self.active_notes {
+            if t == track {
+                let len = (current_pos.saturating_sub(start)).max(1);
+                out.push((start, len, pitch));
+            }
+        }
+        out
+    }
+
+    /// Finish recording at `stop_sample` and assemble completed [`MidiTake`]s for all armed tracks.
+    pub fn finish(&mut self, s: &Session, stop_sample: i64) -> Vec<MidiTake> {
+        self.poll(s);
+        for ((track_id, ch, pitch), (start, vel)) in self.active_notes.drain() {
+            let len = (stop_sample.saturating_sub(start)).max(1);
+            self.notes.entry(track_id).or_default().push((start, len, pitch, vel, 64, ch));
+        }
+
+        let clip_start = self.record_start;
+        let clip_len = (stop_sample.saturating_sub(clip_start)).max(1);
+        let sr = s.sample_rate;
+        let mut takes = Vec::new();
+
+        for track_id in &self.armed_tracks {
+            let mut notes = Vec::new();
+            if let Some(track_notes) = self.notes.get(track_id) {
+                for &(start, len, pitch, vel, rel_vel, ch) in track_notes {
+                    let note_start_ticks = s.tempo.samples_to_ticks(start, sr).saturating_sub(s.tempo.samples_to_ticks(clip_start, sr));
+                    let note_end_ticks =
+                        s.tempo.samples_to_ticks(start.saturating_add(len), sr).saturating_sub(s.tempo.samples_to_ticks(clip_start, sr));
+                    let note_len_ticks = (note_end_ticks.saturating_sub(note_start_ticks)).max(1);
+                    notes.push(Note {
+                        pitch,
+                        velocity: vel,
+                        release_velocity: rel_vel,
+                        channel: ch,
+                        start: note_start_ticks.max(0),
+                        length: note_len_ticks,
+                    });
+                }
+            }
+
+            let mut ctrls = Vec::new();
+            if let Some(track_ctrls) = self.ctrls.get(track_id) {
+                for &(at, ch, kind, val) in track_ctrls {
+                    let tick = s.tempo.samples_to_ticks(at, sr).saturating_sub(s.tempo.samples_to_ticks(clip_start, sr));
+                    ctrls.push(CtrlEvent { tick: tick.max(0), channel: ch, kind, value: val });
+                }
+            }
+
+            let mut sequence = Sequence { notes, ctrls };
+            sequence.sort();
+
+            takes.push(MidiTake { track_id: track_id.0, start: clip_start, length: clip_len, sequence });
+        }
+
+        takes
     }
 }
 
@@ -378,5 +650,103 @@ mod tests {
         assert_eq!(mgr.connected_devices(), Vec::<String>::new());
         mgr.sync_enabled(&[]);
         assert_eq!(mgr.connected_devices(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn record_ring_push_pop_fifo() {
+        let ring = MidiRecordRing::new(4);
+        let ev1 =
+            RecordedMidiEvent { track_id: 1, at_sample: 100, event: LiveMidiEvent { port_id: 0, timestamp_us: 10, len: 3, data: [0x90, 60, 100] } };
+        let ev2 =
+            RecordedMidiEvent { track_id: 2, at_sample: 200, event: LiveMidiEvent { port_id: 0, timestamp_us: 20, len: 3, data: [0x80, 60, 0] } };
+        assert!(ring.push(ev1));
+        assert!(ring.push(ev2));
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.pop(), Some(ev1));
+        assert_eq!(ring.pop(), Some(ev2));
+        assert_eq!(ring.pop(), None);
+    }
+
+    #[test]
+    fn midi_recorder_captures_notes_and_ctrls() {
+        let ring = MidiRecordRing::new(16);
+        let track = TrackId(10);
+        let mut rec = MidiRecorder::new(Arc::clone(&ring), vec![track], 0);
+        let s = Session::default();
+
+        // Note 1: start at 1000, end at 3400
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 1000,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 10, len: 3, data: [0x90, 60, 100] },
+        }));
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 2000,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 20, len: 3, data: [0xB0, 7, 120] },
+        }));
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 3400,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 34, len: 3, data: [0x80, 60, 64] },
+        }));
+        // Note 2: started at 4000, never released before stop at 8000
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 4000,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 40, len: 3, data: [0x90, 64, 90] },
+        }));
+
+        let takes = rec.finish(&s, 8000);
+        assert_eq!(takes.len(), 1);
+        let take = &takes[0];
+        assert_eq!(take.track_id, 10);
+        assert_eq!(take.start, 0);
+        assert_eq!(take.length, 8000);
+        assert_eq!(take.sequence.notes.len(), 2);
+        assert_eq!(take.sequence.ctrls.len(), 1);
+
+        // First note: pitch 60, vel 100, rel 64
+        assert_eq!(take.sequence.notes[0].pitch, 60);
+        assert_eq!(take.sequence.notes[0].velocity, 100);
+        assert_eq!(take.sequence.notes[0].release_velocity, 64);
+        assert!(take.sequence.notes[0].start > 0);
+        assert!(take.sequence.notes[0].length > 0);
+
+        // Second note: pitch 64, vel 90, closed at 8000
+        assert_eq!(take.sequence.notes[1].pitch, 64);
+        assert_eq!(take.sequence.notes[1].velocity, 90);
+        assert!(take.sequence.notes[1].start > take.sequence.notes[0].start);
+
+        // CC: CC 7, value 120
+        assert_eq!(take.sequence.ctrls[0].kind, CtrlKind::Cc(7));
+        assert_eq!(take.sequence.ctrls[0].value, 120);
+    }
+
+    #[test]
+    fn midi_recorder_respects_filter_flags() {
+        let ring = MidiRecordRing::new(16);
+        let track = TrackId(10);
+        let mut rec = MidiRecorder::new(Arc::clone(&ring), vec![track], 0);
+        let mut s = Session::default();
+        s.edit.set_flag("midi.filter.notes", true);
+
+        // Push Note On and CC
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 1000,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 10, len: 3, data: [0x90, 60, 100] },
+        }));
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 2000,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 20, len: 3, data: [0xB0, 7, 120] },
+        }));
+
+        let takes = rec.finish(&s, 5000);
+        assert_eq!(takes.len(), 1);
+        // Notes were filtered, only CC remains
+        assert_eq!(takes[0].sequence.notes.len(), 0);
+        assert_eq!(takes[0].sequence.ctrls.len(), 1);
     }
 }

@@ -16,7 +16,7 @@ mod rng;
 mod sequence;
 mod smf;
 
-pub use live::{LiveMidiEvent, parse_midi_message};
+pub use live::{LiveMidiEvent, MidiTake, RecordedMidiEvent, parse_midi_message};
 pub use names::{gm_drum_name, gm_program_name, note_name};
 pub use rng::XorShift;
 pub use sequence::{CtrlEvent, CtrlKind, Note, Sequence};

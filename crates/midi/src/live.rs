@@ -39,6 +39,46 @@ impl LiveMidiEvent {
         self.data[0] & 0x0F
     }
 
+    /// Whether this event is a Control Change (0xB0..=0xBF).
+    pub fn is_control_change(&self) -> bool {
+        self.len == 3 && (self.data[0] & 0xF0 == 0xB0)
+    }
+
+    /// Controller number for Control Change (0..=127).
+    pub fn cc_controller(&self) -> u8 {
+        self.data[1] & 0x7F
+    }
+
+    /// Controller value for Control Change (0..=127).
+    pub fn cc_value(&self) -> u8 {
+        self.data[2] & 0x7F
+    }
+
+    /// Whether this event is Pitch Bend (0xE0..=0xEF).
+    pub fn is_pitch_bend(&self) -> bool {
+        self.len == 3 && (self.data[0] & 0xF0 == 0xE0)
+    }
+
+    /// 14-bit pitch bend value, centred: -8192..=8191 (0 = centre).
+    pub fn pitch_bend_value(&self) -> i32 {
+        (((self.data[2] as i32 & 0x7F) << 7) | (self.data[1] as i32 & 0x7F)) - 8192
+    }
+
+    /// Whether this event is Channel (mono) Pressure (0xD0..=0xDF).
+    pub fn is_channel_pressure(&self) -> bool {
+        self.len >= 2 && (self.data[0] & 0xF0 == 0xD0)
+    }
+
+    /// Whether this event is Polyphonic Aftertouch (0xA0..=0xAF).
+    pub fn is_poly_pressure(&self) -> bool {
+        self.len == 3 && (self.data[0] & 0xF0 == 0xA0)
+    }
+
+    /// Whether this event is Program Change (0xC0..=0xCF).
+    pub fn is_program_change(&self) -> bool {
+        self.len >= 2 && (self.data[0] & 0xF0 == 0xC0)
+    }
+
     /// Pack `len` and `data` into a single `u32`.
     pub fn pack_word(&self) -> u32 {
         (self.len as u32) | ((self.data[0] as u32) << 8) | ((self.data[1] as u32) << 16) | ((self.data[2] as u32) << 24)
@@ -52,6 +92,23 @@ impl LiveMidiEvent {
         let d2 = ((word >> 24) & 0xFF) as u8;
         Self { port_id, timestamp_us, len, data: [d0, d1, d2] }
     }
+}
+
+/// A recorded MIDI event stamped with the destination track ID and timeline sample position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordedMidiEvent {
+    pub track_id: u64,
+    pub at_sample: i64,
+    pub event: LiveMidiEvent,
+}
+
+/// A completed MIDI take ready to be placed as a clip on a track's playlist.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MidiTake {
+    pub track_id: u64,
+    pub start: i64,
+    pub length: i64,
+    pub sequence: crate::Sequence,
 }
 
 /// Parse raw incoming MIDI bytes into a [`LiveMidiEvent`].
