@@ -14,6 +14,26 @@ pub struct LiveMidiEvent {
 }
 
 impl LiveMidiEvent {
+    /// Construct a Note On event.
+    pub fn note_on(channel: u8, pitch: u8, velocity: u8) -> Self {
+        Self { port_id: 0, timestamp_us: 0, len: 3, data: [0x90 | (channel & 0x0F), pitch & 0x7F, velocity & 0x7F] }
+    }
+
+    /// Construct a Note Off event.
+    pub fn note_off(channel: u8, pitch: u8, release_velocity: u8) -> Self {
+        Self { port_id: 0, timestamp_us: 0, len: 3, data: [0x80 | (channel & 0x0F), pitch & 0x7F, release_velocity & 0x7F] }
+    }
+
+    /// Construct an All Notes Off (CC 123) event.
+    pub fn all_notes_off(channel: u8) -> Self {
+        Self { port_id: 0, timestamp_us: 0, len: 3, data: [0xB0 | (channel & 0x0F), 123, 0] }
+    }
+
+    /// Construct an All Sound Off (CC 120) event.
+    pub fn all_sound_off(channel: u8) -> Self {
+        Self { port_id: 0, timestamp_us: 0, len: 3, data: [0xB0 | (channel & 0x0F), 120, 0] }
+    }
+
     /// Note On event with velocity > 0.
     pub fn is_note_on(&self) -> bool {
         self.len == 3 && (self.data[0] & 0xF0 == 0x90) && self.data[2] > 0

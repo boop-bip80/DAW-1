@@ -298,18 +298,22 @@ fn midi_keyboard(app: &mut SoundApp, ctx: &egui::Context) {
                 wi += 1;
             }
         }
-        if let Some(p) = clicked
-            && let Some(cid) = crate::midi_editor::target_clip(app)
-        {
-            // Step input: add the note at the insertion point (relative to the clip) and advance.
-            let s = app.engine.session();
-            let (clip_start, at) = (s.find_clip(cid).map_or(0, |(_, c)| c.start), s.edit.selection.start);
-            let rel = s.tempo.samples_to_ticks(at, s.sample_rate) - s.tempo.samples_to_ticks(clip_start, s.sample_rate);
-            let len = soundcraft_time::TICKS_PER_QUARTER / 2;
-            let _ = app.run("midi.note_add", json!({"clip": cid.0, "pitch": p, "start_ticks": rel.max(0), "length_ticks": len}));
-            let s = app.engine.session();
-            let next = s.tempo.tick_to_samples(s.tempo.samples_to_ticks(at, s.sample_rate) + len, s.sample_rate);
-            let _ = app.run("transport.locate", json!({"at": next}));
+        if let Some(p) = clicked {
+            if let Some(pl) = &app.player {
+                pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, p, 100));
+                pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, p, 0));
+            }
+            if let Some(cid) = crate::midi_editor::target_clip(app) {
+                // Step input: add the note at the insertion point (relative to the clip) and advance.
+                let s = app.engine.session();
+                let (clip_start, at) = (s.find_clip(cid).map_or(0, |(_, c)| c.start), s.edit.selection.start);
+                let rel = s.tempo.samples_to_ticks(at, s.sample_rate) - s.tempo.samples_to_ticks(clip_start, s.sample_rate);
+                let len = soundcraft_time::TICKS_PER_QUARTER / 2;
+                let _ = app.run("midi.note_add", json!({"clip": cid.0, "pitch": p, "start_ticks": rel.max(0), "length_ticks": len}));
+                let s = app.engine.session();
+                let next = s.tempo.tick_to_samples(s.tempo.samples_to_ticks(at, s.sample_rate) + len, s.sample_rate);
+                let _ = app.run("transport.locate", json!({"at": next}));
+            }
         }
         ui.label(egui::RichText::new("Click keys to step-enter notes into the selected MIDI clip at the insertion point.").small());
     });

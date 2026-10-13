@@ -1018,6 +1018,12 @@ fn process_strip(
                             inst.plugin.note_off(off, pitch);
                             strip.held.retain(|p| *p != pitch);
                         } else {
+                            if ev.is_control_change() && (ev.cc_controller() == 120 || ev.cc_controller() == 123) {
+                                for &p in &strip.held {
+                                    inst.plugin.note_off(off, p);
+                                }
+                                strip.held.clear();
+                            }
                             inst.plugin.midi(off, ev.data);
                         }
                     }

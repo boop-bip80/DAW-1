@@ -256,6 +256,7 @@ pub struct SoundApp {
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
     pub midi_recorder: Option<soundcraft_playback::midi::MidiRecorder>,
+    pub midi_manager: Option<soundcraft_playback::midi::MidiManager>,
     record_start: Samples,
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
@@ -349,6 +350,13 @@ impl SoundApp {
             recent_seen: engine.path.clone(),
             recent_changed: false,
             recent_checked: None,
+            midi_manager: player.as_ref().map(|p| {
+                let mut mm = soundcraft_playback::midi::MidiManager::new(p.midi_input_ring());
+                let flags = &engine.session().edit.flags;
+                let enabled: Vec<String> = flags.iter().filter_map(|f| f.strip_prefix("midi.input.").map(str::to_string)).collect();
+                mm.sync_enabled(&enabled);
+                mm
+            }),
             engine,
             player,
             recorder: None,
@@ -806,7 +814,19 @@ impl SoundApp {
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
+        self.sync_midi_devices();
         Ok(())
+    }
+
+    /// Sync connected MIDI input devices with the session's enabled flags.
+    pub fn sync_midi_devices(&mut self) {
+        if let Some(player) = &self.player {
+            let mut mm = soundcraft_playback::midi::MidiManager::new(player.midi_input_ring());
+            let flags = &self.engine.session().edit.flags;
+            let enabled: Vec<String> = flags.iter().filter_map(|f| f.strip_prefix("midi.input.").map(str::to_string)).collect();
+            mm.sync_enabled(&enabled);
+            self.midi_manager = Some(mm);
+        }
     }
 
     /// Open the input device once (for recording and input monitoring) and feed the player.
@@ -902,6 +922,7 @@ impl SoundApp {
         self.recorder = None;
         self.recorder_failed = false;
         self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
+        self.sync_midi_devices();
     }
 
     fn finish_recording(&mut self) {
@@ -1083,7 +1104,11 @@ impl SoundApp {
                     self.play_from_selection();
                 }
                 TransportRequest::Scrub(at) => self.engine.transport.position = at,
-                TransportRequest::AllNotesOff => {}
+                TransportRequest::AllNotesOff => {
+                    if let Some(p) = &self.player {
+                        p.panic_all_notes_off();
+                    }
+                }
             }
         }
         // Read back the position.

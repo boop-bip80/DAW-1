@@ -180,6 +180,18 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             painter.line_segment([pos2(roll.min.x, y + ROW_H), pos2(roll.max.x, y + ROW_H)], Stroke::new(1.0, Color32::from_rgb(64, 64, 68)));
         }
     }
+    let kresp = ui.interact(keys, ui.id().with(("piano_keys", cid.0)), Sense::click_and_drag());
+    if (kresp.clicked() || kresp.dragged())
+        && let Some(p) = kresp.interact_pointer_pos()
+    {
+        let pitch = pitch_at(p.y);
+        if (0..=127).contains(&pitch)
+            && let Some(pl) = &app.player
+        {
+            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, pitch as u8, 100));
+            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, pitch as u8, 0));
+        }
+    }
     // Grid.
     let mut tick = 0;
     while tick <= len_ticks {
@@ -301,11 +313,20 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 } else {
                     app.midi.selected = vec![i];
                 }
-                // Audition on the instrument would go here (needs a live MIDI input path).
+                if let Some(n) = sequence.notes.get(i)
+                    && let Some(pl) = &app.player
+                {
+                    pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, n.pitch, n.velocity));
+                    pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, n.pitch, 0));
+                }
             }
             None if s.edit.tool == Tool::Pencil => {
                 let pitch = pitch_at(p.y).clamp(0, 127);
                 let start = (((p.x - roll.min.x) / px_per_tick) as i64 / grid_ticks) * grid_ticks;
+                if let Some(pl) = &app.player {
+                    pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, pitch as u8, 100));
+                    pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, pitch as u8, 0));
+                }
                 let _ = app.run(
                     "midi.note_add",
                     json!({"clip": cid.0, "pitch": pitch, "start_ticks": start.max(0), "length_ticks": grid_ticks, "velocity": 100}),
