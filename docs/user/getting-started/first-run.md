@@ -2,7 +2,7 @@
 title: First run
 description: What you see when SoundCraft starts, how to open the demo song, and where the shortcuts and the log file are.
 order: 20
-verified: 0.5.0
+verified: 0.6.1
 ---
 
 To look around without recording anything, choose **File > New...**, tick **Start from the demo session** and click **Create**. The demo song is made by SoundCraft itself.
@@ -14,7 +14,7 @@ To look around without recording anything, choose **File > New...**, tick **Star
 3. Tick **Start from the demo session**.
 4. Click **Create**.
 
-Without that box ticked, **Create** starts an empty session. The window title bar's right side shows the session name and whether you are in the Edit or the Mix window.
+Without that box ticked, **Create** starts an empty session. The right end of the menu bar shows the session name, a `*` when it has unsaved changes, and whether you are in the Edit or the Mix window.
 
 ## Switch between Edit and Mix
 
@@ -26,7 +26,9 @@ On Windows and Linux the menus show `Ctrl` in place of the Mac `Cmd` key. Open *
 
 ## Save your work
 
-Choose **File > Save Session**. The first time, the **Save Session As** window asks for a path; sessions use the `.scraft` extension. SoundCraft 0.5.0 does not ask before it closes or replaces a session, so unsaved edits are lost on Close, New, Open or Quit ([issue 136](https://github.com/storytold/soundcraft/issues/136)). Save first. A save prompt was added after 0.5.0 and is not in a release yet.
+Choose **File > Save Session** or press `Ctrl+S` (`Cmd+S` on macOS). The first time, the **Save Session As** window asks for a path; sessions use the `.scraft` extension. Each later save keeps the previous version in a `Backups` folder next to the session file (the newest ten).
+
+If you close the session, start or open another one, or quit with unsaved changes, SoundCraft asks whether to save them first. Click **Save**, **Don't Save** or **Cancel**.
 
 ## Where the log file is
 

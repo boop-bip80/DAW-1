@@ -2,7 +2,7 @@
 title: Bounce your mix to a file
 description: Export your SoundCraft session as a WAV, AIFF or FLAC file with File > Bounce Mix.
 order: 40
-verified: 0.5.0
+verified: 0.6.1
 ---
 
 Choose **File > Bounce Mix...**, set the file name, format and bit depth, and click **Bounce**. SoundCraft bounces the edit selection, or the whole session when nothing is selected.
@@ -25,4 +25,4 @@ Bounce writes WAV, AIFF and FLAC. MP3 and AAC export are not available yet.
 
 ## Bounce without the window
 
-SoundCraft also ships a command-line tool, `soundcraft-cli`. Its `--bounce` option writes a file without opening the app. The release has it for macOS only (`soundcraft-cli-<version>-macos-universal.zip`). The README shows an example.
+SoundCraft also ships a command-line tool, `soundcraft-cli`. Its `--bounce` option writes a file without opening the app. On Windows, `soundcraft-cli.exe` comes with the installer and the portable zip, next to `soundcraft.exe`. The Linux tarball has it in its `bin` folder. For macOS it is a separate download, `soundcraft-cli-<version>-macos-universal.zip`. The README shows an example.

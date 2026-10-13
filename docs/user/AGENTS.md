@@ -32,7 +32,7 @@ either. Write for a musician or audio editor, not a developer.
     title: SoundCraft does not open on Windows
     description: One sentence for search results, link previews and AI summaries.
     order: 10                 # optional, sorts within the folder (lower first)
-    verified: 0.5.0           # optional, app version you last checked this page against
+    verified: 0.6.1           # optional, app version you last checked this page against
     redirect_from: [old/path] # optional, old URLs (relative to /docs/soundcraft)
     ---
 

@@ -2,19 +2,25 @@
 title: Install SoundCraft
 description: Download SoundCraft for Windows 11, macOS or Linux from GitHub, or install it with ArtCraft Launcher.
 order: 10
-verified: 0.5.0
+verified: 0.6.1
 ---
 
-Download the file for your system from the [latest release](https://github.com/storytold/soundcraft/releases/latest) and install it. In the file names, `<version>` stands for the version number, for example `0.5.0`. The release also lists a checksum for every file in `SHA256SUMS.txt`.
+Download the file for your system from the [latest release](https://github.com/storytold/soundcraft/releases/latest) and install it. In the file names, `<version>` stands for the version number, for example `0.6.1`. The release also lists a checksum for every file in `SHA256SUMS.txt`.
 
 ## Windows 11
 
 1. Open the [latest release](https://github.com/storytold/soundcraft/releases/latest).
-2. Download `soundcraft-<version>-windows-x64.msi`. It fits most PCs (Intel and AMD, 64-bit).
+2. Download the installer for your PC from the table below. Most PCs (Intel and AMD, 64-bit) need `soundcraft-<version>-windows-x64.msi`.
 3. Run the file and follow the installer. It installs for all users, so Windows may ask for administrator approval.
 4. Start **SoundCraft** from the Start menu.
 
-The release also has an `arm64` installer for Snapdragon and other Arm PCs. To run SoundCraft without installing, download `soundcraft-<version>-windows-x64-portable.zip` instead, unzip it and run `soundcraft.exe`.
+| PC                                  | Installer                                | Portable zip                                      |
+|-------------------------------------|------------------------------------------|---------------------------------------------------|
+| x64: Intel and AMD, 64-bit          | `soundcraft-<version>-windows-x64.msi`   | `soundcraft-<version>-windows-x64-portable.zip`   |
+| arm64: Snapdragon and other Arm PCs | `soundcraft-<version>-windows-arm64.msi` | `soundcraft-<version>-windows-arm64-portable.zip` |
+| x86: 32-bit                         | `soundcraft-<version>-windows-x86.msi`   | `soundcraft-<version>-windows-x86-portable.zip`   |
+
+To run SoundCraft without installing, download the portable zip instead, unzip it and run `soundcraft.exe`.
 
 If the window never appears, see [SoundCraft does not open on Windows](../troubleshooting/soundcraft-does-not-open-on-windows.md).
 
@@ -35,7 +41,7 @@ Pick one file from the release. Replace `x86_64` with `aarch64` on Arm.
 | `soundcraft-<version>-linux-x86_64.flatpak`  | Sandboxed. Install with `flatpak install --user <file>`.     |
 | `soundcraft-<version>-linux-x86_64.tar.gz`   | Unpack anywhere.                                             |
 
-The release also has a RISC-V tarball (`soundcraft-<version>-linux-riscv64.tar.gz`) and a FreeBSD tarball (`soundcraft-<version>-freebsd-x86_64.tar.gz`).
+For RISC-V, the release has `soundcraft-<version>-linux-riscv64.tar.gz`, `.deb` and `.rpm`. There is also a FreeBSD tarball (`soundcraft-<version>-freebsd-x86_64.tar.gz`).
 
 ## In a browser
 

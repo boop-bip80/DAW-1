@@ -1,8 +1,8 @@
 ---
 title: Can I choose my audio interface?
-description: SoundCraft 0.5.0 plays and records through your system's default devices and has no audio device picker or ASIO support yet.
+description: SoundCraft plays and records through your system's default devices and has no audio device picker or ASIO support yet.
 order: 30
-verified: 0.5.0
+verified: 0.6.1
 ---
 
 Not yet. SoundCraft plays through the default output device and records from the default input device. There is no device or buffer size setting, and no ASIO support on Windows.

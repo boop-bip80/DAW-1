@@ -2,7 +2,7 @@
 title: Record a track
 description: Record-enable an audio track in SoundCraft and record from your computer's input device.
 order: 30
-verified: 0.5.0
+verified: 0.6.1
 ---
 
 Click the red record-enable button in the track header, then press the Record button or `Ctrl+Space` (`Cmd+Space` on macOS). Press Stop (`Space`) to finish.
@@ -17,6 +17,8 @@ Click the red record-enable button in the track header, then press the Record bu
 6. Press `Space` to stop. The status line reports how many clips were recorded.
 
 If no track is record-enabled, SoundCraft does not record and says: Record-enable a track first (the red button in its header).
+
+SoundCraft writes each take to a WAV file in the session's `Audio Files` folder while you record, so a crash during a take keeps the audio recorded up to that point. Until you first save the session, the takes go to the `Autosave` folder in SoundCraft's settings folder.
 
 ## Punch in and loop recording
 

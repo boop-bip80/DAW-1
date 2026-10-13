@@ -2,7 +2,7 @@
 title: Import audio
 description: Bring WAV, AIFF, FLAC, MP3 and other audio files into a SoundCraft session.
 order: 20
-verified: 0.5.0
+verified: 0.6.1
 ---
 
 Choose **File > Import > Audio...**, pick the file and click **OK**. SoundCraft puts the audio on a new track.
