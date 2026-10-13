@@ -120,6 +120,8 @@ pub struct Tokens {
     pub counter_text: Color32,
     pub counter_label: Color32,
     pub accent: Color32,
+    /// Foreground on blue accent-filled controls.
+    pub on_accent: Color32,
     pub accent_dark: Color32,
     pub mode_on: Color32,
     pub mode_on_text: Color32,
@@ -213,30 +215,32 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    // ArtCraft native dark UI roles. Timeline, meters, clips and transport status remain semantic.
     pub const DARK: Tokens = Tokens {
-        window_bg: Color32::from_rgb(30, 30, 30),
-        panel_bg: Color32::from_rgb(37, 37, 38),
-        panel_bg2: Color32::from_rgb(44, 44, 45),
-        toolbar_bg: Color32::from_rgb(30, 30, 31),
-        toolbar_group: Color32::from_rgb(24, 24, 25),
-        border: Color32::from_rgb(14, 14, 14),
-        border_light: Color32::from_rgb(64, 64, 66),
+        window_bg: Color32::from_rgb(18, 19, 22),
+        panel_bg: Color32::from_rgb(16, 16, 20),
+        panel_bg2: Color32::from_rgb(30, 31, 34),
+        toolbar_bg: Color32::from_rgb(10, 10, 12),
+        toolbar_group: Color32::from_rgb(16, 16, 20),
+        border: Color32::from_rgb(54, 55, 58),
+        border_light: Color32::from_rgb(119, 120, 124),
         edge_light: Color32::from_rgba_premultiplied(20, 20, 20, 20),
-        text: Color32::from_rgb(214, 214, 214),
-        text_dim: Color32::from_rgb(150, 150, 152),
+        text: Color32::from_rgb(242, 241, 238),
+        text_dim: Color32::from_rgb(166, 166, 168),
         text_dark: Color32::from_rgb(16, 16, 16),
-        header_text: Color32::from_rgb(196, 196, 198),
+        header_text: Color32::from_rgb(242, 241, 238),
         counter_bg: Color32::from_rgb(4, 4, 4),
         counter_text: Color32::from_rgb(104, 220, 120),
         counter_label: Color32::from_rgb(200, 200, 200),
-        accent: Color32::from_rgb(64, 132, 196),
-        accent_dark: Color32::from_rgb(40, 92, 146),
+        accent: Color32::from_rgb(45, 129, 255),
+        on_accent: Color32::from_rgb(6, 6, 7),
+        accent_dark: Color32::from_rgb(32, 59, 101),
         mode_on: Color32::from_rgb(92, 196, 108),
         mode_on_text: Color32::from_rgb(10, 30, 12),
         mode_off_text: Color32::from_rgb(98, 196, 112),
-        button: Color32::from_rgb(58, 58, 60),
-        button_hi: Color32::from_rgb(78, 78, 80),
-        button_border: Color32::from_rgb(20, 20, 20),
+        button: Color32::from_rgb(30, 31, 34),
+        button_hi: Color32::from_rgb(50, 51, 55),
+        button_border: Color32::from_rgb(54, 55, 58),
         name_field: Color32::from_rgb(208, 208, 208),
         name_field_sel: Color32::from_rgb(232, 232, 232),
         ruler_bg: Color32::from_rgb(40, 40, 41),
@@ -269,15 +273,15 @@ impl Tokens {
         strip_section: Color32::from_rgb(36, 36, 38),
         slot_bg: Color32::from_rgb(28, 28, 29),
         automation_line: Color32::from_rgb(240, 240, 240),
-        menu_bar: Color32::from_rgb(22, 22, 23),
+        menu_bar: Color32::from_rgb(10, 10, 12),
         group_border: Color32::from_rgb(8, 8, 8),
         mode_off: Color32::from_rgb(20, 36, 22),
         counter_off: Color32::from_rgb(30, 50, 32),
         counter_border: Color32::from_rgb(50, 50, 50),
         counter_rule: Color32::from_rgb(40, 40, 40),
         tool_bracket_off: Color32::from_rgb(64, 64, 66),
-        row_selected: Color32::from_rgb(52, 70, 96),
-        visible_dot: Color32::from_rgb(200, 200, 200),
+        row_selected: Color32::from_rgb(32, 59, 101),
+        visible_dot: Color32::from_rgb(166, 166, 168),
         big_counter_bg: Color32::from_rgb(0, 0, 0),
         header_selected: Color32::from_rgb(52, 58, 66),
         strip_selected: Color32::from_rgb(54, 58, 64),
@@ -290,7 +294,7 @@ impl Tokens {
         knob_bg: Color32::from_rgb(26, 26, 28),
         knob_ring: Color32::from_rgb(150, 150, 154),
         knob_pointer: Color32::from_rgb(230, 230, 230),
-        section_label: Color32::from_rgb(200, 200, 200),
+        section_label: Color32::from_rgb(166, 166, 168),
         slot_well: Color32::from_rgb(43, 43, 43),
         slot_empty: Color32::from_rgb(39, 39, 39),
         slot_face: [Color32::from_rgb(92, 92, 92), Color32::from_rgb(75, 75, 75)],
@@ -315,6 +319,7 @@ impl Tokens {
         counter_text: Color32::from_rgb(18, 108, 40),
         counter_label: Color32::from_rgb(54, 57, 63),
         accent: Color32::from_rgb(62, 116, 180),
+        on_accent: Color32::WHITE,
         accent_dark: Color32::from_rgb(43, 88, 145),
         mode_on: Color32::from_rgb(75, 158, 88),
         mode_on_text: Color32::from_rgb(255, 255, 255),
@@ -458,7 +463,11 @@ pub fn apply(ctx: &egui::Context, light: bool) {
     v.window_fill = t.panel_bg2;
     v.extreme_bg_color = t.slot_bg;
     v.faint_bg_color = t.panel_bg2;
-    v.selection.bg_fill = t.accent;
+    v.selection.bg_fill = if light { t.accent } else { t.row_selected };
+    if !light {
+        v.selection.stroke.color = t.text;
+        v.widgets.hovered.bg_stroke.color = egui::Color32::from_rgb(0x74, 0xAA, 0xFF);
+    }
     v.widgets.inactive.weak_bg_fill = t.button;
     v.widgets.inactive.bg_fill = t.button;
     v.widgets.hovered.weak_bg_fill = t.button_hi;
@@ -481,6 +490,26 @@ pub fn apply(ctx: &egui::Context, light: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn artcraft_dark_roles_preserve_audio_semantics_and_light() {
+        let dark = super::Tokens::DARK;
+        let light = super::Tokens::LIGHT;
+        assert_eq!(dark.window_bg, egui::Color32::from_rgb(0x12, 0x13, 0x16));
+        assert_eq!(dark.toolbar_bg, egui::Color32::from_rgb(0x0A, 0x0A, 0x0C));
+        assert_eq!(dark.accent, egui::Color32::from_rgb(0x2D, 0x81, 0xFF));
+        assert_eq!(dark.on_accent, egui::Color32::from_rgb(0x06, 0x06, 0x07));
+        assert_eq!(dark.row_selected, egui::Color32::from_rgb(0x20, 0x3B, 0x65));
+        assert_eq!(dark.meter_green, egui::Color32::from_rgb(60, 200, 80));
+        assert_eq!(dark.rec, egui::Color32::from_rgb(214, 52, 46));
+        assert_eq!(dark.playlist_bg, egui::Color32::from_rgb(36, 36, 37));
+        let _palette = super::lock_test_palette();
+        let ctx = egui::Context::default();
+        super::apply(&ctx, false);
+        assert_eq!(ctx.global_style().visuals.selection.bg_fill, dark.row_selected);
+        assert_eq!(light.window_bg, egui::Color32::from_rgb(184, 186, 190));
+        assert_eq!(super::ThemeMode::default(), super::ThemeMode::Dark);
+    }
+
     use super::*;
     use crate::{Services, SoundApp, UiState};
     use serde_json::json;
