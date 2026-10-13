@@ -117,7 +117,8 @@ where things are.
 - **Plugins:** 7-band and 1-band EQ, compressor/limiter, expander/gate, de-esser, maximizer,
   channel strip, room and plate reverbs, mod delay, chorus, flanger, phaser, saturator, lo-fi,
   rectifier, pitch shifter, time shift, gain, trim, invert, DC removal, signal generator, dither,
-  a subtractive synth and a drum synth, all original. **CLAP plugins** load too. Any processor
+  a subtractive synth, a drum synth and a sampler (plays any WAV, AIFF, FLAC, MP3 or OGG across the
+  keyboard), all original. **CLAP plugins** load too. Any processor
   runs offline as AudioSuite, and user presets save per plugin.
 - **MIDI:** instrument and MIDI tracks, a piano-roll MIDI editor with a velocity lane, an event
   list, a score view, step input, quantize, transpose, real-time properties, Standard MIDI Files,
@@ -203,6 +204,9 @@ soundcraft-cli app --port 7801 ui.screenshot '{"path":"shot.png"}'
 
 # Give Claude a DAW.
 claude mcp add soundcraft -- soundcraft-cli mcp --demo
+
+# Or keep the agent to some folders (reads and writes are separate roots).
+soundcraft-cli mcp --automation-read-root DIR --automation-write-root DIR
 ```
 
 See [`docs/control-protocol.md`](docs/control-protocol.md) and [`docs/mcp.md`](docs/mcp.md).
@@ -251,7 +255,7 @@ very welcome, in the issues or on Discord.
 
 ## Downloads
 
-**Download SoundCraft** from GitHub: the [latest release](https://github.com/storytold/soundcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/soundcraft/releases) has earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
+**Download SoundCraft** from GitHub: the [latest release](https://github.com/storytold/soundcraft/releases/latest) has every build listed below, and [all releases](https://github.com/storytold/soundcraft/releases) have earlier versions and their notes. `<ver>` in the file names is the version number, and `SHA256SUMS.txt` lists a checksum for every file.
 
 ### Windows
 

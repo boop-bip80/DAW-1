@@ -5,10 +5,9 @@ use super::more_util::{set_text, store_value, text, toggle_flag, values_with_pre
 use super::*;
 use crate::cmd;
 use serde_json::json;
-use soundcraft_model::{BusId, ChannelFormat, ClipContent, OutputPath, Route, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
+use soundcraft_model::{BusId, ChannelFormat, ClipContent, OutputPath, Route, Session, SourceId, TrackId, TrackKind};
 use soundcraft_time::Timecode;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 macro_rules! option {
     ($id:literal, $label:literal, $flag:literal) => {
@@ -147,7 +146,9 @@ fn prepare_dpe(e: &mut Engine, p: &Value) -> Result<Value> {
     let r = soundcraft_time::Range::new(0, end);
     let mut n = 0;
     for t in tracks {
-        if crate::io::consolidate(e, t, r)? {
+        // Each track keeps its own length (its material plus a second), as before.
+        let tr = crate::io::bounded_to_track(e.session(), t, r);
+        if crate::io::consolidate(e, id, t, tr)? {
             n += 1;
         }
     }
@@ -318,7 +319,7 @@ fn current_feet_frames(e: &mut Engine, p: &Value) -> Result<Value> {
     let at = s.edit.selection.start.max(0);
     let frames_at = s.frame_rate.frames_at(at, s.sample_rate);
     let start = ft * 16 + fr - frames_at;
-    s.edit.values.insert("feet_frames.start".into(), start as f64);
+    s.edit.values.insert(soundcraft_model::FEET_FRAMES_START.into(), start as f64);
     Ok(json!({"feet_frames_start": start}))
 }
 
@@ -401,22 +402,10 @@ fn midi_inputs(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"enabled": enabled}))
 }
 
-/// Decode a source file of another session (paths relative to that session's folder).
-fn load_source(dir: &Path, src: &Source, sr: u32) -> Option<soundcraft_audio_io::AudioBuffer> {
-    let p = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
-    let bytes = std::fs::read(&p).ok()?;
-    let (_, mut buf) = soundcraft_audio_io::decode(&bytes, p.extension().and_then(|x| x.to_str())).ok()?;
-    if buf.sample_rate != sr && buf.sample_rate > 0 {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, sr);
-        buf.sample_rate = sr;
-    }
-    Some(buf)
-}
-
 fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
     let id = "file.import_session_data";
     let path = str_param(p, "path").filter(|x| !x.trim().is_empty()).ok_or_else(|| bad(id, "`path` required"))?.to_string();
-    let text_v = std::fs::read_to_string(&path).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
+    let text_v = crate::io::read_text(&path)?;
     let other = Session::from_json(&text_v).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
     let dir = Path::new(&path).parent().map(Path::to_path_buf).unwrap_or_default();
     let names: Option<Vec<String>> =
@@ -436,34 +425,34 @@ fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
     }
     let mut needed: Vec<SourceId> =
         picked.iter().flat_map(|t| t.playlists.iter().flat_map(|pl| pl.clips.iter().filter_map(|c| c.source()))).collect();
+    // A Sampler's sample is session audio too.
+    needed.extend(picked.iter().filter_map(|t| t.instrument.as_ref().and_then(|i| i.sample)));
     needed.sort_by_key(|x| x.0);
     needed.dedup();
     let sr = e.session().sample_rate.hz();
-    let decoded: Vec<(Source, Option<soundcraft_audio_io::AudioBuffer>)> =
-        needed.iter().filter_map(|sid| other.source(*sid).cloned()).map(|src| (src.clone(), load_source(&dir, &src, sr))).collect();
     let s = e.session_mut();
+    let mut files = crate::io::DecodedFiles::new();
     let mut map: std::collections::BTreeMap<u64, SourceId> = Default::default();
     let mut missing = Vec::new();
-    for (src, buf) in decoded {
-        let nid = SourceId(s.alloc());
+    for src in needed.iter().filter_map(|sid| other.source(*sid)) {
         let abs = if Path::new(&src.path).is_absolute() { PathBuf::from(&src.path) } else { dir.join(&src.path) };
         let mut ns = src.clone();
-        ns.id = nid;
+        ns.id = SourceId(s.alloc());
         ns.path = abs.to_string_lossy().into_owned();
-        match buf {
-            Some(b) => {
-                ns.frames = b.frames() as u64;
+        match crate::io::decode_file(&mut files, &abs, sr) {
+            Ok(audio) => {
+                ns.frames = audio.buffer.frames() as u64;
                 ns.sample_rate = sr;
                 ns.unsaved = true;
-                s.pool.insert(nid, Arc::new(SourceAudio::new(b)));
+                s.pool.insert(ns.id, audio);
             }
-            None => {
+            Err(_) => {
                 ns.unsaved = false;
                 missing.push(ns.path.clone());
             }
         }
+        map.insert(src.id.0, ns.id);
         s.sources.push(ns);
-        map.insert(src.id.0, nid);
     }
     let mut out = Vec::new();
     for mut tr in picked {
@@ -480,6 +469,10 @@ fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
                     *source = *n;
                 }
             }
+        }
+        // The donor's source ids mean nothing here: remap the sample, or drop it when it didn't come along.
+        if let Some(ins) = tr.instrument.as_mut() {
+            ins.sample = ins.sample.and_then(|sid| map.get(&sid.0).copied());
         }
         // Busses are matched by name (created when missing).
         let remap = |s: &mut Session, r: &Route| -> Route {
@@ -550,8 +543,7 @@ mod tests {
         e.execute("edit.select", &json!({"start": 48_000})).unwrap();
         e.execute("setup.current_timecode", &json!({"timecode": "01:00:00:00"})).unwrap();
         let s = e.session();
-        let shown =
-            soundcraft_time::format_position(48_000, soundcraft_time::TimeFormat::Timecode, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start);
+        let shown = s.format_position(48_000, soundcraft_time::TimeFormat::Timecode);
         assert_eq!(shown, "01:00:00:00");
     }
 
@@ -601,6 +593,28 @@ mod tests {
         assert!(e.session().pool.get(src).is_some());
         assert_eq!(e.session().track_by_name("Keys").unwrap().clips().len(), 1);
         assert!(e.execute("file.import_session_data", &json!({"path": path, "tracks": ["Nope"]})).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_session_data_brings_a_samplers_sample() {
+        let dir = std::env::temp_dir().join(format!("sc-import-sampler-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("hit.wav");
+        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4_800]] };
+        std::fs::write(&wav, soundcraft_audio_io::encode(&buf, &soundcraft_audio_io::EncodeOptions::default()).unwrap()).unwrap();
+        let mut donor = Engine::default();
+        donor.execute("track.new", &json!({"count": 1, "name": "Pads", "kind": "instrument"})).unwrap();
+        donor.execute("mix.sampler_load", &json!({"track": "Pads", "path": wav.to_string_lossy()})).unwrap();
+        let path = dir.join("donor.scraft").to_string_lossy().into_owned();
+        crate::io::save_session(&mut donor, &path).unwrap();
+        let mut e = crate::demo::demo_engine();
+        e.execute("file.import_session_data", &json!({"path": path, "tracks": ["Pads"]})).unwrap();
+        let sample = e.session().track_by_name("Pads").and_then(|t| t.instrument.as_ref()).and_then(|i| i.sample).unwrap();
+        let src = e.session().source(sample).unwrap();
+        assert_eq!(src.name, "hit");
+        assert!(e.session().pool.get(sample).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

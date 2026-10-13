@@ -176,3 +176,27 @@ fn the_window_draws_in_every_state() {
     frame(&mut app);
     assert_eq!(app.shortcut_editor.capturing, None);
 }
+
+#[test]
+fn recording_tab_leaves_no_widget_focused() {
+    let (mut app, ctx) = (app(), context(OperatingSystem::Mac));
+    app.ui.show_shortcuts = true;
+    let frame = |app: &mut SoundApp, events: Vec<egui::Event>| {
+        ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        })
+        .textures_delta
+        .clear()
+    };
+    for _ in 0..3 {
+        frame(&mut app, Vec::new());
+    }
+    for modifiers in [Modifiers::NONE, Modifiers::SHIFT] {
+        app.shortcut_editor.capturing = Some("window.big_counter");
+        let tab = [true, false].map(|pressed| egui::Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers });
+        frame(&mut app, tab.to_vec());
+        assert_eq!(ctx.memory(|m| m.focused()), None, "{modifiers:?}");
+    }
+    assert_eq!(shortcut_for(&app.ui.shortcuts, "window.big_counter"), Some("Shift+Tab"));
+}
