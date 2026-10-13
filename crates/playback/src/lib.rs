@@ -23,9 +23,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod devices;
+pub mod midi;
 pub mod record;
 
 pub use devices::AudioConfig;
+pub use midi::{LiveMidiEvent, MidiDeviceInfo, MidiInputRing, MidiManager};
 
 use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
@@ -64,6 +66,7 @@ enum Cmd {
     /// Where the callback sends the snapshots it replaces (freeing one takes thousands of frees).
     OldSessions(SyncSender<Arc<Session>>),
     Input(Arc<record::InputRing>),
+    MidiInput(Arc<midi::MidiInputRing>),
     Recording(bool),
     Play {
         from: Samples,
@@ -167,6 +170,7 @@ struct AudioState {
     read: f64,
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
+    midi_input: Option<Arc<midi::MidiInputRing>>,
     recording: bool,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
@@ -201,6 +205,7 @@ impl AudioState {
             read: 0.0,
             device_rate,
             input: None,
+            midi_input: None,
             recording: false,
         }
     }
@@ -210,6 +215,7 @@ impl AudioState {
         while let Ok(c) = self.rx.try_recv() {
             match c {
                 Cmd::Input(r) => self.input = Some(r),
+                Cmd::MidiInput(r) => self.midi_input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
                 Cmd::Session(s, instances) => {
                     changed = true;
@@ -736,6 +742,11 @@ impl Player {
     /// Feed live input (from a `record::Recorder`) into the mix for input monitoring.
     pub fn set_input(&self, ring: Arc<record::InputRing>) {
         let _ = self.tx.send(Cmd::Input(ring));
+    }
+
+    /// Feed live MIDI events (from a `midi::MidiManager` or virtual keyboard) into the audio callback.
+    pub fn set_midi_input(&self, ring: Arc<midi::MidiInputRing>) {
+        let _ = self.tx.send(Cmd::MidiInput(ring));
     }
 
     pub fn set_recording(&self, on: bool) {
