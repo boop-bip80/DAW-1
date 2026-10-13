@@ -311,6 +311,12 @@ impl AudioState {
             }
             ring.pop_into(&mut self.mix.input, n, self.session.sample_rate.hz());
         }
+        self.mix.midi_input.clear();
+        if let Some(ring) = &self.midi_input {
+            while let Some(ev) = ring.pop() {
+                self.mix.midi_input.push((0, ev));
+            }
+        }
         self.mix.monitor_only = !self.playing;
         self.mix.recording = self.recording;
         self.mix.render(&self.session, self.pos, n, &mut self.pending);
@@ -337,7 +343,15 @@ impl AudioState {
     fn fill(&mut self, out: &mut [f32], channels: usize) {
         self.drain();
         let channels = channels.max(1);
-        let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        let audio_monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        let midi_monitoring = self.midi_input.is_some()
+            && self.session.tracks.iter().any(|t| {
+                t.kind.is_midi()
+                    && (t.mixer.input_monitor
+                        || t.mixer.record_arm
+                        || (self.session.edit.flag("options.midi_thru") && self.session.edit.selected_tracks.contains(&t.id)))
+            });
+        let monitoring = audio_monitoring || midi_monitoring;
         if !self.playing && !monitoring {
             out.iter_mut().for_each(|x| *x = 0.0);
             if let Ok(mut m) = self.shared.meters.try_lock() {
@@ -1316,5 +1330,41 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(out.iter().any(|x| x.abs() > 0.1), "the input is heard");
         assert!(shared.meters.lock().unwrap().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
+    }
+
+    #[test]
+    fn armed_instrument_tracks_audition_live_midi_when_stopped() {
+        use crate::midi::MidiInputRing;
+        use soundcraft_midi::LiveMidiEvent;
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let mut ins = Insert::new("subtractive_synth");
+        ins.params.insert("level".into(), -6.0);
+        s.track_mut(t).unwrap().instrument = Some(ins);
+        s.track_mut(t).unwrap().mixer.record_arm = true;
+
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
+
+        let midi_ring = Arc::new(MidiInputRing::new(1024));
+        tx.send(Cmd::MidiInput(Arc::clone(&midi_ring))).unwrap();
+
+        let mut out = vec![0.0f32; 2 * 512];
+        st.fill(&mut out, 2);
+        assert!(out.iter().all(|x| x.abs() < 1e-6), "silent before note on");
+
+        // Push Note On (channel 0, pitch 60, vel 100)
+        assert!(midi_ring.push(LiveMidiEvent { port_id: 0, timestamp_us: 100, len: 3, data: [0x90, 60, 100] }));
+
+        st.fill(&mut out, 2);
+        assert!(out.iter().any(|x| x.abs() > 1e-4), "armed instrument must produce audio on live note on");
     }
 }

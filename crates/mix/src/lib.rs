@@ -52,7 +52,7 @@
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
 use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
-use soundcraft_midi::CtrlKind;
+use soundcraft_midi::{CtrlKind, LiveMidiEvent};
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
 };
@@ -355,6 +355,8 @@ pub struct MixEngine {
     aux_latency: usize,
     /// Live input for the next block (planar), set by the audio host for input monitoring.
     pub input: Vec<Vec<f32>>,
+    /// Live MIDI events for the next block: `(offset_in_block, LiveMidiEvent)`.
+    pub midi_input: Vec<(usize, LiveMidiEvent)>,
     /// Transport stopped: only monitored inputs sound (no clips).
     pub monitor_only: bool,
     /// Recording: record-armed tracks hear their input (auto input).
@@ -436,6 +438,7 @@ impl MixEngine {
             aux_fed: Vec::new(),
             aux_latency: 0,
             input: Vec::new(),
+            midi_input: Vec::new(),
             monitor_only: false,
             recording: false,
             metronome: false,
@@ -518,6 +521,7 @@ impl MixEngine {
         }
         self.meters.clear();
         self.main_meter = StripMeter::default();
+        self.midi_input.clear();
     }
 
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
@@ -651,7 +655,7 @@ impl MixEngine {
             }
         }
         let busses = std::mem::take(&mut self.busses);
-        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+        let live_in = LiveInput { input: &self.input, midi_input: &self.midi_input, monitor_only: self.monitor_only, recording: self.recording };
         run_strips(&mut work, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
                 process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
@@ -732,7 +736,7 @@ impl MixEngine {
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
             }
-            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+            let live_in = LiveInput { input: &self.input, midi_input: &self.midi_input, monitor_only: self.monitor_only, recording: self.recording };
             process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
@@ -890,6 +894,7 @@ impl MixEngine {
 /// Live input routed to monitored tracks.
 struct LiveInput<'a> {
     input: &'a [Vec<f32>],
+    midi_input: &'a [(usize, LiveMidiEvent)],
     monitor_only: bool,
     recording: bool,
 }
@@ -927,7 +932,6 @@ fn process_strip(
             }
         }
         TrackKind::Audio if live.monitor_only => {}
-        TrackKind::Instrument | TrackKind::Midi if live.monitor_only => {}
         TrackKind::Audio => {
             let block = Range { start: pos, end: pos.saturating_add(frames as i64) };
             for clip in t.clips() {
@@ -979,7 +983,12 @@ fn process_strip(
             }
         }
         TrackKind::Instrument | TrackKind::Midi => {
-            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
+            let is_selected = s.edit.selected_tracks.contains(&t.id);
+            let midi_target = t.mixer.record_arm || t.mixer.input_monitor || (s.edit.flag("options.midi_thru") && is_selected);
+
+            if live.monitor_only && !midi_target {
+                // Stopped and not targeted for live MIDI: silent.
+            } else if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
                 // #152: push the instrument's stored parameter values into the live plugin
                 // before processing, the same way inserts do below. Without this, the values
                 // loaded from a session (or set via `mix.insert_state`) never reach the plugin
@@ -992,7 +1001,27 @@ fn process_strip(
                 if std::mem::take(&mut strip.chase) {
                     chase_controllers(s, t, pos, inst);
                 }
-                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+                if !live.monitor_only {
+                    schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+                }
+                if midi_target {
+                    for &(offset, ev) in live.midi_input {
+                        let off = offset.min(frames.saturating_sub(1));
+                        if ev.is_note_on() {
+                            let pitch = ev.note_pitch();
+                            inst.plugin.note_on(off, pitch, ev.note_velocity());
+                            if !strip.held.contains(&pitch) && strip.held.len() < 128 {
+                                strip.held.push(pitch);
+                            }
+                        } else if ev.is_note_off() {
+                            let pitch = ev.note_pitch();
+                            inst.plugin.note_off(off, pitch);
+                            strip.held.retain(|p| *p != pitch);
+                        } else {
+                            inst.plugin.midi(off, ev.data);
+                        }
+                    }
+                }
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
@@ -3241,5 +3270,46 @@ mod tests {
         }
         let e_ls = out[4][100].powi(2) + out[6][100].powi(2);
         assert!((e_ls - x(4).powi(2)).abs() < 1e-5, "Ls energy is preserved");
+    }
+
+    #[test]
+    fn live_midi_events_trigger_instrument_when_monitored_or_armed() {
+        use soundcraft_model::Insert;
+        let mut s = Session::new("LiveMidiTest", soundcraft_time::SampleRate::new(48_000).unwrap());
+        let trk = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("SynthTrack"));
+        let mut ins = Insert::new("subtractive_synth");
+        ins.params.insert("level".into(), -6.0);
+        s.track_mut(trk).unwrap().instrument = Some(ins);
+
+        let mut eng = MixEngine::new(48_000.0, 512);
+
+        // Case 1: Monitor-only (stopped transport), track is NOT armed and NOT monitored -> silent
+        eng.monitor_only = true;
+        eng.midi_input = vec![(0, LiveMidiEvent { port_id: 0, timestamp_us: 10, len: 3, data: [0x90, 60, 100] })];
+        let mut out = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 0, 512, &mut out);
+        assert!(out[0].iter().all(|x| x.abs() < 1e-6), "unarmed track should not produce sound when stopped");
+
+        // Case 2: Monitor-only (stopped transport), track IS record-armed -> synthesizes Note On!
+        s.track_mut(trk).unwrap().mixer.record_arm = true;
+        eng.midi_input = vec![(0, LiveMidiEvent { port_id: 0, timestamp_us: 20, len: 3, data: [0x90, 60, 100] })];
+        let mut out = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 0, 512, &mut out);
+        assert!(out[0].iter().any(|x| x.abs() > 1e-4), "armed track must synthesize live note on");
+
+        // Case 3: Send Note Off -> sound decays
+        eng.midi_input = vec![(0, LiveMidiEvent { port_id: 0, timestamp_us: 30, len: 3, data: [0x80, 60, 0] })];
+        let mut out_off = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 512, 512, &mut out_off);
+        assert!(eng.strips.get(&trk).unwrap().held.is_empty(), "held notes must be cleared after note off");
+
+        // Case 4: Not armed, but MIDI Thru enabled and track is selected -> synthesizes Note On!
+        s.track_mut(trk).unwrap().mixer.record_arm = false;
+        s.edit.set_flag("options.midi_thru", true);
+        s.edit.selected_tracks = vec![trk];
+        eng.midi_input = vec![(0, LiveMidiEvent { port_id: 0, timestamp_us: 40, len: 3, data: [0x90, 64, 110] })];
+        let mut out_thru = vec![vec![0.0; 512]; 2];
+        eng.render(&s, 1024, 512, &mut out_thru);
+        assert!(out_thru[0].iter().any(|x| x.abs() > 1e-4), "MIDI Thru on selected track must synthesize note");
     }
 }
