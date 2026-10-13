@@ -105,12 +105,13 @@ fn button_style(selected_fill: Color32, normal_icon: Color32, radius: u8) -> Ico
 pub fn icon_button(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str) -> Response {
     let t = Tokens::current();
     let style = button_style(t.accent, t.text, 3);
-    let resp = IconButton::new(tip, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
+    let tip = crate::i18n::t(tip);
+    let resp = IconButton::new(tip.as_str(), size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
         key_light(ui.painter(), r.shrink(1.0));
         let s = r.height().min(r.width()) * 0.78;
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(s, s)), icon, tint);
     });
-    resp.on_hover_text(tip)
+    resp.on_hover_text(&tip)
 }
 
 /// Square text toggle used for S / M / I / record etc.
@@ -120,14 +121,15 @@ pub fn text_toggle(ui: &mut Ui, size: egui::Vec2, text: &str, on: bool, on_color
     key(ui.painter(), r, &resp, if on { on_color } else { key_fill(&resp) });
     let col = if on { t.text_dark } else { t.text };
     ui.painter().text(r.center(), Align2::CENTER_CENTER, text, bold((size.y * 0.62).clamp(8.0, 13.0)), col);
-    resp.on_hover_text(tip)
+    resp.on_hover_text(crate::i18n::t(tip))
 }
 
 /// Record-enable button (red dot); the caller owns track arming and command dispatch.
 pub fn rec_toggle(ui: &mut Ui, size: egui::Vec2, on: bool, tip: &str) -> Response {
     let t = Tokens::current();
     let style = button_style(t.rec, Color32::from_rgb(218, 112, 106), 2);
-    let resp = IconButton::new(tip, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
+    let tip = crate::i18n::t(tip);
+    let resp = IconButton::new(tip.as_str(), size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
         key_light(ui.painter(), r.shrink(1.0));
         let rad = size.y * 0.24;
         if on {
@@ -143,7 +145,7 @@ pub fn rec_toggle(ui: &mut Ui, size: egui::Vec2, on: bool, tip: &str) -> Respons
         }
         ui.painter().circle_stroke(r.center(), rad, Stroke::new(1.0, Color32::from_black_alpha(90)));
     });
-    resp.on_hover_text(tip)
+    resp.on_hover_text(&tip)
 }
 
 /// A dropdown-looking selector box. Returns the response (caller opens a menu on click).
@@ -159,14 +161,15 @@ pub(crate) fn selector_box_with_tooltip(ui: &mut Ui, width: f32, height: f32, te
     let tr = Rect::from_min_max(pos2(r.max.x - height * 0.8, r.min.y), r.max);
     icons::draw(ui.painter(), tr.shrink(height * 0.15), "triangle_down", t.text_dim);
     let text_rect = Rect::from_min_max(r.min + vec2(3.0, 1.0), pos2(tr.left() - 2.0, r.bottom() - 1.0));
-    let mut job = egui::text::LayoutJob::simple(text.to_owned(), regular((height * 0.62).clamp(8.0, 12.0)), color, text_rect.width().max(1.0));
+    let shown = crate::i18n::t(text);
+    let mut job = egui::text::LayoutJob::simple(shown, regular((height * 0.62).clamp(8.0, 12.0)), color, text_rect.width().max(1.0));
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     job.wrap.overflow_character = Some('…');
     let galley = ui.painter().layout_job(job);
     let pos = text_rect.center() - galley.size() * 0.5;
     ui.painter().with_clip_rect(r.shrink(1.0)).galley(pos, galley, color);
-    resp.on_hover_text(tooltip)
+    resp.on_hover_text(crate::i18n::t(tooltip))
 }
 
 /// Rotary knob for pan / send pan (-1..1). Drag vertically; double-click resets.
@@ -204,7 +207,7 @@ pub fn pan_knob(ui: &mut Ui, size: f32, value: &mut f32, tip: &str) -> Response 
     p.circle_stroke(c, rad - 0.75, Stroke::new(1.5, t.knob_ring));
     let d = vec2(at.cos(), at.sin());
     p.line_segment([c + d * rad * 0.15, c + d * (rad - 2.5)], Stroke::new(2.0, t.knob_pointer));
-    resp.on_hover_text(tip)
+    resp.on_hover_text(crate::i18n::t(tip))
 }
 
 /// Format a pan value like a console: "<45", "0", "45>".
@@ -501,10 +504,10 @@ pub fn multi_meter(ui: &Ui, r: Rect, levels: &[f32], labels: &[String], clip: bo
 
 /// egui's checkbox, plus drag-to-set (#399): press one box and drag over its neighbours, and each
 /// box the pointer passes takes the state the first one switched to. A click toggles one box.
-pub fn checkbox(ui: &mut Ui, on: &mut bool, label: impl Into<egui::WidgetText>) -> Response {
+pub fn checkbox(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     // egui's own toggle works on a copy: `drag_toggle` decides clicks and drags alike.
     let mut copy = *on;
-    let mut resp = ui.checkbox(&mut copy, label.into()).interact(Sense::drag());
+    let mut resp = ui.checkbox(&mut copy, crate::i18n::t(label)).interact(Sense::drag());
     if drag_toggle(ui, &resp, on) {
         resp.mark_changed();
     }

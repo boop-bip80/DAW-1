@@ -64,15 +64,15 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().rect_filled(full, 0.0, t.panel_bg);
     let header = Rect::from_min_size(full.min, vec2(full.width(), 22.0));
     ui.painter().rect_filled(header, 0.0, t.panel_bg2);
-    ui.painter().text(pos2(header.min.x + 8.0, header.center().y), Align2::LEFT_CENTER, "MIDI EDITOR", bold(11.5), t.header_text);
+    ui.painter().text(pos2(header.min.x + 8.0, header.center().y), Align2::LEFT_CENTER, crate::i18n::t("MIDI EDITOR"), bold(11.5), t.header_text);
     let Some(cid) = target_clip(app) else {
         let track = {
             let s = app.engine.session();
             s.tracks.iter().find(|t| t.kind.is_midi() && s.edit.selected_tracks.contains(&t.id)).map(|t| (t.id, t.name.clone()))
         };
         let msg = match &track {
-            Some((_, name)) => format!("Click to add a MIDI clip to {name} at the insertion point."),
-            None => "Select a MIDI clip (or a MIDI track) to edit its notes.".into(),
+            Some((_, name)) => crate::i18n::tf("Click to add a MIDI clip to {} at the insertion point.", &[name.clone()]),
+            None => crate::i18n::t("Select a MIDI clip (or a MIDI track) to edit its notes."),
         };
         ui.painter().text(full.center(), Align2::CENTER_CENTER, msg, regular(13.0), t.text_dim);
         let body = Rect::from_min_max(pos2(full.min.x, header.max.y), full.max);
@@ -83,8 +83,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             if let Ok(v) = app.run("midi.new_clip", json!({"track": id.0, "start": sel.start, "end": sel.end})) {
                 let _ = app.run("edit.select", json!({"clips": [v["clip"]]}));
             }
-        }
-        return;
+        }        return;
     };
     let Some((track, clip)) = app.engine.session().find_clip(cid).map(|(t, c)| (t, c.clone())) else { return };
     let ClipContent::Midi { sequence } = &clip.content else { return };
@@ -122,15 +121,14 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     if tb.small_button("Legato").clicked() {
         op = Some(("event.change_duration", json!({"legato": 0})));
     }
-    if tb.small_button("Vel −10").clicked() {
+    if tb.small_button(crate::i18n::t("Vel −10")).clicked() {
         op = Some(("event.change_velocity", json!({"add": -10})));
     }
-    if tb.small_button("Vel +10").clicked() {
+    if tb.small_button(crate::i18n::t("Vel +10")).clicked() {
         op = Some(("event.change_velocity", json!({"add": 10})));
     }
-    if tb.small_button("Quantize").on_hover_text("Quantize to the grid").clicked() {
-        op = Some(("event.quantize", json!({"grid": grid_ticks, "strength": 100})));
-    }
+    if tb.small_button(crate::i18n::t("Quantize")).on_hover_text(crate::i18n::t("Quantize to the grid")).clicked() {
+        op = Some(("event.quantize", json!({"grid": grid_ticks, "strength": 100})));    }
     if let Some((id, mut p)) = op {
         p["clips"] = json!([cid.0]);
         let _ = app.run(id, p);

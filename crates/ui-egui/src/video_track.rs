@@ -443,11 +443,11 @@ pub fn draw_lane(app: &mut SoundApp, painter: &Painter, s: &Session, track: &Tra
         }
         let p = painter.with_clip_rect(vis);
         let Some(v) = s.video(source) else {
-            p.text(vis.center(), egui::Align2::CENTER_CENTER, "movie missing from session", regular(10.0), Color32::from_rgb(220, 120, 120));
+            p.text(vis.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("movie missing from session"), regular(10.0), Color32::from_rgb(220, 120, 120));
             continue;
         };
         if !on {
-            p.text(vis.center(), egui::Align2::CENTER_CENTER, "Video Track Offline", regular(10.0), Color32::from_gray(170));
+            p.text(vis.center(), egui::Align2::CENTER_CENTER, crate::i18n::t("Video Track Offline"), regular(10.0), Color32::from_gray(170));
             continue;
         }
         let key = MovieKey::new(source, &v.path);
