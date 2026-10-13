@@ -539,8 +539,8 @@ impl MidiManager {
                 .connect(
                     port,
                     device_name,
-                    move |timestamp_us, bytes, _| {
-                        let ts = if timestamp_us > 0 { timestamp_us } else { monotonic_now_us() };
+                    move |_timestamp_us, bytes, _| {
+                        let ts = monotonic_now_us();
                         if let Some(event) = parse_midi_message(port_id, ts, bytes) {
                             ring.push(event);
                         }

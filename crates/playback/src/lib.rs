@@ -174,6 +174,8 @@ struct AudioState {
     midi_input: Option<Arc<midi::MidiInputRing>>,
     midi_record: Option<Arc<midi::MidiRecordRing>>,
     recording: bool,
+    stream_start_us: u64,
+    rendered_samples: u64,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
     old_sessions: Option<SyncSender<Arc<Session>>>,
@@ -210,6 +212,8 @@ impl AudioState {
             midi_input: None,
             midi_record: None,
             recording: false,
+            stream_start_us: 0,
+            rendered_samples: 0,
         }
     }
 
@@ -249,18 +253,24 @@ impl AudioState {
                     self.playing = true;
                     self.pending_len = 0;
                     self.read = 0.0;
+                    self.stream_start_us = 0;
+                    self.rendered_samples = 0;
                     self.mix.reset();
                 }
                 Cmd::Stop => {
                     self.playing = false;
                     self.end = None;
                     self.looped = None;
+                    self.stream_start_us = 0;
+                    self.rendered_samples = 0;
                     self.mix.reset();
                 }
                 Cmd::Locate(at) => {
                     self.pos = at;
                     self.pending_len = 0;
                     self.read = 0.0;
+                    self.stream_start_us = 0;
+                    self.rendered_samples = 0;
                     self.mix.reset();
                 }
             }
@@ -318,9 +328,12 @@ impl AudioState {
         self.mix.midi_input.clear();
         if let Some(ring) = &self.midi_input {
             let sr = self.session.sample_rate.as_f64().max(1.0);
-            let block_dur_us = ((n as f64 * 1_000_000.0) / sr) as u64;
-            let now_us = midi::monotonic_now_us();
-            let block_start_us = now_us.saturating_sub(block_dur_us);
+            if self.stream_start_us == 0 {
+                self.stream_start_us = midi::monotonic_now_us();
+                self.rendered_samples = 0;
+            }
+            let block_start_us = self.stream_start_us.saturating_add((self.rendered_samples as f64 * 1_000_000.0 / sr) as u64);
+            self.rendered_samples = self.rendered_samples.saturating_add(n as u64);
 
             while let Some(ev) = ring.pop() {
                 let sample_offset = if ev.timestamp_us > 0 && ev.timestamp_us >= block_start_us {
@@ -340,7 +353,7 @@ impl AudioState {
                 {
                     let at_sample = self.pos.saturating_add(sample_offset as i64);
                     for t in &self.session.tracks {
-                        if t.kind.is_midi() && t.mixer.record_arm && !t.inactive {
+                        if t.kind.is_midi() && t.mixer.record_arm && !t.inactive && t.matches_midi_channel(ev.channel()) {
                             rec_ring.push(midi::RecordedMidiEvent { track_id: t.id.0, at_sample, event: ev });
                         }
                     }

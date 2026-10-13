@@ -1436,6 +1436,25 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             }
         }
     }
+    if let Some(t) = app.engine.session().track(id)
+        && t.kind.is_midi()
+    {
+        let current_ch = t.midi_channel;
+        ui.menu_button("MIDI Channel", |ui| {
+            if ui.selectable_label(current_ch.is_none(), "Omni (All)").clicked() {
+                let _ = app.run("track.midi_channel", json!({"tracks": selection, "channel": "omni"}));
+                ui.close();
+            }
+            ui.separator();
+            for ch in 1..=16 {
+                let is_current = current_ch == Some(ch - 1);
+                if ui.selectable_label(is_current, format!("Channel {ch}")).clicked() {
+                    let _ = app.run("track.midi_channel", json!({"tracks": selection, "channel": ch}));
+                    ui.close();
+                }
+            }
+        });
+    }
     let folders: Vec<(u64, String)> = app
         .engine
         .session()

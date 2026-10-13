@@ -821,11 +821,15 @@ impl SoundApp {
     /// Sync connected MIDI input devices with the session's enabled flags.
     pub fn sync_midi_devices(&mut self) {
         if let Some(player) = &self.player {
-            let mut mm = soundcraft_playback::midi::MidiManager::new(player.midi_input_ring());
             let flags = &self.engine.session().edit.flags;
             let enabled: Vec<String> = flags.iter().filter_map(|f| f.strip_prefix("midi.input.").map(str::to_string)).collect();
-            mm.sync_enabled(&enabled);
-            self.midi_manager = Some(mm);
+            if let Some(mm) = &mut self.midi_manager {
+                mm.sync_enabled(&enabled);
+            } else {
+                let mut mm = soundcraft_playback::midi::MidiManager::new(player.midi_input_ring());
+                mm.sync_enabled(&enabled);
+                self.midi_manager = Some(mm);
+            }
         }
     }
 
@@ -952,7 +956,7 @@ impl SoundApp {
         let mut midi_ids = Vec::new();
         if !midi_takes.is_empty() {
             let merge = self.engine.session().edit.flag("options.midi_merge");
-            midi_ids = soundcraft_engine::io::place_midi_takes(&mut self.engine, midi_takes, punch, merge);
+            midi_ids = soundcraft_engine::io::place_midi_takes(&mut self.engine, midi_takes, punch, merge, plan.pass);
         }
         let total_clips = audio_ids.len() + midi_ids.len();
         self.ui.status = if plan.pass.is_some() {
