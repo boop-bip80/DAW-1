@@ -67,7 +67,10 @@ Errors: `{"id": 1, "ok": false, "error": "bad parameters for `mix.volume`: no tr
 - Ranges: `start` + `end` (or `start` + `length`); omitted = the current edit selection. An `end` or
   `length` without `start` counts from the start of the edit selection (the insertion point). `end` and
   `length` together must agree, and without `start` the range may not end before the insertion point;
-  otherwise the command fails instead of guessing.
+  otherwise the command fails instead of guessing. This holds for every command that takes a range
+  (`edit.*`, `event.*`, `file.bounce_*`, `automation.*`, `midi.new_clip`…). Behaviour change: earlier
+  versions ignored an `end` or `length` given without `start` and used the whole edit selection, and
+  let `end` silently win over a `length` that disagreed with it.
 
 ## Examples
 
