@@ -1389,23 +1389,38 @@ pub fn place_midi_takes(e: &mut Engine, takes: Vec<MidiTake>, punch: Option<Rang
                 let c_end = clip.start.saturating_add(clip.length);
                 let overlaps = clip.start < take.start.saturating_add(take.length) && c_end > take.start;
                 if overlaps && let ClipContent::Midi { sequence } = &mut clip.content {
+                    let new_start = clip.start.min(take.start);
+                    let new_end = (take.start.saturating_add(take.length)).max(c_end);
+                    let new_base_ticks = tempo.samples_to_ticks(new_start, sr);
+
                     let clip_base_ticks = tempo.samples_to_ticks(clip.start, sr);
+                    let clip_shift_ticks = clip_base_ticks.saturating_sub(new_base_ticks);
+
                     let take_base_ticks = tempo.samples_to_ticks(take.start, sr);
-                    let delta_ticks = take_base_ticks.saturating_sub(clip_base_ticks);
+                    let take_shift_ticks = take_base_ticks.saturating_sub(new_base_ticks);
+
+                    if clip_shift_ticks > 0 {
+                        for note in &mut sequence.notes {
+                            note.start = note.start.saturating_add(clip_shift_ticks);
+                        }
+                        for ctrl in &mut sequence.ctrls {
+                            ctrl.tick = ctrl.tick.saturating_add(clip_shift_ticks);
+                        }
+                    }
 
                     for note in &take.sequence.notes {
                         let mut n = *note;
-                        n.start = n.start.saturating_add(delta_ticks);
+                        n.start = n.start.saturating_add(take_shift_ticks);
                         sequence.notes.push(n);
                     }
                     for ctrl in &take.sequence.ctrls {
                         let mut c = *ctrl;
-                        c.tick = c.tick.saturating_add(delta_ticks);
+                        c.tick = c.tick.saturating_add(take_shift_ticks);
                         sequence.ctrls.push(c);
                     }
                     sequence.sort();
-                    let new_end = (take.start.saturating_add(take.length)).max(c_end);
-                    clip.length = new_end.saturating_sub(clip.start).max(1);
+                    clip.start = new_start;
+                    clip.length = new_end.saturating_sub(new_start).max(1);
                     out.push(clip.id);
                     merged = true;
                     break;
@@ -1611,6 +1626,40 @@ mod record_tests {
             assert_eq!(sequence.notes.len(), 2);
             assert_eq!(sequence.notes[0].pitch, 60);
             assert_eq!(sequence.notes[1].pitch, 64);
+        } else {
+            panic!("Expected MIDI clip content");
+        }
+    }
+
+    #[test]
+    fn place_midi_takes_merge_with_take_starting_earlier() {
+        let mut e = Engine::default();
+        let s = e.session_mut();
+        let inst = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Synth"));
+        let mut seq1 = soundcraft_midi::Sequence::default();
+        // Note 1 starts at clip tick 0 (sample 48_000)
+        seq1.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 });
+        let cid = s.new_clip_id();
+        crate::edit::place_clip(s, inst, Clip::midi(cid, "Existing", 48_000, 48_000, seq1));
+
+        // Take starts earlier (at sample 24_000) with Note 2 at take tick 0
+        let mut seq2 = soundcraft_midi::Sequence::default();
+        seq2.notes.push(soundcraft_midi::Note { pitch: 55, velocity: 80, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let take = soundcraft_midi::MidiTake { track_id: inst.0, start: 24_000, length: 48_000, sequence: seq2 };
+
+        let clips = place_midi_takes(&mut e, vec![take], None, true);
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0], cid);
+        let clip = e.session().find_clip(cid).unwrap().1;
+        assert_eq!(clip.start, 24_000, "clip start must expand backwards to take start");
+        if let ClipContent::Midi { sequence } = &clip.content {
+            assert_eq!(sequence.notes.len(), 2);
+            // Note 2 (pitch 55) started at sample 24_000 -> tick 0 relative to new clip start
+            assert_eq!(sequence.notes[0].pitch, 55);
+            assert_eq!(sequence.notes[0].start, 0);
+            // Note 1 (pitch 60) started at sample 48_000 -> shifted forward relative to new clip start
+            assert_eq!(sequence.notes[1].pitch, 60);
+            assert!(sequence.notes[1].start > 0);
         } else {
             panic!("Expected MIDI clip content");
         }

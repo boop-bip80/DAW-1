@@ -181,16 +181,28 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         }
     }
     let kresp = ui.interact(keys, ui.id().with(("piano_keys", cid.0)), Sense::click_and_drag());
-    if (kresp.clicked() || kresp.dragged())
-        && let Some(p) = kresp.interact_pointer_pos()
-    {
+    let is_down = (kresp.clicked() || kresp.dragged()) && ui.input(|i| i.pointer.primary_down());
+    let current_pitch = if is_down && let Some(p) = kresp.interact_pointer_pos() {
         let pitch = pitch_at(p.y);
-        if (0..=127).contains(&pitch)
+        if (0..=127).contains(&pitch) { Some(pitch as u8) } else { None }
+    } else {
+        None
+    };
+
+    let pkid = ui.id().with(("piano_audition_pitch", cid.0));
+    let prev_pitch: Option<u8> = ui.data(|d| d.get_temp(pkid));
+    if prev_pitch != current_pitch {
+        if let Some(old) = prev_pitch
             && let Some(pl) = &app.player
         {
-            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, pitch as u8, 100));
-            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, pitch as u8, 0));
+            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_off(0, old, 0));
         }
+        if let Some(new_p) = current_pitch
+            && let Some(pl) = &app.player
+        {
+            pl.midi_input.push(soundcraft_midi::LiveMidiEvent::note_on(0, new_p, 100));
+        }
+        ui.data_mut(|d| d.insert_temp(pkid, current_pitch));
     }
     // Grid.
     let mut tick = 0;

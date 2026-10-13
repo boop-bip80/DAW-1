@@ -61,10 +61,14 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 ### G-02. MIDI devices (closed)
 
 - **Closed:** cross-platform hardware MIDI input via `midir` (CoreMIDI / WinMM / ALSA); lock-free
-  SPSC ring buffers (`MidiInputRing` and `MidiRecordRing`); realtime sample-accurate dispatch to armed
-  tracks and instruments; live take capture into timeline clips with `options.midi_merge` overdub support;
-  held-note resolution on transport stop; `event.all_notes_off` panic silence across all 16 channels;
-  Virtual MIDI Keyboard and piano roll click auditioning; and `Setup > MIDI > MIDI Input Devices...` dialog.
+  SPSC ring buffers (`MidiInputRing` and `MidiRecordRing`) with 64-byte cache line padding (`CachePadded`);
+  zero-allocation RT audio path using fixed `HeldNotes` bitmasks and pre-allocated bounded event queues;
+  sample-accurate sub-sample intra-block offsets derived from high-resolution microsecond timestamps;
+  multi-channel note dispatch (0..15) across DSP plugin hosts (VST3, CLAP, AU);
+  drain and execution of CC 120/123 panic silencing with stopped transport;
+  live take capture into timeline clips with `options.midi_merge` overdub support and retroactive start expansion;
+  sustained note auditioning on mouse down/drag in Virtual Keyboard and Piano Roll;
+  and `Setup > MIDI > MIDI Input Devices...` dialog.
 - **Remaining for future:** MIDI Beat Clock / MTC output, driving external hardware synths.
 - **Estimate:** 0 h (closed).
 

@@ -317,15 +317,31 @@ impl AudioState {
         }
         self.mix.midi_input.clear();
         if let Some(ring) = &self.midi_input {
+            let sr = self.session.sample_rate.as_f64().max(1.0);
+            let block_dur_us = ((n as f64 * 1_000_000.0) / sr) as u64;
+            let now_us = midi::monotonic_now_us();
+            let block_start_us = now_us.saturating_sub(block_dur_us);
+
             while let Some(ev) = ring.pop() {
-                self.mix.midi_input.push((0, ev));
-                if self.recording
+                let sample_offset = if ev.timestamp_us > 0 && ev.timestamp_us >= block_start_us {
+                    let elapsed_us = ev.timestamp_us.saturating_sub(block_start_us);
+                    ((elapsed_us as f64 * sr / 1_000_000.0) as usize).min(n.saturating_sub(1))
+                } else {
+                    0
+                };
+                if self.mix.midi_input.len() < self.mix.midi_input.capacity() {
+                    self.mix.midi_input.push((sample_offset, ev));
+                }
+                let is_panic_cc = ev.is_control_change() && (ev.cc_controller() == 120 || ev.cc_controller() == 123);
+                if !is_panic_cc
+                    && self.recording
                     && self.playing
                     && let Some(rec_ring) = &self.midi_record
                 {
+                    let at_sample = self.pos.saturating_add(sample_offset as i64);
                     for t in &self.session.tracks {
                         if t.kind.is_midi() && t.mixer.record_arm && !t.inactive {
-                            rec_ring.push(midi::RecordedMidiEvent { track_id: t.id.0, at_sample: self.pos, event: ev });
+                            rec_ring.push(midi::RecordedMidiEvent { track_id: t.id.0, at_sample, event: ev });
                         }
                     }
                 }
@@ -365,7 +381,8 @@ impl AudioState {
                         || t.mixer.record_arm
                         || (self.session.edit.flag("options.midi_thru") && self.session.edit.selected_tracks.contains(&t.id)))
             });
-        let monitoring = audio_monitoring || midi_monitoring;
+        let midi_has_events = self.midi_input.as_ref().is_some_and(|r| !r.is_empty());
+        let monitoring = audio_monitoring || midi_monitoring || midi_has_events;
         if !self.playing && !monitoring {
             out.iter_mut().for_each(|x| *x = 0.0);
             if let Ok(mut m) = self.shared.meters.try_lock() {

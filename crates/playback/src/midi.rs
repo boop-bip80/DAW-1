@@ -18,6 +18,35 @@ use soundcraft_midi::{CtrlEvent, CtrlKind, Note, Sequence};
 pub use soundcraft_midi::{LiveMidiEvent, MidiTake, RecordedMidiEvent, parse_midi_message};
 use soundcraft_model::{Session, TrackId};
 
+/// Cache-line padding wrapper (64 bytes) to eliminate false sharing between CPU cores.
+#[repr(align(64))]
+pub struct CachePadded<T>(pub T);
+
+impl<T> std::ops::Deref for CachePadded<T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for CachePadded<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+static MONOTONIC_ANCHOR: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Monotonic microsecond timestamp using safe zero-allocation standard library clock.
+#[inline]
+pub fn monotonic_now_us() -> u64 {
+    let start = MONOTONIC_ANCHOR.get_or_init(std::time::Instant::now);
+    start.elapsed().as_micros() as u64
+}
+
+#[repr(align(64))]
 struct Slot {
     sequence: AtomicUsize,
     word: AtomicU32,
@@ -30,9 +59,9 @@ struct Slot {
 pub struct MidiInputRing {
     slots: Box<[Slot]>,
     mask: usize,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-    dropped: AtomicUsize,
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
+    dropped: CachePadded<AtomicUsize>,
 }
 
 impl MidiInputRing {
@@ -41,7 +70,13 @@ impl MidiInputRing {
         let slots = (0..n)
             .map(|i| Slot { sequence: AtomicUsize::new(i), word: AtomicU32::new(0), port: AtomicU32::new(0), time: AtomicU64::new(0) })
             .collect();
-        Arc::new(Self { slots, mask: n - 1, head: AtomicUsize::new(0), tail: AtomicUsize::new(0), dropped: AtomicUsize::new(0) })
+        Arc::new(Self {
+            slots,
+            mask: n - 1,
+            head: CachePadded(AtomicUsize::new(0)),
+            tail: CachePadded(AtomicUsize::new(0)),
+            dropped: CachePadded(AtomicUsize::new(0)),
+        })
     }
 
     /// Push an event into the ring.
@@ -124,6 +159,7 @@ impl MidiInputRing {
     }
 }
 
+#[repr(align(64))]
 struct RecordSlot {
     sequence: AtomicUsize,
     track: AtomicU64,
@@ -138,9 +174,9 @@ struct RecordSlot {
 pub struct MidiRecordRing {
     slots: Box<[RecordSlot]>,
     mask: usize,
-    head: AtomicUsize,
-    tail: AtomicUsize,
-    dropped: AtomicUsize,
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
+    dropped: CachePadded<AtomicUsize>,
 }
 
 impl MidiRecordRing {
@@ -156,7 +192,13 @@ impl MidiRecordRing {
                 time: AtomicU64::new(0),
             })
             .collect();
-        Arc::new(Self { slots, mask: n - 1, head: AtomicUsize::new(0), tail: AtomicUsize::new(0), dropped: AtomicUsize::new(0) })
+        Arc::new(Self {
+            slots,
+            mask: n - 1,
+            head: CachePadded(AtomicUsize::new(0)),
+            tail: CachePadded(AtomicUsize::new(0)),
+            dropped: CachePadded(AtomicUsize::new(0)),
+        })
     }
 
     /// Push a recorded event into the ring.
@@ -498,7 +540,8 @@ impl MidiManager {
                     port,
                     device_name,
                     move |timestamp_us, bytes, _| {
-                        if let Some(event) = parse_midi_message(port_id, timestamp_us, bytes) {
+                        let ts = if timestamp_us > 0 { timestamp_us } else { monotonic_now_us() };
+                        if let Some(event) = parse_midi_message(port_id, ts, bytes) {
                             ring.push(event);
                         }
                     },
@@ -748,5 +791,40 @@ mod tests {
         // Notes were filtered, only CC remains
         assert_eq!(takes[0].sequence.notes.len(), 0);
         assert_eq!(takes[0].sequence.ctrls.len(), 1);
+    }
+
+    #[test]
+    fn cache_line_alignment_prevents_false_sharing() {
+        assert!(std::mem::align_of::<Slot>() >= 64);
+        assert!(std::mem::align_of::<RecordSlot>() >= 64);
+        assert_eq!(std::mem::size_of::<Slot>() % 64, 0);
+        assert_eq!(std::mem::size_of::<RecordSlot>() % 64, 0);
+        assert!(std::mem::align_of::<CachePadded<std::sync::atomic::AtomicUsize>>() >= 64);
+    }
+
+    #[test]
+    fn staccato_intra_block_duration_preserved() {
+        let ring = MidiRecordRing::new(16);
+        let track = TrackId(10);
+        let mut rec = MidiRecorder::new(Arc::clone(&ring), vec![track], 0);
+        let s = Session::default();
+
+        // Staccato note played in same 512-sample block: Note-on at sample 100, Note-off at sample 250 (150 samples duration)
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 100,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 10, len: 3, data: [0x90, 60, 100] },
+        }));
+        assert!(ring.push(RecordedMidiEvent {
+            track_id: 10,
+            at_sample: 250,
+            event: LiveMidiEvent { port_id: 0, timestamp_us: 25, len: 3, data: [0x80, 60, 64] },
+        }));
+
+        let takes = rec.finish(&s, 512);
+        assert_eq!(takes.len(), 1);
+        let note = &takes[0].sequence.notes[0];
+        // At 120 bpm 48kHz, 150 samples is ~3 ticks (much greater than 1 tick)
+        assert!(note.length > 1, "staccato note duration must be preserved rather than collapsed to 1 tick: got {}", note.length);
     }
 }

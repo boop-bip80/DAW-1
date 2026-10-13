@@ -215,6 +215,66 @@ struct PluginSlot {
     failed: bool,
 }
 
+/// Sounding MIDI note pitches (0..127) on an instrument. Fixed 128-bit bitset (zero heap allocation).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeldNotes {
+    mask: [u64; 2],
+}
+
+impl HeldNotes {
+    pub const fn new() -> Self {
+        Self { mask: [0, 0] }
+    }
+
+    #[inline]
+    pub fn contains(&self, pitch: u8) -> bool {
+        if pitch >= 128 {
+            return false;
+        }
+        let word = (pitch / 64) as usize;
+        let bit = pitch % 64;
+        (self.mask[word] & (1u64 << bit)) != 0
+    }
+
+    #[inline]
+    pub fn insert(&mut self, pitch: u8) {
+        if pitch < 128 {
+            let word = (pitch / 64) as usize;
+            let bit = pitch % 64;
+            self.mask[word] |= 1u64 << bit;
+        }
+    }
+
+    #[inline]
+    pub fn remove(&mut self, pitch: u8) {
+        if pitch < 128 {
+            let word = (pitch / 64) as usize;
+            let bit = pitch % 64;
+            self.mask[word] &= !(1u64 << bit);
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.mask = [0, 0];
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.mask[0] == 0 && self.mask[1] == 0
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        (self.mask[0].count_ones() + self.mask[1].count_ones()) as usize
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..128u8).filter(move |&p| self.contains(p))
+    }
+}
+
 struct Strip {
     buf: Vec<Vec<f32>>,
     /// Pre-fader copy for pre-fader sends.
@@ -225,7 +285,7 @@ struct Strip {
     /// The pool audio handed to the instrument with `set_sample` (sample-playing instruments).
     sample: Option<Arc<SourceAudio>>,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
-    held: Vec<u8>,
+    held: HeldNotes,
     /// The instrument's next block starts somewhere new: send it the controllers in effect there.
     chase: bool,
     muted: bool,
@@ -309,7 +369,7 @@ impl Strip {
             plugins: Vec::new(),
             instrument: None,
             sample: None,
-            held: Vec::new(),
+            held: HeldNotes::new(),
             chase: true,
             muted: false,
             gr: 0.0,
@@ -438,7 +498,7 @@ impl MixEngine {
             aux_fed: Vec::new(),
             aux_latency: 0,
             input: Vec::new(),
-            midi_input: Vec::new(),
+            midi_input: Vec::with_capacity(256),
             monitor_only: false,
             recording: false,
             metronome: false,
@@ -987,7 +1047,16 @@ fn process_strip(
             let midi_target = t.mixer.record_arm || t.mixer.input_monitor || (s.edit.flag("options.midi_thru") && is_selected);
 
             if live.monitor_only && !midi_target {
-                // Stopped and not targeted for live MIDI: silent.
+                // Stopped and not targeted for live MIDI: silence hanging notes if a panic event arrived.
+                if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed)
+                    && live.midi_input.iter().any(|(_, ev)| ev.is_control_change() && (ev.cc_controller() == 120 || ev.cc_controller() == 123))
+                {
+                    inst.plugin.all_notes_off();
+                    for p in strip.held.iter() {
+                        inst.plugin.note_off_chan(0, 0, p);
+                    }
+                    strip.held.clear();
+                }
             } else if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
                 // #152: push the instrument's stored parameter values into the live plugin
                 // before processing, the same way inserts do below. Without this, the values
@@ -1009,18 +1078,17 @@ fn process_strip(
                         let off = offset.min(frames.saturating_sub(1));
                         if ev.is_note_on() {
                             let pitch = ev.note_pitch();
-                            inst.plugin.note_on(off, pitch, ev.note_velocity());
-                            if !strip.held.contains(&pitch) && strip.held.len() < 128 {
-                                strip.held.push(pitch);
-                            }
+                            inst.plugin.note_on_chan(off, ev.channel(), pitch, ev.note_velocity());
+                            strip.held.insert(pitch);
                         } else if ev.is_note_off() {
                             let pitch = ev.note_pitch();
-                            inst.plugin.note_off(off, pitch);
-                            strip.held.retain(|p| *p != pitch);
+                            inst.plugin.note_off_chan(off, ev.channel(), pitch);
+                            strip.held.remove(pitch);
                         } else {
                             if ev.is_control_change() && (ev.cc_controller() == 120 || ev.cc_controller() == 123) {
-                                for &p in &strip.held {
-                                    inst.plugin.note_off(off, p);
+                                inst.plugin.all_notes_off();
+                                for p in strip.held.iter() {
+                                    inst.plugin.note_off_chan(off, ev.channel(), p);
                                 }
                                 strip.held.clear();
                             }
@@ -1505,7 +1573,7 @@ fn midi_offset(s: &Session, t: &Track) -> i64 {
 }
 
 /// Send note on/offs and controllers for MIDI clips overlapping the block.
-fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
+fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut HeldNotes) {
     let sr = s.sample_rate;
     // MIDI Track Offsets: the track's notes sound `offset` samples later (earlier if negative), so
     // the block looks that far back into the clips.
@@ -1545,14 +1613,12 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
                 continue;
             }
             if on >= pos && on < end {
-                inst.plugin.note_on(usize::try_from(on - pos).unwrap_or(0), n.pitch, n.velocity);
-                if !held.contains(&n.pitch) && held.len() < 128 {
-                    held.push(n.pitch);
-                }
+                inst.plugin.note_on_chan(usize::try_from(on - pos).unwrap_or(0), n.channel, n.pitch, n.velocity);
+                held.insert(n.pitch);
             }
             if off >= pos && off < end {
-                inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
-                held.retain(|p| *p != n.pitch);
+                inst.plugin.note_off_chan(usize::try_from(off - pos).unwrap_or(0), n.channel, n.pitch);
+                held.remove(n.pitch);
             }
         }
         let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
