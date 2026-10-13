@@ -137,7 +137,7 @@ pub fn bindable() -> &'static [Bindable] {
 /// `path` is the menu item that runs `id`, if one does. Queries and menu items that need their item's parameters are left out.
 fn bindable_entry(id: &str, path: &'static str) -> Option<Bindable> {
     let (id, label, default) = match soundcraft_engine::find_command(id) {
-        Some(c) if c.journal => (c.id, c.label, c.shortcut),
+        Some(c) if c.journal || c.view => (c.id, c.label, c.shortcut),
         Some(_) => return None,
         None => crate::menus::UI_COMMANDS.iter().find(|c| c.0 == id && c.0.starts_with("window.")).map(|c| (c.0, c.1, c.3))?,
     };

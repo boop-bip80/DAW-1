@@ -46,6 +46,23 @@ fn pro_tools_keys_run_their_commands() {
 }
 
 #[test]
+fn zoom_in_and_out_keep_their_keys() {
+    let pc_ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
+    let mac_cmd = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
+    for (os, cmd) in [(OperatingSystem::Mac, mac_cmd), (OperatingSystem::Windows, pc_ctrl), (OperatingSystem::Nix, pc_ctrl)] {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let ctx = egui::Context::default();
+        ctx.set_os(os);
+        let zoom = |app: &SoundApp| app.engine.session().edit.zoom.samples_per_px;
+        let before = zoom(&app);
+        press(&ctx, &mut app, Key::CloseBracket, cmd);
+        assert_eq!(zoom(&app), before / 2.0, "{os:?} Zoom In");
+        press(&ctx, &mut app, Key::OpenBracket, cmd);
+        assert_eq!(zoom(&app), before, "{os:?} Zoom Out");
+    }
+}
+
+#[test]
 fn ctrl_shift_arrows_nudge_the_selected_clip_gain() {
     let pc_ctrl = Modifiers { ctrl: true, command: true, ..Modifiers::NONE };
     for (os, ctrl) in [(OperatingSystem::Mac, Modifiers::CTRL), (OperatingSystem::Windows, pc_ctrl), (OperatingSystem::Nix, pc_ctrl)] {
