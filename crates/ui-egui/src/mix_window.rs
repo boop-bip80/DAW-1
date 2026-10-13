@@ -281,11 +281,11 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         let out_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 33.0), vec2(inner_w - 4.0, 16.0));
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-input", id.0)).max_rect(in_r));
         let resp = selector_box(&mut c, in_r.width(), in_r.height(), &input_name(app, track), t.text);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Input"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, crate::i18n::t("Input")));
         route_popup(app, &resp, id, true);
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-output", id.0)).max_rect(out_r));
         let resp = selector_box(&mut c, out_r.width(), out_r.height(), &route_name(app, &track.mixer.output), t.text);
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, "Output"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, crate::i18n::t("Output")));
         route_popup(app, &resp, id, false);
         // Automation mode.
         let am_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 51.0), vec2(inner_w - 4.0, 16.0));
@@ -662,7 +662,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
-        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
+        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button(crate::i18n::t("Edit Parameters…")).clicked() {
             if !app.ui.plugin_windows.contains(&(id, slot)) {
                 app.ui.plugin_windows.push((id, slot));
             }
@@ -743,10 +743,10 @@ fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<
     if clap.is_none() || vst3.is_none() {
         ui.separator();
         ui.horizontal(|ui| {
-            if clap.is_none() && ui.small_button("Scan CLAP").clicked() {
+            if clap.is_none() && ui.small_button(crate::i18n::t("Scan CLAP")).clicked() {
                 soundcraft_clap_host::scan();
             }
-            if vst3.is_none() && ui.small_button("Scan VST3").clicked() {
+            if vst3.is_none() && ui.small_button(crate::i18n::t("Scan VST3")).clicked() {
                 soundcraft_vst3_host::scan();
             }
         });

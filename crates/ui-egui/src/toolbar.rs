@@ -419,7 +419,7 @@ fn tempo_value(app: &mut SoundApp, ui: &mut Ui, right: f32, y: f32, bpm: f64) {
     if resp.drag_stopped() || resp.lost_focus() {
         app.engine.end_merge();
     }
-    resp.on_hover_text("Drag to change the tempo (Shift: fine steps), or click to type it");
+    resp.on_hover_text(crate::i18n::t("Drag to change the tempo (Shift: fine steps), or click to type it"));
 }
 
 fn output_meter(app: &mut SoundApp, ui: &mut Ui) {

@@ -263,7 +263,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                             let mut separate = app.ui.mix_separate;
                             if ui
                                 .checkbox(&mut separate, "Mix in Separate Window")
-                                .on_hover_text("Show Edit and Mix at once, e.g. one per monitor")
+                                .on_hover_text(crate::i18n::t("Show Edit and Mix at once, e.g. one per monitor"))
                                 .changed()
                             {
                                 let _ = run_ui_command(app, "window.mix_separate", &json!({"value": separate}));

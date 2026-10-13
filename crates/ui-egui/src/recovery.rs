@@ -20,7 +20,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
             ui.label(format!("“{}” has {what} from an earlier run, autosaved {age}.", left.name));
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Discard").clicked() {
+                if ui.button(crate::i18n::t("Discard")).clicked() {
                     recover = Some(false);
                 }
                 let recover_button = egui::Button::new(egui::RichText::new("Recover").strong()).fill(Tokens::current().accent);

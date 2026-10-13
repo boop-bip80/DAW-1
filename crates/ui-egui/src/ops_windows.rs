@@ -92,7 +92,7 @@ fn beat_detective(app: &mut SoundApp, ctx: &egui::Context) {
         ui.add(egui::Slider::new(&mut app.ops.beat_sensitivity, 0.0..=1.0).text(crate::i18n::t("Sensitivity")));
         crate::widgets::checkbox(ui, &mut app.ops.beat_separate, "Separate clips at detected beats");
         crate::widgets::checkbox(ui, &mut app.ops.beat_set_tempo, "Set the session tempo from the beats");        ui.horizontal(|ui| {
-            if ui.button("Analyze").clicked() {
+            if ui.button(crate::i18n::t("Analyze")).clicked() {
                 let r = app.run("event.beat_detective", json!({"sensitivity": app.ops.beat_sensitivity, "separate": false, "set_tempo": false}));
                 app.ops.beat_result = r.map_or_else(|e| e, |v| v.to_string());
             }

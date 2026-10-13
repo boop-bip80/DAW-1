@@ -503,11 +503,11 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("Refresh devices").clicked() {
+            if ui.button(crate::i18n::t("Refresh devices")).clicked() {
                 refresh = true;
             }
             let changed = draft != app.ui.audio;
-            if ui.add_enabled(changed, egui::Button::new("Apply")).on_hover_text("Reopen the audio devices with these settings").clicked() {
+            if ui.add_enabled(changed, egui::Button::new(crate::i18n::t("Apply"))).on_hover_text(crate::i18n::t("Reopen the audio devices with these settings")).clicked() {
                 apply = true;
             }
             if changed && ui.button("Revert").clicked() {
@@ -516,7 +516,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         });
         ui.separator();
         egui::Grid::new("pe-state").num_columns(2).show(ui, |ui| {
-            ui.label("Output");
+            ui.label(crate::i18n::t("Output"));
             ui.label(app.player.as_ref().map_or("none".to_string(), |p| {
                 if p.silent {
                     "no device (silent clock)".to_string()
@@ -526,7 +526,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }));
             ui.end_row();
-            ui.label("Input");
+            ui.label(crate::i18n::t("Input"));
             ui.label(app.recorder.as_ref().map_or("opened on first record or monitor".to_string(), |r| {
                 format!("{} · {} Hz · {} ch", r.device_name, r.sample_rate, r.channels)
             }));

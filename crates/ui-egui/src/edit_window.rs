@@ -788,7 +788,7 @@ fn views_button(app: &mut SoundApp, ui: &mut Ui, rulers: Rect) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
     let resp = crate::widgets::selector_box(&mut child, r.width(), r.height(), "Views", Tokens::current().text);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, child.is_enabled(), "Views"));
-    let resp = resp.on_hover_text("Columns beside the track headers: inserts, sends, I/O…");
+    let resp = resp.on_hover_text(crate::i18n::t("Columns beside the track headers: inserts, sends, I/O…"));
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         let shown = edit_columns(app.engine.session());
         for (id, label, _, _) in COLUMNS {
@@ -959,7 +959,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
             let _ = app.run("track.folder_toggle", json!({"track": id.0}));
         }
     } else {
-        egui::Popup::menu(&rresp.on_hover_text("Track options")).show(|ui| track_context_menu(app, ui, id));
+        egui::Popup::menu(&rresp.on_hover_text(crate::i18n::t("Track options"))).show(|ui| track_context_menu(app, ui, id));
     }
     if h >= 40.0 && track.kind.has_playlist() {
         let ar = at(3.0, h - 12.0, 9.0, 9.0);
@@ -1089,7 +1089,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
         if !matches!(track.kind, TrackKind::Master | TrackKind::Vca | TrackKind::Folder) {
             let (voice, color) = if track.inactive { ("off", t.text_dim) } else { ("dyn", t.text) };
             let resp = header_selector(ui, at(31.0, 57.0, 31.0, 17.0), ui.id().with(("voice", id.0)), voice, color, false);
-            egui::Popup::menu(&resp.on_hover_text("Voice: dyn plays the track, off makes it inactive")).show(|ui| {
+            egui::Popup::menu(&resp.on_hover_text(crate::i18n::t("Voice: dyn plays the track, off makes it inactive"))).show(|ui| {
                 for (label, inactive) in [("dyn", false), ("off", true)] {
                     if ui.selectable_label(track.inactive == inactive, label).clicked() {
                         let _ = app.run("track.make_inactive", json!({"tracks": [id.0], "inactive": inactive}));
@@ -1150,7 +1150,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
                 let name =
                     track.instrument.as_ref().and_then(|i| crate::mix_window::plugin_info(&i.plugin)).map_or("no instrument", |p| p.short_name);
                 ui.painter().with_clip_rect(field).text(pos2(field.min.x + 5.0, field.center().y), Align2::LEFT_CENTER, name, bold(10.0), t.text);
-                egui::Popup::menu(&resp.on_hover_text("Instrument"))
+                egui::Popup::menu(&resp.on_hover_text(crate::i18n::t("Instrument")))
                     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show(|ui| crate::mix_window::instrument_menu(app, ui, id));
             } else {
@@ -1306,7 +1306,7 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let row = |y: f32, h: f32| (r.height() >= y + h + 1.0).then_some(Rect::from_min_size(r.min + vec2(7.0, y), vec2(r.width() - 14.0, h)));
     if let Some(input) = row(4.0, 15.0) {
         let resp = header_selector(&ui, input, ui.id().with(("in", id.0)), &crate::mix_window::input_name(app, track), t.text, true);
-        crate::mix_window::route_popup(app, &resp.on_hover_text("Input"), id, true);
+        crate::mix_window::route_popup(app, &resp.on_hover_text(crate::i18n::t("Input")), id, true);
     }
     if let Some(out) = row(21.0, 17.0) {
         let (sel, fader) = (out.with_max_x(out.max.x - 11.0), out.with_min_x(out.max.x - 11.0));
@@ -1319,8 +1319,8 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
         let c = fader.center() + vec2(0.5, 0.0);
         ui.painter().vline(c.x, c.y - 5.0..=c.y + 5.0, Stroke::new(1.0, t.text));
         ui.painter().rect_filled(Rect::from_center_size(c + vec2(0.0, -1.5), vec2(5.0, 2.5)), 0.5, t.text);
-        crate::mix_window::route_popup(app, &resp.on_hover_text("Output"), id, false);
-        if fresp.on_hover_text("Show in the Mix window").clicked() {
+        crate::mix_window::route_popup(app, &resp.on_hover_text(crate::i18n::t("Output")), id, false);
+        if fresp.on_hover_text(crate::i18n::t("Show in the Mix window")).clicked() {
             let _ = app.run("edit.select", json!({"tracks": [id.0]}));
             let _ = app.run("window.mix", json!({}));
         }
@@ -1452,7 +1452,7 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             }
         });
     }
-    if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button("Remove from Folder").clicked() {
+    if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button(crate::i18n::t("Remove from Folder")).clicked() {
         let _ = app.run("track.remove_from_folder", json!({"tracks": selection}));
     }
     ui.separator();

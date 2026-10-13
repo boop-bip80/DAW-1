@@ -4,9 +4,17 @@
 //!
 //! Usage: `crate::i18n::t("Save As…")` at display time. `tf("Slide {} of {}", &[..])`
 //! translates patterns with `{}` placeholders. `set_language`/`language` drive the
-//! language state (persisted in `UiState`). The shell keeps egui's left-to-right run
-//! order until a bidi pass lands.
+//! language state (persisted in `UiState`).
+//!
+//! egui lays a label's runs left to right and runs no bidi over them, so Arabic's
+//! translations are handed out in visual order (`bidi.rs`): the runs in the order a
+//! right-to-left reader meets them, the letters inside each run in logical order for
+//! the shaper, brackets mirrored. What a user types keeps its logical order; the shell
+//! keeps egui's left-to-right layout.
 
+mod bidi;
+
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// The UI language. English is the source language; العربية (Arabic) is right-to-left.
@@ -66,13 +74,15 @@ pub fn is_arabic() -> bool {
 }
 
 /// Translate an English UI string into the active language. Unknown strings (and English)
-/// come back unchanged, so untranslated additions keep working.
+/// come back unchanged, so untranslated additions keep working. Arabic's translations come
+/// back in visual order (`bidi.rs`): the runs in the order egui draws them, left to right,
+/// so the label reads right to left.
 pub fn t(s: &str) -> String {
     if !is_arabic() {
         return s.to_string();
     }
-    match tr_ar(s) {
-        Some(ar) => ar.to_string(),
+    match tr_ar_index(s) {
+        Some(i) => visual_ar()[i].clone(),
         None => s.to_string(),
     }
 }
@@ -80,9 +90,25 @@ pub fn t(s: &str) -> String {
 /// Translate a pattern with positional placeholders, substituting the arguments in order.
 /// A placeholder is `{}` or a bare format spec such as `{:.1}` / `{:02}` (the argument is
 /// expected to be pre-formatted); the translated pattern keeps its placeholders, so word
-/// order is free.
+/// order is free: it is filled in logical order and reordered into visual order afterwards
+/// (`bidi.rs`), so two placeholders cannot land in each other's places and a number keeps
+/// its reading spot. The arguments should be numbers, names or single words — not
+/// already-translated phrases.
 pub fn tf(pattern: &str, args: &[String]) -> String {
-    let mut out = t(pattern);
+    if !is_arabic() {
+        return fill(pattern, args);
+    }
+    match tr_ar_index(pattern) {
+        Some(i) => bidi::visual_rtl(&fill(AR[i].1, args)),
+        None => fill(pattern, args),
+    }
+}
+
+/// `pattern` with each positional placeholder (`{}`, or a bare format spec such as `{:.1}` /
+/// `{:02}`) replaced by the next of `args`, in order. A placeholder is never read again, so
+/// an argument containing `{` stays intact.
+fn fill(pattern: &str, args: &[String]) -> String {
+    let mut out = pattern.to_string();
     for a in args {
         // The next positional placeholder: `{}`, or `{` `:` … `}` (a format spec, no nesting).
         let mut span = None;
@@ -164,6 +190,7 @@ static AR: &[(&str, &str)] = &[
     ("All audio clips have loaded media within source bounds.", "كل المقاطع الصوتية حمّلت وسائط ضمن حدود المصدر."),
     ("An open-source digital audio workstation from the ArtCraft team.", "محطة عمل صوتية رقمية مفتوحة المصدر من فريق ArtCraft."),
     ("Analyses the edit selection on the selected tracks.", "يحلل تحديد التحرير على المسارات المحددة."),
+    ("Analyze", "تحليل"),
     ("App Language", "لغة التطبيق"),
     ("Appearance", "المظهر"),
     ("Applies to the selected MIDI clips (or those under the selection).", "ينطبق على مقاطع MIDI المحددة (أو تلك الواقعة ضمن التحديد)."),
@@ -180,6 +207,7 @@ static AR: &[(&str, &str)] = &[
     ("Audio Track", "مسار صوتي"),
     ("Audio as MIDI", "الصوت كـ MIDI"),
     ("Audio files", "ملفات الصوت"),
+    ("Audio system", "نظام الصوت"),
     ("Audio...", "صوت..."),
     ("Audio: {}", "الصوت: {}"),
     ("AudioSuite Process", "معالجة AudioSuite"),
@@ -207,8 +235,10 @@ static AR: &[(&str, &str)] = &[
     ("Bounce Stems...", "خلط المسارات المنفصلة..."),
     ("Bounce...", "خلط..."),
     ("Bounces the edit selection, or the whole session when nothing is selected.", "يخلط تحديد التحرير، أو الجلسة بأكملها عند عدم تحديد أي شيء."),
+    ("Bouncing {} ({}%)", "جارٍ الارتداد {} ({}٪)"),
     ("Bring to Front", "الإحضار إلى الأمام"),
     ("Browse…", "استعراض…"),
+    ("Buffer size", "حجم الصوان"),
     ("Built-in", "مدمج"),
     ("Bus {}", "ناقل {}"),
     ("Bypass", "تجاوز"),
@@ -241,6 +271,7 @@ static AR: &[(&str, &str)] = &[
     ("Clear All Solos", "مسح كل المفرد"),
     ("Clear Automation", "مسح الأتمتة"),
     ("Clear Clips", "مسح المقاطع"),
+    ("Clear Recent", "مسح العناصر الحديثة"),
     ("Clear Sampler Sample", "مسح عينة السامبلر"),
     ("Clear Special", "مسح خاص"),
     ("Clear Trim Automation", "مسح أتمتة التشذيب"),
@@ -248,6 +279,7 @@ static AR: &[(&str, &str)] = &[
     ("Click", "النقرة"),
     ("Click a take (or the selection) to promote it to the main playlist", "انقر أخذة (أو التحديد) لترقيتها إلى قائمة التشغيل الرئيسية"),
     ("Click keys to step-enter notes into the selected MIDI clip at the insertion point.", "انقر المفاتيح لإدخال النوتات تدريجيًا في مقطع MIDI المحدد عند نقطة الإدراج."),
+    ("Click to add a MIDI clip to {} at the insertion point.", "انقر لإضافة مقطع MIDI إلى {} عند نقطة الإدراج."),
     ("Click/Countoff...", "نقرة/عد تنازلي..."),
     ("Click: open instrument · right-click: change", "نقرة: فتح الآلة · نقرة يمين: تغيير"),
     ("Click: open plugin · right-click: change", "نقرة: فتح المكوّن الإضافي · نقرة يمين: تغيير"),
@@ -279,6 +311,7 @@ static AR: &[(&str, &str)] = &[
     ("Coalesce Volume Automation to Clip Gain", "تجميع أتمتة المستوى في كسب المقطع"),
     ("Collaboration", "التعاون"),
     ("Color Palette", "لوحة الألوان"),
+    ("Columns beside the track headers: inserts, sends, I/O…", "الأعمدة بجانب رؤوس المسارات: الإضافات، الإرسالات، الدخل/الخرج…"),
     ("Commands Keyboard Focus (single-key editing)", "تركيز لوحة المفاتيح على الأوامر (تحرير بمفاتيح مفردة)"),
     ("Comments", "تعليقات"),
     ("Commit...", "تثبيت..."),
@@ -317,6 +350,7 @@ static AR: &[(&str, &str)] = &[
     ("Dark", "داكن"),
     ("Dashboard...", "لوحة المعلومات..."),
     ("Default", "افتراضي"),
+    ("Default ({})", "الافتراضي ({})"),
     ("Delay", "التأخير"),
     ("Delay (ticks)", "التأخير (تكتات)"),
     ("Delay Compensation", "تعويض التأخير"),
@@ -331,6 +365,7 @@ static AR: &[(&str, &str)] = &[
     ("Designate as Target Playlist", "تعيين كقائمة التشغيل الهدف"),
     ("Destructive Record", "تسجيل تدميري"),
     ("Device rate", "معدل الجهاز"),
+    ("Discard", "تجاهل"),
     ("Disk Allocation...", "تخصيص القرص..."),
     ("Disk Usage", "استخدام القرص"),
     ("Display name", "اسم العرض"),
@@ -339,6 +374,9 @@ static AR: &[(&str, &str)] = &[
     ("Don't Save", "عدم الحفظ"),
     ("Double Edit", "مضاعفة التحرير"),
     ("Double-click to import audio/MIDI at the insertion point or open a session.", "انقر نقرًا مزدوجًا لاستيراد صوت/MIDI عند نقطة الإدراج أو فتح جلسة."),
+    ("Drag to change the tempo (Shift: fine steps), or click to type it", "اسحب لتغيير السرعة (Shift: خطوات دقيقة)، أو انقر لكتابتها"),
+    ("Drop an audio file here", "أفلت ملف صوت هنا"),
+    ("Drop an audio file on this window", "أفلت ملف صوت على هذه النافذة"),
     ("Dropped Video Frame Indicator", "مؤشر إسقاط إطار الفيديو"),
     ("Dual-licensed MIT OR Apache-2.0. Made with Rust and egui.", "بترخيص مزدوج MIT OR Apache-2.0. صُنع بـ Rust وegui."),
     ("Duplicate", "تكرار"),
@@ -348,6 +386,7 @@ static AR: &[(&str, &str)] = &[
     ("Duplicate and Extend Edit", "تكرار التحرير وتمديده"),
     ("Duplicate of Main Playlist", "تكرار قائمة التشغيل الرئيسية"),
     ("Duplicate...", "تكرار..."),
+    ("Duration", "المدة"),
     ("Duration %", "المدة ٪"),
     ("Dyn3 Compressor/Limiter", "Dyn3 Compressor/Limiter"),
     ("Dyn3 De-Esser", "Dyn3 De-Esser"),
@@ -361,6 +400,7 @@ static AR: &[(&str, &str)] = &[
     ("Edit Memory Location", "تحرير موقع الذاكرة"),
     ("Edit Mode", "وضع التحرير"),
     ("Edit Note", "تحرير النوتة"),
+    ("Edit Parameters…", "تحرير المعلمات…"),
     ("Edit Tool", "أداة التحرير"),
     ("Edit Window Scrolling", "تمرير نافذة التحرير"),
     ("Edit Window Views", "عروض نافذة التحرير"),
@@ -403,6 +443,7 @@ static AR: &[(&str, &str)] = &[
     ("File", "ملف"),
     ("Fill Window With Session", "ملء النافذة بالجلسة"),
     ("Fill window with session (Alt+A)", "ملء النافذة بالجلسة (Alt+A)"),
+    ("Fills the selection on the selected tracks with a new clip.", "يملأ التحديد على المسارات المحددة بمقطع جديد."),
     ("Find Talent", "البحث عن مواهب"),
     ("First commit", "أول إيداع"),
     ("Flatten Performance...", "تسطيح الأداء..."),
@@ -451,6 +492,7 @@ static AR: &[(&str, &str)] = &[
     ("Import MIDI", "استيراد MIDI"),
     ("Inactive ", "غير نشط "),
     ("Includes alternate takes and muted clips. Refresh after editing.", "يتضمن الأخذات البديلة والمقاطع المكتومة. حدِّث بعد التحرير."),
+    ("Input", "الدخل"),
     ("Input Monitoring", "مراقبة الإدخال"),
     ("Input Quantize...", "تكميم الإدخال..."),
     ("Input Trim", "تشذيب الإدخال"),
@@ -465,6 +507,7 @@ static AR: &[(&str, &str)] = &[
     ("Inspect Clip", "فحص المقطع"),
     ("Inspect Session", "فحص الجلسة"),
     ("Inspect Track", "فحص المسار"),
+    ("Instrument", "الآلة"),
     ("Instrument Track", "مسار آلة"),
     ("Instrument: {} (click to change or open its editor)", "الآلة: {} (انقر للتغيير أو لفتح محررها)"),
     ("Instruments", "الآلات"),
@@ -629,9 +672,11 @@ static AR: &[(&str, &str)] = &[
     ("No model credits were built into this copy.", "لم تُبنَ بيانات نسب الطرازات في هذه النسخة."),
     ("No object tracks. Use the Object view in the Mix window to route tracks as objects.", "لا توجد مسارات كائنات. استخدم عرض الكائنات في نافذة الخلط لتوجيه المسارات ككائنات."),
     ("No parameters.", "لا توجد معاملات."),
+    ("No track is record-enabled: click the R button on the track to record.", "لا يوجد مسار مفعَّل التسجيل: انقر زر R على المسار للتسجيل."),
     ("Non-destructive, applied at playback to the selected MIDI tracks.", "غير تدميري، ويُطبَّق عند التشغيل على مسارات MIDI المحددة."),
     ("None", "بلا"),
     ("Normalize to -0.1 dBFS", "التسوية إلى -0.1 dBFS"),
+    ("Nothing to record on yet: add a track with Track › New…, then click its R button.", "لا يوجد ما يُسجَّل عليه بعد: أضف مساراً من مسار › جديد…، ثم انقر زر R الخاص به."),
     ("Nudge", "الإزاحة"),
     ("Nudge Clip Gain Down", "إزاحة كسب المقطع لأسفل"),
     ("Nudge Clip Gain Up", "إزاحة كسب المقطع لأعلى"),
@@ -650,6 +695,7 @@ static AR: &[(&str, &str)] = &[
     ("Original Time Stamp", "الطابع الزمني الأصلي"),
     ("Other Displays", "عروض أخرى"),
     ("Outlines", "المخططات"),
+    ("Output", "الخرج"),
     ("Output Meters", "مقاييس الإخراج"),
     ("Output device", "جهاز الإخراج"),
     ("Outputs", "مخارج"),
@@ -688,6 +734,7 @@ static AR: &[(&str, &str)] = &[
     ("Play/Stop", "تشغيل/إيقاف"),
     ("Playback Engine", "محرك التشغيل"),
     ("Playback Engine...", "محرك التشغيل..."),
+    ("Playlists", "قوائم التشغيل"),
     ("Plugin Automation", "أتمتة المكوّنات الإضافية"),
     ("Plus/Minus", "زائد/ناقص"),
     ("Post-Roll Amount", "مقدار التعقيب"),
@@ -737,6 +784,7 @@ static AR: &[(&str, &str)] = &[
     ("Redo {}", "إعادة {}"),
     ("Reduce motion", "تقليل الحركة"),
     ("Refresh Report", "تحديث التقرير"),
+    ("Refresh devices", "تحديث الأجهزة"),
     ("Regroup", "إعادة التجميع"),
     ("Rel Time", "وقت نسبي"),
     ("Remove", "إزالة"),
@@ -748,6 +796,7 @@ static AR: &[(&str, &str)] = &[
     ("Remove Send", "إزالة الإرسال"),
     ("Remove Tempo Change", "إزالة تغيير الإيقاع"),
     ("Remove Warp", "إزالة الالتواء"),
+    ("Remove from Folder", "إزالة من المجلد"),
     ("Remove send", "إزالة الإرسال"),
     ("Remove {} from the session?", "إزالة {} من الجلسة؟"),
     ("Rename Clip", "إعادة تسمية المقطع"),
@@ -757,8 +806,10 @@ static AR: &[(&str, &str)] = &[
     ("Render", "تصيير"),
     ("Render Clip Gain", "تصيير كسب المقطع"),
     ("Renderer", "وحدة التصيير"),
+    ("Renders and AudioSuite processes run to completion before returning.", "تُستكمل عمليات التصدير وAudioSuite قبل العودة."),
     ("Renders, bounces and AudioSuite processes run to completion before returning.", "تُنفَّذ عمليات التصيير والخلط ومعالجات AudioSuite حتى اكتمالها قبل العودة."),
     ("Renumber Bars...", "إعادة ترقيم الموازير..."),
+    ("Reopen the audio devices with these settings", "إعادة فتح أجهزة الصوت بهذه الإعدادات"),
     ("Repeat", "تكرار"),
     ("Repeat to Fill Selection", "التكرار لملء التحديد"),
     ("Repeat...", "تكرار..."),
@@ -797,6 +848,7 @@ static AR: &[(&str, &str)] = &[
     ("Samples", "عينات"),
     ("Save", "حفظ"),
     ("Save As Template...", "حفظ كقالب..."),
+    ("Save As…", "حفظ باسم…"),
     ("Save Session", "حفظ الجلسة"),
     ("Save Session As", "حفظ الجلسة باسم"),
     ("Save Session As...", "حفظ الجلسة باسم..."),
@@ -805,6 +857,8 @@ static AR: &[(&str, &str)] = &[
     ("Save changes to “{}” before closing?", "حفظ التغييرات في “{}” قبل الإغلاق؟"),
     ("Saved preset {}", "تم حفظ الإعداد المسبق {}"),
     ("Scale...", "تحجيم..."),
+    ("Scan CLAP", "فحص CLAP"),
+    ("Scan VST3", "فحص VST3"),
     ("Scene And Take", "مشهد وأخذة"),
     ("Score Editor", "محرر التدوين"),
     ("Score Setup", "إعداد التدوين"),
@@ -841,6 +895,7 @@ static AR: &[(&str, &str)] = &[
     ("Send J", "الإرسال J"),
     ("Send Level", "مستوى الإرسال"),
     ("Send To...", "إرسال إلى..."),
+    ("Send level", "مستوى الإرسال"),
     ("Send to Back", "الإرسال إلى الخلف"),
     ("Send {}", "الإرسال {}"),
     ("Send {} · Choose destination", "الإرسال {} · اختر وجهة"),
@@ -883,9 +938,11 @@ static AR: &[(&str, &str)] = &[
     ("Shift...", "إزاحة..."),
     ("Show", "إظهار"),
     ("Show / Hide...", "إظهار / إخفاء..."),
+    ("Show Edit and Mix at once, e.g. one per monitor", "إظهار التحرير والمزج معاً، مثلاً واحد لكل شاشة"),
     ("Show Grid Lines", "إظهار خطوط الشبكة"),
     ("Show Target Playlist", "إظهار قائمة التشغيل الهدف"),
     ("Show grid lines", "إظهار خطوط الشبكة"),
+    ("Show in the Mix window", "الإظهار في نافذة المزج"),
     ("Show track names", "إظهار أسماء المسارات"),
     ("Sibelius...", "Sibelius..."),
     ("Sign In", "تسجيل الدخول"),
@@ -904,6 +961,7 @@ static AR: &[(&str, &str)] = &[
     ("Speed", "السرعة"),
     ("Splice", "وصل"),
     ("Split into Mono", "تقسيم إلى أحادي"),
+    ("Spot to where it was recorded", "تموضع عند موضع التسجيل"),
     ("Start", "البداية"),
     ("Start (ticks)", "البداية (تكتات)"),
     ("Start Collaboration...", "بدء التعاون..."),
@@ -914,6 +972,8 @@ static AR: &[(&str, &str)] = &[
     ("Stereo", "مجسم"),
     ("Stop", "إيقاف"),
     ("Stop (Space)", "إيقاف (مسافة)"),
+    ("Stop recording before recovering other work.", "أوقف التسجيل قبل استرداد عمل آخر."),
+    ("Stop recording first", "أوقف التسجيل أولاً"),
     ("Store Plugin State", "تخزين حالة المكوّن الإضافي"),
     ("Strength %", "القوة ٪"),
     ("Stretch", "تمديد"),
@@ -960,6 +1020,7 @@ static AR: &[(&str, &str)] = &[
     ("Time Lock/Unlock", "قفل/إلغاء قفل الوقت"),
     ("Time Operations", "عمليات الوقت"),
     ("Time Operations Window", "نافذة عمليات الوقت"),
+    ("Time Scale", "مقياس الوقت"),
     ("Timecode", "الرمز الزمني"),
     ("Timecode 2", "الرمز الزمني 2"),
     ("Timecode Rate", "معدل الرمز الزمني"),
@@ -990,6 +1051,8 @@ static AR: &[(&str, &str)] = &[
     ("Track Timebase", "الأساس الزمني للمسار"),
     ("Track Transcription Lane", "حارة تفريغ المسار"),
     ("Track View", "عرض المسار"),
+    ("Track options", "خيارات المسار"),
+    ("Track tint in the Edit window", "تظليل المسار في نافذة التحرير"),
     ("Tracks", "المسارات"),
     ("Tracks and Groups", "المسارات والمجموعات"),
     ("Tracks: {}", "المسارات: {}"),
@@ -1024,6 +1087,7 @@ static AR: &[(&str, &str)] = &[
     ("Unsaved Changes", "تغييرات غير محفوظة"),
     ("Untitled", "بدون عنوان"),
     ("Update Active Configuration", "تحديث التهيئة النشطة"),
+    ("Use", "استخدام"),
     ("User Time Stamp", "الطابع الزمني للمستخدم"),
     ("User presets need the desktop app.", "تحتاج الإعدادات المسبقة للمستخدم إلى تطبيق سطح المكتب."),
     ("Uses the edit selection.", "يستخدم تحديد التحرير."),
@@ -1043,6 +1107,7 @@ static AR: &[(&str, &str)] = &[
     ("Video...", "فيديو..."),
     ("View", "عرض"),
     ("View Flags", "أعلام العرض"),
+    ("Voice: dyn plays the track, off makes it inactive", "الصوت: dyn يشغّل المسار، وإيقافه يجعله غير نشط"),
     ("Waveform Zoom", "تكبير الموجة الصوتية"),
     ("Waveform zoom in (Cmd+Alt+])", "تكبير الموجة الصوتية (Cmd+Alt+])"),
     ("Waveforms", "موجات صوتية"),
@@ -1335,11 +1400,89 @@ static AR: &[(&str, &str)] = &[
     ("{} object track(s)", "{} مسار كائنات"),
     ("{} preset", "إعداد مسبق {}"),
     ("{} — {} from channel {}", "{} — {} من القناة {}"),
+    ("{}: click to open · {}click to bypass · right-click to change", "{}: انقر للفتح · انقر مع {} للتجاوز · انقر بالزر الأيمن للتغيير"),
     ("العربية", "العربية"),
     ("“{}” already exists. Do you want to replace it?", "“{}” موجود بالفعل. هل تريد استبداله؟"),
     ("🔍 Find clips", "🔍 بحث عن مقاطع"),
 ];
 
-fn tr_ar(s: &str) -> Option<&'static str> {
-    AR.binary_search_by(|(k, _)| (*k).cmp(s)).ok().map(|i| AR[i].1)
+/// The dictionary row for `s`: its keys (the English strings) are sorted.
+fn tr_ar_index(s: &str) -> Option<usize> {
+    AR.binary_search_by(|(k, _)| (*k).cmp(s)).ok()
+}
+
+/// The dictionary's Arabic side in visual order (`bidi.rs`), built once and shared by every
+/// `t()` call: the runs left to right as a right-to-left reader meets them, the letters
+/// inside each run in logical order for the shaper.
+fn visual_ar() -> &'static [String] {
+    static VISUAL: OnceLock<Vec<String>> = OnceLock::new();
+    VISUAL.get_or_init(|| AR.iter().map(|(_, ar)| bidi::visual_rtl(ar)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dictionary is a binary-searched static: it must stay sorted by its English keys.
+    #[test]
+    fn dictionary_is_sorted() {
+        assert!(AR.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    /// Arabic's lookups come back in visual order (`bidi.rs`): the first word of a sentence
+    /// sits at the reading end, a single word stays as it is, and unknown strings fall back
+    /// to English. (The language is a global and tests run in parallel, so the row is looked
+    /// up directly rather than through `t`.)
+    #[test]
+    fn arabic_lookups_read_right_to_left() {
+        let row = |s: &str| visual_ar()[tr_ar_index(s).unwrap()];
+        assert_eq!(row("Playback Engine"), "التشغيل محرك");
+        assert_eq!(row("Zoom In"), "تكبير");
+        assert!(tr_ar_index("unknown future label").is_none());
+    }
+
+    /// A pattern is filled in logical order and reordered afterwards, so two placeholders
+    /// cannot land in each other's places; a bare format spec takes its argument too.
+    #[test]
+    fn arabic_patterns_fill_before_the_pass() {
+        let pattern = |s: &str| AR[tr_ar_index(s).unwrap()].1;
+        assert_eq!(bidi::visual_rtl(&fill(pattern("Slide {} of {}"), &["3".into(), "10".into()])), "10 من 3 شريحة");
+        assert_eq!(fill("Slide {} of {:.1}%", &["3".into(), "9.87".into()]), "Slide 3 of 9.87%");
+    }
+
+    /// egui lays a label out run by run, left to right, and the bidi pass (`bidi.rs`) orders
+    /// an Arabic label's runs for it. On a real headless layout, with one of the system's
+    /// Arabic faces installed: after the pass the first word of a sentence sits rightmost,
+    /// and a left-to-right island inside it keeps its own order.
+    #[test]
+    fn arabic_labels_lay_out_right_to_left() {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        let painter = egui::Painter::new(ctx.clone(), egui::LayerId::background(), egui::Rect::EVERYTHING);
+        let font = egui::FontId::proportional(13.0);
+        // The font chain finds an Arabic face on Windows, macOS and most Linuxes; without
+        // one the glyph positions would mean nothing.
+        let probe = painter.layout_no_wrap("غ".into(), font.clone(), egui::Color32::WHITE);
+        let missing = painter.layout_no_wrap("\u{fffd}".into(), font.clone(), egui::Color32::WHITE);
+        let probe_uv = probe.rows[0].row.glyphs[0].uv_rect;
+        let missing_uv = missing.rows[0].row.glyphs[0].uv_rect;
+        if probe_uv == missing_uv || probe_uv.is_nothing() {
+            eprintln!("skipped: no Arabic face installed");
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+            return;
+        }
+        for (label, first, second) in [("مسار جديد", "مسار", "جديد"), ("حفظ كـ WAV…", "حفظ", "WAV")] {
+            let galley = painter.layout_no_wrap(bidi::visual_rtl(label), font.clone(), egui::Color32::WHITE);
+            let glyphs = &galley.rows[0].row.glyphs;
+            let x_of = |word: &str| glyphs.iter().filter(|g| word.contains(g.chr)).map(|g| g.pos.x).collect::<Vec<f32>>();
+            let (a, b) = (x_of(first), x_of(second));
+            assert!(!a.is_empty() && !b.is_empty(), "{label}: no glyphs for `{first}`/`{second}`");
+            assert!(
+                a.iter().all(|&x| b.iter().all(|&y| x > y)),
+                "`{label}`: `{first}` must sit right of `{second}` after the pass"
+            );
+        }
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+    }
 }
