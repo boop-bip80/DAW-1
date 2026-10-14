@@ -128,6 +128,8 @@ pub struct Tokens {
     pub counter_text: Color32,
     pub counter_label: Color32,
     pub accent: Color32,
+    /// Timeline and sampler editing marks, independent of the interface accent.
+    pub editor_accent: Color32,
     /// Foreground on blue accent-filled controls.
     pub on_accent: Color32,
     pub accent_dark: Color32,
@@ -244,6 +246,7 @@ impl Tokens {
         counter_text: Color32::from_rgb(104, 220, 120),
         counter_label: Color32::from_rgb(200, 200, 200),
         accent: SUITE_DARK.accent,
+        editor_accent: Color32::from_rgb(64, 132, 196),
         on_accent: SUITE_DARK.on_accent,
         accent_dark: SUITE_DARK.selection,
         mode_on: Color32::from_rgb(92, 196, 108),
@@ -333,6 +336,7 @@ impl Tokens {
         counter_text: Color32::from_rgb(18, 108, 40),
         counter_label: Color32::from_rgb(54, 57, 63),
         accent: Color32::from_rgb(62, 116, 180),
+        editor_accent: Color32::from_rgb(62, 116, 180),
         on_accent: Color32::WHITE,
         accent_dark: Color32::from_rgb(43, 88, 145),
         mode_on: Color32::from_rgb(75, 158, 88),
@@ -563,6 +567,7 @@ mod tests {
         assert_eq!(ctx.global_style().visuals.selection.bg_fill, suite.selection);
         assert_eq!(ctx.global_style().visuals.selection.stroke.color, suite.selection_text);
         assert_eq!(ctx.global_style().visuals.widgets.hovered.bg_stroke.color, suite.focus);
+        assert_eq!(dark.editor_accent, egui::Color32::from_rgb(64, 132, 196));
         for mode in [super::ThemeMode::AvidDark, super::ThemeMode::Light] {
             super::apply_mode(&ctx, mode);
             let original = if mode == super::ThemeMode::Light { egui::Visuals::light() } else { egui::Visuals::dark() };
@@ -575,6 +580,8 @@ mod tests {
     fn artcraft_dark_roles_preserve_audio_semantics_and_light() {
         let dark = super::Tokens::DARK;
         let light = super::Tokens::LIGHT;
+        assert_eq!(light.editor_accent, light.accent);
+        assert_eq!(super::Tokens::AVID_DARK.editor_accent, super::Tokens::AVID_DARK.accent);
         assert_eq!(dark.window_bg, egui::Color32::from_rgb(0x12, 0x13, 0x16));
         assert_eq!(dark.toolbar_bg, egui::Color32::from_rgb(0x0A, 0x0A, 0x0C));
         assert_eq!(dark.accent, egui::Color32::from_rgb(0x2D, 0x81, 0xFF));

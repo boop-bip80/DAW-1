@@ -21,6 +21,7 @@ pub const AVID_DARK: Tokens = Tokens {
     counter_text: Color32::from_rgb(104, 220, 120),
     counter_label: Color32::from_rgb(200, 200, 200),
     accent: Color32::from_rgb(64, 132, 196),
+    editor_accent: Color32::from_rgb(64, 132, 196),
     on_accent: Color32::WHITE,
     accent_dark: Color32::from_rgb(40, 92, 146),
     mode_on: Color32::from_rgb(92, 196, 108),
