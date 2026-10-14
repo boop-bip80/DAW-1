@@ -1,10 +1,10 @@
 //! Design tokens. Colours were chosen by eye to give a dark, studio-style look; they are ours.
 
-use craft_ui::theme::SuiteDarkPalette;
+use craft_ui::theme::SuitePalette;
 use egui::{Color32, FontFamily, FontId};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const SUITE_DARK: SuiteDarkPalette = SuiteDarkPalette::ARTCRAFT;
+const SUITE_DARK: SuitePalette = SuitePalette::ARTCRAFT_DARK;
 
 mod avid_dark;
 
@@ -534,7 +534,7 @@ pub fn apply_mode(ctx: &egui::Context, mode: ThemeMode) {
 mod tests {
     #[test]
     fn standard_dark_adapts_shared_suite_roles_and_focus() {
-        let suite = super::SuiteDarkPalette::ARTCRAFT;
+        let suite = super::SuitePalette::ARTCRAFT_DARK;
         let dark = super::Tokens::DARK;
         for (role, actual, expected) in [
             ("window", dark.window_bg, suite.window),
