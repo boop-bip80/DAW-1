@@ -1,4 +1,4 @@
-# .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
+# .deb/.rpm/Arch packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
 # the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand env vars in `src`) and
 # exports VERSION and NFPM_ARCH.
 #
@@ -58,6 +58,25 @@ overrides:
       - mesa-vulkan-drivers
       - xdg-desktop-portal
       - (pipewire-alsa or alsa-plugins-pulseaudio)
+  # Named ai.storyteller.soundcraft, not soundcraft: the AUR already has soundcraft, soundcraft-bin and
+  # soundcraft-git, and an AUR helper treats any installed package with an AUR name as its own and
+  # rebuilds it on the next update. ArtCraft Launcher also uses the bundle id to tell this package
+  # (which it updates with `pacman -U`) from an AUR build (which it leaves to the AUR helper).
+  # nfpm has no optdepends for Arch, so the recommends above have no equivalent here.
+  archlinux:
+    depends:
+      - glibc
+      - gcc-libs
+      - hicolor-icon-theme
+      - libxkbcommon
+      - alsa-lib
+      - vulkan-icd-loader
+    provides:
+      - soundcraft
+    conflicts:
+      - soundcraft
+      - soundcraft-bin
+      - soundcraft-git
 
 contents:
   - src: ${STAGE}/usr/bin/soundcraft
