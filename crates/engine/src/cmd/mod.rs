@@ -10,6 +10,7 @@ mod audio_midi;
 mod audiosuite;
 mod clap;
 mod clip;
+mod clip_list;
 mod clip_more;
 mod edit;
 mod edit_more;
@@ -24,15 +25,23 @@ mod more_util;
 mod options;
 mod plugin_state;
 mod query;
+pub(crate) mod sampler;
 mod setup_more;
 mod surround;
+mod tab;
 mod track;
 mod track_more;
 mod transport;
+mod transport_cue;
 mod video;
 mod view;
 mod view_more;
 mod vst3;
+mod zoom_toggle;
+
+pub use file::bounce_job;
+
+pub(crate) use edit::remember_selection;
 
 pub type Run = fn(&mut Engine, &Value) -> Result<Value>;
 /// `Err(reason)` = disabled.
@@ -51,6 +60,8 @@ pub struct CommandSpec {
     pub run: Run,
     pub journal: bool,
     pub undoable: bool,
+    /// Only touches `edit.zoom`, through `Engine::zoom_mut`.
+    pub view: bool,
 }
 
 /// Serializable description of a command.
@@ -80,18 +91,16 @@ impl CommandSpec {
     }
 }
 
-/// `cmd!(id, label, [menu…], shortcut, params, enabled, run)`; `query`/`noundo` variants.
+/// `cmd!(id, label, [menu…], shortcut, params, enabled, run)`; `query`/`noundo`/`view` variants.
 #[macro_export]
 macro_rules! cmd {
-    (query $id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr, $run:expr) => {
-        $crate::cmd::CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, params: $params, enabled: $en, run: $run, journal: false, undoable: false }
+    (query $($t:tt)*) => { $crate::cmd!(@spec false, false, false; $($t)*) };
+    (noundo $($t:tt)*) => { $crate::cmd!(@spec true, false, false; $($t)*) };
+    (view $($t:tt)*) => { $crate::cmd!(@spec false, false, true; $($t)*) };
+    (@spec $journal:literal, $undoable:literal, $view:literal; $id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr, $run:expr) => {
+        $crate::cmd::CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, params: $params, enabled: $en, run: $run, journal: $journal, undoable: $undoable, view: $view }
     };
-    (noundo $id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr, $run:expr) => {
-        $crate::cmd::CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, params: $params, enabled: $en, run: $run, journal: true, undoable: false }
-    };
-    ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $params:literal, $en:expr, $run:expr) => {
-        $crate::cmd::CommandSpec { id: $id, label: $label, menu: &[$($m),*], shortcut: $sc, params: $params, enabled: $en, run: $run, journal: true, undoable: true }
-    };
+    ($id:literal, $($t:tt)*) => { $crate::cmd!(@spec true, true, false; $id, $($t)*) };
 }
 
 pub fn command_specs() -> &'static [CommandSpec] {
@@ -108,6 +117,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(mix::specs());
         v.extend(options::specs());
         v.extend(transport::specs());
+        v.extend(transport_cue::specs());
+        v.extend(tab::specs());
         v.extend(query::specs());
         v.extend(health::specs());
         v.extend(audiosuite::specs());
@@ -116,6 +127,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(view_more::specs());
         v.extend(track_more::specs());
         v.extend(clip_more::specs());
+        v.extend(clip_list::specs());
         v.extend(event_more::specs());
         v.extend(setup_more::specs());
         v.extend(clap::specs());
@@ -123,7 +135,9 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(surround::specs());
         v.extend(plugin_state::specs());
         v.extend(instrument::specs());
+        v.extend(sampler::specs());
         v.extend(video::specs());
+        v.extend(zoom_toggle::specs());
         v
     })
 }
@@ -234,9 +248,7 @@ pub fn tracks_required(e: &Engine, cmd: &str, p: &Value) -> Result<Vec<TrackId>>
     if t.is_empty() { Err(bad(cmd, "no tracks: pass `track`/`tracks` or select tracks")) } else { Ok(t) }
 }
 
-/// Largest position accepted from parameters: 2^40 samples (about 265 days at 48 kHz). Clamping
-/// here keeps every later addition and subtraction on positions far away from overflow.
-pub const MAX_POSITION: Samples = 1 << 40;
+pub use soundcraft_time::MAX_POSITION;
 
 /// Position from `key`: a number of samples, or `{"seconds": x}`, or a string in the main counter format.
 /// Values are clamped to ±[`MAX_POSITION`].
@@ -271,7 +283,7 @@ fn position_param_raw(e: &Engine, cmd: &str, p: &Value, key: &str) -> Result<Opt
             }
         };
         for f in fmts {
-            if let Ok(x) = soundcraft_time::parse_position(body, f, s.sample_rate, &s.tempo, s.frame_rate, s.timecode_start) {
+            if let Ok(x) = s.parse_position(body, f) {
                 return Ok(Some(x));
             }
         }
@@ -291,6 +303,10 @@ pub fn range_param(e: &Engine, cmd: &str, p: &Value) -> Result<Range> {
         (Some(a), None, None) => Ok(Range::point(a)),
         _ => Ok(e.session().edit.selection),
     }
+}
+
+pub fn clip_id(p: &Value, cmd: &str) -> Result<ClipId> {
+    p.get("clip").and_then(Value::as_u64).map(ClipId).ok_or_else(|| bad(cmd, "`clip` id required"))
 }
 
 pub fn clip_ids_param(e: &Engine, p: &Value) -> Vec<ClipId> {

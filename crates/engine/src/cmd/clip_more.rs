@@ -101,12 +101,13 @@ fn regroup(e: &mut Engine, p: &Value) -> Result<Value> {
 
 fn same_material(a: &Clip, b: &Clip) -> bool {
     a.length == b.length
-        && match (&a.content, &b.content) {
-            (ClipContent::Audio { source: s1, offset: o1 }, ClipContent::Audio { source: s2, offset: o2 }) => s1 == s2 && o1 == o2,
-            (ClipContent::Midi { sequence: q1 }, ClipContent::Midi { sequence: q2 }) => q1 == q2,
-            (ClipContent::Video { source: s1, offset: o1 }, ClipContent::Video { source: s2, offset: o2 }) => s1 == s2 && o1 == o2,
-            _ => false,
-        }
+        && (a.loop_id.is_some() && a.loop_id == b.loop_id
+            || match (&a.content, &b.content) {
+                (ClipContent::Audio { source: s1, offset: o1 }, ClipContent::Audio { source: s2, offset: o2 }) => s1 == s2 && o1 == o2,
+                (ClipContent::Midi { sequence: q1 }, ClipContent::Midi { sequence: q2 }) => q1 == q2,
+                (ClipContent::Video { source: s1, offset: o1 }, ClipContent::Video { source: s2, offset: o2 }) => s1 == s2 && o1 == o2,
+                _ => false,
+            })
 }
 
 /// The loop a clip belongs to: back-to-back copies of the same material. Origin first.
@@ -160,6 +161,7 @@ fn unloop(e: &mut Engine, p: &Value) -> Result<Value> {
             } else {
                 for c in pl.clips.iter_mut().filter(|c| chain.contains(&c.id)) {
                     c.group = None;
+                    c.loop_id = None;
                 }
             }
         }
@@ -204,7 +206,7 @@ fn effects_render(e: &mut Engine, p: &Value) -> Result<Value> {
     let ids = clip_ids_param(e, p);
     let mut n = 0;
     for id in &ids {
-        if crate::io::render_clip_gain(e, *id)? {
+        if crate::io::render_clip_gain(e, "clip.effects_render", *id)? {
             n += 1;
         }
         let s = e.session_mut();
@@ -304,6 +306,42 @@ mod tests {
         assert!(e.execute("clip.unloop", &json!({"clip": ids[3].0})).is_err());
     }
 
+    /// A 100-sample MIDI clip with one note, on a fresh instrument-less MIDI track.
+    fn midi_engine() -> (Engine, TrackId, ClipId) {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Midi, ChannelFormat::Mono, None);
+        let id = s.new_clip_id();
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 240 });
+        crate::edit::place_clip(&mut s, t, Clip::midi(id, "m", 0, 100, seq));
+        s.edit.selected_tracks = vec![t];
+        (Engine::new(s), t, id)
+    }
+
+    #[test]
+    fn unloop_recognises_loops_after_source_edit() {
+        let (mut e, t, id) = midi_engine();
+        assert_eq!(e.execute("clip.loop", &json!({"clip": id.0, "count": 4})).unwrap()["loops"], 3);
+        // Editing the source note makes the copies' content differ from it.
+        if let Some(c) = e.session_mut().find_clip_mut(id)
+            && let ClipContent::Midi { sequence } = &mut c.content
+        {
+            sequence.notes[0].length = 1100;
+        }
+        e.execute("clip.unloop", &json!({"clip": id.0})).unwrap();
+        let left: Vec<ClipId> = e.session().track(t).unwrap().clips().iter().map(|c| c.id).collect();
+        assert_eq!(left, vec![id]);
+    }
+
+    #[test]
+    fn unloop_flatten_turns_loop_into_independent_clips() {
+        let (mut e, t, id) = midi_engine();
+        e.execute("clip.loop", &json!({"clip": id.0, "count": 3})).unwrap();
+        e.execute("clip.unloop", &json!({"clip": id.0, "mode": "flatten"})).unwrap();
+        assert_eq!(e.session().track(t).unwrap().clips().len(), 3);
+        assert!(e.session().track(t).unwrap().clips().iter().all(|c| c.loop_id.is_none() && c.group.is_none()));
+    }
+
     #[test]
     fn regroup_reuses_group() {
         let (mut e, _, ids) = engine_with(&[(0, 100, 0), (500, 100, 0), (900, 100, 0)]);
@@ -361,5 +399,70 @@ mod tests {
         assert_eq!(c.stretch, 1.0);
         assert_eq!(c.length, 18_000);
         assert_ne!(c.source(), Some(src));
+    }
+
+    fn peak_from(ch: &[f32], start: usize) -> f32 {
+        ch.get(start..).unwrap_or(&[]).iter().fold(0.0f32, |m, x| m.max(x.abs()))
+    }
+
+    fn max_abs_diff(a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+        a.iter().zip(b.iter()).flat_map(|(x, y)| x.iter().zip(y.iter()).map(|(p, q)| (p - q).abs())).fold(0.0f32, f32::max)
+    }
+
+    /// Gain and effects renders bake the current varispeed. The clip must not keep stretching the result.
+    #[test]
+    fn render_preserves_stretched_audio() {
+        for command in ["clip.gain_render", "clip.effects_render"] {
+            for ratio in [0.5_f64, 1.0, 2.0] {
+                let mut s = Session::default();
+                let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+                let tone: Vec<f32> = (0..9_600).map(|i| (i as f32 * 0.05).sin() * 0.4).collect();
+                let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
+                let src = crate::io::add_source(&mut s, "tone", buf, None, soundcraft_audio_io::FileFormat::Wav);
+                let id = s.new_clip_id();
+                crate::edit::place_clip(&mut s, t, Clip::audio(id, "tone", src, 0, 0, 9_600));
+                s.edit.selected_clips = vec![id];
+                let mut e = Engine::new(s);
+                e.execute("clip.gain", &json!({"clip": id.0, "db": -6.0})).unwrap();
+                e.execute("clip.conform_to_tempo", &json!({"clip": id.0, "source_bpm": 120.0 * ratio})).unwrap();
+                if command == "clip.effects_render" {
+                    e.execute("clip.effects_set", &json!({"clip": id.0, "params": {"gain": 3.0}})).unwrap();
+                }
+                let range = e.session().find_clip(id).unwrap().1.range();
+                let before = soundcraft_mix::render_clips(e.session(), t, range);
+                e.execute(command, &json!({"clip": id.0})).unwrap();
+                let c = e.session().find_clip(id).unwrap().1.clone();
+                assert!((c.stretch - 1.0).abs() < 1e-9, "{command} ratio {ratio} left stretch {}", c.stretch);
+                assert_eq!(c.gain_db, 0.0);
+                let after = soundcraft_mix::render_clips(e.session(), t, range);
+                let diff = max_abs_diff(&before, &after);
+                assert!(diff < 1e-5, "{command} ratio {ratio} changed the audio by {diff}");
+                if ratio < 1.0 {
+                    let tail = before.first().map(|ch| peak_from(ch, ch.len() / 2)).unwrap_or(0.0);
+                    assert!(tail > 0.02, "{command} conformed tail was silent before render: {tail}");
+                }
+            }
+        }
+
+        // Varispeed on a non-elastic track does not change the clip length. Render still matches it.
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let tone: Vec<f32> = (0..9_600).map(|i| (i as f32 * 0.05).sin() * 0.4).collect();
+        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
+        let src = crate::io::add_source(&mut s, "tone", buf, None, soundcraft_audio_io::FileFormat::Wav);
+        let id = s.new_clip_id();
+        crate::edit::place_clip(&mut s, t, Clip::audio(id, "tone", src, 0, 0, 9_600));
+        s.edit.selected_clips = vec![id];
+        let mut e = Engine::new(s);
+        e.execute("clip.elastic_properties", &json!({"clip": id.0, "ratio": 0.5})).unwrap();
+        e.execute("clip.gain", &json!({"clip": id.0, "db": -6.0})).unwrap();
+        let range = e.session().find_clip(id).unwrap().1.range();
+        let before = soundcraft_mix::render_clips(e.session(), t, range);
+        e.execute("clip.gain_render", &json!({"clip": id.0})).unwrap();
+        let c = e.session().find_clip(id).unwrap().1.clone();
+        assert_eq!(c.length, 9_600);
+        assert!((c.stretch - 1.0).abs() < 1e-9);
+        let after = soundcraft_mix::render_clips(e.session(), t, range);
+        assert!(max_abs_diff(&before, &after) < 1e-5);
     }
 }

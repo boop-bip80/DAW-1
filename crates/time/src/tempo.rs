@@ -55,6 +55,10 @@ fn valid_bpm(bpm: f64) -> Result<f64, TimeError> {
     if bpm.is_finite() && (5.0..=1000.0).contains(&bpm) { Ok(bpm) } else { Err(TimeError::Tempo(bpm)) }
 }
 
+fn valid_meter(numerator: u32, denominator: u32) -> bool {
+    (1..=64).contains(&numerator) && [1, 2, 4, 8, 16, 32, 64].contains(&denominator)
+}
+
 impl TempoMap {
     pub fn new(bpm: f64, numerator: u32, denominator: u32) -> Result<Self, TimeError> {
         let mut m = TempoMap::default();
@@ -68,6 +72,25 @@ impl TempoMap {
     }
     pub fn meters(&self) -> &[MeterEvent] {
         &self.meters
+    }
+
+    /// Repair a map read from a file: only valid tempos and meters, in tick order, with one of each
+    /// at tick 0.
+    pub fn sanitize(&mut self) {
+        self.tempos.retain(|e| e.tick >= 0 && valid_bpm(e.bpm).is_ok());
+        self.tempos.sort_by_key(|e| e.tick);
+        self.tempos.dedup_by_key(|e| e.tick);
+        if self.tempos.first().is_none_or(|e| e.tick > 0) {
+            let bpm = self.tempos.first().map_or(120.0, |e| e.bpm);
+            self.tempos.insert(0, TempoEvent { tick: 0, bpm });
+        }
+        self.meters.retain(|m| m.tick >= 0 && valid_meter(m.numerator, m.denominator));
+        self.meters.sort_by_key(|m| m.tick);
+        self.meters.dedup_by_key(|m| m.tick);
+        if self.meters.first().is_none_or(|m| m.tick > 0) {
+            let (numerator, denominator) = self.meters.first().map_or((4, 4), |m| (m.numerator, m.denominator));
+            self.meters.insert(0, MeterEvent { tick: 0, numerator, denominator });
+        }
     }
 
     /// Insert or replace the tempo at `tick`.
@@ -96,13 +119,31 @@ impl TempoMap {
     }
 
     /// Insert or replace the meter at `tick` (snapped to the bar line at or before it).
+    /// Later meter changes keep their bar numbers, so they stay on bar lines.
     pub fn set_meter(&mut self, tick: i64, numerator: u32, denominator: u32) -> Result<(), TimeError> {
-        if !(1..=64).contains(&numerator) || ![1, 2, 4, 8, 16, 32, 64].contains(&denominator) {
+        if !valid_meter(numerator, denominator) {
             return Err(TimeError::Meter(numerator, denominator));
         }
         let tick = if tick <= 0 { 0 } else { self.bar_start_tick(self.bar_beat_at_tick(tick).bar) };
-        let ev = MeterEvent { tick, numerator, denominator };
-        match self.meters.binary_search_by(|e| e.tick.cmp(&tick)) {
+        let later = self.take_meters_after(tick);
+        self.put_meter(MeterEvent { tick, numerator, denominator });
+        self.restore_meters_at_bars(later);
+        Ok(())
+    }
+
+    /// Remove a meter event (the one at tick 0 is kept). Later meter changes keep their bar numbers.
+    pub fn remove_meter(&mut self, tick: i64) -> bool {
+        if tick == 0 || !self.meters.iter().any(|e| e.tick == tick) {
+            return false;
+        }
+        let later = self.take_meters_after(tick);
+        self.meters.retain(|e| e.tick != tick);
+        self.restore_meters_at_bars(later);
+        true
+    }
+
+    fn put_meter(&mut self, ev: MeterEvent) {
+        match self.meters.binary_search_by(|e| e.tick.cmp(&ev.tick)) {
             Ok(i) => {
                 if let Some(e) = self.meters.get_mut(i) {
                     *e = ev;
@@ -110,16 +151,21 @@ impl TempoMap {
             }
             Err(i) => self.meters.insert(i, ev),
         }
-        Ok(())
     }
 
-    pub fn remove_meter(&mut self, tick: i64) -> bool {
-        if tick == 0 {
-            return false;
+    /// Remove the meters after `tick`, returning each with the bar it starts.
+    fn take_meters_after(&mut self, tick: i64) -> Vec<(i64, MeterEvent)> {
+        let later: Vec<_> = self.meters.iter().filter(|e| e.tick > tick).map(|e| (self.bar_beat_at_tick(e.tick).bar, *e)).collect();
+        self.meters.retain(|e| e.tick <= tick);
+        later
+    }
+
+    /// Put meters back at the start of their bars under the current earlier meters, in bar order.
+    fn restore_meters_at_bars(&mut self, later: Vec<(i64, MeterEvent)>) {
+        for (bar, ev) in later {
+            let tick = self.bar_start_tick(bar);
+            self.put_meter(MeterEvent { tick, ..ev });
         }
-        let before = self.meters.len();
-        self.meters.retain(|e| e.tick != tick);
-        before != self.meters.len()
     }
 
     /// Tempo in effect at `tick`.
@@ -155,6 +201,19 @@ impl TempoMap {
     /// Ticks → samples (exact for constant-tempo segments).
     pub fn tick_to_samples(&self, tick: i64, sr: SampleRate) -> Samples {
         to_samples(self.tick_to_samples_f(tick, sr))
+    }
+
+    /// Fractional ticks → sample position, without rounding to a whole MIDI tick first.
+    /// Tempo events fall on integer ticks, so each interval is linear even at an event boundary.
+    pub fn fractional_tick_to_samples(&self, tick: f64, sr: SampleRate) -> Samples {
+        if !tick.is_finite() {
+            return 0;
+        }
+        let left_tick = to_samples(tick.floor());
+        let left = self.tick_to_samples_f(left_tick, sr);
+        let right = self.tick_to_samples_f(left_tick.saturating_add(1), sr);
+        let fraction = (tick - left_tick as f64).clamp(0.0, 1.0);
+        to_samples(left + (right - left) * fraction)
     }
 
     fn tick_to_samples_f(&self, tick: i64, sr: SampleRate) -> f64 {
@@ -200,7 +259,7 @@ impl TempoMap {
         let mut cur_tick = 0i64;
         let first = self.meter_at_tick(0);
         if bar < 1 {
-            return (bar - 1).saturating_mul(first.ticks_per_bar());
+            return bar.saturating_sub(1).saturating_mul(first.ticks_per_bar());
         }
         for (i, m) in self.meters.iter().enumerate() {
             let next_tick = self.meters.get(i + 1).map(|n| n.tick);
@@ -289,6 +348,13 @@ mod tests {
     }
 
     #[test]
+    fn minimum_bar_saturates_instead_of_overflowing() {
+        let m = TempoMap::default();
+        assert_eq!(m.bar_start_tick(i64::MIN), i64::MIN);
+        assert_eq!(m.bar_start_tick(0), -TICKS_PER_QUARTER * 4);
+    }
+
+    #[test]
     fn tempo_change_is_integrated() {
         let mut m = TempoMap::default();
         let sr = SampleRate::HZ_48000;
@@ -296,6 +362,22 @@ mod tests {
         // Bar 1 at 120 = 96000 samples; bar 2 at 60 = 192000 samples.
         assert_eq!(m.tick_to_samples(TICKS_PER_QUARTER * 8, sr), 96_000 + 192_000);
         assert_eq!(m.samples_to_ticks(96_000 + 192_000, sr), TICKS_PER_QUARTER * 8);
+    }
+
+    #[test]
+    fn fractional_ticks_preserve_sample_positions_across_tempo_changes() {
+        let mut m = TempoMap::default();
+        m.set_tempo(1920, 90.0).unwrap();
+        for sr in [SampleRate::HZ_48000, SampleRate::new(44_100).unwrap(), SampleRate::new(96_000).unwrap()] {
+            for sample in [-10, 0, 1, 500, 47_999, 48_000, 48_001, 96_007, 400_123] {
+                let ticks = m.samples_to_ticks_f(sample, sr);
+                assert!((m.fractional_tick_to_samples(ticks, sr) - sample).abs() <= 1, "{sample} at {sr:?}");
+            }
+        }
+        assert_eq!(m.fractional_tick_to_samples(0.5, SampleRate::HZ_48000), 13);
+        for ticks in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(m.fractional_tick_to_samples(ticks, SampleRate::HZ_48000), 0);
+        }
     }
 
     #[test]
@@ -315,6 +397,22 @@ mod tests {
         let m = TempoMap::new(120.0, 6, 8).unwrap();
         assert_eq!(m.bar_beat_at_tick(TICKS_PER_QUARTER * 3), BarBeat { bar: 2, beat: 1, tick: 0 });
         assert_eq!(m.bar_beat_at_tick(TICKS_PER_QUARTER / 2), BarBeat { bar: 1, beat: 2, tick: 0 });
+    }
+
+    #[test]
+    fn sanitize_keeps_what_the_setters_accept() {
+        let tempo = |tick, bpm| TempoEvent { tick, bpm };
+        let meter = |tick, numerator, denominator| MeterEvent { tick, numerator, denominator };
+        let mut m = TempoMap {
+            tempos: vec![tempo(960, 4e9), tempo(3840, 90.0), tempo(-5, 100.0), tempo(1920, 60.0), tempo(1920, 70.0)],
+            meters: vec![meter(0, 0, 4), meter(3840, 3, 4)],
+        };
+        m.sanitize();
+        assert_eq!(m.tempos(), [tempo(0, 60.0), tempo(1920, 60.0), tempo(3840, 90.0)]);
+        assert_eq!(m.meters(), [meter(0, 3, 4), meter(3840, 3, 4)]);
+        let mut empty = TempoMap { tempos: Vec::new(), meters: Vec::new() };
+        empty.sanitize();
+        assert_eq!(empty, TempoMap::default());
     }
 
     #[test]

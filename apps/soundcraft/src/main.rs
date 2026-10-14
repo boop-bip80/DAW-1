@@ -11,6 +11,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod config;
 mod control_server;
 #[cfg(any(target_os = "windows", test))]
 mod graphics;
@@ -19,10 +20,19 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+
+/// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
+fn set_title(ctx: &egui::Context, title: String) {
+    let id = egui::Id::new("window_title");
+    if ctx.data(|d| d.get_temp::<String>(id)).as_deref() != Some(title.as_str()) {
+        ctx.data_mut(|d| d.insert_temp(id, title.clone()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+}
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -34,19 +44,33 @@ impl eframe::App for App {
         if let Some(menu) = &mut self.2 {
             menu.process(&mut self.0);
         }
-        self.0.logic(ctx);
+        self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.2 {
             menu.sync(&self.0);
         }
-        // Files dropped on the window: sessions open, audio/MIDI import.
+        // Files dropped on the window: audio on an instrument track or a Sampler window loads
+        // the sampler; otherwise sessions open and audio/MIDI import.
         let dropped: Vec<String> =
-            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect());
+            self.0.take_dropped_files(ctx).iter().map(|f| f.path().to_string_lossy().into_owned()).filter(|s| !s.is_empty()).collect();
         for p in dropped {
             open_path(&mut self.0, &p);
         }
         if self.0.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+        soundcraft_ui_egui::fit_window_to_screen(ctx);
+        let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
+        self.0.ui.window_maximized = maximized;
+        if let Some(r) = inner.filter(|_| !maximized) {
+            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+        }
+        self.0.ui.ui_scale = self.0.extra.ui_scale;
+        // Saved now rather than at exit: the recent list matters most after a crash.
+        if self.0.take_recent_changed() {
+            save_prefs(&self.0.ui);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
@@ -60,15 +84,16 @@ impl eframe::App for App {
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
         };
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        set_title(ctx, title);
     }
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
         self.0.raw_input_hook(raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.ui(ui);
+        self.0.guarded(|app| app.ui(ui));
     }
     fn on_exit(&mut self) {
+        self.0.close_autosave();
         save_prefs(&self.0.ui);
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
@@ -83,7 +108,7 @@ impl eframe::App for App {
 fn open_path(app: &mut SoundApp, p: &str) {
     let lower = p.to_ascii_lowercase();
     let r = if lower.ends_with(".scraft") {
-        app.run("session.open", serde_json::json!({"path": p}))
+        dialogs::run_or_ask(app, "session.open", serde_json::json!({"path": p}))
     } else if lower.ends_with(".mid") || lower.ends_with(".midi") || lower.ends_with(".smf") {
         app.run("file.import_midi", serde_json::json!({"path": p}))
     } else {
@@ -97,16 +122,7 @@ fn open_path(app: &mut SoundApp, p: &str) {
 
 /// The per-user settings directory: `ui.json`, `Autosave/`, `Presets/` and `logs/` live here.
 fn config_dir() -> Option<std::path::PathBuf> {
-    if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support/SoundCraft"))
-    } else if cfg!(windows) {
-        std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("SoundCraft"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-            .map(|c| c.join("soundcraft"))
-    }
+    config::config_dir()
 }
 
 fn prefs_path() -> Option<std::path::PathBuf> {
@@ -122,24 +138,24 @@ fn load_prefs() -> Option<UiState> {
     if !prefs_enabled() {
         return None;
     }
-    let bytes = std::fs::read(prefs_path()?).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let path = prefs_path()?;
+    match config::load_ui(&path) {
+        Ok(state) => state,
+        Err(error) => {
+            log::warn!("{error}");
+            None
+        }
+    }
 }
 
 fn save_prefs(ui: &UiState) {
     if !prefs_enabled() {
         return;
     }
-    if let Some(p) = prefs_path() {
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let mut ui = ui.clone();
-        ui.plugin_windows.clear();
-        ui.status.clear();
-        if let Ok(bytes) = serde_json::to_vec_pretty(&ui) {
-            let _ = std::fs::write(&p, bytes);
-        }
+    if let Some(path) = prefs_path()
+        && let Err(error) = config::save_ui(&path, ui)
+    {
+        log::warn!("{error}");
     }
 }
 
@@ -152,18 +168,27 @@ fn services() -> Services {
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 _ => d.add_filter(
                     "Audio",
-                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "aac", "mp4", "caf", "mkv", "webm"],
+                    &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
                 ),
             };
             d.pick_file().map(|p| p.to_string_lossy().into_owned())
         })),
-        pick_save: Some(Box::new(|_purpose: &str, default: &str| {
+        pick_save: Some(Box::new(|purpose: &str, default: &str| {
             let path = std::path::Path::new(default);
-            let mut d = rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]);
+            let mut d = match purpose {
+                "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
+                _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
+            };
+            if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
+                d = d.set_directory(dir);
+            }
             if let Some(n) = path.file_name().and_then(|n| n.to_str()) {
                 d = d.set_file_name(n);
             }
             d.save_file().map(|p| p.to_string_lossy().into_owned())
+        })),
+        pick_folder: Some(Box::new(|start: &str| {
+            rfd::FileDialog::new().set_directory(start).pick_folder().map(|p| p.to_string_lossy().into_owned())
         })),
     }
 }
@@ -198,7 +223,7 @@ fn main() -> eframe::Result {
     let files: Vec<String> = args
         .iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && !(i > &0 && args.get(i - 1).is_some_and(|p| p == "--control")))
+        .filter(|(i, a)| !(a.starts_with("--") || (i > &0 && args.get(i - 1).is_some_and(|p| p == "--control"))))
         .map(|(_, a)| a.clone())
         .collect();
     log::info!("SoundCraft {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
@@ -215,16 +240,18 @@ fn main() -> eframe::Result {
             },
             None => {
                 logger.no_file();
-                log::warn!("no log file: no settings directory (HOME, XDG_CONFIG_HOME or APPDATA is not set)");
+                log::warn!("no log file: no settings directory (profile override is empty or platform configuration is unavailable)");
             }
         }
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+    let prefs = load_prefs().unwrap_or_default();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundCraft")
-            .with_inner_size([1600.0, 1000.0])
+            .with_inner_size(sane_window_size(prefs.window_size))
+            .with_maximized(prefs.window_maximized)
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true)
             .with_app_id("ai.storyteller.soundcraft"),
@@ -233,20 +260,21 @@ fn main() -> eframe::Result {
     if let Some(icon) = app_icon() {
         options.viewport = options.viewport.with_icon(icon);
     }
-    // Before eframe creates the wgpu instance: default Windows to DirectX 12 only (see graphics.rs).
+    // Before eframe creates the wgpu instance: default Windows to DirectX 12 with FXC (see graphics.rs).
     #[cfg(target_os = "windows")]
-    graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
+    graphics::configure(&mut options, eframe::wgpu::Backends::from_env(), eframe::wgpu::Dx12Compiler::from_env());
     eframe::run_native(
         "SoundCraft",
         options,
         Box::new(move |cc| {
-            let player = if no_audio { None } else { Some(soundcraft_playback::Player::new(Arc::new(engine.session().clone()))) };
+            let player =
+                if no_audio { None } else { Some(soundcraft_playback::Player::with_config(Arc::new(engine.session().clone()), &prefs.audio)) };
             let mut app = SoundApp::new(engine, player, services());
             app.autosave_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Autosave")));
+            app.leftovers = app.autosave_dir.as_deref().map(soundcraft_engine::autosave::leftovers).unwrap_or_default();
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
-            if let Some(ui) = load_prefs() {
-                app.ui = ui;
-            }
+            app.extra.ui_scale = prefs.ui_scale;
+            app.ui = prefs;
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
@@ -274,4 +302,27 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// A saved window size, or the default when the prefs file holds nonsense (NaN, negative, tiny).
+fn sane_window_size([w, h]: [f32; 2]) -> [f32; 2] {
+    if w.is_finite() && h.is_finite() && w >= 960.0 && h >= 600.0 { [w.min(16_384.0), h.min(16_384.0)] } else { [1600.0, 1000.0] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_title;
+
+    #[test]
+    fn the_title_is_sent_only_when_it_changes() {
+        let ctx = egui::Context::default();
+        let titles = |title: &str| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| set_title(ui.ctx(), title.to_string()));
+            out.textures_delta.clear();
+            out.viewport_output.values().flat_map(|v| &v.commands).filter(|c| matches!(c, egui::ViewportCommand::Title(_))).count()
+        };
+        assert_eq!(titles("Song — SoundCraft"), 1);
+        assert_eq!(titles("Song — SoundCraft"), 0);
+        assert_eq!(titles("Song * — SoundCraft"), 1);
+    }
 }

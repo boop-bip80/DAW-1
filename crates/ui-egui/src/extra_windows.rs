@@ -52,15 +52,16 @@ pub fn run(app: &mut SoundApp, id: &str, p: &Value) -> Option<Value> {
 }
 
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
-    apply_customization(app, ctx);
     auto_update(app, ctx);
     renderer(app, ctx);
     ui_customization(app, ctx);
+    apply_customization(app, ctx);
 }
 
 fn apply_customization(app: &mut SoundApp, ctx: &egui::Context) {
     let want = (app.extra.ui_scale.clamp(0.75, 1.5), app.extra.reduce_motion);
-    if app.extra.applied == Some(want) {
+    // Rescaling mid-drag would move the Interface scale slider out from under the pointer.
+    if app.extra.applied == Some(want) || ctx.input(|i| i.pointer.any_down()) {
         return;
     }
     // Only touch the zoom once the user has changed it, so platform scaling stays untouched.
@@ -157,7 +158,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
                 ui.add(egui::Slider::new(&mut app.extra.ui_scale, 0.75..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
                 ui.end_row();
                 ui.label("Reduce motion");
-                ui.checkbox(&mut app.extra.reduce_motion, "");
+                crate::widgets::checkbox(ui, &mut app.extra.reduce_motion, "");
                 ui.end_row();
                 ui.label("Theme");
                 let mut chosen = None;
@@ -173,7 +174,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
                 }
                 ui.end_row();
                 ui.label("Auto-update configuration");
-                ui.checkbox(&mut app.extra.auto_update_config, "");
+                crate::widgets::checkbox(ui, &mut app.extra.auto_update_config, "");
                 ui.end_row();
             });
             if ui.button("Reset").clicked() {

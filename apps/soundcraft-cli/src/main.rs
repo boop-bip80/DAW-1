@@ -8,23 +8,32 @@
 //! soundcraft-cli commands [FILTER]               list commands
 //! soundcraft-cli describe ID                     one command's details
 //! soundcraft-cli app [--port P] METHOD [JSON]     call a running app's control channel
-//! soundcraft-cli mcp [--connect PORT] [--demo]    MCP server on stdio
+//! soundcraft-cli mcp [--connect PORT] [--demo] [--automation-read-root DIR] [--automation-write-root DIR]
+//!                                                 MCP server on stdio. The two roots confine every file the
+//!                                                 agent's commands read (open, import, presets) and write
+//!                                                 (save, bounce, export) to those folders, links followed;
+//!                                                 a root left out grants none of its access. They run the
+//!                                                 in-process server, so they conflict with --connect.
 //! soundcraft-cli parity [--write PATH]            parity report (markdown)
 //! soundcraft-cli plugins                          list built-in plugins
 //! ```
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod automation_args;
+
 use serde_json::{Value, json};
 use soundcraft_automation::{Backend, Headless, Remote, mcp::Server};
 use soundcraft_engine::Engine;
+use soundcraft_engine::file_access::{self, AutomationRoots};
 use std::io::Write;
 use std::process::ExitCode;
 
-/// Print without panicking on a closed pipe.
+/// Print without panicking on a closed pipe. A write error must not skip later work
+/// such as `--bounce` or `--save`, and must not by itself report success.
 macro_rules! outln {
     ($($t:tt)*) => {{
         let mut o = std::io::stdout().lock();
-        if writeln!(o, $($t)*).is_err() { return ExitCode::SUCCESS; }
+        let _ = writeln!(o, $($t)*);
     }};
 }
 
@@ -113,6 +122,14 @@ fn info(args: &[String]) -> ExitCode {
 
 fn convert(args: &[String]) -> ExitCode {
     let (Some(input), Some(output)) = (args.first(), args.get(1)) else { return fail("convert IN OUT") };
+    let rate = match parse_rate(arg_value(args, "--rate").as_deref()) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    let bit_depth = match parse_bit_depth(arg_value(args, "--bit-depth").as_deref()) {
+        Ok(b) => b,
+        Err(e) => return fail(e),
+    };
     let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => return fail(format!("{input}: {e}")),
@@ -122,7 +139,7 @@ fn convert(args: &[String]) -> ExitCode {
         Ok(x) => x,
         Err(e) => return fail(format!("{input}: {e}")),
     };
-    if let Some(rate) = arg_value(args, "--rate").and_then(|r| r.parse::<u32>().ok()) {
+    if let Some(rate) = rate {
         buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, rate);
         buf.sample_rate = rate;
     }
@@ -133,11 +150,6 @@ fn convert(args: &[String]) -> ExitCode {
     let Some(format) = soundcraft_audio_io::encode_format_for(&out_ext) else {
         return fail(format!("{output}: cannot write `.{out_ext}` files (supported: {})", soundcraft_audio_io::ENCODE_EXTENSIONS));
     };
-    let bit_depth = match arg_value(args, "--bit-depth").as_deref() {
-        Some("16") => soundcraft_audio_io::BitDepth::Int16,
-        Some("32") | Some("32f") => soundcraft_audio_io::BitDepth::Float32,
-        _ => soundcraft_audio_io::BitDepth::Int24,
-    };
     let opts = soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: true, bwf: None };
     match soundcraft_audio_io::encode(&buf, &opts).map_err(|e| e.to_string()).and_then(|b| std::fs::write(output, b).map_err(|e| e.to_string())) {
         Ok(()) => {
@@ -145,6 +157,25 @@ fn convert(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => fail(e),
+    }
+}
+
+fn parse_rate(v: Option<&str>) -> Result<Option<u32>, String> {
+    match v {
+        None => Ok(None),
+        Some(r) => match r.parse::<u32>() {
+            Ok(hz) if hz > 0 => Ok(Some(hz)),
+            _ => Err(format!("--rate: expected a sample rate in Hz, got `{r}`")),
+        },
+    }
+}
+
+fn parse_bit_depth(v: Option<&str>) -> Result<soundcraft_audio_io::BitDepth, String> {
+    match v {
+        None | Some("24") => Ok(soundcraft_audio_io::BitDepth::Int24),
+        Some("16") => Ok(soundcraft_audio_io::BitDepth::Int16),
+        Some("32") | Some("32f") => Ok(soundcraft_audio_io::BitDepth::Float32),
+        Some(b) => Err(format!("--bit-depth: expected 16, 24 or 32f, got `{b}`")),
     }
 }
 
@@ -187,7 +218,7 @@ fn finish(e: &mut Engine, args: &[String]) -> ExitCode {
         }
     }
     if let Some(path) = arg_value(args, "--save") {
-        match e.execute("session.save", &json!({"path": path})) {
+        match e.execute("session.save", &json!({"path": path, "replace": true})) {
             Ok(v) => outln!("{v}"),
             Err(err) => return fail(err),
         }
@@ -294,12 +325,45 @@ fn describe(args: &[String]) -> ExitCode {
     }
 }
 
+/// Control-channel methods. Every other dotted id is an engine command.
+fn is_control_method(method: &str) -> bool {
+    matches!(
+        method,
+        "engine.execute"
+            | "command"
+            | "engine.commands"
+            | "engine.parity"
+            | "session.inspect"
+            | "document.inspect"
+            | "ui.inspect"
+            | "ui.menu.list"
+            | "ui.menu.invoke"
+            | "ui.set"
+            | "ui.move"
+            | "ui.click"
+            | "ui.drag"
+            | "ui.key"
+            | "ui.text"
+            | "ui.screenshot"
+            | "app.quit"
+    )
+}
+
+/// A command id is shorthand for `engine.execute`. Documented control methods stay methods.
+fn app_request(method: &str, params: Value) -> (String, Value) {
+    if is_control_method(method) || !method.contains('.') {
+        (method.to_string(), params)
+    } else {
+        ("engine.execute".to_string(), json!({"command": method, "params": params}))
+    }
+}
+
 fn app(args: &[String]) -> ExitCode {
     let port = arg_value(args, "--port").or_else(|| std::env::var("SOUNDCRAFT_CONTROL_PORT").ok()).unwrap_or_else(|| "7979".into());
     let positional: Vec<&String> = args
         .iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && args.get(i - 1).is_some_and(|p| p == "--port")))
+        .filter(|(i, a)| !(a.starts_with("--") || (*i > 0 && args.get(i - 1).is_some_and(|p| p == "--port"))))
         .map(|(_, a)| a)
         .collect();
     let Some(method) = positional.first() else { return fail("app [--port P] METHOD [JSON]") };
@@ -311,17 +375,8 @@ fn app(args: &[String]) -> ExitCode {
         None => json!({}),
     };
     let mut r = Remote::new(&port);
-    // A bare command id is shorthand for engine.execute.
-    let (m, p) = if method.contains('.')
-        && !method.starts_with("ui.")
-        && !method.starts_with("engine.")
-        && !method.starts_with("session.")
-        && !method.starts_with("app.")
-    {
-        ("engine.execute".to_string(), json!({"command": method, "params": params}))
-    } else {
-        (method.to_string(), params)
-    };
+    // A bare command id is shorthand for engine.execute. Control-channel methods stay methods.
+    let (m, p) = app_request(method, params);
     match r.call(&m, p) {
         Ok(v) => {
             outln!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
@@ -331,15 +386,62 @@ fn app(args: &[String]) -> ExitCode {
     }
 }
 
+/// What `mcp` was asked for.
+struct McpArgs {
+    connect: Option<String>,
+    demo: bool,
+    roots: Option<std::sync::Arc<AutomationRoots>>,
+}
+
+/// Parse the `mcp` options up front: a malformed or misspelled root flag must not leave the
+/// server running unconfined.
+fn parse_mcp_args(args: &[String]) -> Result<McpArgs, String> {
+    let mut connect = None;
+    let mut demo = false;
+    let mut roots_args = automation_args::AutomationArgs::new(None, None);
+    let mut it = args.iter().cloned();
+    while let Some(a) = it.next() {
+        if roots_args.consume(&a, &mut it)? {
+            continue;
+        }
+        match a.as_str() {
+            "--connect" => connect = Some(it.next().ok_or("--connect needs a port or host:port")?),
+            "--demo" => demo = true,
+            other if other.starts_with("--automation-") => return Err(format!("unknown mcp option `{other}`")),
+            _ => {}
+        }
+    }
+    let roots = AutomationRoots::new(roots_args.read_root.as_deref(), roots_args.write_root.as_deref())?;
+    if roots.is_some() && connect.is_some() {
+        return Err("--automation-read-root and --automation-write-root confine the in-process server; a running app is not confined by them, \
+so drop --connect (or use --connect without the roots)"
+            .into());
+    }
+    Ok(McpArgs { connect, demo, roots })
+}
+
 fn mcp(args: &[String]) -> ExitCode {
+    let McpArgs { connect, demo, roots } = match parse_mcp_args(args) {
+        Ok(a) => a,
+        Err(err) => return fail(err),
+    };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let r = if let Some(port) = arg_value(args, "--connect") {
+    let r = if let Some(port) = connect {
         let mut s = Server::new(Remote::new(&port));
         s.serve(stdin.lock(), stdout.lock())
     } else {
-        let e = if args.iter().any(|a| a == "--demo") { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
-        let mut s = Server::new(Headless::new(e));
+        // `--demo` is the operator's own choice, made before the roots come into force.
+        let e = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
+        let mut h = Headless::new(e);
+        if let Some(roots) = roots {
+            // Every thread of this process, not only the server's: nothing reaches past the roots.
+            file_access::confine_process(roots.clone());
+            let show = |root: Option<&std::path::Path>| root.map_or_else(|| "none".to_string(), |r| r.display().to_string());
+            eprintln!("soundcraft-cli: files confined: read root {}, write root {}", show(roots.read_root()), show(roots.write_root()));
+            h = h.with_automation_roots(Some(roots));
+        }
+        let mut s = Server::new(h);
         s.serve(stdin.lock(), stdout.lock())
     };
     match r {
@@ -351,7 +453,7 @@ fn mcp(args: &[String]) -> ExitCode {
 fn parity(args: &[String]) -> ExitCode {
     let p = soundcraft_engine::catalog::parity_json();
     let mut md = String::new();
-    md.push_str("# Parity report\n\nGenerated by `soundcraft-cli parity --write docs/parity.md` (also `cargo xtask parity`).\n");
+    md.push_str("# Parity report\n\nGenerated by `soundcraft-cli parity --write docs/parity-checklist.md` (also `cargo xtask parity`).\n");
     md.push_str("It compares the incumbent's menu tree (feature names observed black-box, `crates/engine/catalog/menus.txt`) with SoundCraft's command registry.\n");
     md.push_str("UI-layer commands (windows, AudioSuite) are counted by the app's own report (`engine.parity` over the control channel).\n\n");
     md.push_str(&format!(
@@ -381,6 +483,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn command_ids_are_execute_shorthand_and_control_methods_stay_methods() {
+        let (m, p) = app_request("engine.history", json!({}));
+        assert_eq!(m, "engine.execute");
+        assert_eq!(p["command"], "engine.history");
+        let (m, p) = app_request("ui.theme", json!({"mode": "light"}));
+        assert_eq!(m, "engine.execute");
+        assert_eq!(p["params"]["mode"], "light");
+        let (m, _) = app_request("session.new", json!({"name": "Session A"}));
+        assert_eq!(m, "engine.execute");
+        let (m, _) = app_request("track.new", json!({}));
+        assert_eq!(m, "engine.execute");
+        for method in ["session.inspect", "engine.commands", "engine.parity", "ui.screenshot", "app.quit"] {
+            assert_eq!(app_request(method, json!({})).0, method);
+        }
+    }
+
+    #[test]
+    fn convert_rejects_invalid_rate_and_bit_depth() {
+        assert_eq!(parse_rate(None), Ok(None));
+        assert_eq!(parse_rate(Some("44100")), Ok(Some(44_100)));
+        assert!(parse_rate(Some("4410x")).is_err());
+        assert!(parse_rate(Some("0")).is_err());
+        assert!(matches!(parse_bit_depth(None), Ok(soundcraft_audio_io::BitDepth::Int24)));
+        assert!(matches!(parse_bit_depth(Some("16")), Ok(soundcraft_audio_io::BitDepth::Int16)));
+        assert!(matches!(parse_bit_depth(Some("32f")), Ok(soundcraft_audio_io::BitDepth::Float32)));
+        assert!(parse_bit_depth(Some("8")).is_err());
+    }
+
+    #[test]
     fn missing_media_gets_one_warning_each() {
         assert!(missing_warnings(&[]).is_empty());
         let w = missing_warnings(&["a.wav".to_string(), "b.wav: decode failed".to_string()]);
@@ -404,6 +535,7 @@ mod tests {
         let help = help_text();
         assert!(help.starts_with("soundcraft-cli info FILE"));
         assert!(help.ends_with("soundcraft-cli plugins                          list built-in plugins"));
+        assert!(help.contains("--automation-read-root DIR") && help.contains("--automation-write-root DIR"));
         assert!(!help.contains("```"));
         assert!(!help.contains("#![") && !help.contains("use serde_json"));
     }

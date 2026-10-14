@@ -1,17 +1,70 @@
 //! Design tokens. Colours were chosen by eye to give a dark, studio-style look; they are ours.
 
 use egui::{Color32, FontFamily, FontId};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whether the Light palette is active. Dark is the default (the incumbent is dark-only).
 static LIGHT_THEME: AtomicBool = AtomicBool::new(false);
 
-/// The operating system's appearance, asked once off the UI thread.
-static SYSTEM: AtomicU8 = AtomicU8::new(SYSTEM_UNKNOWN);
-const SYSTEM_UNKNOWN: u8 = 0;
-const SYSTEM_ASKING: u8 = 1;
-const SYSTEM_DARK: u8 = 2;
-const SYSTEM_LIGHT: u8 = 3;
+/// Unit tests that change or read the process-wide palette must own it until their assertions
+/// finish. The lock is re-entrant per thread, so a test may hold it and still build apps
+/// (`SoundApp::new` takes it too) without deadlocking itself.
+#[cfg(test)]
+pub(crate) fn lock_test_palette() -> TestPaletteGuard {
+    TestPaletteGuard::acquire()
+}
+
+/// RAII handle for the re-entrant, per-thread test palette lock; see [`lock_test_palette`].
+#[cfg(test)]
+pub(crate) struct TestPaletteGuard;
+
+#[cfg(test)]
+impl TestPaletteGuard {
+    fn acquire() -> Self {
+        palette_lock::acquire();
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestPaletteGuard {
+    fn drop(&mut self) {
+        palette_lock::release();
+    }
+}
+
+#[cfg(test)]
+mod palette_lock {
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    static PALETTE: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        /// How many guards this thread holds; the OS lock is taken on 0→1 and released on 1→0.
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+        static GUARD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn acquire() {
+        DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                GUARD.with(|guard| *guard.borrow_mut() = Some(PALETTE.lock().unwrap_or_else(PoisonError::into_inner)));
+            }
+            depth.set(depth.get() + 1);
+        });
+    }
+
+    pub(super) fn release() {
+        DEPTH.with(|depth| {
+            let left = depth.get().saturating_sub(1);
+            depth.set(left);
+            if left == 0 {
+                GUARD.with(|guard| *guard.borrow_mut() = None);
+            }
+        });
+    }
+}
 
 /// The Appearance setting (`ui.theme {mode}`). Dark by default; System and Light are opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -57,6 +110,8 @@ pub struct Tokens {
     pub toolbar_group: Color32,
     pub border: Color32,
     pub border_light: Color32,
+    /// The lit top/left edge of raised panels: track headers and Mix strips.
+    pub edge_light: Color32,
     pub text: Color32,
     pub text_dim: Color32,
     pub text_dark: Color32,
@@ -146,16 +201,15 @@ pub struct Tokens {
     pub knob_ring: Color32,
     /// Pan knob pointer.
     pub knob_pointer: Color32,
-    /// Mix insert slot holding a plugin.
-    pub insert_on: Color32,
-    /// Mix insert slot, bypassed.
-    pub insert_bypass: Color32,
-    /// Mix send slot in use.
-    pub send_on: Color32,
-    /// Mix insert/send slot outline.
-    pub slot_border: Color32,
     /// Mix-window section captions (INSERTS A-E, I/O…).
     pub section_label: Color32,
+    /// Plugin slots, as Pro Tools draws them: the well they sit in, an empty slot, a used slot's
+    /// face (top, bottom), a bypassed one's, and the dots, letters and arrows on them.
+    pub slot_well: Color32,
+    pub slot_empty: Color32,
+    pub slot_face: [Color32; 2],
+    pub slot_bypassed: [Color32; 2],
+    pub slot_mark: Color32,
 }
 
 impl Tokens {
@@ -167,6 +221,7 @@ impl Tokens {
         toolbar_group: Color32::from_rgb(24, 24, 25),
         border: Color32::from_rgb(14, 14, 14),
         border_light: Color32::from_rgb(64, 64, 66),
+        edge_light: Color32::from_rgba_premultiplied(20, 20, 20, 20),
         text: Color32::from_rgb(214, 214, 214),
         text_dim: Color32::from_rgb(150, 150, 152),
         text_dark: Color32::from_rgb(16, 16, 16),
@@ -233,51 +288,53 @@ impl Tokens {
         meter_bg: Color32::from_rgb(8, 8, 8),
         meter_clip_off: Color32::from_rgb(60, 20, 20),
         knob_bg: Color32::from_rgb(26, 26, 28),
-        knob_ring: Color32::from_rgb(90, 90, 94),
+        knob_ring: Color32::from_rgb(150, 150, 154),
         knob_pointer: Color32::from_rgb(230, 230, 230),
-        insert_on: Color32::from_rgb(52, 62, 80),
-        insert_bypass: Color32::from_rgb(70, 56, 30),
-        send_on: Color32::from_rgb(46, 66, 56),
-        slot_border: Color32::from_rgb(16, 16, 16),
         section_label: Color32::from_rgb(200, 200, 200),
+        slot_well: Color32::from_rgb(43, 43, 43),
+        slot_empty: Color32::from_rgb(39, 39, 39),
+        slot_face: [Color32::from_rgb(92, 92, 92), Color32::from_rgb(75, 75, 75)],
+        slot_bypassed: [Color32::from_rgb(66, 96, 146), Color32::from_rgb(50, 76, 120)],
+        slot_mark: Color32::from_rgb(159, 159, 159),
     };
 
     pub const LIGHT: Tokens = Tokens {
-        window_bg: Color32::from_rgb(238, 239, 242),
-        panel_bg: Color32::from_rgb(248, 249, 251),
-        panel_bg2: Color32::from_rgb(255, 255, 255),
-        toolbar_bg: Color32::from_rgb(230, 232, 236),
-        toolbar_group: Color32::from_rgb(242, 243, 246),
-        border: Color32::from_rgb(190, 193, 200),
-        border_light: Color32::from_rgb(210, 213, 220),
-        text: Color32::from_rgb(35, 36, 40),
-        text_dim: Color32::from_rgb(95, 98, 106),
-        text_dark: Color32::from_rgb(20, 21, 24),
-        header_text: Color32::from_rgb(45, 47, 53),
-        counter_bg: Color32::from_rgb(224, 226, 231),
-        counter_text: Color32::from_rgb(22, 116, 45),
-        counter_label: Color32::from_rgb(65, 68, 75),
+        window_bg: Color32::from_rgb(184, 186, 190),
+        panel_bg: Color32::from_rgb(204, 206, 210),
+        panel_bg2: Color32::from_rgb(216, 218, 222),
+        toolbar_bg: Color32::from_rgb(194, 196, 200),
+        toolbar_group: Color32::from_rgb(208, 210, 214),
+        border: Color32::from_rgb(100, 103, 109),
+        border_light: Color32::from_rgb(150, 153, 159),
+        edge_light: Color32::from_rgba_premultiplied(150, 150, 150, 150),
+        text: Color32::from_rgb(24, 25, 28),
+        text_dim: Color32::from_rgb(68, 70, 76),
+        text_dark: Color32::from_rgb(16, 17, 20),
+        header_text: Color32::from_rgb(30, 32, 36),
+        counter_bg: Color32::from_rgb(224, 226, 228),
+        counter_text: Color32::from_rgb(18, 108, 40),
+        counter_label: Color32::from_rgb(54, 57, 63),
         accent: Color32::from_rgb(62, 116, 180),
         accent_dark: Color32::from_rgb(43, 88, 145),
         mode_on: Color32::from_rgb(75, 158, 88),
         mode_on_text: Color32::from_rgb(255, 255, 255),
-        mode_off_text: Color32::from_rgb(48, 122, 62),
-        button: Color32::from_rgb(224, 226, 230),
-        button_hi: Color32::from_rgb(210, 213, 219),
-        button_border: Color32::from_rgb(175, 179, 187),
-        name_field: Color32::from_rgb(255, 255, 255),
-        name_field_sel: Color32::from_rgb(236, 242, 252),
-        ruler_bg: Color32::from_rgb(226, 228, 233),
-        ruler_label_bg: Color32::from_rgb(226, 228, 233),
-        ruler_text: Color32::from_rgb(70, 73, 80),
-        ruler_tick: Color32::from_rgb(130, 134, 142),
-        tempo_ruler: Color32::from_rgb(104, 170, 124),
-        meter_ruler: Color32::from_rgb(92, 158, 184),
-        marker_ruler: Color32::from_rgb(210, 213, 219),
-        playlist_bg: Color32::from_rgb(246, 247, 249),
-        playlist_alt: Color32::from_rgb(238, 240, 244),
-        grid_line: Color32::from_rgb(210, 213, 219),
-        bar_line: Color32::from_rgb(185, 189, 197),
+        mode_off_text: Color32::from_rgb(38, 106, 52),
+        button: Color32::from_rgb(214, 216, 220),
+        button_hi: Color32::from_rgb(200, 203, 208),
+        button_border: Color32::from_rgb(108, 111, 117),
+        name_field: Color32::from_rgb(236, 237, 239),
+        name_field_sel: Color32::from_rgb(224, 232, 244),
+        ruler_bg: Color32::from_rgb(198, 200, 204),
+        ruler_label_bg: Color32::from_rgb(198, 200, 204),
+        ruler_text: Color32::from_rgb(48, 50, 56),
+        ruler_tick: Color32::from_rgb(108, 111, 118),
+        tempo_ruler: Color32::from_rgb(92, 156, 112),
+        meter_ruler: Color32::from_rgb(80, 144, 172),
+        marker_ruler: Color32::from_rgb(186, 189, 194),
+        playlist_bg: Color32::from_rgb(210, 212, 216),
+        playlist_alt: Color32::from_rgb(202, 204, 208),
+        grid_line: Color32::from_rgb(188, 191, 196),
+        bar_line: Color32::from_rgb(162, 166, 172),
         selection: Color32::from_rgba_premultiplied(100, 145, 205, 90),
         playhead: Color32::from_rgb(210, 48, 42),
         insertion: Color32::from_rgb(35, 36, 40),
@@ -292,37 +349,38 @@ impl Tokens {
         meter_green: Color32::from_rgb(36, 160, 58),
         meter_yellow: Color32::from_rgb(190, 162, 20),
         meter_red: Color32::from_rgb(195, 42, 35),
-        fader_track: Color32::from_rgb(198, 201, 207),
-        strip_bg: Color32::from_rgb(235, 237, 241),
-        strip_section: Color32::from_rgb(244, 245, 247),
-        slot_bg: Color32::from_rgb(248, 249, 251),
-        automation_line: Color32::from_rgb(40, 42, 48),
-        menu_bar: Color32::from_rgb(222, 224, 229),
-        group_border: Color32::from_rgb(190, 193, 200),
-        mode_off: Color32::from_rgb(236, 240, 237),
-        counter_off: Color32::from_rgb(214, 230, 217),
-        counter_border: Color32::from_rgb(190, 193, 200),
-        counter_rule: Color32::from_rgb(204, 207, 213),
-        tool_bracket_off: Color32::from_rgb(200, 203, 210),
-        row_selected: Color32::from_rgb(198, 216, 240),
-        visible_dot: Color32::from_rgb(110, 113, 120),
-        big_counter_bg: Color32::from_rgb(224, 226, 231),
-        header_selected: Color32::from_rgb(206, 219, 238),
-        strip_selected: Color32::from_rgb(206, 219, 238),
-        marker_text: Color32::from_rgb(35, 36, 40),
-        playlist_lane: Color32::from_rgb(232, 234, 238),
-        universe_bg: Color32::from_rgb(228, 230, 234),
+        fader_track: Color32::from_rgb(120, 123, 129),
+        strip_bg: Color32::from_rgb(198, 200, 204),
+        strip_section: Color32::from_rgb(210, 212, 216),
+        slot_bg: Color32::from_rgb(194, 196, 201),
+        automation_line: Color32::from_rgb(30, 32, 38),
+        menu_bar: Color32::from_rgb(204, 206, 210),
+        group_border: Color32::from_rgb(118, 121, 127),
+        mode_off: Color32::from_rgb(202, 212, 204),
+        counter_off: Color32::from_rgb(192, 212, 198),
+        counter_border: Color32::from_rgb(118, 121, 127),
+        counter_rule: Color32::from_rgb(188, 191, 196),
+        tool_bracket_off: Color32::from_rgb(172, 175, 181),
+        row_selected: Color32::from_rgb(174, 196, 226),
+        visible_dot: Color32::from_rgb(86, 89, 96),
+        big_counter_bg: Color32::from_rgb(224, 226, 228),
+        header_selected: Color32::from_rgb(184, 200, 224),
+        strip_selected: Color32::from_rgb(184, 200, 224),
+        marker_text: Color32::from_rgb(24, 25, 28),
+        playlist_lane: Color32::from_rgb(200, 202, 206),
+        universe_bg: Color32::from_rgb(198, 200, 204),
         universe_view: Color32::from_rgb(40, 42, 48),
-        meter_bg: Color32::from_rgb(196, 199, 206),
-        meter_clip_off: Color32::from_rgb(232, 200, 198),
-        knob_bg: Color32::from_rgb(252, 252, 253),
-        knob_ring: Color32::from_rgb(150, 154, 162),
-        knob_pointer: Color32::from_rgb(40, 42, 48),
-        insert_on: Color32::from_rgb(206, 218, 236),
-        insert_bypass: Color32::from_rgb(240, 222, 186),
-        send_on: Color32::from_rgb(204, 230, 214),
-        slot_border: Color32::from_rgb(175, 179, 187),
-        section_label: Color32::from_rgb(95, 98, 106),
+        meter_bg: Color32::from_rgb(52, 54, 58),
+        meter_clip_off: Color32::from_rgb(92, 54, 54),
+        knob_bg: Color32::from_rgb(232, 233, 236),
+        knob_ring: Color32::from_rgb(116, 120, 128),
+        knob_pointer: Color32::from_rgb(30, 32, 38),
+        section_label: Color32::from_rgb(56, 58, 64),
+        slot_well: Color32::from_rgb(212, 214, 218),
+        slot_empty: Color32::from_rgb(198, 200, 205),
+        slot_face: [Color32::from_rgb(244, 245, 247), Color32::from_rgb(214, 216, 220)],
+        slot_bypassed: [Color32::from_rgb(190, 210, 240), Color32::from_rgb(160, 186, 228)],
+        slot_mark: Color32::from_rgb(92, 95, 102),
     };
 
     pub fn current() -> Tokens {
@@ -335,66 +393,44 @@ pub fn is_light() -> bool {
     LIGHT_THEME.load(Ordering::Relaxed)
 }
 
-/// Whether `mode` resolves to the Light palette right now. Never blocks.
+/// Resolve each frame from the integration's current OS appearance. Unknown uses Dark.
 pub fn wants_light(ctx: &egui::Context, mode: ThemeMode) -> bool {
     match mode {
         ThemeMode::Light => true,
         ThemeMode::Dark => false,
-        ThemeMode::System => system_is_light(ctx),
+        ThemeMode::System => ctx.system_theme() == Some(egui::Theme::Light),
     }
 }
 
-/// Forget the cached system appearance so the next System lookup asks again.
-pub fn refresh_system() {
-    let _ = SYSTEM.compare_exchange(SYSTEM_DARK, SYSTEM_UNKNOWN, Ordering::Relaxed, Ordering::Relaxed);
-    let _ = SYSTEM.compare_exchange(SYSTEM_LIGHT, SYSTEM_UNKNOWN, Ordering::Relaxed, Ordering::Relaxed);
-}
-
-/// The OS appearance. The query (a D-Bus call on Linux) runs once on a background thread; until it
-/// answers this reports dark, and `ctx` is repainted when the answer arrives.
-#[cfg(not(target_arch = "wasm32"))]
-fn system_is_light(ctx: &egui::Context) -> bool {
-    if SYSTEM.compare_exchange(SYSTEM_UNKNOWN, SYSTEM_ASKING, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-        let ctx = ctx.clone();
-        let spawned = std::thread::Builder::new().name("soundcraft-theme".into()).spawn(move || {
-            let light = matches!(dark_light::detect(), Ok(dark_light::Mode::Light));
-            SYSTEM.store(if light { SYSTEM_LIGHT } else { SYSTEM_DARK }, Ordering::Relaxed);
-            ctx.request_repaint();
-        });
-        if spawned.is_err() {
-            SYSTEM.store(SYSTEM_DARK, Ordering::Relaxed);
-        }
+/// A track's header and lane backgrounds in the Edit window, tinted with its colour by `tint` (0..1).
+pub fn track_backgrounds(color: [u8; 3], selected: bool, tint: f32) -> (Color32, Color32) {
+    let t = Tokens::current();
+    let k = tint.clamp(0.0, 1.0);
+    if k <= 0.0 {
+        return if selected { (t.header_selected, t.playlist_alt) } else { (t.panel_bg2, t.playlist_bg) };
     }
-    SYSTEM.load(Ordering::Relaxed) == SYSTEM_LIGHT
-}
-
-/// On the web the query is a synchronous `matchMedia` lookup (no threads there).
-#[cfg(target_arch = "wasm32")]
-fn system_is_light(_ctx: &egui::Context) -> bool {
-    if SYSTEM.compare_exchange(SYSTEM_UNKNOWN, SYSTEM_ASKING, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-        let light = matches!(dark_light::detect(), Ok(dark_light::Mode::Light));
-        SYSTEM.store(if light { SYSTEM_LIGHT } else { SYSTEM_DARK }, Ordering::Relaxed);
-    }
-    SYSTEM.load(Ordering::Relaxed) == SYSTEM_LIGHT
+    let c = rgb(color);
+    let header = t.panel_bg2.lerp_to_gamma(c, k * 0.55);
+    let header = if selected { crate::widgets::shade(header, 0.1) } else { header };
+    let lane = if selected { t.playlist_alt } else { t.playlist_bg }.lerp_to_gamma(c, k * 0.2);
+    (header, lane)
 }
 
 /// Track colours tinted for clip bodies.
 pub fn clip_colors(rgb: [u8; 3], selected: bool) -> (Color32, Color32, Color32) {
     let [r, g, b] = rgb;
-    let k = if selected { 0.95 } else { 0.62 };
-    let body = Color32::from_rgb((f32::from(r) * k) as u8, (f32::from(g) * k) as u8, (f32::from(b) * k) as u8);
-    let bar = Color32::from_rgb((f32::from(r) * 0.9) as u8, (f32::from(g) * 0.9) as u8, (f32::from(b) * 0.9) as u8);
+    let shade = |k: f32| Color32::from_rgb((f32::from(r) * k) as u8, (f32::from(g) * k) as u8, (f32::from(b) * k) as u8);
+    let tint = |k: f32| {
+        let t = |c: u8| (f32::from(c) + (255.0 - f32::from(c)) * k) as u8;
+        Color32::from_rgb(t(r), t(g), t(b))
+    };
+    let bar = shade(0.9);
     if is_light() {
         // A paler body and a waveform in a deep shade of the clip's own colour.
-        let tint = |c: u8, k: f32| (f32::from(c) + (255.0 - f32::from(c)) * k) as u8;
-        let k = if selected { 0.2 } else { 0.45 };
-        let body = Color32::from_rgb(tint(r, k), tint(g, k), tint(b, k));
-        let d = if selected { 0.22 } else { 0.32 };
-        let wave = Color32::from_rgb((f32::from(r) * d) as u8, (f32::from(g) * d) as u8, (f32::from(b) * d) as u8);
-        return (body, bar, wave);
+        return if selected { (tint(0.2), bar, shade(0.22)) } else { (tint(0.45), bar, shade(0.32)) };
     }
-    let wave = if selected { Color32::from_rgb(20, 20, 24) } else { Color32::from_rgb(12, 12, 14) };
-    (body, bar, wave)
+    // A dark body and a light waveform in the clip's own colour; selection inverts them.
+    if selected { (shade(0.7), bar, Color32::from_rgb(16, 16, 18)) } else { (shade(0.34), bar, tint(0.35)) }
 }
 
 pub fn rgb(c: [u8; 3]) -> Color32 {
@@ -430,8 +466,13 @@ pub fn apply(ctx: &egui::Context, light: bool) {
     v.widgets.inactive.fg_stroke.color = t.text;
     v.window_corner_radius = egui::CornerRadius::same(6);
     v.menu_corner_radius = egui::CornerRadius::same(4);
-    ctx.set_visuals(v);
-    ctx.global_style_mut(|s| {
+    // Keep receiving native OS appearance changes even when our palette is manual. On macOS,
+    // pinning egui's theme also pins the window appearance and hides later OS changes.
+    ctx.set_theme(egui::ThemePreference::System);
+    // Both egui style branches must use our resolved palette: egui can select either branch
+    // as the OS changes, including while SoundCraft's manual Light/Dark choice stays fixed.
+    ctx.all_styles_mut(|s| {
+        s.visuals = v.clone();
         s.spacing.item_spacing = egui::vec2(6.0, 4.0);
         s.spacing.button_padding = egui::vec2(6.0, 2.0);
         s.interaction.tooltip_delay = 0.4;
@@ -445,12 +486,39 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn test_palette_lock_is_reentrant_and_excludes_other_threads() {
+        // Regression for the parallel-run flakes: the process-wide palette must be owned for a
+        // whole test, re-entrant on the owning thread (so `SoundApp::new` can take it too), and
+        // exclusive against other threads (so a frame cannot flip it mid-test).
+        let outer = lock_test_palette();
+        let inner = lock_test_palette();
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _held = lock_test_palette();
+            let _ = tx.send(());
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "another thread must wait for the palette lock");
+        drop(inner);
+        drop(outer);
+        drop(app);
+        // Other tests compete for the lock too, and some hold it for seconds: allow for a queue.
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(120)).is_ok(), "the palette lock must be released when every holder drops it");
+    }
+
+    #[test]
     fn dark_is_the_default() {
         assert_eq!(ThemeMode::default(), ThemeMode::Dark);
         assert_eq!(UiState::default().theme, ThemeMode::Dark);
         // Prefs saved before the setting existed load as Dark.
         let old: UiState = serde_json::from_value(json!({"show_tracks_list": true})).unwrap_or_default();
         assert_eq!(old.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn prefs_saved_before_track_tint_get_the_default() {
+        let ui: UiState = serde_json::from_value(json!({"theme": "light"})).unwrap();
+        assert!((ui.track_tint - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -475,5 +543,80 @@ mod tests {
         assert_eq!(app.ui.theme, ThemeMode::Light);
         assert_eq!(app.run("ui.theme", json!({"mode": "system"})), Ok(json!({"mode": "system"})));
         assert!(crate::menus::UI_COMMANDS.iter().any(|c| c.0 == "ui.theme"));
+    }
+
+    #[test]
+    fn application_frames_follow_system_appearance_and_preserve_manual_palettes() {
+        // Mixer rendering tests also change the process-wide custom-painted palette.
+        let _palette = lock_test_palette();
+        fn frame(app: &mut SoundApp, ctx: &egui::Context, system_theme: Option<egui::Theme>, light: bool) {
+            let mode = app.ui.theme;
+            let colors = |app: &SoundApp| {
+                app.engine
+                    .session()
+                    .tracks
+                    .iter()
+                    .map(|track| {
+                        (track.color, track.playlists.iter().flat_map(|playlist| &playlist.clips).map(|clip| clip.color).collect::<Vec<_>>())
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let before = colors(app);
+            let mut output = ctx.run_ui(egui::RawInput { system_theme, ..Default::default() }, |ui| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                let tokens = if light { Tokens::LIGHT } else { Tokens::DARK };
+                assert_eq!(is_light(), light, "custom palette for {mode:?} with {system_theme:?}");
+                assert_eq!(Tokens::current().panel_bg, tokens.panel_bg);
+                assert_eq!(ctx.options(|options| options.theme_preference), egui::ThemePreference::System);
+                for theme in [egui::Theme::Light, egui::Theme::Dark] {
+                    let style = ctx.style_of(theme);
+                    assert_eq!(style.visuals.dark_mode, !light);
+                    assert_eq!(style.visuals.panel_fill, tokens.panel_bg);
+                    assert_eq!(style.visuals.widgets.inactive.bg_fill, tokens.button);
+                    assert_eq!(style.visuals.widgets.inactive.fg_stroke.color, tokens.text);
+                    assert_eq!(style.spacing.button_padding, egui::vec2(6.0, 2.0));
+                }
+                app.ui(ui);
+                assert_eq!(ui.visuals().panel_fill, tokens.panel_bg);
+                assert_eq!(ui.visuals().widgets.inactive.bg_fill, tokens.button);
+            });
+            output.textures_delta.clear();
+            assert_eq!(app.ui.theme, mode);
+            assert_eq!(serde_json::to_value(&app.ui).unwrap()["theme"], mode.id());
+            assert_eq!(colors(app), before, "appearance must preserve track and clip colors");
+        }
+
+        let appearances = [Some(egui::Theme::Light), Some(egui::Theme::Dark), Some(egui::Theme::Light), None];
+        for initial in [Some(egui::Theme::Light), Some(egui::Theme::Dark), None] {
+            let ctx = egui::Context::default();
+            let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+            app.ui = serde_json::from_value(json!({"theme": "system"})).unwrap();
+            frame(&mut app, &ctx, initial, initial == Some(egui::Theme::Light));
+        }
+
+        let ctx = egui::Context::default();
+        let mut engine = soundcraft_engine::demo::demo_engine();
+        let track = engine.session_mut().tracks.first_mut().unwrap();
+        track.color = [19, 83, 147];
+        track.playlists.iter_mut().flat_map(|playlist| &mut playlist.clips).next().unwrap().color = Some([211, 57, 99]);
+        let mut app = SoundApp::new(engine, None, Services::default());
+        for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+            app.run("ui.theme", json!({"mode": mode.id()})).unwrap();
+            for appearance in appearances {
+                let light = mode == ThemeMode::Light || (mode == ThemeMode::System && appearance == Some(egui::Theme::Light));
+                frame(&mut app, &ctx, appearance, light);
+            }
+            if mode != ThemeMode::System {
+                let latest = if mode == ThemeMode::Light { egui::Theme::Dark } else { egui::Theme::Light };
+                frame(&mut app, &ctx, Some(latest), mode == ThemeMode::Light);
+                app.run("ui.theme", json!({"mode": "system"})).unwrap();
+                // Resolve the current context immediately, without another OS appearance event.
+                app.logic(&ctx);
+                assert_eq!(is_light(), latest == egui::Theme::Light);
+                assert_eq!(ctx.global_style().visuals.dark_mode, latest != egui::Theme::Light);
+                frame(&mut app, &ctx, Some(latest), latest == egui::Theme::Light);
+            }
+        }
     }
 }
