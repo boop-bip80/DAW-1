@@ -257,6 +257,23 @@ pub fn floating(app: &mut SoundApp, ctx: &egui::Context) {
     crate::mix_window::send_window(app, ctx);
     about(app, ctx);
     session_info(app, ctx);
+    craft_ai(app, ctx);
+}
+
+/// Craft AI: the ArtCraft family's built-in local assistant — a local Gemma model of the
+/// user's choosing, never a cloud service. See `crate::craft_ai`.
+fn craft_ai(app: &mut SoundApp, ctx: &egui::Context) {
+    let mut open = app.ui.show_craft_ai;
+    if !open {
+        return;
+    }
+    egui::Window::new(crate::i18n::t("Craft AI"))
+        .open(&mut open)
+        .default_size(egui::vec2(380.0, 520.0))
+        .show(ctx, |ui| crate::craft_ai::show(app, ui));
+    if !open {
+        app.ui.show_craft_ai = false;
+    }
 }
 
 fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {

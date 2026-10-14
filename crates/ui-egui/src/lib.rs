@@ -19,6 +19,7 @@ pub mod midi_editor;
 pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
+pub mod craft_ai;
 pub mod panels;
 mod recent;
 pub mod recovery;
@@ -72,6 +73,9 @@ pub struct UiState {
     pub show_audio_health: bool,
     pub show_about: bool,
     pub show_midi_editor: bool,
+    /// Craft AI: the ArtCraft family's built-in local assistant (a floating window).
+    #[serde(default)]
+    pub show_craft_ai: bool,
     pub show_universe: bool,
     pub narrow_mix: bool,
     /// Mix window sections: inserts_ae, inserts_fj, sends_ae, sends_fj, io, comments, eq_curve, color.
@@ -147,6 +151,7 @@ impl Default for UiState {
             show_audio_health: false,
             show_about: false,
             show_midi_editor: false,
+            show_craft_ai: false,
             show_universe: false,
             narrow_mix: false,
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],

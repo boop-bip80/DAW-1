@@ -22,6 +22,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.clip_list_view", "Clip List", "View > Other Displays > Clip List", None),
     ("window.narrow_mix", "Narrow Mix", "View > Narrow Mix", Some("Cmd+Alt+M")),
     ("window.session_info", "Session Info", "", None),
+    ("window.craft_ai", "Craft AI", "Window > Craft AI", None),
     ("window.audio_health", "Session Audio Health", "", None),
     ("window.about", "About SoundCraft", "", None),
     ("window.close", "Close Window", "Window > Close Window", Some("Cmd+W")),
@@ -532,6 +533,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         "window.track_list" => toggle(&mut app.ui.show_tracks_list),
         "window.narrow_mix" => toggle(&mut app.ui.narrow_mix),
         "window.session_info" => toggle(&mut app.ui.show_session_info),
+        "window.craft_ai" => toggle(&mut app.ui.show_craft_ai),
         "window.audio_health" => {
             app.audio_health_report = None;
             toggle(&mut app.ui.show_audio_health)
