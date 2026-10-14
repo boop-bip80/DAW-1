@@ -1,7 +1,10 @@
 //! Design tokens. Colours were chosen by eye to give a dark, studio-style look; they are ours.
 
+use craft_ui::theme::SuiteDarkPalette;
 use egui::{Color32, FontFamily, FontId};
 use std::sync::atomic::{AtomicU8, Ordering};
+
+const SUITE_DARK: SuiteDarkPalette = SuiteDarkPalette::ARTCRAFT;
 
 mod avid_dark;
 
@@ -220,32 +223,35 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    /// Focused control border for standard Dark; alternative palettes keep egui defaults.
+    pub const DARK_FOCUS: Color32 = SUITE_DARK.focus;
+
     // ArtCraft native dark UI roles. Timeline, meters, clips and transport status remain semantic.
     pub const DARK: Tokens = Tokens {
-        window_bg: Color32::from_rgb(18, 19, 22),
-        panel_bg: Color32::from_rgb(16, 16, 20),
-        panel_bg2: Color32::from_rgb(30, 31, 34),
-        toolbar_bg: Color32::from_rgb(10, 10, 12),
-        toolbar_group: Color32::from_rgb(16, 16, 20),
-        border: Color32::from_rgb(54, 55, 58),
-        border_light: Color32::from_rgb(119, 120, 124),
+        window_bg: SUITE_DARK.window,
+        panel_bg: SUITE_DARK.panel,
+        panel_bg2: SUITE_DARK.raised,
+        toolbar_bg: SUITE_DARK.chrome,
+        toolbar_group: SUITE_DARK.panel,
+        border: SUITE_DARK.border,
+        border_light: SUITE_DARK.border_strong,
         edge_light: Color32::from_rgba_premultiplied(20, 20, 20, 20),
-        text: Color32::from_rgb(242, 241, 238),
-        text_dim: Color32::from_rgb(166, 166, 168),
+        text: SUITE_DARK.text,
+        text_dim: SUITE_DARK.text_secondary,
         text_dark: Color32::from_rgb(16, 16, 16),
-        header_text: Color32::from_rgb(242, 241, 238),
+        header_text: SUITE_DARK.text,
         counter_bg: Color32::from_rgb(4, 4, 4),
         counter_text: Color32::from_rgb(104, 220, 120),
         counter_label: Color32::from_rgb(200, 200, 200),
-        accent: Color32::from_rgb(45, 129, 255),
-        on_accent: Color32::from_rgb(6, 6, 7),
-        accent_dark: Color32::from_rgb(32, 59, 101),
+        accent: SUITE_DARK.accent,
+        on_accent: SUITE_DARK.on_accent,
+        accent_dark: SUITE_DARK.selection,
         mode_on: Color32::from_rgb(92, 196, 108),
         mode_on_text: Color32::from_rgb(10, 30, 12),
         mode_off_text: Color32::from_rgb(98, 196, 112),
-        button: Color32::from_rgb(30, 31, 34),
-        button_hi: Color32::from_rgb(50, 51, 55),
-        button_border: Color32::from_rgb(54, 55, 58),
+        button: SUITE_DARK.raised,
+        button_hi: SUITE_DARK.hover,
+        button_border: SUITE_DARK.border,
         name_field: Color32::from_rgb(208, 208, 208),
         name_field_sel: Color32::from_rgb(232, 232, 232),
         ruler_bg: Color32::from_rgb(40, 40, 41),
@@ -278,15 +284,15 @@ impl Tokens {
         strip_section: Color32::from_rgb(36, 36, 38),
         slot_bg: Color32::from_rgb(28, 28, 29),
         automation_line: Color32::from_rgb(240, 240, 240),
-        menu_bar: Color32::from_rgb(10, 10, 12),
+        menu_bar: SUITE_DARK.chrome,
         group_border: Color32::from_rgb(8, 8, 8),
         mode_off: Color32::from_rgb(20, 36, 22),
         counter_off: Color32::from_rgb(30, 50, 32),
         counter_border: Color32::from_rgb(50, 50, 50),
         counter_rule: Color32::from_rgb(40, 40, 40),
         tool_bracket_off: Color32::from_rgb(64, 64, 66),
-        row_selected: Color32::from_rgb(32, 59, 101),
-        visible_dot: Color32::from_rgb(166, 166, 168),
+        row_selected: SUITE_DARK.selection,
+        visible_dot: SUITE_DARK.text_secondary,
         big_counter_bg: Color32::from_rgb(0, 0, 0),
         header_selected: Color32::from_rgb(52, 58, 66),
         strip_selected: Color32::from_rgb(54, 58, 64),
@@ -299,7 +305,7 @@ impl Tokens {
         knob_bg: Color32::from_rgb(26, 26, 28),
         knob_ring: Color32::from_rgb(150, 150, 154),
         knob_pointer: Color32::from_rgb(230, 230, 230),
-        section_label: Color32::from_rgb(166, 166, 168),
+        section_label: SUITE_DARK.text_secondary,
         slot_well: Color32::from_rgb(43, 43, 43),
         slot_empty: Color32::from_rgb(39, 39, 39),
         slot_face: [Color32::from_rgb(92, 92, 92), Color32::from_rgb(75, 75, 75)],
@@ -498,7 +504,7 @@ pub fn apply_mode(ctx: &egui::Context, mode: ThemeMode) {
     v.selection.bg_fill = if mode == ThemeMode::Dark { t.row_selected } else { t.accent };
     if mode == ThemeMode::Dark {
         v.selection.stroke.color = t.text;
-        v.widgets.hovered.bg_stroke.color = egui::Color32::from_rgb(0x74, 0xAA, 0xFF);
+        v.widgets.hovered.bg_stroke.color = Tokens::DARK_FOCUS;
     }
     v.widgets.inactive.weak_bg_fill = t.button;
     v.widgets.inactive.bg_fill = t.button;
@@ -522,6 +528,49 @@ pub fn apply_mode(ctx: &egui::Context, mode: ThemeMode) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standard_dark_adapts_shared_suite_roles_and_focus() {
+        let suite = super::SuiteDarkPalette::ARTCRAFT;
+        let dark = super::Tokens::DARK;
+        for (role, actual, expected) in [
+            ("window", dark.window_bg, suite.window),
+            ("panel", dark.panel_bg, suite.panel),
+            ("raised panel", dark.panel_bg2, suite.raised),
+            ("toolbar", dark.toolbar_bg, suite.chrome),
+            ("toolbar group", dark.toolbar_group, suite.panel),
+            ("border", dark.border, suite.border),
+            ("strong border", dark.border_light, suite.border_strong),
+            ("text", dark.text, suite.text),
+            ("secondary text", dark.text_dim, suite.text_secondary),
+            ("header text", dark.header_text, suite.text),
+            ("accent", dark.accent, suite.accent),
+            ("accent foreground", dark.on_accent, suite.on_accent),
+            ("subdued accent", dark.accent_dark, suite.selection),
+            ("button", dark.button, suite.raised),
+            ("button hover", dark.button_hi, suite.hover),
+            ("button border", dark.button_border, suite.border),
+            ("menu bar", dark.menu_bar, suite.chrome),
+            ("selected row", dark.row_selected, suite.selection),
+            ("visible dot", dark.visible_dot, suite.text_secondary),
+            ("section label", dark.section_label, suite.text_secondary),
+            ("focus", super::Tokens::DARK_FOCUS, suite.focus),
+        ] {
+            assert_eq!(actual, expected, "{role}");
+        }
+        let _palette = super::lock_test_palette();
+        let ctx = egui::Context::default();
+        super::apply_mode(&ctx, super::ThemeMode::Dark);
+        assert_eq!(ctx.global_style().visuals.selection.bg_fill, suite.selection);
+        assert_eq!(ctx.global_style().visuals.selection.stroke.color, suite.selection_text);
+        assert_eq!(ctx.global_style().visuals.widgets.hovered.bg_stroke.color, suite.focus);
+        for mode in [super::ThemeMode::AvidDark, super::ThemeMode::Light] {
+            super::apply_mode(&ctx, mode);
+            let original = if mode == super::ThemeMode::Light { egui::Visuals::light() } else { egui::Visuals::dark() };
+            assert_eq!(ctx.global_style().visuals.widgets.hovered.bg_stroke, original.widgets.hovered.bg_stroke);
+            assert_eq!(ctx.global_style().visuals.selection.stroke, original.selection.stroke);
+        }
+    }
+
     #[test]
     fn artcraft_dark_roles_preserve_audio_semantics_and_light() {
         let dark = super::Tokens::DARK;
