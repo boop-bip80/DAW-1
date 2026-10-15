@@ -162,6 +162,24 @@ fn batch_keep_going_still_sets_is_error_on_partial_failure() {
     assert!(sess["tracks"].as_array().unwrap().iter().any(|t| t["name"] == "After"));
 }
 
+/// A batch past the cap is refused as a whole, naming the cap, and runs nothing: the first 1000
+/// used to run and the reply said nothing about the rest (#460).
+#[test]
+fn batch_over_the_cap_is_refused_before_anything_runs() {
+    let mut s = Server::new(Headless::new(Engine::default()));
+    let calls: Vec<Value> = (0..1001).map(|i| json!({"command": "track.new", "params": {"count": 1, "name": format!("T{i}")}})).collect();
+    let r = rpc(&mut s, 1, "tools/call", json!({"name": "batch", "arguments": {"calls": calls}}));
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("1001 entries") && text.contains("at most 1000"), "{text}");
+    assert_eq!(session(&mut s)["tracks"].as_array().unwrap().len(), 0, "nothing ran");
+    // exactly the cap still runs in full
+    let calls: Vec<Value> = (0..1000).map(|i| json!({"command": "track.new", "params": {"count": 1, "name": format!("T{i}")}})).collect();
+    let r = tool(&mut s, "batch", json!({"calls": calls}));
+    assert_eq!(r.as_array().map(Vec::len), Some(1000), "{r}");
+    assert_eq!(session(&mut s)["tracks"].as_array().unwrap().len(), 1000);
+}
+
 #[test]
 fn batch_rejects_non_array_calls() {
     let mut s = Server::new(Headless::new(Engine::default()));

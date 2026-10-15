@@ -6,6 +6,8 @@ use std::io::{BufRead, Write};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// The most calls one `batch` runs; a longer one is refused whole, so nothing is left half done.
+pub const MAX_BATCH_CALLS: usize = 1000;
 
 const INSTRUCTIONS: &str = "SoundCraft is a digital audio workstation (Pro Tools-class). Everything a user can do is a \
 command: call `list_commands` to discover ids and their params, then `execute` (or `batch`). Positions are samples \
@@ -135,9 +137,14 @@ impl<B: Backend> Server<B> {
                 let Some(calls) = args.get("calls").and_then(Value::as_array) else {
                     return error_result("`calls` must be an array");
                 };
+                // a batch past the cap is refused before anything runs: running the first 1000 and
+                // answering as if all had run left the rest silently undone (#460)
+                if calls.len() > MAX_BATCH_CALLS {
+                    return error_result(&format!("`calls` has {} entries; at most {MAX_BATCH_CALLS} run in one batch, split it", calls.len()));
+                }
                 let mut out = Vec::new();
                 let mut failed = false;
-                for c in calls.iter().take(1000) {
+                for c in calls {
                     let Some(cmd) = c.get("command").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
                         out.push(json!({"command": "", "ok": false, "error": "`command` required"}));
                         failed = true;
