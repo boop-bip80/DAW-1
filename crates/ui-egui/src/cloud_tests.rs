@@ -241,3 +241,47 @@ fn service_host_is_empty_without_env() {
     // Must not panic and must not hardcode a hostname.
     let _ = app.service();
 }
+
+// ---------------------------------------------------------------- large-file constraint documentation
+
+#[test]
+fn save_note_documents_in_memory_assembly() {
+    // save_note is the user-visible explanation of upload constraints.
+    // It must mention memory so users of large sessions understand the risk.
+    use craft_ui::cloud::CloudApp;
+    let app = app();
+    let note = app.save_note().unwrap_or_default();
+    assert!(
+        note.to_lowercase().contains("memory") || note.to_lowercase().contains("ram"),
+        "save_note must document the in-memory bundle constraint; got: {note}"
+    );
+}
+
+#[test]
+fn save_note_does_not_claim_cloud_is_safe_for_large_sessions() {
+    // Ensure we do not phrase save_note as if large sessions are fine.
+    use craft_ui::cloud::CloudApp;
+    let app = app();
+    let note = app.save_note().unwrap_or_default().to_lowercase();
+    // "may be slow" alone is insufficient. The note must mention a hard limit:
+    // memory, RAM, or a size qualifier.
+    let warns_about_limit = note.contains("ram") || note.contains("memory") || note.contains("cannot") || note.contains("exhaust");
+    assert!(warns_about_limit, "save_note must warn about the RAM limit, not just slowness: {note}");
+}
+
+// ---------------------------------------------------------------- .scraft silent audio loss prevention
+
+#[test]
+fn scraft_error_mentions_audio_loss() {
+    // The refusal error for a .scraft destination must explain *why* —
+    // that the audio would be silently absent. The user must be able to
+    // act on the message without reading source code.
+    use craft_ui::cloud::CloudApp;
+    let mut app = app();
+    let err = app.encode(1, Destination::new("session.scraft")).unwrap_err();
+    assert!(err.to_lowercase().contains("audio"), "the .scraft refusal must mention audio loss; got: {err}");
+    assert!(
+        err.to_lowercase().contains("without") || err.to_lowercase().contains("missing"),
+        "the .scraft refusal must explain what would be lost; got: {err}"
+    );
+}

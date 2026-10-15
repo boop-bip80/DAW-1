@@ -423,4 +423,52 @@ mod tests {
     fn legacy_token_without_a_service_is_not_loaded() {
         assert_eq!(token_for_service(&json!({"token": "secret"}), "https://one.example"), None);
     }
+
+    /// Verify that `write_private` creates the session file with mode 0600.
+    ///
+    /// The session token is a bearer credential. Mode 0600 limits it to the
+    /// owner's read-write, which is the minimum needed for the application
+    /// to load it. A world-readable credential file is a security defect.
+    #[test]
+    #[cfg(unix)]
+    fn write_private_creates_with_mode_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("soundcraft-cloud-test-0600-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        super::write_private(&path, b"{\"token\":\"test\",\"service\":\"https://x.example\"}")
+            .expect("write_private must succeed on a writable temp dir");
+
+        let meta = std::fs::metadata(&path).expect("file must exist after write_private");
+        let mode = meta.permissions().mode();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(mode & 0o777, 0o600, "session token file must be owner-read-write only (0600), got {:04o}", mode & 0o777);
+    }
+
+    /// Same check for an existing file: write_private must tighten permissions
+    /// even when the file was created by an earlier call with loose mode.
+    #[test]
+    #[cfg(unix)]
+    fn write_private_tightens_existing_file_to_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("soundcraft-cloud-test-0644-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        // Pre-create with permissive mode.
+        std::fs::write(&path, b"old").expect("pre-create must succeed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644 must succeed");
+
+        super::write_private(&path, b"{\"token\":\"updated\",\"service\":\"https://x.example\"}")
+            .expect("write_private must succeed on a writable file");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(mode & 0o777, 0o600, "write_private must tighten an existing 0644 file to 0600, got {:04o}", mode & 0o777);
+    }
 }

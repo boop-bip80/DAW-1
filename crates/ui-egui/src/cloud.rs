@@ -220,11 +220,13 @@ impl CloudApp for SoundApp {
         writes_as(into)?;
         let est = estimated_bundle_bytes(self.engine.session());
         if est > BUNDLE_SIZE_WARNING_BYTES {
-            log::warn!(
-                "cloud save: session estimated at {:.1} GiB; \
-                 upload may be slow or rejected by the service",
-                est as f64 / (1024.0 * 1024.0 * 1024.0)
+            let gib = est as f64 / (1024.0 * 1024.0 * 1024.0);
+            let msg = format!(
+                "Warning: session is ~{gib:.1} GiB. The bundle is assembled \
+                 in memory — upload may exhaust RAM or be rejected by the service.",
             );
+            log::warn!("cloud save: {msg}");
+            self.ui.status = msg;
         }
         let snapshot = self.engine.session().clone();
         let (bytes, _fresh) = session_bundle(&snapshot).map_err(|e| e.to_string())?;
@@ -292,8 +294,11 @@ impl CloudApp for SoundApp {
 
     fn save_note(&self) -> Option<String> {
         Some(
-            "Sessions are saved as SoundCraft bundles (.scraftz) that include \
-             their audio. Large sessions may be slow to upload."
+            "Sessions are saved as SoundCraft bundles (.scraftz) that pack every \
+             audio source into a ZIP. The entire bundle is assembled in memory \
+             before upload — sessions larger than available RAM cannot be saved \
+             to the cloud. Very large sessions (> 2 GiB) may be slow or rejected \
+             by the service."
                 .to_owned(),
         )
     }
