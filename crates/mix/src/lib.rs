@@ -1334,8 +1334,12 @@ fn bus_reads(t: &Track) -> impl Iterator<Item = BusId> + '_ {
         Route::Bus(b) if matches!(t.kind, TrackKind::Aux | TrackKind::Folder) => Some(*b),
         _ => None,
     };
-    let keys = t.mixer.inserts.iter().flatten().filter(|_| keyed(t)).filter(|i| soundcraft_dsp::takes_key(&i.plugin)).filter_map(|i| i.key);
-    input.into_iter().chain(keys)
+    input.into_iter().chain(key_reads(t))
+}
+
+/// The busses a strip's inserts read as key inputs.
+fn key_reads(t: &Track) -> impl Iterator<Item = BusId> + '_ {
+    t.mixer.inserts.iter().flatten().filter(|_| keyed(t)).filter(|i| soundcraft_dsp::takes_key(&i.plugin)).filter_map(|i| i.key)
 }
 
 /// The busses a strip writes: its output and its sends.
@@ -1371,6 +1375,12 @@ pub fn key_feeds_back(s: &Session, track: TrackId, bus: BusId) -> bool {
         next += 1;
     }
     false
+}
+
+/// The first key input that feeds back, as (keyed track, key bus): a routing change that makes
+/// a key bus carry the keyed track's own signal shows up here.
+pub fn key_loop(s: &Session) -> Option<(TrackId, BusId)> {
+    s.tracks.iter().find_map(|t| key_reads(t).find(|b| key_feeds_back(s, t.id, *b)).map(|b| (t.id, b)))
 }
 
 /// Strips that read no busses first, then the ones that do, ordered so bus producers come
@@ -2250,6 +2260,25 @@ pub fn render_clips(s: &Session, track: TrackId, range: Range) -> Vec<Vec<f32>> 
 
 /// Render one track through its inserts (pre-fader) — Commit / Freeze.
 pub fn render_track_pre_fader(s: &Session, track: TrackId, range: Range) -> Vec<Vec<f32>> {
+    // The tracks that feed the track's key inputs keep playing, heard only through the busses
+    // that lead there, or a keyed gate would commit silence.
+    let mut need: Vec<BusId> = s.track(track).map(|t| key_reads(t).collect()).unwrap_or_default();
+    let mut keep: Vec<TrackId> = Vec::new();
+    let mut next = 0;
+    while let Some(&b) = need.get(next) {
+        for o in s.tracks.iter().filter(|o| o.id != track && bus_writes(o).any(|w| w == b)) {
+            if keep.contains(&o.id) {
+                continue;
+            }
+            keep.push(o.id);
+            for r in bus_reads(o) {
+                if !need.contains(&r) {
+                    need.push(r);
+                }
+            }
+        }
+        next += 1;
+    }
     let mut solo = s.clone();
     // Multichannel tracks render into a main mix of their own format (straight through).
     let fmt = s.track(track).map_or(ChannelFormat::Stereo, |t| if t.channels() > 2 { t.format } else { ChannelFormat::Stereo });
@@ -2267,6 +2296,17 @@ pub fn render_track_pre_fader(s: &Session, track: TrackId, range: Range) -> Vec<
             t.automation.retain(|l| matches!(l.param, AutoParam::Plugin { .. }));
             t.mixer.sends.iter_mut().for_each(|x| *x = None);
             t.mixer.surround = None;
+        } else if keep.contains(&t.id) {
+            t.mixer.solo = false;
+            let feeds = |r: &Route| matches!(r, Route::Bus(b) if need.contains(b));
+            if !feeds(&t.mixer.output) {
+                t.mixer.output = Route::None;
+            }
+            for snd in &mut t.mixer.sends {
+                if snd.as_ref().is_some_and(|x| !feeds(&x.target)) {
+                    *snd = None;
+                }
+            }
         } else {
             t.inactive = true;
         }

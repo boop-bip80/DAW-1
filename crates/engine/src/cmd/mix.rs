@@ -455,6 +455,20 @@ fn insert_key(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"key": bus.map(|(_, name)| name), "ext_key": ins.key.is_some()}))
 }
 
+/// Refuses a routing change that made a key bus carry its keyed track's own signal (the engine
+/// then puts the session back as it was).
+pub(crate) fn refuse_key_loop(e: &Engine, cmd: &str) -> Result<()> {
+    let s = e.session();
+    match soundcraft_mix::key_loop(s) {
+        Some((t, b)) => {
+            let track = s.track(t).map_or("?", |t| t.name.as_str());
+            let bus = s.bus(b).map_or("?", |b| b.name.as_str());
+            Err(bad(cmd, format!("`{bus}` is a key input of `{track}` and would carry its own signal: a feedback loop")))
+        }
+        None => Ok(()),
+    }
+}
+
 fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let bus = str_param(p, "bus").ok_or_else(|| bad("mix.send", "`bus` required"))?.to_string();
     let t = tracks_required(e, "mix.send", p)?.first().copied().ok_or_else(|| bad("mix.send", "no track"))?;
@@ -473,6 +487,7 @@ fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     if let Some(x) = tr.mixer.sends.get_mut(slot) {
         *x = Some(sl);
     }
+    refuse_key_loop(e, "mix.send")?;
     Ok(json!({"slot": slot, "bus": bid}))
 }
 
@@ -946,6 +961,32 @@ mod tests {
         e.execute("mix.insert_key", &json!({"track": "Bass", "slot": 0, "bus": null})).unwrap();
         assert_eq!(insert(&e, "Bass").key, None);
         assert_eq!(insert(&e, "Bass").params["ext_key"], 0.0);
+    }
+
+    #[test]
+    fn routing_a_keyed_track_into_its_key_bus_is_refused() {
+        let mut e = Engine::default();
+        for name in ["Kick", "Bass", "Sub"] {
+            e.execute("track.new", &json!({"count": 1, "name": name, "format": "mono"})).unwrap();
+        }
+        e.execute("mix.send", &json!({"track": "Kick", "slot": 0, "bus": "Kick Key"})).unwrap();
+        e.execute("mix.insert", &json!({"track": "Bass", "slot": 0, "plugin": "compressor"})).unwrap();
+        e.execute("mix.insert_key", &json!({"track": "Bass", "slot": 0, "bus": "Kick Key"})).unwrap();
+        let before = e.session().clone();
+        // Straight from the keyed track, by send or by output.
+        let err = e.execute("mix.send", &json!({"track": "Bass", "slot": 0, "bus": "Kick Key"})).unwrap_err();
+        assert!(err.to_string().contains("feedback loop"), "{err}");
+        assert!(e.execute("track.output", &json!({"tracks": ["Bass"], "output": "Kick Key"})).is_err());
+        // Through an aux downstream of the keyed track.
+        e.execute("track.new", &json!({"count": 1, "name": "Ret", "kind": "aux", "format": "mono"})).unwrap();
+        e.execute("track.input", &json!({"tracks": ["Ret"], "input": "Ret Bus"})).unwrap();
+        e.execute("track.output", &json!({"tracks": ["Bass"], "output": "Ret Bus"})).unwrap();
+        assert!(e.execute("track.output", &json!({"tracks": ["Ret"], "output": "Kick Key"})).is_err());
+        assert!(e.execute("mix.send", &json!({"track": "Ret", "slot": 0, "bus": "Kick Key"})).is_err());
+        // Another track can still feed the key.
+        e.execute("mix.send", &json!({"track": "Sub", "slot": 0, "bus": "Kick Key"})).unwrap();
+        let bass = |s: &Session| s.track_by_name("Bass").unwrap().mixer.sends.clone();
+        assert_eq!(bass(e.session()), bass(&before));
     }
 
     #[test]

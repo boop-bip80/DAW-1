@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use soundcraft_audio_io::AudioBuffer;
-use soundcraft_mix::{key_feeds_back, render_range};
+use soundcraft_mix::{key_feeds_back, key_loop, render_range, render_track_pre_fader};
 use soundcraft_model::{BusId, ChannelFormat, Clip, Insert, Route, SendSlot, Session, SourceAudio, SourceId, TrackId, TrackKind};
 use soundcraft_time::Range;
 use std::sync::Arc;
@@ -27,13 +27,17 @@ fn send_to(s: &mut Session, t: TrackId, bus: BusId) {
 /// A quiet bass (-26 dBFS, under the compressor's threshold) with a compressor on it, and a
 /// kick (loud bursts) that only feeds the "Kick Key" bus: the main mix is the bass alone.
 fn kick_and_bass(key: bool, ext_key: bool) -> Session {
+    keyed_bass("compressor", key, ext_key)
+}
+
+fn keyed_bass(plugin: &str, key: bool, ext_key: bool) -> Session {
     let mut s = Session::default();
     let bus = s.add_bus("Kick Key", ChannelFormat::Mono);
     let bass = add_audio(&mut s, "Bass", 901, vec![0.05; LEN]);
     let kick = add_audio(&mut s, "Kick", 902, (0..LEN).map(|i| if i % 9600 < 2400 { 0.9 } else { 0.0 }).collect());
     s.track_mut(kick).unwrap().mixer.output = Route::None;
     send_to(&mut s, kick, bus);
-    let mut comp = Insert::new("compressor");
+    let mut comp = Insert::new(plugin);
     comp.params.insert("threshold".into(), -20.0);
     comp.params.insert("ratio".into(), 10.0);
     comp.params.insert("attack".into(), 1.0);
@@ -105,4 +109,35 @@ fn a_key_from_a_bus_the_track_feeds_is_a_feedback_loop() {
     s.track_mut(ducked).unwrap().mixer.inserts[0] = Some(gate);
     s.track_mut(ducked).unwrap().mixer.output = Route::Bus(key);
     assert!(key_feeds_back(&s, bass, key), "through a keyed track");
+}
+
+/// Commit renders the track alone, but the tracks feeding its key keep playing into the key bus.
+#[test]
+fn commit_of_a_keyed_track_keeps_its_key() {
+    let range = Range::new(0, LEN as i64);
+    let commit = |s: &Session| {
+        let bass = s.tracks.iter().find(|t| t.name == "Bass").unwrap().id;
+        render_track_pre_fader(s, bass, range)
+    };
+    // The gate opens only on the kick: without the key it would commit silence.
+    let gated = keyed_bass("expander_gate", true, true);
+    let live = render_range(&gated, range, 1024);
+    let committed = commit(&gated);
+    assert!(rms(&committed[0]) > 0.01, "the committed gate should open on the kick: {}", rms(&committed[0]));
+    let g = std::f32::consts::SQRT_2;
+    let diff = committed[0].iter().zip(&live[0]).map(|(c, l)| (c - l * g).abs()).fold(0.0f32, f32::max);
+    assert!(diff < 1e-4, "the commit should sound like the track in the mix: off by {diff}");
+    // A keyed compressor commits ducked.
+    let (plain, keyed) = (rms(&commit(&kick_and_bass(false, true))[0]), rms(&commit(&kick_and_bass(true, true))[0]));
+    assert!(keyed < 0.6 * plain, "the committed bass should be ducked: {keyed} vs {plain}");
+}
+
+#[test]
+fn a_route_into_a_key_bus_from_the_keyed_track_is_a_loop() {
+    let mut s = kick_and_bass(true, true);
+    assert_eq!(key_loop(&s), None);
+    let key = s.bus_by_name("Kick Key").unwrap().id;
+    let bass = s.tracks.iter().find(|t| t.name == "Bass").unwrap().id;
+    s.track_mut(bass).unwrap().mixer.sends[1] = Some(SendSlot::new(Route::Bus(key)));
+    assert_eq!(key_loop(&s), Some((bass, key)));
 }
