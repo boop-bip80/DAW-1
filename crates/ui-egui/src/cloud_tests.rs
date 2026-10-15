@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp};
 
+use crate::{Services, SoundApp};
 use super::{BUNDLE_SIZE_WARNING_BYTES, Destination, EntryKind, SAVES_AS, SESSION, estimated_bundle_bytes, opens, session_name, writes_as};
 
 fn app() -> SoundApp {
@@ -87,12 +87,16 @@ fn session_name_drops_folder_separators() {
 fn opens_accepts_scraftz() {
     let entry = craft_cloud::Entry {
         id: "1".into(),
+        room: String::new(),
         name: "song.scraftz".into(),
+        path: String::new(),
         kind: EntryKind::File,
         size: Some(1024),
+        modified: None,
         mime: Some("application/zip".into()),
         etag: None,
-        room: None,
+        writable: true,
+        shared_by: None,
     };
     assert!(opens(&entry));
 }
@@ -101,20 +105,35 @@ fn opens_accepts_scraftz() {
 fn opens_rejects_scraft() {
     let entry = craft_cloud::Entry {
         id: "2".into(),
+        room: String::new(),
         name: "song.scraft".into(),
+        path: String::new(),
         kind: EntryKind::File,
         size: Some(512),
+        modified: None,
         mime: Some("application/json".into()),
         etag: None,
-        room: None,
+        writable: true,
+        shared_by: None,
     };
     assert!(!opens(&entry));
 }
 
 #[test]
 fn opens_rejects_folder() {
-    let entry =
-        craft_cloud::Entry { id: "3".into(), name: "Projects".into(), kind: EntryKind::Folder, size: None, mime: None, etag: None, room: None };
+    let entry = craft_cloud::Entry {
+        id: "3".into(),
+        room: String::new(),
+        name: "Projects".into(),
+        path: String::new(),
+        kind: EntryKind::Folder,
+        size: None,
+        modified: None,
+        mime: None,
+        etag: None,
+        writable: false,
+        shared_by: None,
+    };
     assert!(!opens(&entry));
 }
 
