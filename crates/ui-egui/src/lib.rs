@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod bounce;
+pub mod cloud;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
@@ -125,6 +126,12 @@ pub struct UiState {
     pub window_size: [f32; 2],
     pub window_maximized: bool,
     pub ui_scale: f32,
+    /// Whether the cloud Open / Save As overlay is visible.
+    #[serde(default)]
+    pub show_cloud: bool,
+    /// Which cloud page (Open or Save As) is showing.
+    #[serde(default)]
+    pub cloud_page: cloud::CloudPage,
 }
 
 impl Default for UiState {
@@ -185,16 +192,21 @@ impl Default for UiState {
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
+            show_cloud: false,
+            cloud_page: cloud::CloudPage::Open,
         }
     }
 }
 
-/// Host services (file dialogs) injected by the app; absent in tests and on the web.
+/// Host services (file dialogs, URL opener) injected by the app; absent in tests and on the web.
 #[derive(Default)]
 pub struct Services {
     pub pick_open: Option<Box<dyn Fn(&str, &[&str]) -> Option<String>>>,
     pub pick_save: Option<Box<dyn Fn(&str, &str) -> Option<String>>>,
     pub pick_folder: Option<Box<dyn Fn(&str) -> Option<String>>>,
+    /// Open a URL in the system browser. Cloud sign-in and share links land here.
+    /// The web build passes `None`; the browser navigates directly through egui's open_url.
+    pub open_url: Option<Box<dyn Fn(&str)>>,
 }
 
 /// File-system-safe folder name for a plugin id (`clap:com.x.y` → `clap_com.x.y`).
@@ -267,6 +279,15 @@ pub struct SoundApp {
     pub ui: UiState,
     pub audio_health_report: Option<Result<Value, String>>,
     pub services: Services,
+    // ---- Cloud Open / Save / Share / account / presence -------------------
+    /// Cloud file state: folder listing, selected entry, in-flight transfer.
+    pub cloud: cloud::CloudFiles,
+    /// Session snapshot captured at encode time. Cleared on mark_saved/drop_pending.
+    pub cloud_sent: cloud::Sent,
+    /// Share dialog (open with the Share button or overflow menu).
+    pub share: craft_ui::share::ShareDialog,
+    /// Presence bar: who else is in the session right now.
+    pub presence: craft_ui::presence::PresenceBar,
     /// Set only by a desktop host after installing an OS menu bar.
     pub native_menu_bar: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
@@ -362,6 +383,10 @@ impl SoundApp {
             ui: UiState::default(),
             audio_health_report: None,
             services,
+            cloud: cloud::CloudFiles::default(),
+            cloud_sent: None,
+            share: craft_ui::share::ShareDialog::default(),
+            presence: craft_ui::presence::PresenceBar::default(),
             native_menu_bar: false,
             autosave_dir: None,
             autosaver: None,
@@ -1132,7 +1157,7 @@ impl SoundApp {
         }
     }
 
-    /// Per-frame logic: control channel, transport, document sync.
+    /// Per-frame logic: control channel, transport, document sync, cloud pump.
     pub fn logic(&mut self, ctx: &egui::Context) {
         if ctx.current_pass_index() > 0 {
             return;
@@ -1155,6 +1180,8 @@ impl SoundApp {
         let now = ctx.input(|i| i.time);
         let dt = self.last_frame.replace(now).map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
+        // Drain cloud worker answers; must run every frame so transfers complete.
+        cloud::pump(self, ctx);
         control::drain(self, ctx);
         self.note_recent_session();
         self.apply_editor_edits();
@@ -1263,6 +1290,9 @@ impl SoundApp {
         score_editor::show(self, &ctx);
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
+        // Cloud overlay: shown over everything except the menu bar. Rendered last
+        // so it appears on top; the dim layer covers the content beneath it.
+        cloud::show_cloud_overlay(self, &ctx);
         // Here, not in logic(): a covered or minimized window runs only logic(), with no vsync to pace it.
         if self.meters_live() {
             let hz = if self.ui.window == MainWindow::Mix { 60 } else { 30 };

@@ -7,6 +7,11 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    // Cloud
+    ("cloud.open", "Open from the Cloud", "", None),
+    ("cloud.save", "Save to the Cloud", "", None),
+    ("cloud.save_as", "Save to the Cloud As…", "", None),
+    ("cloud.link", "Link a Cloud Account", "", None),
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
@@ -277,7 +282,16 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     if app.ui.window == MainWindow::Edit || app.ui.mix_separate { "Edit" } else { "Mix" }
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Session title sits at the far right.
                     ui.label(egui::RichText::new(title).color(t.text_dim));
+                    ui.add_space(8.0);
+                    // Cloud controls: presence bar, share button, account badge.
+                    // Only drawn when a cloud backend is wired up (service configured).
+                    if crate::cloud::available(app) {
+                        crate::cloud::who(app, ui);
+                        crate::cloud::share_button(app, ui, &crate::cloud::copies());
+                        crate::cloud::shares(app);
+                    }
                 });
             });
         },
@@ -502,6 +516,42 @@ fn wants_dialog(id: &str) -> bool {
 
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
+    // Cloud commands: open the cloud overlay, trigger saves, link an account.
+    match id {
+        "cloud.open" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            app.ui.show_cloud = true;
+            app.ui.cloud_page = crate::cloud::CloudPage::Open;
+            crate::cloud::start(app);
+            return Some(Ok(json!({"cloud": "open"})));
+        }
+        "cloud.save" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            let _ = crate::cloud::save(app);
+            return Some(Ok(json!({"cloud": "saving"})));
+        }
+        "cloud.save_as" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            app.ui.show_cloud = true;
+            app.ui.cloud_page = crate::cloud::CloudPage::SaveAs;
+            crate::cloud::start(app);
+            return Some(Ok(json!({"cloud": "save_as"})));
+        }
+        "cloud.link" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            crate::cloud::link(app);
+            return Some(Ok(json!({"cloud": "linking"})));
+        }
+        _ => {}
+    }
     if matches!(id, "ui.dock" | "ui.dock.reset") {
         return Some(crate::docking::command(app, id == "ui.dock.reset", p));
     }
