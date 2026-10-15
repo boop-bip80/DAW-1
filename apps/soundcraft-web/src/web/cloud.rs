@@ -129,7 +129,7 @@ fn offer_login() {
     let _ = window.location().set_href("/auth/login");
 }
 
-/// POST `/logout` with the session cookie attached, so the service can revoke
+/// POST `/auth/logout` with the session cookie attached, so the service can revoke
 /// the server-side session.
 async fn fetch_logout() -> Result<(), String> {
     let global = js_sys::global();
@@ -140,7 +140,7 @@ async fn fetch_logout() -> Result<(), String> {
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
     init.set_credentials(web_sys::RequestCredentials::Include);
-    let req = web_sys::Request::new_with_str_and_init("/logout", &init).map_err(|e| format!("{e:?}"))?;
+    let req = web_sys::Request::new_with_str_and_init("/auth/logout", &init).map_err(|e| format!("{e:?}"))?;
     let promised = fetch.call1(global.as_ref(), req.as_ref()).map_err(|e| format!("{e:?}"))?;
     let promised: js_sys::Promise = promised.dyn_into().map_err(|_| "not a promise".to_owned())?;
     wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;

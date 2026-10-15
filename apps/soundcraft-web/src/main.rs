@@ -30,3 +30,14 @@ fn main() {
 fn main() {
     eprintln!("soundcraft-web only runs in the browser: build it with `trunk build --release` in apps/soundcraft-web");
 }
+
+#[cfg(test)]
+mod tests {
+    /// CollabCraft's sign-out endpoint lives under `/auth/`; posting to a bare `/logout` gets a 404.
+    #[test]
+    fn cloud_logout_posts_to_auth_namespace() {
+        let src = include_str!("web/cloud.rs");
+        assert!(src.contains("\"/auth/logout\""), "logout must POST to /auth/logout");
+        assert!(!src.contains("\"/logout\""), "bare /logout route must not remain");
+    }
+}
