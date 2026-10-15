@@ -2,10 +2,10 @@
 title: Install SoundCraft
 description: Download SoundCraft for Windows 11, macOS or Linux from GitHub, or install it with ArtCraft Launcher.
 order: 10
-verified: 0.6.1
+verified: 0.7.0
 ---
 
-Download the file for your system from the [latest release](https://github.com/storytold/soundcraft/releases/latest) and install it. In the file names, `<version>` stands for the version number, for example `0.6.1`. The release also lists a checksum for every file in `SHA256SUMS.txt`.
+Download the file for your system from the [latest release](https://github.com/storytold/soundcraft/releases/latest) and install it. In the file names, `<version>` stands for the version number, for example `0.7.0`. The release also lists a checksum for every file in `SHA256SUMS.txt`.
 
 ## Windows 11
 

@@ -2,7 +2,7 @@
 title: Bounce your mix to a file
 description: Export your SoundCraft session as a WAV, AIFF or FLAC file with File > Bounce Mix.
 order: 40
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 Choose **File > Bounce Mix...**, set the file name, format and bit depth, and click **Bounce**. SoundCraft bounces the edit selection, or the whole session when nothing is selected.
@@ -11,7 +11,7 @@ Choose **File > Bounce Mix...**, set the file name, format and bit depth, and cl
 
 1. Optional: select the range you want to export. Leave nothing selected to bounce the whole session.
 2. Choose **File > Bounce Mix...**. The **Bounce Mix** window opens.
-3. In **File**, type the full path of the file to write. The window suggests a name ending in `Bounce.wav`.
+3. In **File**, type the full path of the file to write, or click **Browse…**. The window suggests a name ending in `Bounce.wav` in the session's folder.
 4. Pick a **Format**: WAV, AIFF or FLAC.
 5. Pick a **Bit Depth**: 16-bit, 24-bit or 32f-bit. The window starts at 24-bit.
 6. Tick **Normalize to -0.1 dBFS** if you want the bounce normalized to that peak level.

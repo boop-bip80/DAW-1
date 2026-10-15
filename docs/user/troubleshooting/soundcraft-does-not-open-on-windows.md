@@ -2,7 +2,7 @@
 title: SoundCraft does not open on Windows
 description: What to try when SoundCraft flashes in Task Manager, closes right after starting or never shows a window on Windows 11.
 order: 10
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 Install the [latest release](https://github.com/storytold/soundcraft/releases/latest): version 0.6.1 fixes the most common cause, a crash with `Parent device is lost` right after the window appears. If it still does not open, start it with the Vulkan graphics backend as shown below.

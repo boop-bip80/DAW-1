@@ -2,7 +2,7 @@
 title: Create a session and add tracks
 description: Start a new SoundCraft session, add audio, MIDI or instrument tracks, and save it as a .scraft file.
 order: 10
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 Choose **File > New...** to start a session, then **Track > New...** to add tracks. Save with **File > Save Session**.

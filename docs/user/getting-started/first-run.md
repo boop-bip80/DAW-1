@@ -2,7 +2,7 @@
 title: First run
 description: What you see when SoundCraft starts, how to open the demo song, and where the shortcuts and the log file are.
 order: 20
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 To look around without recording anything, choose **File > New...**, tick **Start from the demo session** and click **Create**. The demo song is made by SoundCraft itself.

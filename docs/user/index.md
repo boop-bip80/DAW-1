@@ -1,12 +1,12 @@
 ---
 title: SoundCraft
 description: SoundCraft is a free, open-source audio workstation for recording, editing and mixing, built as an alternative to Avid Pro Tools.
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 SoundCraft is a digital audio workstation for recording, editing and mixing audio and MIDI. It is a free, open-source alternative to Avid Pro Tools and follows the same workflow: an **Edit** window for arranging and editing, a **Mix** window for balancing, edit modes, tools, playlists and AudioSuite processing.
 
-It runs on Windows, macOS, Linux, FreeBSD and in a web browser. SoundCraft is pre-alpha: recording, editing, mixing and bouncing work, but some things are still missing, such as choosing an audio interface and buffer size, recording MIDI from a controller, and session interchange (AAF/OMF). It cannot open Pro Tools sessions.
+It runs on Windows, macOS, Linux, FreeBSD and in a web browser. SoundCraft is pre-alpha: recording, editing, mixing and bouncing work, but some things are still missing, such as recording MIDI from a controller, ASIO on Windows, and exchanging sessions with Pro Tools (AAF/OMF). It cannot open Pro Tools sessions.
 
 ## Start here
 

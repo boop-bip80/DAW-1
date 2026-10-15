@@ -1,14 +1,23 @@
 ---
 title: Can I choose my audio interface?
-description: SoundCraft plays and records through your system's default devices and has no audio device picker or ASIO support yet.
+description: Yes. Pick the audio system, output and input device, sample rate and buffer size in Setup > Playback Engine. The downloads have no ASIO support.
 order: 30
-verified: 0.6.1
+verified: 0.7.0
 ---
 
-Not yet. SoundCraft plays through the default output device and records from the default input device. There is no device or buffer size setting, and no ASIO support on Windows.
+Yes. Choose **Setup > Playback Engine...**, pick your interface and click **Apply**. The downloads from the release page do not include ASIO support on Windows.
 
-## What to do
+## Pick your interface
 
-Set your interface as the default playback and recording device in your system's sound settings, then start SoundCraft. The **Playback Engine** window (**Setup > Playback Engine...**) shows the output device, the device rate and the input device in use. The window also has a **Reconnect audio device** button.
+1. Choose **Setup > Playback Engine...**.
+2. Pick the **Audio system**, then the **Output device** and **Input device**. Each list starts with **Default**, which follows your system's sound settings.
+3. Optional: pick a **Sample rate** and a **Buffer size**. **Device default** leaves them to the device.
+4. Click **Apply**. SoundCraft reopens the audio devices with the new settings.
 
-Choosing an audio interface and buffer size is on the project's list of things still missing. A request for an audio driver option is open as [issue 213](https://github.com/storytold/soundcraft/issues/213).
+If you plug in an interface while the window is open, click **Refresh devices**. **Revert** undoes changes you have not applied yet. The lower part of the window shows the output and input that are open right now. The input is opened the first time you record or monitor.
+
+The choice is saved for this computer, not in the session. If the device is unplugged later, or does not offer the rate or buffer size you picked, SoundCraft falls back to the system default.
+
+## ASIO on Windows
+
+ASIO can only be turned on by building SoundCraft yourself, because it needs Steinberg's ASIO SDK. On Windows the downloads use WASAPI. A request for an audio driver option is open as [issue 213](https://github.com/storytold/soundcraft/issues/213).

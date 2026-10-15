@@ -2,7 +2,7 @@
 title: Report a problem
 description: What to include when you report a SoundCraft bug, and where to post it.
 order: 20
-verified: 0.6.1
+verified: 0.7.0
 ---
 
 Open an issue in the [SoundCraft issue tracker](https://github.com/storytold/soundcraft/issues), or ask in [Discord](https://discord.gg/artcraft). Attach the log file.
