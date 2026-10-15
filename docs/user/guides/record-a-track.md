@@ -18,7 +18,7 @@ Click the red record-enable button in the track header, then press the Record bu
 
 If no track is record-enabled, SoundCraft does not record and says: Record-enable a track first (the red button in its header).
 
-SoundCraft writes each take to a WAV file in the session's `Audio Files` folder while you record, so a crash during a take keeps the audio recorded up to that point. Until you first save the session, the takes go to the `Autosave` folder in SoundCraft's settings folder.
+SoundCraft writes each take to a WAV file in the session's `Audio Files` folder while you record, so after a crash during a take you may be able to recover part of it. The file's length is updated about once a second, so the last moments before the crash may be missing. Until you first save the session, the takes go to the `Autosave` folder in SoundCraft's settings folder.
 
 ## Punch in and loop recording
 
