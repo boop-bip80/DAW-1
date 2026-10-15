@@ -187,7 +187,7 @@ articulations, parts). ≈ 40–60 h.
 
 ### G-21. Compressed export
 
-Bounce writes WAV/BWF/RF64, AIFF, FLAC and MP3 (own encoder); Pro Tools also writes AAC/M4A in
+Bounce writes WAV/BWF/RF64, AIFF, FLAC and MP3; Pro Tools also writes AAC/M4A in
 Bounce Mix. ≈ 6–14 h (pure-Rust encoder).
 
 ### G-22. Avid cloud services

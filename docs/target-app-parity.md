@@ -81,7 +81,7 @@ post-production, tracking) can switch. "Ready" is depth, correctness and fidelit
 |---|---:|---:|---|---:|---|---|
 | Features | 45 % | **~45 %** | estimated | 520–810 | [area table](#feature-areas) | Menu breadth 94 % measured, but depth is thin: see the area table |
 | UI/UX fidelity | 10 % | **~55 %** | estimated | 60–100 | [ui-parity.md](ui-parity.md) | Edit/Mix windows, every menu, floating windows; open UX bugs #3 #5 #6 #7 #140 #144; shortcuts only recently right on Windows/Linux (#15, #41); generic plugin UIs |
-| File formats | 10 % | **~40 %** | estimated | 70–120 | [file-format-parity.md](file-format-parity.md) | WAV/BWF/RF64/AIFF/FLAC read+write, MP3 write, compressed formats read; no `.ptx`, AAF, OMF, ADM BWF, AAC export, video export |
+| File formats | 10 % | **~40 %** | estimated | 70–120 | [file-format-parity.md](file-format-parity.md) | WAV/BWF/RF64/AIFF/FLAC/MP3 read+write, compressed formats read; no `.ptx`, AAF, OMF, ADM BWF, AAC export, video export |
 | Hardware | 10 % | **~12 %** | estimated | 110–180 | [hardware-parity.md](hardware-parity.md) | Default output and default input device only, fixed 512-sample block, no ASIO, no MIDI devices, no control surfaces, no sync |
 | Stability | 10 % | **~45 %** | estimated | 50–80 | [gaps.md](gaps.md) | Never-crash rules and proptests (random edits, mutated sessions, hostile params); but ~25 open correctness bugs, a launch failure (#142), an X11 llvmpipe failure (#107) |
 | Performance | 5 % | **~35 %** | estimated (unmeasured) | 40–70 | [hardware-parity.md](hardware-parity.md) | Parallel strip rendering and PDC exist; whole files decoded into RAM, recording into RAM (#84 open), no track-count or latency benchmarks |
