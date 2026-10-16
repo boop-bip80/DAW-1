@@ -38,9 +38,9 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    egui::Window::new("Score Editor").open(&mut open).default_size(vec2(900.0, 340.0)).show(ctx, |ui| {
+    egui::Window::new(crate::i18n::t("Score Editor")).open(&mut open).default_size(vec2(900.0, 340.0)).show(ctx, |ui| {
         let Some(cid) = crate::midi_editor::target_clip(app) else {
-            ui.label("Select a MIDI clip or MIDI track.");
+            ui.label(crate::i18n::t("Select a MIDI clip or MIDI track."));
             return;
         };
         let s = app.engine.session();
