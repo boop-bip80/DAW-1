@@ -104,6 +104,22 @@ fn load(_: &[(&str, u32)], _: &str, _: Option<&str>) -> Option<FontData> {
     None
 }
 
+/// (path, ttc index) candidates for an Arabic face, appended after the Latin ones: egui's
+/// bundled faces carry no Arabic glyphs, and neither does macOS's Helvetica. The first face
+/// with the glyph wins, so Latin text keeps its look. Windows' Segoe UI and Linux's DejaVu
+/// Sans already cover Arabic as the regular face; these catch every other system.
+const ARABIC: &[(&str, u32)] = &[
+    ("/System/Library/Fonts/GeezaPro.ttc", 0),
+    ("C:\\Windows\\Fonts\\tahoma.ttf", 0),
+    ("C:\\Windows\\Fonts\\trado.ttf", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf", 0),
+    ("/usr/share/fonts/noto/NotoSansArabic-Regular.ttf", 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf", 0),
+    ("/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf", 0),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
+    ("/usr/share/fonts/TTF/DejaVuSans.ttf", 0),
+];
+
 pub fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -125,6 +141,15 @@ pub fn definitions() -> FontDefinitions {
         fonts.font_data.insert("system-hangul".into(), Arc::new(h));
         for family in fonts.families.values_mut() {
             family.push("system-hangul".into());
+        }
+    }
+    // العربية: an Arabic face after the Latin and Korean ones. On a system with none of these
+    // and no Arabic-capable UI font the interface stays English (the language picker keeps
+    // working).
+    if let Some(ar) = load(ARABIC, "sans-serif:lang=ar", Some("ar")) {
+        fonts.font_data.insert("system-arabic".into(), Arc::new(ar));
+        for family in fonts.families.values_mut() {
+            family.push("system-arabic".into());
         }
     }
     fonts

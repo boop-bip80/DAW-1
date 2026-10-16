@@ -101,7 +101,7 @@ pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
             }
         }
         ui.separator();
-        if ui.button("Clear Recent").clicked() {
+        if ui.button(crate::i18n::t("Clear Recent")).clicked() {
             app.ui.recent_sessions.clear();
             app.recent_changed = true;
             ui.close();

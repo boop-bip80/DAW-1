@@ -12,12 +12,14 @@ pub mod docking;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
+pub mod i18n;
 pub mod icons;
 pub mod menus;
 pub mod midi_editor;
 pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
+pub mod craft_ai;
 pub mod panels;
 mod recent;
 pub mod recovery;
@@ -71,6 +73,9 @@ pub struct UiState {
     pub show_audio_health: bool,
     pub show_about: bool,
     pub show_midi_editor: bool,
+    /// Craft AI: the ArtCraft family's built-in local assistant (a floating window).
+    #[serde(default)]
+    pub show_craft_ai: bool,
     pub show_universe: bool,
     pub narrow_mix: bool,
     /// Mix window sections: inserts_ae, inserts_fj, sends_ae, sends_fj, io, comments, eq_curve, color.
@@ -120,6 +125,8 @@ pub struct UiState {
     pub configurations: Vec<(String, Value)>,
     /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
+    /// UI language (English default; العربية switches the interface and its alignment).
+    pub language: i18n::Language,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
     /// the desktop app last saw them; it restores them at launch.
     pub window_size: [f32; 2],
@@ -144,6 +151,7 @@ impl Default for UiState {
             show_audio_health: false,
             show_about: false,
             show_midi_editor: false,
+            show_craft_ai: false,
             show_universe: false,
             narrow_mix: false,
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
@@ -182,6 +190,7 @@ impl Default for UiState {
             workspace_dir: String::new(),
             configurations: Vec::new(),
             theme: theme::ThemeMode::Dark,
+            language: i18n::Language::English,
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
@@ -410,6 +419,12 @@ impl SoundApp {
         self
     }
 
+    /// Set the UI language and remember it in `UiState`.
+    pub fn set_language(&mut self, l: i18n::Language) {
+        self.ui.language = l;
+        i18n::set_language(l);
+    }
+
     /// Run a command; errors go to the status line. Returns the result.
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
         if matches!(id, "session.new" | "session.open" | "session.close" | "session.revert") && bounce::refuses_session_switch(self) {
@@ -441,7 +456,7 @@ impl SoundApp {
                 Ok(v)
             }
             Err(e) => {
-                self.ui.status = e.to_string();
+                self.ui.status = i18n::t(&e.to_string());
                 log::warn!("{id}: {e}");
                 Err(e.to_string())
             }
@@ -527,11 +542,11 @@ impl SoundApp {
         let armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm);
         if !armed {
             let why = if self.engine.session().tracks.is_empty() {
-                "Nothing to record on yet: add a track with Track › New…, then click its R button."
+                i18n::t("Nothing to record on yet: add a track with Track › New…, then click its R button.")
             } else {
-                "No track is record-enabled: click the R button on the track to record."
+                i18n::t("No track is record-enabled: click the R button on the track to record.")
             };
-            self.ui.status = why.into();
+            self.ui.status = why.clone();
             self.record_hint = Some((self.last_frame.unwrap_or_default(), why));
             return;
         }
@@ -539,12 +554,11 @@ impl SoundApp {
         let takes = match self.arm_recorder() {
             Ok(takes) => takes,
             Err(err) => {
-                self.ui.status = format!("Cannot record: {err}");
+                self.ui.status = i18n::tf("Cannot record: {}", &[err.to_string()]);
                 return;
             }
         };
-        self.lost_shown = 0;
-        if let Some(p) = &self.player {
+        self.lost_shown = 0;        if let Some(p) = &self.player {
             p.set_recording(true);
         }
         let already_playing = self.is_playing();
@@ -591,10 +605,10 @@ impl SoundApp {
     fn arm_recorder(&mut self) -> Result<Vec<soundcraft_engine::io::Take>, String> {
         let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
         let unsaved_dir = self.autosave_dir.as_ref().map_or_else(std::env::temp_dir, |d| d.join(name));
-        let Some(r) = &mut self.recorder else { return Err("no audio input device".into()) };
+        let Some(r) = &mut self.recorder else { return Err(i18n::t("no audio input device")) };
         let plan = soundcraft_engine::io::plan_takes(&self.engine, &unsaved_dir, r.channels);
         if plan.is_empty() {
-            return Err("no audio track is record-enabled".into());
+            return Err(i18n::t("no audio track is record-enabled"));
         }
         let takes = plan
             .iter()
@@ -807,7 +821,7 @@ impl SoundApp {
             }
             Err(e) => {
                 self.recorder_failed = true;
-                self.ui.status = format!("No audio input: {e}");
+                self.ui.status = i18n::tf("No audio input: {}", &[e.to_string()]);
             }
         }
     }
@@ -905,8 +919,7 @@ impl SoundApp {
         self.autosaved_rev = 0;
         let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
         self.ui.status =
-            if plan.pass.is_some() { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
-        if let Some(p) = problem {
+            if plan.pass.is_some() { crate::i18n::tf("Loop-recorded {} take(s)", &[(ids.len() / tracks).to_string()]) } else { crate::i18n::tf("Recorded {} clip(s)", &[(ids.len()).to_string()]) };        if let Some(p) = problem {
             log::warn!("recording: {p}");
             self.ui.status = format!("{} ({p})", self.ui.status);
         }
@@ -1112,6 +1125,7 @@ impl SoundApp {
         if ctx.current_pass_index() > 0 {
             return;
         }
+        i18n::set_language(self.ui.language);
         // Fonts set now take effect next frame, so draw only from the frame after.
         if !self.fonts_ready {
             if self.fonts_installed {
@@ -1205,6 +1219,7 @@ impl SoundApp {
     /// Lay out the whole window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        i18n::set_language(self.ui.language);
         // The integration creates this Ui before logic resolves the current frame's palette.
         ui.set_style(ctx.global_style());
         if !self.fonts_ready {
