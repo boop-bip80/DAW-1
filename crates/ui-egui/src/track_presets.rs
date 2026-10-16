@@ -54,7 +54,24 @@ pub(crate) fn name_menu(app: &mut SoundApp, ui: &mut egui::Ui, id: TrackId, trac
 
 /// The Recall Track Preset submenu: the presets in the folder, recalled onto `tracks`.
 fn recall_menu(app: &mut SoundApp, ui: &mut egui::Ui, tracks: &[u64]) {
-    ui.menu_button("Recall Track Preset", |ui| {
+    presets_menu(app, ui, "Recall Track Preset", |path| json!({"path": path, "tracks": tracks}));
+}
+
+/// An insert or send slot's menu items, as in Pro Tools: Save Track Preset... for the clicked track
+/// (desktop only), and Recall Inserts (or Recall Sends), whose inserts or sends land on that track
+/// starting at the clicked slot.
+pub(crate) fn slot_menu(app: &mut SoundApp, ui: &mut egui::Ui, track: TrackId, slot: usize, sends: bool) {
+    if dir(app).is_some() && ui.button("Save Track Preset...").clicked() {
+        open_save(app, track);
+        ui.close();
+    }
+    let (label, only) = if sends { ("Recall Sends", "sends") } else { ("Recall Inserts", "inserts") };
+    presets_menu(app, ui, label, |path| json!({"path": path, "tracks": [track.0], "only": only, "from": slot}));
+}
+
+/// A submenu of the presets in the folder; picking one runs `track.load_preset` with `params(path)`.
+fn presets_menu(app: &mut SoundApp, ui: &mut egui::Ui, label: &str, params: impl Fn(String) -> serde_json::Value) {
+    ui.menu_button(label, |ui| {
         let Some(dir) = dir(app) else {
             ui.add_enabled(false, egui::Button::new("Track presets need the desktop app"));
             return;
@@ -67,7 +84,7 @@ fn recall_menu(app: &mut SoundApp, ui: &mut egui::Ui, tracks: &[u64]) {
         for n in names {
             if ui.button(&n).clicked() {
                 let path = dir.join(format!("{n}.json")).display().to_string();
-                let _ = app.run("track.load_preset", json!({"path": path, "tracks": tracks}));
+                let _ = app.run("track.load_preset", params(path));
                 ui.close();
             }
         }
