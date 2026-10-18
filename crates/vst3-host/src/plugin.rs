@@ -213,9 +213,8 @@ impl Plugin for Vst3Plugin {
     }
 
     fn reset(&mut self) {
-        self.notes.clear();
+        keep_releases_on_reset(&mut self.notes, &mut self.held);
         self.controls.clear();
-        self.held = [false; 128];
     }
 
     fn set_param(&mut self, id: &str, value: f32) -> bool {
@@ -486,5 +485,38 @@ impl PluginEditor for Vst3Editor {
         if let (Some(&vid), Some(n)) = (self.ids.get(i), self.normalized(i, value)) {
             self.link.set_normalized(vid, n);
         }
+    }
+}
+
+/// Reset's share of the note queue: drop everything pending except the releases the plug-in is
+/// owed. Each held key gets an off at time 0 and any off already queued survives, so a note that
+/// was sounding when the transport stopped is still released on the next block.
+fn keep_releases_on_reset(notes: &mut Vec<NoteEvent>, held: &mut [bool; 128]) {
+    notes.retain(|e| matches!(e, NoteEvent::Off { .. }));
+    for (key, h) in (0u8..).zip(held.iter_mut()) {
+        if std::mem::take(h) && notes.len() < notes.capacity() {
+            notes.insert(0, NoteEvent::Off { time: 0, key });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_keeps_the_releases_it_owes() {
+        let mut notes = Vec::with_capacity(EVENT_CAP);
+        notes.push(NoteEvent::On { time: 3, key: 72, velocity: 1.0 });
+        notes.push(NoteEvent::Off { time: 5, key: 67 });
+        let mut held = [false; 128];
+        held[60] = true;
+        held[64] = true;
+        keep_releases_on_reset(&mut notes, &mut held);
+        let mut keys: Vec<u8> = notes.iter().filter_map(|e| if let NoteEvent::Off { key, .. } = e { Some(*key) } else { None }).collect();
+        assert_eq!(keys.len(), notes.len(), "reset left a non-release queued");
+        keys.sort_unstable();
+        assert_eq!(keys, [60, 64, 67], "reset must queue an off for every held or already-released key");
+        assert!(held.iter().all(|h| !h), "reset must clear held");
     }
 }
