@@ -215,7 +215,11 @@ impl AudioState {
                 Cmd::Input(r) => self.input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
                 Cmd::Drain(back) => {
-                    let _ = back.send(self.mix.drain_plugins());
+                    // Too late (the player stopped waiting): the retire channel still reaches the
+                    // UI thread, which collects it after the stream has closed. Never dropped here.
+                    if let Err(late) = back.send(self.mix.drain_plugins()) {
+                        let _ = self.garbage.send(late.0);
+                    }
                 }
                 Cmd::Session(s, instances) => {
                     changed = true;
@@ -476,12 +480,16 @@ pub struct Player {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Player {
+    /// Takes the plugin instances back from the audio thread and drops them here, then closes
+    /// the stream, then collects anything that came back late.
     fn drop(&mut self) {
         // Closing the stream joins the audio thread, and the callback's plugin instances would
         // be dropped there. A VST3's `terminate` may wait for the UI thread (Arturia's Jup-8000 V
         // does), which is the thread waiting in the join: the app never exits. So the instances
         // come back here first and are dropped on this thread. Bounded: a device that has
-        // stopped calling never answers, and then the instances go down with the stream.
+        // stopped calling never answers. An answer after the deadline goes down the retire
+        // channel (`Cmd::Drain` in `AudioState::drain`), which stays open until this function
+        // has closed the stream and collected it, so no instance is dropped on the audio thread.
         let (back, got) = sync_channel(1);
         if self.tx.send(Cmd::Drain(back)).is_ok()
             && let Ok(plugins) = got.recv_timeout(std::time::Duration::from_millis(1500))
@@ -491,6 +499,8 @@ impl Drop for Player {
                 drop(p);
             }
         }
+        // Before the fields drop (`side`, with the retire channel's receiver, is declared first).
+        drop(self._stream.take());
         self.side().collect_garbage();
     }
 }
@@ -1160,6 +1170,7 @@ mod tests {
         assert_eq!(grx.try_recv().unwrap().len(), 1);
     }
 
+    /// `Cmd::Drain` returns the instances to its caller; a late answer goes down the retire channel.
     #[test]
     fn drain_hands_every_instance_back_instead_of_dropping_it_on_the_audio_thread() {
         use soundcraft_model::{ChannelFormat, Insert, TrackKind};
@@ -1189,6 +1200,19 @@ mod tests {
         // The callback goes on without it (and without recreating a third-party instance).
         st.fill(&mut out, 2);
         assert!(got.try_recv().is_err());
+        // A drain whose caller has stopped waiting: the instance comes back through the retire
+        // channel instead, never dropped on this (the audio) thread.
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin: soundcraft_dsp::create("gain").unwrap() }],
+        ))
+        .unwrap();
+        st.fill(&mut out, 2);
+        let (back, got) = sync_channel(1);
+        drop(got);
+        tx.send(Cmd::Drain(back)).unwrap();
+        st.fill(&mut out, 2);
+        assert_eq!(grx.try_recv().map(|v| v.len()), Ok(1), "late answer takes the retire channel");
     }
 
     #[test]
