@@ -1488,63 +1488,71 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
     let offset = midi_offset(s, t);
     let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
-    for clip in t.clips() {
-        if clip.muted {
-            continue;
-        }
-        let ClipContent::Midi { sequence } = &clip.content else { continue };
-        // A note-off is clamped to `clip.end()`, which the half-open range excludes: when that
-        // sample is the first of this block (`pos == clip.end()`) the clip still has to be visited
-        // or the off is never sent and the note holds forever.
-        if clip.end() < pos || clip.start >= end {
-            continue;
-        }
-        let base = s.tempo.samples_to_ticks(clip.start, sr);
-        // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
-        let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
-        let (dv, dp, dur, delay) = if s.edit.values.is_empty() {
-            (0i64, 0i64, 1.0f64, 0i64)
-        } else {
-            (
-                rtp("velocity", 0.0).clamp(-127.0, 127.0) as i64,
-                rtp("transpose", 0.0).clamp(-127.0, 127.0) as i64,
-                rtp("duration", 100.0).clamp(1.0, 1000.0) / 100.0,
-                rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
-            )
-        };
-        for n0 in &sequence.notes {
-            let mut n = *n0;
-            n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
-            n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
-            n.length = ((n.length as f64 * dur) as i64).max(1);
-            n.start = n.start.saturating_add(delay).max(0);
-            let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
-            let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
-            if on >= clip.end() {
+    // Two passes, so at any one sample offset every note-off precedes every note-on: a clip that
+    // ends where the next begins (or a repeated pitch) must not have its new note killed by the
+    // old one's release. Allocation-free; a note whose on and off share a sample keeps on-then-off.
+    for ons in [false, true] {
+        for clip in t.clips() {
+            if clip.muted {
                 continue;
             }
-            if on >= pos && on < end {
-                inst.plugin.note_on(usize::try_from(on - pos).unwrap_or(0), n.pitch, n.velocity);
-                if !held.contains(&n.pitch) && held.len() < 128 {
-                    held.push(n.pitch);
+            let ClipContent::Midi { sequence } = &clip.content else { continue };
+            // A note-off is clamped to `clip.end()`, which the half-open range excludes: when that
+            // sample is the first of this block (`pos == clip.end()`) the clip still has to be visited
+            // or the off is never sent and the note holds forever.
+            if clip.end() < pos || clip.start >= end {
+                continue;
+            }
+            let base = s.tempo.samples_to_ticks(clip.start, sr);
+            // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
+            let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
+            let (dv, dp, dur, delay) = if s.edit.values.is_empty() {
+                (0i64, 0i64, 1.0f64, 0i64)
+            } else {
+                (
+                    rtp("velocity", 0.0).clamp(-127.0, 127.0) as i64,
+                    rtp("transpose", 0.0).clamp(-127.0, 127.0) as i64,
+                    rtp("duration", 100.0).clamp(1.0, 1000.0) / 100.0,
+                    rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
+                )
+            };
+            for n0 in &sequence.notes {
+                let mut n = *n0;
+                n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
+                n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
+                n.length = ((n.length as f64 * dur) as i64).max(1);
+                n.start = n.start.saturating_add(delay).max(0);
+                let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
+                let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
+                if on >= clip.end() {
+                    continue;
+                }
+                if ons && on >= pos && on < end {
+                    inst.plugin.note_on(usize::try_from(on - pos).unwrap_or(0), n.pitch, n.velocity);
+                    if !held.contains(&n.pitch) && held.len() < 128 {
+                        held.push(n.pitch);
+                    }
+                }
+                if off >= pos && off < end && (ons == (off == on)) {
+                    inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
+                    held.retain(|p| *p != n.pitch);
                 }
             }
-            if off >= pos && off < end {
-                inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
-                held.retain(|p| *p != n.pitch);
-            }
-        }
-        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
-            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
-        // Events before tick 0 are what a start trim hid: they don't play.
-        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
-            let tick = c.tick.saturating_add(delay).max(0);
-            if !near.contains(&tick) {
+            if !ons {
                 continue;
             }
-            let at = s.tempo.tick_to_samples(base.saturating_add(tick), sr);
-            if at >= pos && at < end && at < clip.end() {
-                inst.plugin.midi(usize::try_from(at - pos).unwrap_or(0), ctrl_message(c.kind, c.value, dp));
+            let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
+                ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
+            // Events before tick 0 are what a start trim hid: they don't play.
+            for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
+                let tick = c.tick.saturating_add(delay).max(0);
+                if !near.contains(&tick) {
+                    continue;
+                }
+                let at = s.tempo.tick_to_samples(base.saturating_add(tick), sr);
+                if at >= pos && at < end && at < clip.end() {
+                    inst.plugin.midi(usize::try_from(at - pos).unwrap_or(0), ctrl_message(c.kind, c.value, dp));
+                }
             }
         }
     }
@@ -2779,6 +2787,35 @@ mod tests {
         // Past the clip nothing more is sent.
         render_block(&mut eng, &s, 1536);
         assert_eq!(heard.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_note_off_at_a_clip_boundary_precedes_the_next_clips_note_on() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears2"));
+        let note = || {
+            let mut seq = soundcraft_midi::Sequence::default();
+            seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 });
+            seq
+        };
+        // The later clip is first in the playlist, so playlist order alone would send its on first.
+        let (late, early) = (s.new_clip_id(), s.new_clip_id());
+        let clips = &mut s.track_mut(t).unwrap().playlist_mut().unwrap().clips;
+        clips.push(Clip::midi(late, "b", 24_000, 24_000, note()));
+        clips.push(Clip::midi(early, "a", 0, 24_000, note()));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears2 { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears2".into(), ch: 2, plugin: Box::new(ears) }]);
+        // One beat at 120 bpm / 48 kHz is 24 000 samples, so the boundary sits on a tick and lands
+        // at offset 256 of the block starting 256 samples before it.
+        render_block(&mut eng, &s, 0);
+        heard.lock().unwrap().clear();
+        render_block(&mut eng, &s, 23_744);
+        assert_eq!(*heard.lock().unwrap(), vec![("off", 256, 60), ("on", 256, 60)]);
+        assert_eq!(eng.strips[&t].held, vec![60]);
     }
 
     #[test]
