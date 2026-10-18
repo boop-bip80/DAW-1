@@ -71,6 +71,9 @@ enum Cmd {
         looped: Option<Range>,
     },
     Stop,
+    /// Every plugin instance the callback holds, sent back for the UI thread to drop before the
+    /// stream closes (see `Player`'s `Drop`).
+    Drain(SyncSender<Vec<Box<dyn Plugin>>>),
     Locate(Samples),
 }
 
@@ -211,6 +214,9 @@ impl AudioState {
             match c {
                 Cmd::Input(r) => self.input = Some(r),
                 Cmd::Recording(r) => self.recording = r,
+                Cmd::Drain(back) => {
+                    let _ = back.send(self.mix.drain_plugins());
+                }
                 Cmd::Session(s, instances) => {
                     changed = true;
                     if (s.sample_rate.as_f64() - self.session.sample_rate.as_f64()).abs() > 0.5 {
@@ -466,6 +472,27 @@ pub struct Player {
     pub device_buffer: Option<u32>,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Player {
+    fn drop(&mut self) {
+        // Closing the stream joins the audio thread, and the callback's plugin instances would
+        // be dropped there. A VST3's `terminate` may wait for the UI thread (Arturia's Jup-8000 V
+        // does), which is the thread waiting in the join: the app never exits. So the instances
+        // come back here first and are dropped on this thread. Bounded: a device that has
+        // stopped calling never answers, and then the instances go down with the stream.
+        let (back, got) = sync_channel(1);
+        if self.tx.send(Cmd::Drain(back)).is_ok()
+            && let Ok(plugins) = got.recv_timeout(std::time::Duration::from_millis(1500))
+        {
+            for p in plugins {
+                log::debug!("plugin instance released at close: {}", p.info().name);
+                drop(p);
+            }
+        }
+        self.side().collect_garbage();
+    }
 }
 
 impl Player {
@@ -1131,6 +1158,37 @@ mod tests {
         tx.send(Cmd::Session(Arc::new(s44), Vec::new())).unwrap();
         st.fill(&mut out, 2);
         assert_eq!(grx.try_recv().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn drain_hands_every_instance_back_instead_of_dropping_it_on_the_audio_thread() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:test.fake"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
+        let plugin = soundcraft_dsp::create("gain").unwrap();
+        tx.send(Cmd::Session(Arc::clone(&s), vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin }])).unwrap();
+        let mut out = vec![0.0f32; 256];
+        st.fill(&mut out, 2);
+        // The instance is in service; a drain takes it out and sends it back on the given channel.
+        let (back, got) = sync_channel(1);
+        tx.send(Cmd::Drain(back)).unwrap();
+        st.fill(&mut out, 2);
+        assert_eq!(got.try_recv().map(|v| v.len()), Ok(1), "the instance comes back to the caller");
+        assert!(grx.try_recv().is_err(), "and not through the retire channel");
+        // The callback goes on without it (and without recreating a third-party instance).
+        st.fill(&mut out, 2);
+        assert!(got.try_recv().is_err());
     }
 
     #[test]
