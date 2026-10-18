@@ -286,6 +286,8 @@ impl AudioState {
             n = n.min(usize::try_from((l.end - self.pos).max(1)).unwrap_or(BLOCK));
         } else if let Some(e) = self.end {
             if self.pos >= e {
+                // Reaching the end is a stop: release held notes (a note ending on the end sample is never otherwise released).
+                self.mix.reset();
                 self.playing = false;
                 self.end = None;
                 self.shared.playing.store(false, Ordering::Relaxed);
@@ -1045,6 +1047,78 @@ mod tests {
         let mut out = vec![0.0f32; 4096];
         st.fill(&mut out, 2);
         assert!(shared.position.load(Ordering::Relaxed) >= 1000);
+        assert!(!shared.playing.load(Ordering::Relaxed));
+    }
+
+    struct LogInstrument {
+        inner: Box<dyn Plugin>,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Plugin for LogInstrument {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.log.lock().unwrap().push("reset");
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, _offset: usize, _note: u8, _velocity: u8) {
+            self.log.lock().unwrap().push("note_on");
+        }
+        fn note_off(&mut self, _offset: usize, _note: u8) {
+            self.log.lock().unwrap().push("note_off");
+        }
+        fn all_notes_off(&mut self) {
+            self.log.lock().unwrap().push("all_notes_off");
+        }
+    }
+
+    #[test]
+    fn reaching_the_end_releases_held_notes() {
+        use soundcraft_model::{ChannelFormat, Clip, Insert, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.log"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 1024, seq));
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, channel().0);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let plugin = Box::new(LogInstrument { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) });
+        tx.send(Cmd::Session(
+            Arc::new(s),
+            vec![PreparedInstance { track: t, slot: soundcraft_mix::INSTRUMENT_SLOT, id: "clap:test.log".into(), ch: 2, plugin }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: Some(1024), looped: None }).unwrap();
+        let mut out = vec![0.0f32; 2 * 2048];
+        st.fill(&mut out, 2);
+        st.fill(&mut out, 2);
+        let log = log.lock().unwrap();
+        let on = log.iter().position(|e| *e == "note_on");
+        assert!(on.is_some(), "the note started: {log:?}");
+        assert!(log.iter().skip(on.unwrap_or(0)).any(|e| *e == "all_notes_off"), "held notes were released at the end: {log:?}");
         assert!(!shared.playing.load(Ordering::Relaxed));
     }
 
