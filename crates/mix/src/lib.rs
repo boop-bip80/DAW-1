@@ -520,6 +520,17 @@ impl MixEngine {
         self.main_meter = StripMeter::default();
     }
 
+    /// Release every held note on every instrument now. Unlike `reset`, this leaves plugin state,
+    /// the playback position and note chasing alone, so queued releases still sound out.
+    pub fn all_notes_off(&mut self) {
+        for st in self.strips.values_mut() {
+            if let Some(i) = &mut st.instrument {
+                i.plugin.all_notes_off();
+            }
+            st.held.clear();
+        }
+    }
+
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
     /// call outside the realtime thread when the document changes, or let `render` do it.
     pub fn sync(&mut self, s: &Session) {
@@ -2706,6 +2717,46 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct Calls {
+        on: Vec<u8>,
+        all_off: usize,
+        resets: usize,
+    }
+
+    struct Spy {
+        inner: Box<dyn Plugin>,
+        calls: Arc<std::sync::Mutex<Calls>>,
+    }
+
+    impl Plugin for Spy {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.calls.lock().unwrap().resets += 1;
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, _offset: usize, note: u8, _velocity: u8) {
+            self.calls.lock().unwrap().on.push(note);
+        }
+        fn all_notes_off(&mut self) {
+            self.calls.lock().unwrap().all_off += 1;
+        }
+    }
+
     #[test]
     fn a_note_off_on_the_clip_end_block_boundary_is_sent() {
         let mut s = Session::default();
@@ -2728,6 +2779,34 @@ mod tests {
         // Past the clip nothing more is sent.
         render_block(&mut eng, &s, 1536);
         assert_eq!(heard.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn all_notes_off_releases_every_held_note_without_resetting() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 48_000 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000 * 4, seq));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(eng.strips[&t].held, vec![60]);
+        let (offs, resets) = {
+            let c = calls.lock().unwrap();
+            assert_eq!(c.on, vec![60]);
+            (c.all_off, c.resets)
+        };
+        eng.all_notes_off();
+        let c = calls.lock().unwrap();
+        assert_eq!(c.all_off, offs + 1, "the instrument was told to release");
+        assert_eq!(c.resets, resets, "reset would discard the queued releases");
+        assert!(eng.strips[&t].held.is_empty());
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
