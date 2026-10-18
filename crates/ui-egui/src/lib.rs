@@ -796,7 +796,7 @@ impl SoundApp {
     /// Close the input device, if open, with the output stream paused: creating or destroying an
     /// input stream while the output's callbacks run deadlocks cpal's ASIO host
     /// (`Player::with_output_paused`).
-    fn close_input(&mut self) {
+    pub fn close_input(&mut self) {
         let Some(r) = self.recorder.take() else { return };
         match &self.player {
             Some(p) => p.with_output_paused(|| drop(r)),
