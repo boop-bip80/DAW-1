@@ -138,7 +138,7 @@ impl Plugin for ClapPlugin {
 
     fn reset(&mut self) {
         self.inst.reset();
-        keep_releases_on_reset(&mut self.queue, &mut self.held);
+        keep_releases_on_reset(&mut self.queue, &mut self.held, self.notes);
     }
 
     fn set_param(&mut self, id: &str, value: f32) -> bool {
@@ -346,7 +346,7 @@ impl PluginEditor for ClapEditor {
 /// drop the rest. Each held key gets an off at time 0 (a CLAP note-off, or a MIDI 0x80 message for
 /// MIDI-only ports) and any off already queued survives, so a note that was sounding when the
 /// transport stopped is still released on the next block.
-fn keep_releases_on_reset(queue: &mut Vec<Event>, held: &mut [bool; 128]) {
+fn keep_releases_on_reset(queue: &mut Vec<Event>, held: &mut [bool; 128], notes: NoteMode) {
     queue.retain(|e| match e {
         Event::Param { .. } | Event::NoteOff { .. } => true,
         Event::Midi { data, .. } => data[0] & 0xF0 == 0x80,
@@ -354,7 +354,11 @@ fn keep_releases_on_reset(queue: &mut Vec<Event>, held: &mut [bool; 128]) {
     });
     for (key, h) in (0u8..).zip(held.iter_mut()) {
         if std::mem::take(h) && queue.len() < queue.capacity() {
-            queue.insert(0, Event::NoteOff { time: 0, key });
+            let off = match notes {
+                NoteMode::Midi => Event::Midi { time: 0, data: [0x80, key, 0] },
+                NoteMode::Clap | NoteMode::None => Event::NoteOff { time: 0, key },
+            };
+            queue.insert(0, off);
         }
     }
 }
@@ -371,7 +375,7 @@ mod tests {
         let mut held = [false; 128];
         held[60] = true;
         held[64] = true;
-        keep_releases_on_reset(&mut queue, &mut held);
+        keep_releases_on_reset(&mut queue, &mut held, NoteMode::Clap);
         let mut keys: Vec<u8> = queue
             .iter()
             .map(|e| match e {
@@ -381,6 +385,23 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, [60, 64, 67], "reset must queue an off for every held or already-released key");
+        assert!(held.iter().all(|h| !h), "reset must clear held");
+
+        // A MIDI-only port gets 0x80 messages for the held keys instead.
+        let mut queue = Vec::with_capacity(EVENT_CAP);
+        let mut held = [false; 128];
+        held[60] = true;
+        held[64] = true;
+        keep_releases_on_reset(&mut queue, &mut held, NoteMode::Midi);
+        let mut msgs: Vec<[u8; 3]> = queue
+            .iter()
+            .map(|e| match e {
+                Event::Midi { time: 0, data } => *data,
+                other => panic!("MIDI port must get 0x80 messages, got {other:?}"),
+            })
+            .collect();
+        msgs.sort_unstable();
+        assert_eq!(msgs, [[0x80, 60, 0], [0x80, 64, 0]]);
         assert!(held.iter().all(|h| !h), "reset must clear held");
     }
 }
