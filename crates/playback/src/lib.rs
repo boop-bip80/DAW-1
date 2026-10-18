@@ -331,6 +331,8 @@ impl AudioState {
             ring.pop_into(&mut self.mix.input, n, self.session.sample_rate.hz());
         }
         self.mix.monitor_only = !self.playing;
+        // An open hosted editor needs its plug-in processed (GUIs sync through `process`): no suspension while one is open.
+        self.mix.no_suspend = self.shared.editors_open.load(Ordering::Relaxed);
         self.mix.recording = self.recording;
         self.mix.render(&self.session, self.pos, n, &mut self.pending);
         self.send_garbage();
@@ -1292,6 +1294,69 @@ mod tests {
         assert!(!session_has_hosted(&s), "a built-in insert is not hosted");
         s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:test.x"));
         assert!(session_has_hosted(&s));
+    }
+
+    /// An effect that sleeps by its own status and counts its `process` calls.
+    struct Sleepy {
+        inner: Box<dyn Plugin>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Plugin for Sleepy {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.process(io, frames);
+        }
+        fn process_status(&self) -> soundcraft_dsp::ProcessStatus {
+            soundcraft_dsp::ProcessStatus::Sleep
+        }
+    }
+
+    #[test]
+    fn an_open_editor_keeps_hosted_effects_from_being_suspended() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.sleepy"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
+        });
+        let (tx, rx) = channel();
+        let (gtx, _grx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plugin = Sleepy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let instances = vec![PreparedInstance { track: t, slot: 0, id: "clap:test.sleepy".into(), ch: 2, plugin: Box::new(plugin) }];
+        tx.send(Cmd::Session(s, instances)).unwrap();
+        let mut out = vec![0.0f32; 2 * 2048];
+        st.fill(&mut out, 2);
+        let after_adoption = calls.load(Ordering::Relaxed);
+        st.fill(&mut out, 2);
+        assert_eq!(calls.load(Ordering::Relaxed), after_adoption, "suspended: no process calls with silent input and no editor open");
+        shared.editors_open.store(true, Ordering::Relaxed);
+        st.fill(&mut out, 2);
+        st.fill(&mut out, 2);
+        assert!(calls.load(Ordering::Relaxed) > after_adoption, "an open editor must keep the effect processed");
     }
 
     #[test]
