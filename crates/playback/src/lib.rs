@@ -526,8 +526,9 @@ impl Drop for Player {
     /// Takes the audio state (and so every plugin instance) back from the callback and drops it
     /// here, then closes the stream, then collects what was retired before.
     fn drop(&mut self) {
-        // Closing the stream joins the audio thread, which destroys the callback there; plugin
-        // instances it owned would be dropped on that thread. A VST3's `terminate` may wait for
+        // Closing the stream joins the audio thread on WASAPI and ALSA, which destroys the callback
+        // there (on ASIO cpal drops the closure on the caller's thread inside `remove_callback`);
+        // plugin instances it owned would be dropped on the audio thread. A VST3's `terminate` may wait for
         // the UI thread (Arturia's Jup-8000 V does), which is the thread waiting in the join: the
         // app never exits. So the state is taken out of the holder here, without the callback's
         // help: a device that has stopped calling (a device error, an unplugged interface, a
@@ -538,12 +539,14 @@ impl Drop for Player {
             if let Err(e) = stream.pause() {
                 log::debug!("audio stream did not pause at close: {e}");
             }
-            // A couple of buffer periods for a callback already under way to finish. Not needed
-            // for correctness (the lock below waits for at most one block); it keeps the take
-            // from contending with a running device.
+            // A couple of buffer periods for a callback already under way to finish. It only
+            // shortens the common case (a callback past the `playing` check); correctness rests
+            // on the lock below.
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        // Blocking is fine here: the callback holds the lock for one block at most.
+        // Blocking is fine here: the callback holds the lock for one block at most. If a plug-in's
+        // `process` never returns (it waits on the UI thread), this lock waits with it; that hang
+        // is the same class as before this change, not a new one.
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner).take();
         if state.is_some() {
             log::debug!("audio state released at close");
@@ -803,8 +806,7 @@ impl Player {
         }
     }
 
-    /// Closes every plugin editor window (main thread). Call before replacing the player: its
-    /// instances may be dropped on the audio thread, where editor windows cannot be closed.
+    /// Closes every plugin editor window (main thread). Call before replacing the player.
     pub fn close_editors(&self) {
         for e in self.side().editors.values_mut() {
             e.close();
@@ -1463,6 +1465,84 @@ mod tests {
         drop(player);
         let here = std::thread::current().id();
         assert_eq!(*dropped_on.lock().unwrap(), Some(here), "after a fault, teardown must still run on the player's thread");
+    }
+
+    /// Like `ThreadLog`, but `process` is slow and says when it started and finished.
+    struct SlowLog {
+        inner: Box<dyn Plugin>,
+        log: Arc<std::sync::Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+    }
+
+    impl Plugin for SlowLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.log.lock().unwrap().push(("process started", std::thread::current().id()));
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            self.inner.process(io, frames);
+            self.log.lock().unwrap().push(("process finished", std::thread::current().id()));
+        }
+    }
+
+    impl Drop for SlowLog {
+        fn drop(&mut self) {
+            self.log.lock().unwrap().push(("dropped", std::thread::current().id()));
+        }
+    }
+
+    /// Review finding (PR 752): the player's drop must wait for a block in progress before it takes
+    /// the state; taking it mid-block would drop the instances under the running `process`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_player_waits_for_a_block_in_progress_before_taking_the_state() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.slow"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = SlowLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance { track: t, slot: soundcraft_mix::INSTRUMENT_SLOT, id: "clap:test.slow".into(), ch: 2, plugin: Box::new(plugin) }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !log.lock().unwrap().iter().any(|(w, _)| *w == "process started") {
+            assert!(std::time::Instant::now() < deadline, "the clock thread never started a block: {:?}", log.lock().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // The block is under way and holds the lock; the player's drop must wait for it.
+        drop(player);
+        let log = log.lock().unwrap();
+        let at = |what: &str| log.iter().position(|(w, _)| *w == what);
+        assert!(at("process finished").is_some(), "the drop must wait for the block in progress: {log:?}");
+        assert!(at("process finished") < at("dropped") && at("dropped").is_some(), "teardown must follow the block: {log:?}");
+        let here = std::thread::current().id();
+        assert_eq!(at("dropped").map(|i| log[i].1), Some(here), "teardown must run on the player's thread: {log:?}");
     }
 
     /// Review finding (PR 752): once the engine has faulted nothing drains the queue; commands the
