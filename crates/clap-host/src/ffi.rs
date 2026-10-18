@@ -1047,6 +1047,8 @@ pub(crate) struct PortBuffers {
     ptrs: Vec<Vec<*mut f32>>,
     bufs: Vec<clap_audio_buffer>,
     frames: usize,
+    /// Every channel holds a constant (silent) block: `refresh` sets each `constant_mask` to all ones.
+    constant: bool,
 }
 
 // SAFETY: the raw pointers only ever point into `data`, which this struct owns; moving the struct
@@ -1063,7 +1065,7 @@ impl PortBuffers {
             .iter()
             .map(|_| clap_audio_buffer { data32: std::ptr::null_mut(), data64: std::ptr::null_mut(), channel_count: 0, latency: 0, constant_mask: 0 })
             .collect();
-        PortBuffers { data, ptrs, bufs, frames }
+        PortBuffers { data, ptrs, bufs, frames, constant: false }
     }
 
     pub fn channels(&self, port: usize) -> usize {
@@ -1078,8 +1080,14 @@ impl PortBuffers {
         self.data.get_mut(port).and_then(|p| p.get_mut(ch)).map(Vec::as_mut_slice)
     }
 
+    /// Marks every channel of the next block as constant (CLAP's way to say silent), or clears it.
+    pub fn set_constant(&mut self, constant: bool) {
+        self.constant = constant;
+    }
+
     /// Points the CLAP tables at the current data (no allocation).
     fn refresh(&mut self) {
+        let constant = self.constant;
         for ((d, p), b) in self.data.iter_mut().zip(self.ptrs.iter_mut()).zip(self.bufs.iter_mut()) {
             for (dc, pc) in d.iter_mut().zip(p.iter_mut()) {
                 *pc = dc.as_mut_ptr();
@@ -1087,9 +1095,14 @@ impl PortBuffers {
             b.data32 = p.as_mut_ptr();
             b.data64 = std::ptr::null_mut();
             b.channel_count = u32::try_from(p.len()).unwrap_or(0);
-            b.constant_mask = 0;
+            b.constant_mask = if constant { all_channels_mask(b.channel_count) } else { 0 };
         }
     }
+}
+
+/// A mask with one bit set per channel (`channels` low bits; all 64 from 64 channels up).
+pub(crate) fn all_channels_mask(channels: u32) -> u64 {
+    1u64.checked_shl(channels).map_or(u64::MAX, |b| b.wrapping_sub(1))
 }
 
 // ---- instances -----------------------------------------------------------------------------
@@ -1653,5 +1666,21 @@ mod tests {
         assert_eq!((e.tempo, e.bar_number, e.tsig_num, e.tsig_denom), (90.0, 1, 3, 4));
         let nan = transport_event(&Transport { quarters: f64::NAN, ..t });
         assert_eq!(nan.song_pos_beats, 0);
+    }
+
+    #[test]
+    fn silent_inputs_set_one_constant_bit_per_channel() {
+        assert_eq!(all_channels_mask(0), 0);
+        assert_eq!(all_channels_mask(1), 0b1);
+        assert_eq!(all_channels_mask(2), 0b11);
+        assert_eq!(all_channels_mask(6), 0b11_1111);
+        assert_eq!(all_channels_mask(64), u64::MAX);
+        let mut b = PortBuffers::new(&[2, 1], 4);
+        b.set_constant(true);
+        b.refresh();
+        assert_eq!(b.bufs.iter().map(|x| x.constant_mask).collect::<Vec<_>>(), vec![0b11, 0b1]);
+        b.set_constant(false);
+        b.refresh();
+        assert!(b.bufs.iter().all(|x| x.constant_mask == 0));
     }
 }

@@ -2,7 +2,8 @@
 
 use crate::ffi::{EVENT_CAP, Event, GuiLink, Instance, NotePort, PortBuffers};
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport};
+use clap_sys::process::{CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_SLEEP, CLAP_PROCESS_TAIL, clap_process_status};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, ProcessStatus, Transport};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -41,6 +42,8 @@ pub struct ClapPlugin {
     latency: usize,
     steady: i64,
     transport: Option<Transport>,
+    /// What the plugin returned from its last `process` call (`Continue` before the first).
+    status: ProcessStatus,
 }
 
 impl ClapPlugin {
@@ -65,6 +68,7 @@ impl ClapPlugin {
             latency: 0,
             steady: 0,
             transport: None,
+            status: ProcessStatus::Continue,
         }
     }
 
@@ -92,6 +96,18 @@ impl ClapPlugin {
 
 fn pick_main(ports: &[crate::ffi::PortInfo]) -> Option<usize> {
     ports.iter().position(|p| p.main && p.channels > 0).or_else(|| ports.iter().position(|p| p.channels > 0))
+}
+
+/// Maps a `clap_process_status` to the trait's status. An error or an unknown value keeps the
+/// plugin processing.
+fn status_from_clap(s: clap_process_status) -> ProcessStatus {
+    match s {
+        CLAP_PROCESS_CONTINUE_IF_NOT_QUIET => ProcessStatus::ContinueIfNotQuiet,
+        CLAP_PROCESS_TAIL => ProcessStatus::Tail,
+        CLAP_PROCESS_SLEEP => ProcessStatus::Sleep,
+        CLAP_PROCESS_CONTINUE => ProcessStatus::Continue,
+        _ => ProcessStatus::Continue,
+    }
 }
 
 fn note_mode(p: Option<NotePort>) -> NoteMode {
@@ -123,6 +139,7 @@ impl Plugin for ClapPlugin {
         self.notes = note_mode(port);
         self.midi_in = port.is_some_and(|p| p.supported & CLAP_NOTE_DIALECT_MIDI != 0);
         self.max_block = mb;
+        self.status = ProcessStatus::Continue;
         self.inst.state().restart.store(false, Ordering::Relaxed);
         match self.inst.activate(sr, 1, u32::try_from(mb).unwrap_or(u32::MAX)) {
             Ok(()) => {
@@ -196,6 +213,7 @@ impl Plugin for ClapPlugin {
             let events = self.queue.get(..k).unwrap_or(&[]);
             let r = self.inst.process(n, self.steady, &mut self.inputs, &mut self.outputs, events, offset, self.transport.as_ref());
             self.queue.drain(..k);
+            self.status = r.as_ref().map_or(ProcessStatus::Continue, |&s| status_from_clap(s));
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
                 (Ok(_), Some(p)) => {
@@ -222,6 +240,14 @@ impl Plugin for ClapPlugin {
 
     fn latency(&self) -> usize {
         self.latency
+    }
+
+    fn process_status(&self) -> ProcessStatus {
+        self.status
+    }
+
+    fn set_input_silent(&mut self, silent: bool) {
+        self.inputs.set_constant(silent);
     }
 
     fn set_transport(&mut self, transport: &Transport) {
@@ -340,5 +366,22 @@ impl PluginEditor for ClapEditor {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap_sys::process::CLAP_PROCESS_ERROR;
+
+    #[test]
+    fn clap_process_status_maps_to_the_trait_status() {
+        assert_eq!(status_from_clap(CLAP_PROCESS_CONTINUE), ProcessStatus::Continue);
+        assert_eq!(status_from_clap(CLAP_PROCESS_CONTINUE_IF_NOT_QUIET), ProcessStatus::ContinueIfNotQuiet);
+        assert_eq!(status_from_clap(CLAP_PROCESS_TAIL), ProcessStatus::Tail);
+        assert_eq!(status_from_clap(CLAP_PROCESS_SLEEP), ProcessStatus::Sleep);
+        assert_eq!(status_from_clap(CLAP_PROCESS_ERROR), ProcessStatus::Continue);
+        assert_eq!(status_from_clap(99), ProcessStatus::Continue);
+        assert_eq!(status_from_clap(-1), ProcessStatus::Continue);
     }
 }
