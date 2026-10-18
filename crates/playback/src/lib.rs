@@ -80,6 +80,9 @@ struct Shared {
     /// Speed × 1000.
     speed: AtomicU32,
     meters: Mutex<MeterSnapshot>,
+    /// A hosted plug-in's editor is open (set by the UI thread each frame): the engine keeps
+    /// running while stopped, because such GUIs initialise and sync through `process` calls.
+    editors_open: AtomicBool,
 }
 
 /// What stopped the audio output.
@@ -168,6 +171,12 @@ struct AudioState {
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
     recording: bool,
+    /// The session holds a hosted plug-in: the engine runs while stopped so the mixer can suspend
+    /// plug-ins by their own signals rather than starving them.
+    hosted: bool,
+    /// Blocks rendered (tests observe whether the engine ran even when nothing is audible).
+    #[cfg(test)]
+    renders: usize,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
     old_sessions: Option<SyncSender<Arc<Session>>>,
@@ -180,11 +189,22 @@ fn new_engine(sr: f32) -> MixEngine {
     m
 }
 
+/// Whether any track of `s` carries a hosted (third-party) plug-in. Allocation-free: runs on the audio thread.
+fn session_has_hosted(s: &Session) -> bool {
+    s.tracks.iter().any(|t| {
+        t.instrument.as_ref().is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin))
+            || t.mixer.inserts.iter().flatten().any(|i| soundcraft_mix::is_third_party(&i.plugin))
+    })
+}
+
 impl AudioState {
     fn new(rx: Receiver<Cmd>, shared: Arc<Shared>, session: Arc<Session>, device_rate: f64, garbage: Sender<Vec<Box<dyn Plugin>>>) -> Self {
         let sr = session.sample_rate.as_f64() as f32;
         let nch = main_channels(&session);
         AudioState {
+            hosted: session_has_hosted(&session),
+            #[cfg(test)]
+            renders: 0,
             garbage,
             old_sessions: None,
             fold: fold_gains(&session),
@@ -226,6 +246,7 @@ impl AudioState {
                         self.read = 0.0;
                     }
                     self.fold = fold_gains(&s);
+                    self.hosted = session_has_hosted(&s);
                     let old = std::mem::replace(&mut self.session, s);
                     if let Some(tx) = &self.old_sessions {
                         let _ = tx.try_send(old);
@@ -273,6 +294,10 @@ impl AudioState {
 
     /// Render the next block at the session rate into `pending`.
     fn render_next(&mut self, quantum: usize) {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         let mut n = quantum.clamp(1, BLOCK);
         if let Some(l) = self.looped
             && self.pos >= l.end
@@ -331,7 +356,16 @@ impl AudioState {
     fn fill(&mut self, out: &mut [f32], channels: usize) {
         self.drain();
         let channels = channels.max(1);
-        let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        // An armed or input-monitoring track keeps the engine running while stopped when an
+        // input stream is open.
+        // A hosted plug-in with its editor open keeps the engine running too: Guitar Rig 7 and
+        // Helix Native initialise their GUIs and sync them with their DSP through `process`
+        // calls, and sit frozen on an idle track until the transport runs.
+        // Any hosted plug-in keeps the engine running too: it expects `process` calls, and the mixer
+        // suspends plug-ins individually by their own signals, so the global gate must not starve them.
+        let monitoring = self.hosted
+            || self.shared.editors_open.load(Ordering::Relaxed)
+            || self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
         if !self.playing && !monitoring {
             out.iter_mut().for_each(|x| *x = 0.0);
             if let Ok(mut m) = self.shared.meters.try_lock() {
@@ -507,6 +541,7 @@ impl Player {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
@@ -684,6 +719,7 @@ impl Player {
                 out.push((t, slot, id, v));
             }
         }
+        self.shared.editors_open.store(side.editors.values().any(|e| e.is_open()), Ordering::Relaxed);
         out
     }
 
@@ -694,7 +730,11 @@ impl Player {
 
     /// Opens the plugin's own editor window. Main thread only.
     pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
-        self.side().open_editor((track, slot))
+        let r = self.side().open_editor((track, slot));
+        if r.is_ok() {
+            self.shared.editors_open.store(true, Ordering::Relaxed);
+        }
+        r
     }
 
     pub fn close_editor(&self, track: TrackId, slot: usize) {
@@ -989,6 +1029,7 @@ mod tests {
             playing: AtomicBool::new(true),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         };
         let fault = Fault::default();
         let mut out = [0.5f32; 8];
@@ -1030,6 +1071,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1048,6 +1090,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1073,6 +1116,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&s), 48_000.0, channel().0);
@@ -1106,6 +1150,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1131,6 +1176,122 @@ mod tests {
         tx.send(Cmd::Session(Arc::new(s44), Vec::new())).unwrap();
         st.fill(&mut out, 2);
         assert_eq!(grx.try_recv().unwrap().len(), 1);
+    }
+
+    /// Puts out a constant level whenever it is processed, so a test can hear whether a track ran.
+    struct Tone {
+        inner: Box<dyn Plugin>,
+    }
+
+    impl Plugin for Tone {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            for ch in io.iter_mut() {
+                for x in ch.iter_mut().take(frames) {
+                    *x = 0.5;
+                }
+            }
+        }
+    }
+
+    /// Gate (hosted rule, ADR 0007; frozen editors, 2026-10-18): the stopped-transport engine table.
+    /// Each row is (track kind, armed, input monitor, hosted editor open, hosted plug-in present) and
+    /// whether the engine must run while the transport is stopped and no audio input stream is open.
+    /// Any hosted plug-in keeps it running (it expects `process` calls) and so does an open editor;
+    /// without either, an idle track does not run (no CPU for nothing) and an armed audio track
+    /// without an input stream has nothing to monitor. Rows with a hosted insert also check that it
+    /// is heard. A new cell is one more row.
+    #[test]
+    fn stopped_transport_audibility_table() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        // (kind, armed, input monitor, editor open, hosted plug-in present, engine must run)
+        let cells = [
+            (TrackKind::Instrument, true, false, false, true, true),
+            (TrackKind::Instrument, false, true, false, true, true),
+            (TrackKind::Instrument, false, false, false, true, true),
+            (TrackKind::Instrument, false, false, true, true, true),
+            (TrackKind::Audio, true, false, false, true, true),
+            (TrackKind::Audio, false, true, false, true, true),
+            (TrackKind::Audio, false, false, true, true, true),
+            (TrackKind::Audio, false, false, false, false, false),
+            (TrackKind::Instrument, false, false, false, false, false),
+            (TrackKind::Audio, true, false, false, false, false),
+        ];
+        for (kind, armed, monitor, editor_open, hosted, expect_runs) in cells {
+            let mut s = Session::default();
+            let t = s.add_track(kind, ChannelFormat::Stereo, None);
+            let slot = if kind == TrackKind::Instrument { soundcraft_mix::INSTRUMENT_SLOT } else { 0 };
+            {
+                let tr = s.track_mut(t).unwrap();
+                tr.mixer.record_arm = armed;
+                tr.mixer.input_monitor = monitor;
+                if hosted {
+                    if slot == soundcraft_mix::INSTRUMENT_SLOT {
+                        tr.instrument = Some(Insert::new("clap:test.tone"));
+                    } else {
+                        tr.mixer.inserts[0] = Some(Insert::new("clap:test.tone"));
+                    }
+                }
+            }
+            let s = Arc::new(s);
+            let shared = Arc::new(Shared {
+                position: AtomicI64::new(0),
+                playing: AtomicBool::new(false),
+                speed: AtomicU32::new(1000),
+                meters: Mutex::new(MeterSnapshot::default()),
+                editors_open: AtomicBool::new(false),
+            });
+            let (tx, rx) = channel();
+            let (gtx, _grx) = channel();
+            let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(Session::default()), 48_000.0, gtx);
+            let instances = if hosted {
+                let plugin = Tone { inner: soundcraft_dsp::create("gain").unwrap() };
+                vec![PreparedInstance { track: t, slot, id: "clap:test.tone".into(), ch: 2, plugin: Box::new(plugin) }]
+            } else {
+                Vec::new()
+            };
+            tx.send(Cmd::Session(Arc::clone(&s), instances)).unwrap();
+            shared.editors_open.store(editor_open, Ordering::Relaxed);
+            let mut out = vec![0.0f32; 2 * 2048];
+            // Two callbacks: the first adopts the instance, the second is steady state.
+            st.fill(&mut out, 2);
+            st.fill(&mut out, 2);
+            let peak = out.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            let cell = format!("kind={kind:?} armed={armed} monitor={monitor} editor_open={editor_open} hosted={hosted}");
+            assert_eq!(st.renders > 0, expect_runs, "engine ran: {cell}: renders {}", st.renders);
+            // A hosted insert is processed while stopped, so it must be heard. The mixer does not
+            // process an instrument slot while the transport is stopped, so instrument rows check
+            // only that the engine ran.
+            if hosted && expect_runs && kind == TrackKind::Audio {
+                assert!(peak > 0.1, "hosted tone audible: {cell}: peak {peak}");
+            }
+        }
+    }
+
+    #[test]
+    fn session_has_hosted_sees_third_party_plugins_only() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        assert!(!session_has_hosted(&s));
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("gain"));
+        assert!(!session_has_hosted(&s), "a built-in insert is not hosted");
+        s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:test.x"));
+        assert!(session_has_hosted(&s));
     }
 
     #[test]
@@ -1198,6 +1359,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let (gtx, grx) = channel();
@@ -1227,6 +1389,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
@@ -1262,6 +1425,7 @@ mod tests {
                 playing: AtomicBool::new(false),
                 speed: AtomicU32::new(1000),
                 meters: Mutex::new(MeterSnapshot::default()),
+                editors_open: AtomicBool::new(false),
             });
             let (tx, rx) = channel();
             let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
@@ -1292,6 +1456,7 @@ mod tests {
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
             meters: Mutex::new(MeterSnapshot::default()),
+            editors_open: AtomicBool::new(false),
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
