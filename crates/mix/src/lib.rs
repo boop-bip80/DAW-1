@@ -609,6 +609,16 @@ impl MixEngine {
         }
     }
 
+    /// Put the strips taken out for processing back into the engine, every one of them so none is
+    /// dropped by an unwind, leaving `work` empty.
+    fn restore_strips(&mut self, work: &mut Vec<(usize, Strip)>, s: &Session) {
+        for (i, st) in work.drain(..) {
+            if let Some(t) = s.tracks.get(i) {
+                self.strips.insert(t.id, st);
+            }
+        }
+    }
+
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
@@ -664,11 +674,7 @@ impl MixEngine {
         }));
         self.busses = busses;
         if let Err(panic) = ran {
-            for (i, st) in work.drain(..) {
-                if let Some(t) = s.tracks.get(i) {
-                    self.strips.insert(t.id, st);
-                }
-            }
+            self.restore_strips(&mut work, s);
             self.work = work;
             self.order = order;
             std::panic::resume_unwind(panic);
@@ -734,11 +740,7 @@ impl MixEngine {
                 self.route_strip(t, st, pos, frames);
             }
         }
-        for (i, st) in work.drain(..) {
-            if let Some(t) = s.tracks.get(i) {
-                self.strips.insert(t.id, st);
-            }
-        }
+        self.restore_strips(&mut work, s);
         self.work = work;
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
         // Phase 2: auxes in dependency order (they read busses).
@@ -748,7 +750,15 @@ impl MixEngine {
                 st.scratch.resize(self.max_block, 0.0);
             }
             let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-            process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
+            // As in phase 1: a panicking plug-in leaves its strip in the engine, not dropped by the unwind.
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
+            }));
+            if let Err(panic) = ran {
+                self.strips.insert(t.id, st);
+                self.order = order;
+                std::panic::resume_unwind(panic);
+            }
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
             st.align.process(&mut st.buf, frames);
@@ -2759,6 +2769,52 @@ mod tests {
 
     fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
         vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(soundcraft_dsp::create("gain").unwrap())) }]
+    }
+
+    /// A plug-in whose `process` panics.
+    struct Panics(Box<dyn Plugin>);
+
+    impl Plugin for Panics {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            std::panic::panic_any("a plug-in bug");
+        }
+    }
+
+    /// A plug-in that panics while a block renders must leave its strip in the engine, so the
+    /// instance can be drained and torn down off the audio thread instead of by the unwind. One row
+    /// per phase: an insert on an ordinary track, and one on an aux.
+    #[test]
+    fn a_panicking_plugin_leaves_its_strip_drainable() {
+        for on_aux in [false, true] {
+            let (mut s, t) = session_with_dc(0.5, 48_000);
+            let aux = s.add_track(TrackKind::Aux, ChannelFormat::Mono, None);
+            let track = if on_aux { aux } else { t };
+            s.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.panics"));
+            let mut eng = MixEngine::new(48_000.0, 512);
+            eng.set_external_instances(true);
+            let mut gain = soundcraft_dsp::create("gain").unwrap();
+            gain.prepare(48_000.0, 512, 1);
+            eng.adopt(vec![PreparedInstance { track, slot: 0, id: "clap:test.panics".into(), ch: 1, plugin: Box::new(Panics(gain)) }]);
+            let mut out = vec![vec![0.0; 512]; 2];
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| eng.render(&s, 0, 512, &mut out)));
+            assert!(ran.is_err(), "the plug-in's panic comes out of render (on_aux: {on_aux})");
+            assert_eq!(eng.drain_plugins().len(), 1, "the instance is still in the engine after the panic (on_aux: {on_aux})");
+        }
     }
 
     #[test]
