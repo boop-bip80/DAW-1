@@ -1113,6 +1113,12 @@ fn process_strip(
 /// Below this magnitude (about -120 dBFS) a sample counts as silence for insert suspension.
 const SILENCE_THRESHOLD: f32 = 1e-6;
 
+/// True when every sample of every channel in the block is exactly 0.0: no threshold, because
+/// CLAP's `CLAP_PROCESS_SLEEP` means "sleep until a non-zero input", however quiet.
+fn is_all_zero(buf: &[Vec<f32>], frames: usize) -> bool {
+    buf.iter().all(|c| c.get(..frames).unwrap_or(c).iter().fold(true, |ok, x| ok & (*x == 0.0)))
+}
+
 /// True when every sample of every channel in the block is below [`SILENCE_THRESHOLD`].
 fn is_silent(buf: &[Vec<f32>], frames: usize) -> bool {
     // A branch-free fold vectorizes (see `contain_failure`).
@@ -1120,8 +1126,8 @@ fn is_silent(buf: &[Vec<f32>], frames: usize) -> bool {
 }
 
 /// Runs one insert over the block, or leaves it unprocessed when it is a hosted effect, its
-/// input is silent and its [`ProcessStatus`] allows that (`Sleep` while silent;
-/// `ContinueIfNotQuiet` once its last output was silent too; `Tail` once `tail_samples()` of
+/// input is silent and its [`ProcessStatus`] allows that (`Sleep` while the input is exactly
+/// zero, any nonzero sample wakes it; `ContinueIfNotQuiet` once its last output was silent too; `Tail` once `tail_samples()` of
 /// silence have gone through and its last output was silent). The buffers are then left as they
 /// are: silent in, silent out. Any non-silent block resumes it, and a parameter change wakes it
 /// for one block (without restarting its tail count). `no_suspend` runs every insert. True when
@@ -1135,7 +1141,7 @@ fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transp
                 && match slot.plugin.process_status() {
                     ProcessStatus::Continue => false,
                     ProcessStatus::ContinueIfNotQuiet => slot.output_silent,
-                    ProcessStatus::Sleep => true,
+                    ProcessStatus::Sleep => is_all_zero(buf, frames),
                     ProcessStatus::Tail => slot.output_silent && slot.quiet >= slot.plugin.tail_samples(),
                 };
             if skip {
@@ -2820,6 +2826,8 @@ mod tests {
             param_at: Option<usize>,
             no_suspend: bool,
             instrument: bool,
+            /// Level of the DC clip that feeds the insert (0.5 unless a row needs a tiny one).
+            dc: f32,
             /// Block positions rendered, in order.
             blocks: &'static [i64],
             /// `process` calls after each block.
@@ -2835,6 +2843,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0]],
                 calls: &[1],
                 told: &[true],
@@ -2846,6 +2855,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0], LOUD],
                 calls: &[0, 1],
                 told: &[false],
@@ -2857,6 +2867,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0], LOUD],
                 calls: &[0, 1],
                 told: &[false],
@@ -2868,6 +2879,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0], QUIET[1], QUIET[2], LOUD],
                 calls: &[1, 2, 2, 3],
                 told: &[true, true, false],
@@ -2879,6 +2891,7 @@ mod tests {
                 param_at: None,
                 no_suspend: true,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0]],
                 calls: &[1],
                 told: &[true],
@@ -2892,6 +2905,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[LOUD, QUIET[0], QUIET[1], QUIET[2], QUIET[3]],
                 calls: &[1, 2, 3, 4, 4],
                 told: &[false, true, true, true],
@@ -2904,6 +2918,7 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[LOUD, QUIET[0], QUIET[1], QUIET[2]],
                 calls: &[1, 2, 3, 3],
                 told: &[false, true, true],
@@ -2916,6 +2931,7 @@ mod tests {
                 param_at: Some(1),
                 no_suspend: false,
                 instrument: false,
+                dc: 0.5,
                 blocks: &[QUIET[0], QUIET[1], QUIET[2]],
                 calls: &[0, 1, 1],
                 told: &[true],
@@ -2927,13 +2943,39 @@ mod tests {
                 param_at: None,
                 no_suspend: false,
                 instrument: true,
+                dc: 0.5,
                 blocks: &[QUIET[0], QUIET[1]],
                 calls: &[1, 2],
                 told: &[],
             },
+            // Sleep wakes on any nonzero sample, even one below SILENCE_THRESHOLD, and sleeps on exact zero.
+            Row {
+                status: Sleep,
+                tail: 0,
+                decay: 0,
+                param_at: None,
+                no_suspend: false,
+                instrument: false,
+                dc: 1e-7,
+                blocks: &[LOUD],
+                calls: &[1],
+                told: &[true],
+            },
+            Row {
+                status: Sleep,
+                tail: 0,
+                decay: 0,
+                param_at: None,
+                no_suspend: false,
+                instrument: false,
+                dc: 0.0,
+                blocks: &[LOUD],
+                calls: &[0],
+                told: &[],
+            },
         ];
         for (n, row) in rows.iter().enumerate() {
-            let (mut s, mut t) = session_with_dc(0.5, 1024);
+            let (mut s, mut t) = session_with_dc(row.dc, 1024);
             let id = "clap:test.sleepy";
             let slot = if row.instrument {
                 t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);

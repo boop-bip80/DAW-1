@@ -201,7 +201,8 @@ pub enum ProcessStatus {
     /// After the input goes silent, keep calling for `tail_samples()` more samples (and while the
     /// output is still not silent), then stop until it returns.
     Tail,
-    /// Stop calling `process` until an input is not silent (or an event arrives).
+    /// Stop calling `process` until an input sample is not exactly zero (or an event arrives);
+    /// unlike the other statuses this has no quietness threshold (CLAP's "sleep until a non-zero input").
     Sleep,
 }
 
