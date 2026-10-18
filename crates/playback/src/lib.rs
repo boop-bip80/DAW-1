@@ -171,6 +171,10 @@ fn render_held(holder: &Mutex<Option<AudioState>>, fault: &Fault, shared: &Share
     };
     match held.as_mut() {
         Some(st) => {
+            if fault.failed.load(Ordering::Relaxed) {
+                // Never `fill` again; keep what the UI thread sends from piling up unseen.
+                st.discard_after_fault();
+            }
             guarded_block(fault, shared, out, |o| st.fill(o, channels));
             true
         }
@@ -234,6 +238,20 @@ impl AudioState {
             device_rate,
             input: None,
             recording: false,
+        }
+    }
+
+    /// After the engine has faulted nothing drains the queue any more: take every pending command
+    /// off it. New third-party instances go back down the garbage channel, so they drop on the UI
+    /// thread (a failed send means the receiver is gone and nothing is left to do); everything
+    /// else is dropped here, which frees nothing that matters (snapshots are `Arc<Session>`).
+    /// The instance vector is converted in place (`PreparedInstance` is a whole multiple of
+    /// `Box<dyn Plugin>` in size), so nothing new is allocated here.
+    fn discard_after_fault(&mut self) {
+        while let Ok(c) = self.rx.try_recv() {
+            if let Cmd::Session(_, instances) = c {
+                let _ = self.garbage.send(instances.into_iter().map(|i| i.plugin).collect());
+            }
         }
     }
 
@@ -1445,6 +1463,45 @@ mod tests {
         drop(player);
         let here = std::thread::current().id();
         assert_eq!(*dropped_on.lock().unwrap(), Some(here), "after a fault, teardown must still run on the player's thread");
+    }
+
+    /// Review finding (PR 752): once the engine has faulted nothing drains the queue; commands the
+    /// UI keeps sending are taken off it, and their new instances go back to the UI thread.
+    #[test]
+    fn commands_after_a_fault_are_not_kept() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.late"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let holder: Holder = Arc::new(Mutex::new(Some(AudioState::new(rx, Arc::clone(&shared), Arc::new(Session::default()), 48_000.0, gtx))));
+        let fault = Fault::default();
+        let mut out = vec![0.0f32; 8];
+        guarded_block(&fault, &shared, &mut out, |_| std::panic::panic_any("a plug-in bug"));
+        assert!(fault.failed.load(Ordering::Relaxed));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let plugin = ThreadLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+            let late =
+                PreparedInstance { track: t, slot: soundcraft_mix::INSTRUMENT_SLOT, id: "clap:test.late".into(), ch: 2, plugin: Box::new(plugin) };
+            tx.send(Cmd::Session(Arc::clone(&s), vec![late])).unwrap();
+        }
+        tx.send(Cmd::Stop).unwrap();
+        assert!(render_held(&holder, &fault, &shared, &mut out, 2));
+        assert!(log.lock().unwrap().iter().all(|(w, _)| *w != "drop"), "returned, not dropped on the audio side");
+        let returned: Vec<_> = std::iter::from_fn(|| grx.try_recv().ok()).collect();
+        assert_eq!(returned.iter().map(Vec::len).sum::<usize>(), 2, "the instances sent after the fault must come back to the UI thread");
+        let held = holder.lock().unwrap();
+        let pending = held.as_ref().map(|st| st.rx.try_recv().is_ok());
+        assert_eq!(pending, Some(false), "nothing may be left waiting in the queue");
     }
 
     #[test]
