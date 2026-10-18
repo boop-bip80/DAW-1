@@ -1215,6 +1215,100 @@ mod tests {
         assert_eq!(grx.try_recv().map(|v| v.len()), Ok(1), "late answer takes the retire channel");
     }
 
+    /// Records the thread of every lifecycle call, so a test can assert where teardown ran.
+    struct ThreadLog {
+        inner: Box<dyn Plugin>,
+        log: Arc<std::sync::Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+    }
+
+    impl ThreadLog {
+        fn note(&self, what: &'static str) {
+            let mut log = self.log.lock().unwrap();
+            if log.last().map(|(w, _)| *w) != Some(what) {
+                log.push((what, std::thread::current().id()));
+            }
+        }
+    }
+
+    impl Plugin for ThreadLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.note("prepare");
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.note("process");
+            self.inner.process(io, frames);
+        }
+    }
+
+    impl Drop for ThreadLog {
+        fn drop(&mut self) {
+            self.note("drop");
+        }
+    }
+
+    /// Gate (quit deadlock, 2026-10-18): a hosted plugin's teardown runs on the thread that owns the
+    /// player, never on the audio thread. A VST3's `terminate` may wait for the UI thread; if it ran on
+    /// the audio thread while the UI thread joined that thread, the app hung on quit. The fake records
+    /// where every call ran; the player here drives the real silent-clock thread and the real `Drop`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_teardown_never_runs_on_the_audio_thread() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.threads"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = ThreadLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance {
+                track: t,
+                slot: soundcraft_mix::INSTRUMENT_SLOT,
+                id: "clap:test.threads".into(),
+                ch: 2,
+                plugin: Box::new(plugin),
+            }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        // Wait until the clock thread has processed the instance (it runs every 10 ms).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !log.lock().unwrap().iter().any(|(w, _)| *w == "process") {
+            assert!(std::time::Instant::now() < deadline, "the clock thread never processed the instance: {:?}", log.lock().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(player);
+        let log = log.lock().unwrap();
+        let here = std::thread::current().id();
+        let processed_on = log.iter().find(|(w, _)| *w == "process").map(|(_, id)| *id).unwrap();
+        let dropped_on = log.iter().find(|(w, _)| *w == "drop").map(|(_, id)| *id);
+        assert_ne!(processed_on, here, "sanity: processing ran on the clock thread, not here");
+        assert_eq!(dropped_on, Some(here), "teardown must run on the player's thread, not the audio thread: {log:?}");
+    }
+
     #[test]
     fn plugin_states_are_read_without_the_audio_thread() {
         let mut side = Side::new(48_000.0, channel().1);
