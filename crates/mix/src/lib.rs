@@ -1482,7 +1482,10 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
             continue;
         }
         let ClipContent::Midi { sequence } = &clip.content else { continue };
-        if !clip.range().overlaps(&Range { start: pos, end }) {
+        // A note-off is clamped to `clip.end()`, which the half-open range excludes: when that
+        // sample is the first of this block (`pos == clip.end()`) the clip still has to be visited
+        // or the off is never sent and the note holds forever.
+        if clip.end() < pos || clip.start >= end {
             continue;
         }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
@@ -2669,6 +2672,62 @@ mod tests {
         eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(keys) }]);
         render_block(&mut eng, &s, 0);
         assert_eq!(*heard.lock().unwrap(), vec![(72, 80)]);
+    }
+
+    struct Ears2 {
+        inner: Box<dyn Plugin>,
+        heard: Arc<std::sync::Mutex<Vec<(&'static str, usize, u8)>>>,
+    }
+
+    impl Plugin for Ears2 {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, offset: usize, note: u8, _velocity: u8) {
+            self.heard.lock().unwrap().push(("on", offset, note));
+        }
+        fn note_off(&mut self, offset: usize, note: u8) {
+            self.heard.lock().unwrap().push(("off", offset, note));
+        }
+    }
+
+    #[test]
+    fn a_note_off_on_the_clip_end_block_boundary_is_sent() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears2"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        // Far longer than the clip, so the off is clamped to the clip end (sample 1024).
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 1024, seq));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears2 { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears2".into(), ch: 2, plugin: Box::new(ears) }]);
+        for pos in [0, 512, 1024] {
+            render_block(&mut eng, &s, pos);
+        }
+        assert_eq!(*heard.lock().unwrap(), vec![("on", 0, 60), ("off", 0, 60)]);
+        // Past the clip nothing more is sent.
+        render_block(&mut eng, &s, 1536);
+        assert_eq!(heard.lock().unwrap().len(), 2);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
