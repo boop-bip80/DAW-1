@@ -1,8 +1,10 @@
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, menus};
+use soundcraft_ui_egui::{Services, SoundApp, i18n, menus};
 
 #[test]
 fn undo_and_redo_name_the_step_they_would_take() {
+    // This test speaks English; the machine running it may prefer another language.
+    i18n::set(i18n::Language::English);
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     let label = |app: &SoundApp, id| menus::live_label(app, Some(id));
     assert_eq!(label(&app, "edit.undo").as_deref(), Some("Can't Undo"));

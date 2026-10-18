@@ -38,6 +38,32 @@ const HANGUL: &[(&str, u32)] = &[
     ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", 0),
     ("/usr/share/fonts/naver-nanum/NanumGothic.ttf", 0),
 ];
+/// Simplified Chinese fallback. The interface and session names must draw even when the user's
+/// Latin UI font has no Han glyphs. PingFang ships as a 75 MB collection on recent macOS, larger
+/// than [`MAX_FONT_BYTES`], so Hiragino Sans GB (always installed) comes first there.
+const HAN: &[(&str, u32)] = &[
+    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    ("/System/Library/Fonts/STHeiti Medium.ttc", 1),
+    ("/System/Library/Fonts/Supplemental/Songti.ttc", 0),
+    ("/System/Library/Fonts/PingFang.ttc", 3),
+    ("/Library/Fonts/Arial Unicode.ttf", 0),
+    ("C:\\Windows\\Fonts\\msyh.ttc", 0),
+    ("C:\\Windows\\Fonts\\msyhbd.ttc", 0),
+    ("C:\\Windows\\Fonts\\simsun.ttc", 0),
+    ("C:\\Windows\\Fonts\\simhei.ttf", 0),
+    ("C:\\Windows\\Fonts\\Deng.ttf", 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/local/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 2),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf", 0),
+    ("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf", 0),
+    ("/usr/share/fonts/truetype/source-han-sans/SourceHanSansSC-Regular.otf", 0),
+    ("/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc", 0),
+    ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0),
+];
 /// Font files larger than this are skipped: egui keeps the whole file in memory.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_FONT_BYTES: u64 = 64 << 20;
@@ -121,6 +147,21 @@ pub fn definitions() -> FontDefinitions {
         bold_family.insert(0, "system-regular".into());
     }
     fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
+    // Han before Hangul: some Korean fonts carry Hanja glyphs, and a Chinese menu must use the
+    // Chinese face. Both come last so the Latin UI font keeps its own punctuation and digits.
+    //
+    // The Han collection is large (Hiragino Sans GB is 23 MB, PingFang 75 MB), so only a Chinese
+    // interface reads it. An English interface with Chinese track or clip names is the separate
+    // multilingual-name problem tracked in PR #141; loading 23 MB for every English launch would
+    // make the menu localization cost memory it does not need.
+    if crate::i18n::current() == crate::i18n::Language::SimplifiedChinese
+        && let Some(h) = load(HAN, "sans-serif:lang=zh-cn", Some("zh-cn"))
+    {
+        fonts.font_data.insert("system-han".into(), Arc::new(h));
+        for family in fonts.families.values_mut() {
+            family.push("system-han".into());
+        }
+    }
     if let Some(h) = load(HANGUL, "sans-serif:lang=ko", Some("ko")) {
         fonts.font_data.insert("system-hangul".into(), Arc::new(h));
         for family in fonts.families.values_mut() {
@@ -145,6 +186,47 @@ mod tests {
         }
         // Face 0 of the Noto Sans CJK collection is Japanese; the Korean face is 1.
         assert!(HANGUL.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 1));
+    }
+
+    #[test]
+    fn han_candidates_cover_every_desktop_platform() {
+        for prefix in ["/System/Library/Fonts/", "C:\\Windows\\Fonts\\", "/usr/share/fonts/"] {
+            assert!(HAN.iter().any(|(p, _)| p.starts_with(prefix)), "no Han candidate under {prefix}");
+        }
+        // Face 3 of PingFang.ttc is PingFang SC; 0-2 are HK, MO and TC.
+        assert!(HAN.iter().filter(|(p, _)| p.ends_with("PingFang.ttc")).all(|(_, i)| *i == 3));
+        // Face 2 of Noto Sans CJK is Simplified Chinese; 0 is Japanese and 1 Korean.
+        assert!(HAN.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 2));
+        // Hiragino Sans GB face 0 is the W3 Simplified Chinese face.
+        assert!(HAN.iter().any(|(p, i)| p.ends_with("Hiragino Sans GB.ttc") && *i == 0));
+    }
+
+    /// An English interface does not pay for the Han font, even though the file is installed.
+    #[test]
+    fn an_english_interface_does_not_load_the_han_font() {
+        crate::i18n::set(crate::i18n::Language::English);
+        let defs = definitions();
+        assert!(!defs.font_data.contains_key("system-han"));
+    }
+
+    /// Chinese menu labels draw in every family, not as boxes; skipped without a Chinese font.
+    #[test]
+    fn every_family_draws_han_with_a_system_chinese_font() {
+        crate::i18n::set(crate::i18n::Language::SimplifiedChinese);
+        let defs = definitions();
+        if !defs.font_data.contains_key("system-han") {
+            eprintln!("skipping: no Chinese system font");
+            return;
+        }
+        let families: Vec<FontFamily> = defs.families.keys().cloned().collect();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(defs);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        for family in families {
+            let font = egui::FontId::new(13.0, family.clone());
+            assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, "中文菜单界面")), "{family:?} has no Chinese");
+        }
     }
 
     /// Korean names draw in every family, not as boxes; skipped when the system has no Korean font.

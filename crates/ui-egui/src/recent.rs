@@ -11,7 +11,7 @@
 //! greyed out instead of failing on click; whether each one exists is checked at most every few
 //! seconds while the menu is open, because a session on a network share costs a round trip.
 
-use crate::SoundApp;
+use crate::{SoundApp, i18n};
 use serde_json::json;
 use std::path::Path;
 
@@ -84,9 +84,9 @@ impl SoundApp {
 
 /// The File › Open Recent submenu.
 pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
-    ui.menu_button("Open Recent", |ui| {
+    ui.menu_button(i18n::tr("Open Recent"), |ui| {
         if app.ui.recent_sessions.is_empty() {
-            ui.add_enabled(false, egui::Button::new("No Recent Sessions"));
+            ui.add_enabled(false, egui::Button::new(i18n::tr("No Recent Sessions")));
             return;
         }
         let now = ui.ctx().input(|i| i.time);
@@ -94,14 +94,17 @@ pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
         let mut open = None;
         for (i, path) in app.ui.recent_sessions.iter().enumerate() {
             let here = exists.get(i).copied().unwrap_or(true);
-            let text = if here { label(path) } else { format!("{}  (missing)", label(path)) };
-            let r = ui.add_enabled(here, egui::Button::new(text)).on_hover_text(path.as_str()).on_disabled_hover_text(format!("{path}\nnot found"));
+            let text = if here { label(path) } else { format!("{}  {}", label(path), i18n::tr("(missing)")) };
+            let r = ui
+                .add_enabled(here, egui::Button::new(text))
+                .on_hover_text(path.as_str())
+                .on_disabled_hover_text(format!("{path}\n{}", i18n::tr("not found")));
             if r.clicked() {
                 open = Some(path.clone());
             }
         }
         ui.separator();
-        if ui.button("Clear Recent").clicked() {
+        if ui.button(i18n::tr("Clear Recent")).clicked() {
             app.ui.recent_sessions.clear();
             app.recent_changed = true;
             ui.close();

@@ -2,7 +2,7 @@
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
-use soundcraft_ui_egui::{SoundApp, menus};
+use soundcraft_ui_egui::{SoundApp, i18n, menus};
 use std::sync::mpsc::{Receiver, channel};
 
 struct Entry {
@@ -32,18 +32,18 @@ impl NativeMenu {
         let (tx, events) = channel();
         let mut native = Self { menu, entries: Vec::new(), events, last_sync: None };
         let app_menu = Submenu::new("SoundCraft", true);
-        native.add_item(app, &app_menu, "About SoundCraft", "", Some("window.about".into()))?;
-        native.add_item(app, &app_menu, "Session Info", "", Some("window.session_info".into()))?;
-        native.add_item(app, &app_menu, "Session Audio Health", "", Some("window.audio_health".into()))?;
+        native.add_item(app, &app_menu, i18n::tr("About SoundCraft"), "", Some("window.about".into()))?;
+        native.add_item(app, &app_menu, i18n::tr("Session Info"), "", Some("window.session_info".into()))?;
+        native.add_item(app, &app_menu, i18n::tr("Session Audio Health"), "", Some("window.audio_health".into()))?;
         app_menu.append(&PredefinedMenuItem::separator())?;
         app_menu.append(&PredefinedMenuItem::services(None))?;
         app_menu.append(&PredefinedMenuItem::separator())?;
         // muda's own Hide items take ⌘H and ⌥⌘H, which are Heal Separation and Copy to Send.
-        app_menu.append(&MenuItem::with_id("hide", "Hide SoundCraft", true, None))?;
-        app_menu.append(&MenuItem::with_id("hide_others", "Hide Others", true, None))?;
+        app_menu.append(&MenuItem::with_id("hide", i18n::tr("Hide SoundCraft"), true, None))?;
+        app_menu.append(&MenuItem::with_id("hide_others", i18n::tr("Hide Others"), true, None))?;
         app_menu.append(&PredefinedMenuItem::show_all(None))?;
         app_menu.append(&PredefinedMenuItem::separator())?;
-        native.add_item(app, &app_menu, "Quit SoundCraft", "", Some("app.quit".into()))?;
+        native.add_item(app, &app_menu, i18n::tr("Quit SoundCraft"), "", Some("app.quit".into()))?;
         native.menu.append(&app_menu)?;
         let aliases = menus::ui_aliases();
         for root in menus::tree() {
@@ -61,10 +61,16 @@ impl NativeMenu {
     }
 
     fn add_branch(&mut self, app: &SoundApp, node: &menus::MenuNode, aliases: &[(&str, &str)]) -> muda::Result<Submenu> {
-        let submenu = Submenu::new(&node.label, true);
+        let submenu = Submenu::new(i18n::menu_label(&node.path, &node.label), true);
         for child in &node.children {
             if child.children.is_empty() {
-                self.add_item(app, &submenu, &child.label, &child.path, menus::command_for_path(&child.path, aliases))?;
+                self.add_item(
+                    app,
+                    &submenu,
+                    i18n::menu_label(&child.path, &child.label),
+                    &child.path,
+                    menus::command_for_path(&child.path, aliases),
+                )?;
             } else {
                 submenu.append(&self.add_branch(app, child, aliases)?)?;
             }

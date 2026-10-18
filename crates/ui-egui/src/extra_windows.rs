@@ -2,6 +2,7 @@
 //! object tracks' positions), UI Customization, and auto-updating the active window configuration.
 
 use crate::SoundApp;
+use crate::i18n;
 use crate::theme::{Tokens, bold, regular};
 use egui::{Align2, Color32, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
@@ -150,7 +151,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    egui::Window::new(egui::RichText::new("Appearance").font(bold(13.0))).open(&mut open).default_size(vec2(320.0, 180.0)).resizable(false).show(
+    egui::Window::new(egui::RichText::new("Appearance").font(bold(13.0))).open(&mut open).default_size(vec2(320.0, 230.0)).resizable(false).show(
         ctx,
         |ui| {
             egui::Grid::new("ui_custom").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
@@ -171,6 +172,23 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
                 });
                 if let Some(mode) = chosen {
                     let _ = app.run("ui.theme", json!({"mode": mode.id()}));
+                }
+                ui.end_row();
+                ui.label("Language");
+                let mut language = None;
+                egui::ComboBox::from_id_salt("ui_language").selected_text(app.ui.language.label(i18n::current())).show_ui(ui, |ui| {
+                    for setting in i18n::LanguageSetting::ALL {
+                        // The web build has no bundled CJK font, so it offers only English/System.
+                        if cfg!(target_arch = "wasm32") && setting == i18n::LanguageSetting::SimplifiedChinese {
+                            continue;
+                        }
+                        if ui.selectable_label(app.ui.language == setting, setting.label(i18n::current())).clicked() {
+                            language = Some(setting);
+                        }
+                    }
+                });
+                if let Some(setting) = language {
+                    let _ = app.run("ui.language", json!({"lang": setting.id()}));
                 }
                 ui.end_row();
                 ui.label("Auto-update configuration");

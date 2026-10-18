@@ -26,6 +26,8 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 image.workspace = true
+# The system UI language, for the menu localization (safe, cross-platform incl. wasm).
+sys-locale = { version = "0.3", features = ["js"] }
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

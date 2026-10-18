@@ -1,7 +1,7 @@
 //! Search: a command palette over every engine and UI command (Window › Search, Cmd+Ctrl+S).
 
-use crate::SoundApp;
 use crate::theme::{Tokens, mono};
+use crate::{SoundApp, i18n};
 use egui::{Align2, Key, vec2};
 
 #[derive(Debug, Clone, Default)]
@@ -65,15 +65,19 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let t = Tokens::current();
     let mut run: Option<String> = None;
     let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
-    egui::Window::new("Search")
+    egui::Window::new(i18n::tr("Search"))
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
         .anchor(Align2::CENTER_TOP, vec2(0.0, 90.0))
         .fixed_size(vec2(560.0, 380.0))
         .show(ctx, |ui| {
-            let r = ui
-                .add(egui::TextEdit::singleline(&mut app.palette.query).hint_text("Search commands…").desired_width(f32::INFINITY).font(mono(15.0)));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut app.palette.query)
+                    .hint_text(i18n::tr("Search commands…"))
+                    .desired_width(f32::INFINITY)
+                    .font(mono(15.0)),
+            );
             r.request_focus();
             let q = app.palette.query.trim().to_string();
             let mut hits: Vec<(i32, Entry)> =

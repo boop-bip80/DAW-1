@@ -1,7 +1,7 @@
 //! The menu bar, built from the incumbent's menu catalog so every item has its place. Items
 //! that map to a command are live; the rest are shown disabled (and listed in the parity report).
 
-use crate::{MainWindow, SoundApp};
+use crate::{MainWindow, SoundApp, i18n};
 use serde_json::{Value, json};
 use soundcraft_engine::catalog;
 
@@ -73,6 +73,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("ui.bounce_dialog", "Bounce Mix…", "", None),
     ("ui.set", "Set UI State", "", None),
     ("ui.theme", "Appearance", "", None),
+    ("ui.language", "Language", "", None),
 ];
 
 /// Extra catalog mappings handled by the UI layer.
@@ -221,39 +222,39 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
         |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("SoundCraft", |ui| {
-                    if ui.button("About SoundCraft").clicked() {
+                    if ui.button(i18n::tr("About SoundCraft")).clicked() {
                         app.ui.show_about = true;
                     }
-                    if ui.button("Session Info").clicked() {
+                    if ui.button(i18n::tr("Session Info")).clicked() {
                         app.ui.show_session_info = true;
                     }
-                    if ui.button("Session Audio Health").clicked() {
+                    if ui.button(i18n::tr("Session Audio Health")).clicked() {
                         let _ = app.run("window.audio_health", json!({"value": true}));
                     }
                     ui.separator();
-                    if ui.button("Quit").clicked() {
+                    if ui.button(i18n::tr("Quit")).clicked() {
                         let _ = crate::dialogs::run_or_ask(app, "app.quit", json!({}));
                     }
                 });
                 let extra = ui_aliases();
                 for root in tree() {
-                    ui.menu_button(&root.label, |ui| {
+                    ui.menu_button(i18n::menu_label(&root.path, &root.label), |ui| {
                         for c in &root.children {
                             menu_node(app, ui, c, &extra);
                             if c.path == "File > Open" {
                                 crate::recent::menu(app, ui);
                             }
                         }
-                        if root.label == "AudioSuite" {
+                        if root.path == "AudioSuite" {
                             ui.separator();
-                            ui.label(egui::RichText::new("Processes selected clips offline").small().color(t.text_dim));
+                            ui.label(egui::RichText::new(i18n::tr("Processes selected clips offline")).small().color(t.text_dim));
                         }
-                        if root.label == "Window" {
+                        if root.path == "Window" {
                             ui.separator();
                             let mut separate = app.ui.mix_separate;
                             if ui
-                                .checkbox(&mut separate, "Mix in Separate Window")
-                                .on_hover_text("Show Edit and Mix at once, e.g. one per monitor")
+                                .checkbox(&mut separate, i18n::tr("Mix in Separate Window"))
+                                .on_hover_text(i18n::tr("Show Edit and Mix at once, e.g. one per monitor"))
                                 .changed()
                             {
                                 let _ = run_ui_command(app, "window.mix_separate", &json!({"value": separate}));
@@ -266,7 +267,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     "{}{}  —  {}",
                     app.engine.session().name,
                     if app.engine.is_dirty() { " *" } else { "" },
-                    if app.ui.window == MainWindow::Edit || app.ui.mix_separate { "Edit" } else { "Mix" }
+                    if app.ui.window == MainWindow::Edit || app.ui.mix_separate { i18n::tr("Edit") } else { i18n::tr("Mix") }
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(title).color(t.text_dim));
@@ -278,7 +279,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
 
 fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str, &str)]) {
     if !n.children.is_empty() {
-        ui.menu_button(&n.label, |ui| {
+        ui.menu_button(i18n::menu_label(&n.path, &n.label), |ui| {
             for c in &n.children {
                 menu_node(app, ui, c, extra);
             }
@@ -287,7 +288,7 @@ fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str
     }
     let id = command_for_path(&n.path, extra);
     let (enabled, checked) = item_state(app, &n.path, id.as_deref());
-    let label = live_label(app, id.as_deref()).unwrap_or_else(|| n.label.clone());
+    let label = live_label(app, id.as_deref()).unwrap_or_else(|| i18n::menu_label(&n.path, &n.label).to_string());
     let label = if checked { format!("✔ {label}") } else { label };
     let shortcut = id.as_deref().and_then(shortcut_for).unwrap_or("");
     let btn = egui::Button::new(label).shortcut_text(crate::shortcuts::shortcut_label(shortcut, ui.ctx().os().is_mac()));
@@ -429,8 +430,8 @@ pub fn shortcut_for(id: &str) -> Option<&'static str> {
 pub fn live_label(app: &SoundApp, id: Option<&str>) -> Option<String> {
     let e = &app.engine;
     match id? {
-        "edit.undo" => Some(e.undo_label().map_or_else(|| "Can't Undo".into(), |l| format!("Undo {l}"))),
-        "edit.redo" => Some(e.redo_label().map_or_else(|| "Can't Redo".into(), |l| format!("Redo {l}"))),
+        "edit.undo" => Some(e.undo_label().map_or_else(|| i18n::tr("Can't Undo").to_string(), |l| i18n::trf("Undo {}", &[&l]))),
+        "edit.redo" => Some(e.redo_label().map_or_else(|| i18n::tr("Can't Redo").to_string(), |l| i18n::trf("Redo {}", &[&l]))),
         _ => None,
     }
 }
@@ -638,6 +639,16 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.theme = mode;
             json!({"mode": mode.id()})
         }
+        "ui.language" => {
+            let Some(value) = p.get("lang").and_then(Value::as_str) else {
+                return Some(Ok(json!({"lang": app.ui.language.id()})));
+            };
+            let Some(setting) = i18n::LanguageSetting::parse(value) else {
+                return Some(Err(format!("unknown language `{value}` (system, en or zh-Hans)")));
+            };
+            app.set_language(setting);
+            json!({"lang": setting.id()})
+        }
         "ui.set" => match serde_json::to_value(&app.ui) {
             Ok(mut cur) => {
                 if let (Some(obj), Some(patch)) = (cur.as_object_mut(), p.as_object()) {
@@ -650,8 +661,12 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                         if let Err(error) = ns.docking.validate().and_then(|()| ns.mix_docking.validate_mix()) {
                             return Some(Err(error));
                         }
+                        let language = app.ui.language;
                         crate::docking::cancel_replaced_state(app, &ns);
                         app.ui = ns;
+                        if app.ui.language != language {
+                            app.apply_language_setting();
+                        }
                         json!({"ui": app.ui})
                     }
                     Err(e) => return Some(Err(format!("bad ui state: {e}"))),

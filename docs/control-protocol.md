@@ -45,6 +45,7 @@ Errors: `{"id": 1, "ok": false, "error": "bad parameters for `mix.volume`: no tr
 | `session.inspect` | `{detail?: "summary"|"full"}` | The document: tracks, clips (with times), inserts (+params when full), sends, routing, automation, markers, groups, busses, sources (`loaded` true when decoded audio is in the pool), selection, zoom (`samples_per_px`, `scroll`), transport, undo label. |
 | `ui.inspect` | `{}` | UI state (`window`, panels, dialogs), window size, playing/position, audio device, and `edit_layout` (timeline rect and every track row's rect, for clicking). |
 | `ui.set` | any `UiState` fields | e.g. `{"window": "Mix", "narrow_mix": true}`. |
+| `ui.language` | `{lang?}` | Get or set the interface language: `system` (follow the OS), `en` or `zh-Hans`. Saved with the UI preferences; on macOS the system menu bar is rebuilt. |
 | `ui.menu.list` | `{}` | Every catalog menu path and the command that implements it (or null). |
 | `ui.menu.invoke` | `{path}` or `{id}` | Like clicking the menu item: may open its dialog (e.g. `"Track > New..."`). |
 | `ui.click` | `{x, y, button?, count?, cmd?, shift?, alt?, ctrl?}` | Synthetic click (window points). |
@@ -80,6 +81,10 @@ Offscreen (no window): `cargo run -p soundcraft-ui-egui --example ui_shot -- out
 where each script line is a request (`{"method": …, "params": …}`), `{"shot": "path.png"}` or
 `{"steps": n}`. Use `--system-theme light|dark|none` to supply the initial OS appearance, and
 script events such as `{"system_theme": "dark"}` to change it on subsequent frames.
+
+Interface language follows the operating system unless **Setup › Appearance › Language** pins
+English or Simplified Chinese; `ui.language {"lang":"zh-Hans"}` does the same from the control
+channel and persists it. Menus are translated; dialogs, panels and tooltips remain English.
 
 Appearance defaults to Dark. `ui.theme {"mode":"system"}` follows the appearance supplied by
 the native or web integration at launch and on later frames, while the saved choice stays System.

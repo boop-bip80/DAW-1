@@ -12,6 +12,7 @@ pub mod docking;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
+pub mod i18n;
 pub mod icons;
 pub mod menus;
 pub mod midi_editor;
@@ -120,6 +121,8 @@ pub struct UiState {
     pub configurations: Vec<(String, Value)>,
     /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
+    /// Appearance ▸ Language: follow the system by default, or pin English / Simplified Chinese.
+    pub language: i18n::LanguageSetting,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
     /// the desktop app last saw them; it restores them at launch.
     pub window_size: [f32; 2],
@@ -182,6 +185,7 @@ impl Default for UiState {
             workspace_dir: String::new(),
             configurations: Vec::new(),
             theme: theme::ThemeMode::Dark,
+            language: i18n::LanguageSetting::System,
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
@@ -268,6 +272,10 @@ pub struct SoundApp {
     pub services: Services,
     /// Set only by a desktop host after installing an OS menu bar.
     pub native_menu_bar: bool,
+    /// The language command changed the preference; the desktop host saves `ui.json`.
+    language_changed: bool,
+    /// The language command changed the preference; a macOS host rebuilds its native menu.
+    native_menu_rebuild: bool,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Writes the open session's autosaves in the background, once there is something to write.
@@ -360,6 +368,8 @@ impl SoundApp {
             audio_health_report: None,
             services,
             native_menu_bar: false,
+            language_changed: false,
+            native_menu_rebuild: false,
             autosave_dir: None,
             autosaver: None,
             autosaved_rev: 0,
@@ -408,6 +418,44 @@ impl SoundApp {
     pub fn with_control(mut self, rx: Receiver<ControlRequest>) -> Self {
         self.control_rx = Some(rx);
         self
+    }
+
+    /// Apply the language loaded from `ui.json`, before a desktop host builds its native menu.
+    pub fn apply_saved_language(&self) {
+        i18n::set_setting(self.ui.language);
+    }
+
+    /// Switch the interface language now: menu labels, fonts and (on macOS) the system menu bar.
+    pub fn set_language(&mut self, setting: i18n::LanguageSetting) {
+        if self.ui.language == setting {
+            return;
+        }
+        self.ui.language = setting;
+        self.language_changed = true;
+        self.native_menu_rebuild = true;
+        i18n::set_setting(setting);
+        // The Han fallback is loaded only for a Chinese interface, so reinstall the fonts.
+        self.fonts_installed = false;
+        self.fonts_ready = false;
+    }
+
+    /// Apply `ui.language` after `ui.set` replaced the state wholesale.
+    pub(crate) fn apply_language_setting(&mut self) {
+        i18n::set_setting(self.ui.language);
+        self.language_changed = true;
+        self.native_menu_rebuild = true;
+        self.fonts_installed = false;
+        self.fonts_ready = false;
+    }
+
+    /// Whether the host should save the language preference now.
+    pub fn take_language_changed(&mut self) -> bool {
+        std::mem::take(&mut self.language_changed)
+    }
+
+    /// Whether a macOS host should rebuild the native menu bar.
+    pub fn take_native_menu_rebuild(&mut self) -> bool {
+        std::mem::take(&mut self.native_menu_rebuild)
     }
 
     /// Run a command; errors go to the status line. Returns the result.

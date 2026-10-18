@@ -50,7 +50,7 @@ measures readiness and adds hardware, localization and field bug reports.
 | UI/UX fidelity | ~55 % | 60–100 | [ui-parity.md](docs/ui-parity.md) |
 | File formats | ~40 % | 70–120 | [file-format-parity.md](docs/file-format-parity.md) |
 | Hardware (interfaces, MIDI, surfaces, sync) | ~12 % | 110–180 | [hardware-parity.md](docs/hardware-parity.md) |
-| Localization | ~12 % (1 of Pro Tools' 8 languages) | 70–110 | [localization-parity.md](docs/localization-parity.md) |
+| Localization | ~18 % (English + Simplified Chinese menus) | 55–90 | [localization-parity.md](docs/localization-parity.md) |
 | Performance | ~35 % (unmeasured) | 40–70 | [hardware-parity.md](docs/hardware-parity.md#performance) |
 | Stability | ~45 % | 50–80 | [gaps.md](docs/gaps.md) |
 | Platforms | ~65 % (5 platforms built, macOS exercised) | 20–40 | [gaps.md](docs/gaps.md) |
@@ -84,7 +84,7 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#f
 | Language | Code | Status | Translated |
 |---|---|---|---:|
 | English | en | full | 100 % |
-| Simplified Chinese | zh-Hans | none | 0 % |
+| Simplified Chinese | zh-Hans | menus | ≈ 42 % (584 menu labels; dialogs/panels English) |
 | Spanish | es | none (PR #143 open) | 0 % |
 | Hindi | hi | none | 0 % |
 | Arabic | ar | none | 0 % |
@@ -155,6 +155,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-18 | minor | Simplified Chinese menus: system-language detection, 584 path-keyed labels, `SOUNDCRAFT_LANG`, CJK system-font fallback; dialogs and panels stay English |
 | 2026-10-13 | trivial | Progress log: mix.instrument params, unknown fields refused (#265) |
 | 2026-10-13 | trivial | Progress log: bus bounce compensates aux returns (#246) |
 | 2026-10-13 | trivial | Progress log: master insert latency compensated (#351) |

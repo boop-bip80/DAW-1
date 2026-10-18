@@ -20,7 +20,7 @@ mod logging;
 mod native_menu;
 
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs, i18n};
 use std::sync::Arc;
 
 struct App(SoundApp, Option<&'static logging::AppLogger>, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
@@ -46,8 +46,22 @@ impl eframe::App for App {
         }
         self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.2 {
-            menu.sync(&self.0);
+        {
+            // A language change replaces the native menu: labels are fixed when it is built.
+            if self.0.take_native_menu_rebuild() {
+                self.2 = None;
+                self.0.native_menu_bar = false;
+                match native_menu::NativeMenu::new(&self.0, ctx) {
+                    Ok(menu) => {
+                        self.0.native_menu_bar = true;
+                        self.2 = Some(menu);
+                    }
+                    Err(e) => log::warn!("system menu bar unavailable after a language change, using the in-window menu bar: {e}"),
+                }
+            }
+            if let Some(menu) = &mut self.2 {
+                menu.sync(&self.0);
+            }
         }
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
         // the sampler; otherwise sessions open and audio/MIDI import.
@@ -68,8 +82,10 @@ impl eframe::App for App {
             self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
         }
         self.0.ui.ui_scale = self.0.extra.ui_scale;
-        // Saved now rather than at exit: the recent list matters most after a crash.
-        if self.0.take_recent_changed() {
+        // Saved now rather than at exit: the recent list and language matter most after a crash.
+        let recent_changed = self.0.take_recent_changed();
+        let language_changed = self.0.take_language_changed();
+        if recent_changed || language_changed {
             save_prefs(&self.0.ui);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
@@ -79,7 +95,7 @@ impl eframe::App for App {
                 "{}{} — SoundCraft — {}",
                 self.0.engine.session().name,
                 if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
+                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { i18n::tr("Edit") } else { i18n::tr("Mix") }
             )
         } else {
             format!("{} — SoundCraft", self.0.engine.session().name)
@@ -275,6 +291,7 @@ fn main() -> eframe::Result {
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             app.extra.ui_scale = prefs.ui_scale;
             app.ui = prefs;
+            app.apply_saved_language();
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);
