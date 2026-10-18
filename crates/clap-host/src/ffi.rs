@@ -28,7 +28,7 @@ use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_info, clap_param_rescan_flags, clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
-use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
+use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_host_tail, clap_plugin_tail};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
@@ -475,6 +475,11 @@ static HOST_LOG: clap_host_log = clap_host_log { log: Some(host_log) };
 static HOST_PARAMS: clap_host_params =
     clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
 static HOST_LATENCY: clap_host_latency = clap_host_latency { changed: Some(host_latency_changed) };
+static HOST_TAIL: clap_host_tail = clap_host_tail { changed: Some(host_tail_changed) };
+
+/// `clap_host_tail.changed` (audio thread): nothing to do, the tail is re-read after every
+/// `process` call.
+unsafe extern "C" fn host_tail_changed(_host: *const clap_host) {}
 
 unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_char) -> *const c_void {
     if id.is_null() {
@@ -488,6 +493,8 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
         (&HOST_PARAMS as *const clap_host_params).cast()
     } else if id == CLAP_EXT_LATENCY {
         (&HOST_LATENCY as *const clap_host_latency).cast()
+    } else if id == CLAP_EXT_TAIL {
+        (&HOST_TAIL as *const clap_host_tail).cast()
     } else if id == CLAP_EXT_STATE {
         (&HOST_STATE as *const clap_host_state).cast()
     } else if id == CLAP_EXT_GUI {
@@ -1136,6 +1143,17 @@ pub(crate) struct NotePort {
     pub preferred: u32,
 }
 
+/// The plug-in's reported tail through `clap.tail`, if it offers the extension and the call succeeds.
+///
+/// # Safety
+/// `ext` is null or points to a valid `clap_plugin_tail` whose `get` accepts `plugin`.
+unsafe fn read_tail(ext: *const clap_plugin_tail, plugin: *const clap_plugin) -> Option<u32> {
+    // SAFETY: caller contract.
+    let f = unsafe { ext.as_ref() }.and_then(|t| t.get)?;
+    // SAFETY: caller contract.
+    Some(unsafe { f(plugin) })
+}
+
 /// A live plugin instance plus the host struct it was created with.
 pub(crate) struct Instance {
     plugin: *const clap_plugin,
@@ -1306,10 +1324,8 @@ impl Instance {
     /// audio thread), as reported: `i32::MAX` and above mean an infinite tail. `None` without the
     /// extension.
     pub fn tail(&self) -> Option<u32> {
-        // SAFETY: see `params`.
-        let f = unsafe { self.tail.as_ref() }.and_then(|t| t.get)?;
-        // SAFETY: valid instance.
-        Some(unsafe { f(self.plugin) })
+        // SAFETY: `tail` is null or the plugin's extension struct, valid for the instance's life.
+        unsafe { read_tail(self.tail, self.plugin) }
     }
 
     pub fn is_active(&self) -> bool {
@@ -1680,6 +1696,31 @@ mod tests {
         assert_eq!((e.tempo, e.bar_number, e.tsig_num, e.tsig_denom), (90.0, 1, 3, 4));
         let nan = transport_event(&Transport { quarters: f64::NAN, ..t });
         assert_eq!(nan.song_pos_beats, 0);
+    }
+
+    #[test]
+    fn the_tail_is_read_through_the_extension_and_offered_to_the_plugin() {
+        unsafe extern "C" fn one_second(_: *const clap_plugin) -> u32 {
+            48_000
+        }
+        unsafe extern "C" fn infinite(_: *const clap_plugin) -> u32 {
+            u32::MAX
+        }
+        let finite = clap_plugin_tail { get: Some(one_second) };
+        let forever = clap_plugin_tail { get: Some(infinite) };
+        let no_get = clap_plugin_tail { get: None };
+        // SAFETY: the fakes ignore the plugin pointer.
+        unsafe {
+            assert_eq!(read_tail(&finite, std::ptr::null()), Some(48_000));
+            assert_eq!(read_tail(&forever, std::ptr::null()), Some(u32::MAX));
+            assert_eq!(read_tail(&no_get, std::ptr::null()), None);
+            assert_eq!(read_tail(std::ptr::null(), std::ptr::null()), None);
+        }
+        // SAFETY: a valid NUL-terminated id; the host pointer is unused.
+        let ext = unsafe { host_get_extension(std::ptr::null(), CLAP_EXT_TAIL.as_ptr()) };
+        assert_eq!(ext, (&HOST_TAIL as *const clap_host_tail).cast());
+        // SAFETY: `changed` ignores the host pointer.
+        unsafe { (HOST_TAIL.changed.unwrap())(std::ptr::null()) };
     }
 
     #[test]

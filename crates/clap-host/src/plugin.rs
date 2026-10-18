@@ -44,7 +44,7 @@ pub struct ClapPlugin {
     transport: Option<Transport>,
     /// What the plugin returned from its last `process` call (`Continue` before the first).
     status: ProcessStatus,
-    /// The finite tail (`clap.tail`) read after the last `process` call; 0 when unknown.
+    /// The tail (`clap.tail`) read after the last `process` call, as [`tail_samples_from`] maps it.
     tail: usize,
 }
 
@@ -108,6 +108,17 @@ const INFINITE_TAIL: u32 = i32::MAX as u32;
 /// infinite.
 fn finite_tail(tail: Option<u32>) -> Option<u32> {
     tail.filter(|&t| t < INFINITE_TAIL)
+}
+
+/// The trait's tail from `clap.tail`: 0 without the extension; an infinite tail becomes
+/// `u32::MAX`, as the VST3 host reports `kInfiniteTail` (the offline render caps it; the mixer
+/// never suspends such a plugin, see [`status_from_clap`]).
+fn tail_samples_from(tail: Option<u32>) -> usize {
+    match tail {
+        None => 0,
+        Some(t) if t >= INFINITE_TAIL => u32::MAX as usize,
+        Some(t) => usize::try_from(t).unwrap_or(usize::MAX),
+    }
 }
 
 /// Maps a `clap_process_status` and the plugin's `clap.tail` (`None` without the extension) to
@@ -233,7 +244,7 @@ impl Plugin for ClapPlugin {
             let r = self.inst.process(n, self.steady, &mut self.inputs, &mut self.outputs, events, offset, self.transport.as_ref());
             self.queue.drain(..k);
             let tail = self.inst.tail();
-            self.tail = finite_tail(tail).map_or(0, |t| usize::try_from(t).unwrap_or(0));
+            self.tail = tail_samples_from(tail);
             self.status = r.as_ref().map_or(ProcessStatus::Continue, |&s| status_from_clap(s, tail));
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
@@ -429,5 +440,10 @@ mod tests {
         assert_eq!(finite_tail(Some(512)), Some(512));
         assert_eq!(finite_tail(inf), None);
         assert_eq!(finite_tail(None), None);
+        assert_eq!(tail_samples_from(Some(48_000)), 48_000);
+        assert_eq!(tail_samples_from(Some(0)), 0);
+        assert_eq!(tail_samples_from(inf), u32::MAX as usize);
+        assert_eq!(tail_samples_from(Some(u32::MAX)), u32::MAX as usize);
+        assert_eq!(tail_samples_from(None), 0);
     }
 }
