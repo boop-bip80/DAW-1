@@ -208,6 +208,22 @@ impl AudioState {
         }
     }
 
+    /// After a fault `fill` no longer runs, so nothing else would answer `Cmd::Drain`: hand the
+    /// plug-in instances back here so the player still tears them down on its own thread. Every
+    /// other command is dropped, the engine being dead. Only runs after a fault, so the
+    /// allocation stays off the hot path.
+    fn answer_drains(&mut self) {
+        while let Ok(c) = self.rx.try_recv() {
+            if let Cmd::Drain(back) = c {
+                // A second panic leaves nothing to hand back, so the answer is empty.
+                let plugins = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.mix.drain_plugins())).unwrap_or_default();
+                if let Err(late) = back.send(plugins) {
+                    let _ = self.garbage.send(late.0);
+                }
+            }
+        }
+    }
+
     fn drain(&mut self) {
         let mut changed = false;
         while let Ok(c) = self.rx.try_recv() {
@@ -651,6 +667,9 @@ impl Player {
                 if let Some(b) = buf.get_mut(..n) {
                     let shared = Arc::clone(&state.shared);
                     guarded_block(&failed, &shared, b, |b| state.fill(b, 2));
+                    if failed.failed.load(Ordering::Relaxed) {
+                        state.answer_drains();
+                    }
                 }
                 if Arc::strong_count(&state.shared) <= 1 {
                     break;
@@ -924,6 +943,9 @@ where
             for out in data.chunks_mut(chunk) {
                 let Some(s) = scratch.get_mut(..out.len()) else { return };
                 guarded_block(&failed, &guard, s, |d| state.fill(d, channels));
+                if failed.failed.load(Ordering::Relaxed) {
+                    state.answer_drains();
+                }
                 for (o, x) in out.iter_mut().zip(s.iter()) {
                     *o = T::from_sample(*x);
                 }
@@ -1307,6 +1329,145 @@ mod tests {
         let dropped_on = log.iter().find(|(w, _)| *w == "drop").map(|(_, id)| *id);
         assert_ne!(processed_on, here, "sanity: processing ran on the clock thread, not here");
         assert_eq!(dropped_on, Some(here), "teardown must run on the player's thread, not the audio thread: {log:?}");
+    }
+
+    /// A fake plug-in whose `process` always panics.
+    struct Panics(Box<dyn Plugin>);
+
+    impl Plugin for Panics {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            std::panic::panic_any("a plug-in bug");
+        }
+    }
+
+    /// Review finding (PR 752): once a block panicked, `guarded_block` skips `fill`, so a drain
+    /// was never answered and the player's instances were dropped on the audio thread. The
+    /// callback must still hand the instances back after the fault.
+    #[test]
+    fn a_drain_is_answered_after_the_engine_faulted() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:test.panics"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
+        let plugin = Panics(soundcraft_dsp::create("gain").unwrap());
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance { track: t, slot: 1, id: "clap:test.panics".into(), ch: 2, plugin: Box::new(plugin) }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let fault = Fault::default();
+        let mut out = vec![0.0f32; 256];
+        guarded_block(&fault, &shared, &mut out, |o| st.fill(o, 2));
+        assert!(fault.failed.load(Ordering::Relaxed), "the plug-in's panic faults the engine");
+        let (back, got) = sync_channel(1);
+        tx.send(Cmd::Drain(back)).unwrap();
+        guarded_block(&fault, &shared, &mut out, |o| st.fill(o, 2));
+        assert!(got.try_recv().is_err(), "sanity: a faulted block skips fill, so the drain is still queued");
+        st.answer_drains();
+        assert_eq!(got.try_recv().map(|v| v.len()), Ok(1), "the instance comes back after the fault");
+        assert!(grx.try_recv().is_err(), "and not through the retire channel");
+    }
+
+    /// Like `ThreadLog`, but `process` panics; records where `drop` ran.
+    struct PanicLog {
+        inner: Box<dyn Plugin>,
+        dropped_on: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    }
+
+    impl Plugin for PanicLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            std::panic::panic_any("a plug-in bug");
+        }
+    }
+
+    impl Drop for PanicLog {
+        fn drop(&mut self) {
+            *self.dropped_on.lock().unwrap() = Some(std::thread::current().id());
+        }
+    }
+
+    /// Gate (review finding, PR 752): after a plug-in panicked on the audio thread the player's
+    /// drop still gets the instances back and tears them down on its own thread.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_teardown_never_runs_on_the_audio_thread_after_a_fault() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.panics"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let dropped_on = Arc::new(std::sync::Mutex::new(None));
+        let plugin = PanicLog { inner: soundcraft_dsp::create("gain").unwrap(), dropped_on: Arc::clone(&dropped_on) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance {
+                track: t,
+                slot: soundcraft_mix::INSTRUMENT_SLOT,
+                id: "clap:test.panics".into(),
+                ch: 2,
+                plugin: Box::new(plugin),
+            }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !player.fault.failed.load(Ordering::Relaxed) {
+            assert!(std::time::Instant::now() < deadline, "the plug-in never faulted the engine");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(player);
+        let here = std::thread::current().id();
+        assert_eq!(*dropped_on.lock().unwrap(), Some(here), "after a fault, teardown must still run on the player's thread");
     }
 
     #[test]

@@ -652,12 +652,27 @@ impl MixEngine {
         }
         let busses = std::mem::take(&mut self.busses);
         let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-        run_strips(&mut work, |(i, st)| {
-            if let Some(t) = s.tracks.get(*i) {
-                process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
-            }
-        });
+        // A plug-in that panics unwinds out of here. The strips go back into the engine first, so
+        // their instances can still be drained and torn down off the audio thread, not dropped
+        // by the unwind.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_strips(&mut work, |(i, st)| {
+                if let Some(t) = s.tracks.get(*i) {
+                    process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
+                }
+            });
+        }));
         self.busses = busses;
+        if let Err(panic) = ran {
+            for (i, st) in work.drain(..) {
+                if let Some(t) = s.tracks.get(i) {
+                    self.strips.insert(t.id, st);
+                }
+            }
+            self.work = work;
+            self.order = order;
+            std::panic::resume_unwind(panic);
+        }
         // Delay compensation: align every strip to the slowest. Direct-to-main outputs also wait
         // for the slowest aux return. Aux latency has to be read before those outputs are routed,
         // or the first block (and a one-block bounce probe) still sees zero.
