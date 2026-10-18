@@ -195,9 +195,11 @@ pub enum ProcessStatus {
     /// Keep calling `process` every block.
     #[default]
     Continue,
-    /// Call `process` only while some input is not silent.
+    /// Keep calling `process` while its output is not quiet; once the input is silent and the
+    /// last output was silent too, stop until an input is not silent.
     ContinueIfNotQuiet,
-    /// After the input goes silent, keep calling for `tail_samples()` more samples, then stop until it returns.
+    /// After the input goes silent, keep calling for `tail_samples()` more samples (and while the
+    /// output is still not silent), then stop until it returns.
     Tail,
     /// Stop calling `process` until an input is not silent (or an event arrives).
     Sleep,

@@ -219,6 +219,9 @@ struct PluginSlot {
     /// Samples of silent input the plugin has processed since its input was last not silent
     /// (how far into its tail it is).
     quiet: usize,
+    /// The block the plugin last processed came out silent (true before the first). A plugin
+    /// whose output still rings is not suspended.
+    output_silent: bool,
 }
 
 struct Strip {
@@ -421,7 +424,7 @@ impl SlotCtx<'_> {
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
         let suspendable = third && idx != INSTRUMENT_SLOT;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false, suspendable, quiet: 0 })
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false, suspendable, quiet: 0, output_silent: true })
     }
 }
 
@@ -1104,10 +1107,11 @@ fn is_silent(buf: &[Vec<f32>], frames: usize) -> bool {
 }
 
 /// Runs one insert over the block, or leaves it unprocessed when it is a hosted effect, its
-/// input is silent and its [`ProcessStatus`] allows that (`ContinueIfNotQuiet` and `Sleep` while
-/// silent, `Tail` once `tail_samples()` of silence have gone through). The buffers are then left
-/// as they are: silent in, silent out. Any non-silent block resumes it. `no_suspend` runs every
-/// insert. True when the plugin processed the block.
+/// input is silent and its [`ProcessStatus`] allows that (`Sleep` while silent;
+/// `ContinueIfNotQuiet` once its last output was silent too; `Tail` once `tail_samples()` of
+/// silence have gone through and its last output was silent). The buffers are then left as they
+/// are: silent in, silent out. Any non-silent block resumes it. `no_suspend` runs every insert.
+/// True when the plugin processed the block.
 fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transport: &Transport, no_suspend: bool) -> bool {
     if slot.suspendable {
         let silent = is_silent(buf, frames);
@@ -1115,8 +1119,9 @@ fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transp
             let skip = !no_suspend
                 && match slot.plugin.process_status() {
                     ProcessStatus::Continue => false,
-                    ProcessStatus::ContinueIfNotQuiet | ProcessStatus::Sleep => true,
-                    ProcessStatus::Tail => slot.quiet >= slot.plugin.tail_samples(),
+                    ProcessStatus::ContinueIfNotQuiet => slot.output_silent,
+                    ProcessStatus::Sleep => true,
+                    ProcessStatus::Tail => slot.output_silent && slot.quiet >= slot.plugin.tail_samples(),
                 };
             if skip {
                 return false;
@@ -1129,6 +1134,9 @@ fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transp
     }
     slot.plugin.set_transport(transport);
     slot.plugin.process(buf, frames);
+    if slot.suspendable {
+        slot.output_silent = is_silent(buf, frames);
+    }
     true
 }
 
@@ -2725,11 +2733,15 @@ mod tests {
     }
 
     /// An effect that reports a fixed [`ProcessStatus`] and tail, counts its `process` calls and
-    /// records what it was told with `set_input_silent`.
+    /// records what it was told with `set_input_silent`. After its input goes silent it rings on:
+    /// it outputs 0.5 for `decay` more processed blocks.
     struct Sleepy {
         inner: Box<dyn Plugin>,
         status: ProcessStatus,
         tail: usize,
+        decay: usize,
+        /// Ringing blocks left.
+        left: usize,
         calls: Arc<std::sync::atomic::AtomicUsize>,
         told: Arc<std::sync::Mutex<Vec<bool>>>,
     }
@@ -2752,7 +2764,14 @@ mod tests {
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let silent_in = io.iter().all(|c| c.iter().take(frames).all(|x| *x == 0.0));
             self.inner.process(io, frames);
+            if !silent_in {
+                self.left = self.decay;
+            } else if self.left > 0 {
+                self.left -= 1;
+                io.iter_mut().for_each(|c| c.iter_mut().take(frames).for_each(|x| *x = 0.5));
+            }
         }
         fn tail_samples(&self) -> usize {
             self.tail
@@ -2770,10 +2789,12 @@ mod tests {
         use ProcessStatus::*;
         // DC at 0.5 for the first 1024 samples, silence after: blocks at 4096.. are silent input.
         const LOUD: i64 = 0;
-        const QUIET: [i64; 3] = [4096, 4608, 5120];
+        const QUIET: [i64; 4] = [4096, 4608, 5120, 5632];
         struct Row {
             status: ProcessStatus,
             tail: usize,
+            /// Blocks the fake rings on (outputs 0.5) after its input goes silent.
+            decay: usize,
             no_suspend: bool,
             instrument: bool,
             /// Block positions rendered, in order.
@@ -2784,28 +2805,53 @@ mod tests {
             told: &'static [bool],
         }
         let rows = [
-            Row { status: Continue, tail: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
+            Row { status: Continue, tail: 0, decay: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
             Row {
                 status: ContinueIfNotQuiet,
                 tail: 0,
+                decay: 0,
                 no_suspend: false,
                 instrument: false,
                 blocks: &[QUIET[0], LOUD],
                 calls: &[0, 1],
                 told: &[false],
             },
-            Row { status: Sleep, tail: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0], LOUD], calls: &[0, 1], told: &[false] },
+            Row { status: Sleep, tail: 0, decay: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0], LOUD], calls: &[0, 1], told: &[false] },
             Row {
                 status: Tail,
                 tail: 1024,
+                decay: 0,
                 no_suspend: false,
                 instrument: false,
                 blocks: &[QUIET[0], QUIET[1], QUIET[2], LOUD],
                 calls: &[1, 2, 2, 3],
                 told: &[true, true, false],
             },
-            Row { status: Sleep, tail: 0, no_suspend: true, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
-            Row { status: Sleep, tail: 0, no_suspend: false, instrument: true, blocks: &[QUIET[0], QUIET[1]], calls: &[1, 2], told: &[] },
+            Row { status: Sleep, tail: 0, decay: 0, no_suspend: true, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
+            // Output, not input: a decaying ContinueIfNotQuiet effect is processed while its output
+            // rings after the input went silent, and suspended once it came out silent.
+            Row {
+                status: ContinueIfNotQuiet,
+                tail: 0,
+                decay: 2,
+                no_suspend: false,
+                instrument: false,
+                blocks: &[LOUD, QUIET[0], QUIET[1], QUIET[2], QUIET[3]],
+                calls: &[1, 2, 3, 4, 4],
+                told: &[false, true, true, true],
+            },
+            // Tail: the tail counter alone (0 here) does not suspend an effect still ringing.
+            Row {
+                status: Tail,
+                tail: 0,
+                decay: 1,
+                no_suspend: false,
+                instrument: false,
+                blocks: &[LOUD, QUIET[0], QUIET[1], QUIET[2]],
+                calls: &[1, 2, 3, 3],
+                told: &[false, true, true],
+            },
+            Row { status: Sleep, tail: 0, decay: 0, no_suspend: false, instrument: true, blocks: &[QUIET[0], QUIET[1]], calls: &[1, 2], told: &[] },
         ];
         for (n, row) in rows.iter().enumerate() {
             let (mut s, mut t) = session_with_dc(0.5, 1024);
@@ -2824,6 +2870,8 @@ mod tests {
                 inner: soundcraft_dsp::create("gain").unwrap(),
                 status: row.status,
                 tail: row.tail,
+                decay: row.decay,
+                left: 0,
                 calls: Arc::clone(&calls),
                 told: Arc::clone(&told),
             };
@@ -2835,7 +2883,7 @@ mod tests {
             for (b, (&pos, &want)) in row.blocks.iter().zip(row.calls).enumerate() {
                 let out = render_block(&mut eng, &s, pos);
                 assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), want, "row {n} ({:?}), block {b} at {pos}", row.status);
-                if pos != LOUD {
+                if pos != LOUD && row.decay == 0 {
                     assert_eq!(out, 0.0, "row {n}: silent in, silent out");
                 }
             }
