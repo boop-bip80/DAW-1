@@ -531,6 +531,33 @@ impl MixEngine {
         }
     }
 
+    /// Give every instrument exactly one processing pass over silence, so a host that delivers
+    /// queued events on its next `process` (a `reset` or `all_notes_off` only queues the release)
+    /// gets to send them, even when the engine would otherwise not run (playback ended, stopped
+    /// with nothing monitoring). `frames` is clamped to `max_block`. Nothing is scheduled, the
+    /// position is untouched, inserts do not run, and the output is discarded. Allocation-free.
+    pub fn flush_releases(&mut self, frames: usize) {
+        let frames = frames.min(self.max_block);
+        for st in self.strips.values_mut() {
+            let Some(inst) = st.instrument.as_mut().filter(|i| !i.failed) else { continue };
+            if st.buf.len() >= 2 {
+                for c in st.buf.iter_mut() {
+                    c.iter_mut().take(frames).for_each(|x| *x = 0.0);
+                }
+                inst.plugin.process(&mut st.buf, frames);
+            } else if let Some(c0) = st.buf.first_mut() {
+                let mut io = [std::mem::take(c0), std::mem::take(&mut st.scratch)];
+                for c in io.iter_mut() {
+                    c.iter_mut().take(frames).for_each(|x| *x = 0.0);
+                }
+                inst.plugin.process(&mut io, frames);
+                let [a, b] = io;
+                *c0 = a;
+                st.scratch = b;
+            }
+        }
+    }
+
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
     /// call outside the realtime thread when the document changes, or let `render` do it.
     pub fn sync(&mut self, s: &Session) {
@@ -2730,6 +2757,7 @@ mod tests {
         on: Vec<u8>,
         all_off: usize,
         resets: usize,
+        processed: usize,
     }
 
     struct Spy {
@@ -2755,6 +2783,7 @@ mod tests {
             self.inner.param(id)
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.calls.lock().unwrap().processed += 1;
             self.inner.process(io, frames);
         }
         fn note_on(&mut self, _offset: usize, note: u8, _velocity: u8) {
@@ -2844,6 +2873,31 @@ mod tests {
         assert_eq!(c.all_off, offs + 1, "the instrument was told to release");
         assert_eq!(c.resets, resets, "reset would discard the queued releases");
         assert!(eng.strips[&t].held.is_empty());
+    }
+
+    #[test]
+    fn flush_releases_processes_every_instrument_once_without_scheduling() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000, seq));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        eng.ensure_synced(&s);
+        eng.flush_releases(512);
+        {
+            let c = calls.lock().unwrap();
+            assert_eq!(c.processed, 1, "one pass");
+            assert!(c.on.is_empty(), "nothing was scheduled");
+        }
+        render_block(&mut eng, &s, 0);
+        assert_eq!(calls.lock().unwrap().on, vec![60], "the position was untouched, so the first note still schedules");
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
