@@ -1134,14 +1134,16 @@ fn is_silent(buf: &[Vec<f32>], frames: usize) -> bool {
 /// the plugin processed the block.
 fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transport: &Transport, no_suspend: bool) -> bool {
     if slot.suspendable {
-        let silent = is_silent(buf, frames);
+        // Exactly zero implies below the threshold, so the second scan runs only when it must.
+        let all_zero = is_all_zero(buf, frames);
+        let silent = all_zero || is_silent(buf, frames);
         if silent {
             let skip = !no_suspend
                 && !slot.woken
                 && match slot.plugin.process_status() {
                     ProcessStatus::Continue => false,
                     ProcessStatus::ContinueIfNotQuiet => slot.output_silent,
-                    ProcessStatus::Sleep => is_all_zero(buf, frames),
+                    ProcessStatus::Sleep => all_zero,
                     ProcessStatus::Tail => slot.output_silent && slot.quiet >= slot.plugin.tail_samples(),
                 };
             if skip {
@@ -1151,7 +1153,9 @@ fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transp
         } else {
             slot.quiet = 0;
         }
-        slot.plugin.set_input_silent(silent);
+        // The flag asserts true silence (VST3 `silenceFlags`, CLAP `constant_mask`), so a quiet but
+        // nonzero block must not set it.
+        slot.plugin.set_input_silent(all_zero);
     }
     slot.woken = false;
     slot.plugin.set_transport(transport);
@@ -2957,6 +2961,19 @@ mod tests {
                 no_suspend: false,
                 instrument: false,
                 dc: 1e-7,
+                blocks: &[LOUD],
+                calls: &[1],
+                told: &[false],
+            },
+            // Exact zero is told it is silent.
+            Row {
+                status: Continue,
+                tail: 0,
+                decay: 0,
+                param_at: None,
+                no_suspend: false,
+                instrument: false,
+                dc: 0.0,
                 blocks: &[LOUD],
                 calls: &[1],
                 told: &[true],
