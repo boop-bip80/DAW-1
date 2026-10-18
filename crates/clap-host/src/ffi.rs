@@ -28,6 +28,7 @@ use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_info, clap_param_rescan_flags, clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
+use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_plugin_tail};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
@@ -248,6 +249,7 @@ impl Bundle {
             params: std::ptr::null(),
             ports: std::ptr::null(),
             latency: std::ptr::null(),
+            tail: std::ptr::null(),
             notes: std::ptr::null(),
             state_ext: std::ptr::null(),
             gui: Arc::new(GuiLink::default()),
@@ -275,6 +277,7 @@ impl Bundle {
         inst.params = inst.extension::<clap_plugin_params>(CLAP_EXT_PARAMS);
         inst.ports = inst.extension::<clap_plugin_audio_ports>(CLAP_EXT_AUDIO_PORTS);
         inst.latency = inst.extension::<clap_plugin_latency>(CLAP_EXT_LATENCY);
+        inst.tail = inst.extension::<clap_plugin_tail>(CLAP_EXT_TAIL);
         inst.notes = inst.extension::<clap_plugin_note_ports>(CLAP_EXT_NOTE_PORTS);
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
@@ -1139,6 +1142,7 @@ pub(crate) struct Instance {
     params: *const clap_plugin_params,
     ports: *const clap_plugin_audio_ports,
     latency: *const clap_plugin_latency,
+    tail: *const clap_plugin_tail,
     notes: *const clap_plugin_note_ports,
     state_ext: *const clap_plugin_state,
     gui: Arc<GuiLink>,
@@ -1296,6 +1300,16 @@ impl Instance {
             Some(f) => unsafe { f(self.plugin) },
             None => 0,
         }
+    }
+
+    /// The plugin's tail in samples from the `clap.tail` extension (`get` is callable from the
+    /// audio thread), as reported: `i32::MAX` and above mean an infinite tail. `None` without the
+    /// extension.
+    pub fn tail(&self) -> Option<u32> {
+        // SAFETY: see `params`.
+        let f = unsafe { self.tail.as_ref() }.and_then(|t| t.get)?;
+        // SAFETY: valid instance.
+        Some(unsafe { f(self.plugin) })
     }
 
     pub fn is_active(&self) -> bool {

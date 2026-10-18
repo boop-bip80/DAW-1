@@ -44,6 +44,8 @@ pub struct ClapPlugin {
     transport: Option<Transport>,
     /// What the plugin returned from its last `process` call (`Continue` before the first).
     status: ProcessStatus,
+    /// The finite tail (`clap.tail`) read after the last `process` call; 0 when unknown.
+    tail: usize,
 }
 
 impl ClapPlugin {
@@ -69,6 +71,7 @@ impl ClapPlugin {
             steady: 0,
             transport: None,
             status: ProcessStatus::Continue,
+            tail: 0,
         }
     }
 
@@ -98,12 +101,28 @@ fn pick_main(ports: &[crate::ffi::PortInfo]) -> Option<usize> {
     ports.iter().position(|p| p.main && p.channels > 0).or_else(|| ports.iter().position(|p| p.channels > 0))
 }
 
-/// Maps a `clap_process_status` to the trait's status. An error or an unknown value keeps the
-/// plugin processing.
-fn status_from_clap(s: clap_process_status) -> ProcessStatus {
+/// `clap.tail` values from here up mean an infinite tail.
+const INFINITE_TAIL: u32 = i32::MAX as u32;
+
+/// The tail as a finite sample count: `None` without the `clap.tail` extension or when it is
+/// infinite.
+fn finite_tail(tail: Option<u32>) -> Option<u32> {
+    tail.filter(|&t| t < INFINITE_TAIL)
+}
+
+/// Maps a `clap_process_status` and the plugin's `clap.tail` (`None` without the extension) to
+/// the trait's status. An error or an unknown value keeps the plugin processing. `TAIL` becomes
+/// [`ProcessStatus::Tail`] only with a known finite tail (the mixer counts it down); without one
+/// the plugin keeps processing, and a plugin with an infinite tail always does, whatever it
+/// returned.
+fn status_from_clap(s: clap_process_status, tail: Option<u32>) -> ProcessStatus {
+    if tail.is_some_and(|t| t >= INFINITE_TAIL) {
+        return ProcessStatus::Continue;
+    }
     match s {
         CLAP_PROCESS_CONTINUE_IF_NOT_QUIET => ProcessStatus::ContinueIfNotQuiet,
-        CLAP_PROCESS_TAIL => ProcessStatus::Tail,
+        CLAP_PROCESS_TAIL if finite_tail(tail).is_some() => ProcessStatus::Tail,
+        CLAP_PROCESS_TAIL => ProcessStatus::Continue,
         CLAP_PROCESS_SLEEP => ProcessStatus::Sleep,
         CLAP_PROCESS_CONTINUE => ProcessStatus::Continue,
         _ => ProcessStatus::Continue,
@@ -213,7 +232,9 @@ impl Plugin for ClapPlugin {
             let events = self.queue.get(..k).unwrap_or(&[]);
             let r = self.inst.process(n, self.steady, &mut self.inputs, &mut self.outputs, events, offset, self.transport.as_ref());
             self.queue.drain(..k);
-            self.status = r.as_ref().map_or(ProcessStatus::Continue, |&s| status_from_clap(s));
+            let tail = self.inst.tail();
+            self.tail = finite_tail(tail).map_or(0, |t| usize::try_from(t).unwrap_or(0));
+            self.status = r.as_ref().map_or(ProcessStatus::Continue, |&s| status_from_clap(s, tail));
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
                 (Ok(_), Some(p)) => {
@@ -244,6 +265,10 @@ impl Plugin for ClapPlugin {
 
     fn process_status(&self) -> ProcessStatus {
         self.status
+    }
+
+    fn tail_samples(&self) -> usize {
+        self.tail
     }
 
     fn set_input_silent(&mut self, silent: bool) {
@@ -376,12 +401,33 @@ mod tests {
 
     #[test]
     fn clap_process_status_maps_to_the_trait_status() {
-        assert_eq!(status_from_clap(CLAP_PROCESS_CONTINUE), ProcessStatus::Continue);
-        assert_eq!(status_from_clap(CLAP_PROCESS_CONTINUE_IF_NOT_QUIET), ProcessStatus::ContinueIfNotQuiet);
-        assert_eq!(status_from_clap(CLAP_PROCESS_TAIL), ProcessStatus::Tail);
-        assert_eq!(status_from_clap(CLAP_PROCESS_SLEEP), ProcessStatus::Sleep);
-        assert_eq!(status_from_clap(CLAP_PROCESS_ERROR), ProcessStatus::Continue);
-        assert_eq!(status_from_clap(99), ProcessStatus::Continue);
-        assert_eq!(status_from_clap(-1), ProcessStatus::Continue);
+        use ProcessStatus::*;
+        let inf = Some(INFINITE_TAIL);
+        let rows: &[(clap_process_status, Option<u32>, ProcessStatus)] = &[
+            (CLAP_PROCESS_CONTINUE, None, Continue),
+            (CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, None, ContinueIfNotQuiet),
+            (CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, Some(4800), ContinueIfNotQuiet),
+            (CLAP_PROCESS_SLEEP, None, Sleep),
+            (CLAP_PROCESS_SLEEP, Some(0), Sleep),
+            (CLAP_PROCESS_ERROR, None, Continue),
+            (99, None, Continue),
+            (-1, Some(10), Continue),
+            // TAIL is followed only with a finite tail the mixer can count down.
+            (CLAP_PROCESS_TAIL, Some(48_000), Tail),
+            (CLAP_PROCESS_TAIL, Some(0), Tail),
+            (CLAP_PROCESS_TAIL, Some(INFINITE_TAIL - 1), Tail),
+            (CLAP_PROCESS_TAIL, None, Continue),
+            (CLAP_PROCESS_TAIL, inf, Continue),
+            (CLAP_PROCESS_TAIL, Some(u32::MAX), Continue),
+            // An infinite tail keeps the plugin processing whatever it returned.
+            (CLAP_PROCESS_SLEEP, inf, Continue),
+            (CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, Some(u32::MAX), Continue),
+        ];
+        for &(s, tail, want) in rows {
+            assert_eq!(status_from_clap(s, tail), want, "status {s}, tail {tail:?}");
+        }
+        assert_eq!(finite_tail(Some(512)), Some(512));
+        assert_eq!(finite_tail(inf), None);
+        assert_eq!(finite_tail(None), None);
     }
 }
