@@ -540,13 +540,17 @@ impl MixEngine {
         let frames = frames.min(self.max_block);
         for st in self.strips.values_mut() {
             let Some(inst) = st.instrument.as_mut().filter(|i| !i.failed) else { continue };
+            // Defensive: `sync` sizes `buf` and `scratch` to `max_block`, but a plug-in must never
+            // be handed a buffer shorter than `frames`, so clamp to the shortest one.
             if st.buf.len() >= 2 {
+                let frames = frames.min(st.buf.iter().map(Vec::len).min().unwrap_or(0));
                 for c in st.buf.iter_mut() {
                     c.iter_mut().take(frames).for_each(|x| *x = 0.0);
                 }
                 inst.plugin.process(&mut st.buf, frames);
             } else if let Some(c0) = st.buf.first_mut() {
                 let mut io = [std::mem::take(c0), std::mem::take(&mut st.scratch)];
+                let frames = frames.min(io[0].len()).min(io[1].len());
                 for c in io.iter_mut() {
                     c.iter_mut().take(frames).for_each(|x| *x = 0.0);
                 }
@@ -582,6 +586,11 @@ impl MixEngine {
             let strip = self.strips.entry(t.id).or_insert_with(Strip::new);
             if strip.buf.len() != ch || strip.buf.first().map_or(0, Vec::len) != mb {
                 strip.buf = vec![vec![0.0; mb]; ch];
+            }
+            // The mono instrument path swaps `scratch` in as a second channel, and
+            // `flush_releases` can run before any `render`, so size it here too.
+            if strip.scratch.len() < mb {
+                strip.scratch.resize(mb, 0.0);
             }
             while strip.plugins.len() > t.mixer.inserts.len() {
                 let p = strip.plugins.pop().flatten();
@@ -2373,6 +2382,7 @@ mod tests {
     }
 
     fn add_dc_track(s: &mut Session, level: f32, frames: usize) -> TrackId {
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![level; frames]] };
         s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(buf)));
@@ -2758,6 +2768,8 @@ mod tests {
         all_off: usize,
         resets: usize,
         processed: usize,
+        /// `(frames, shortest channel length)` of every `process` call.
+        shapes: Vec<(usize, usize)>,
     }
 
     struct Spy {
@@ -2783,7 +2795,11 @@ mod tests {
             self.inner.param(id)
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
-            self.calls.lock().unwrap().processed += 1;
+            {
+                let mut c = self.calls.lock().unwrap();
+                c.processed += 1;
+                c.shapes.push((frames, io.iter().map(Vec::len).min().unwrap_or(0)));
+            }
             self.inner.process(io, frames);
         }
         fn note_on(&mut self, _offset: usize, note: u8, _velocity: u8) {
@@ -2898,6 +2914,26 @@ mod tests {
         }
         render_block(&mut eng, &s, 0);
         assert_eq!(calls.lock().unwrap().on, vec![60], "the position was untouched, so the first note still schedules");
+    }
+
+    #[test]
+    fn flush_releases_hands_a_mono_instrument_full_length_buffers_before_any_render() {
+        let mut s = Session::default();
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        eng.ensure_synced(&s);
+        assert_eq!(eng.strips[&t].buf.len(), 1, "a mono strip");
+        eng.flush_releases(512);
+        let c = calls.lock().unwrap();
+        assert_eq!(c.shapes.len(), 1, "one pass");
+        assert_eq!(c.shapes[0].0, 512);
+        assert!(c.shapes[0].1 >= 512, "shortest channel of {} samples", c.shapes[0].1);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
@@ -3184,6 +3220,7 @@ mod tests {
         let mut imp = vec![0.0f32; 48_000];
         imp[1000] = 1.0;
         s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![imp] })));
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let bus = s.add_bus("Stem", ChannelFormat::Stereo);
         let cid = s.new_clip_id();
