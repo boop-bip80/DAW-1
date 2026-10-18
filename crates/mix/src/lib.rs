@@ -51,7 +51,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
-use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
+use soundcraft_dsp::{Plugin, ProcessStatus, SampleSource, Transport, db_to_gain};
 use soundcraft_midi::CtrlKind;
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
@@ -213,6 +213,12 @@ struct PluginSlot {
     /// Last values pushed to the plugin, in the insert's parameter-map order.
     applied: Vec<f32>,
     failed: bool,
+    /// A hosted (third-party) effect insert: it may be left unprocessed while its input is
+    /// silent and its [`ProcessStatus`] allows it. Never set for instruments or built-ins.
+    suspendable: bool,
+    /// Samples of silent input the plugin has processed since its input was last not silent
+    /// (how far into its tail it is).
+    quiet: usize,
 }
 
 struct Strip {
@@ -359,6 +365,9 @@ pub struct MixEngine {
     pub monitor_only: bool,
     /// Recording: record-armed tracks hear their input (auto input).
     pub recording: bool,
+    /// Never leave a hosted effect unprocessed for silent input: every active insert runs every
+    /// block. The host sets this while any plug-in editor is open, so an editor never freezes.
+    pub no_suspend: bool,
     /// Mix the metronome (Options > Click) into the output. Playback turns this on; offline renders
     /// (bounces, stems, exports) leave it off so the click is never printed into a file.
     pub metronome: bool,
@@ -411,7 +420,8 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
+        let suspendable = third && idx != INSTRUMENT_SLOT;
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false, suspendable, quiet: 0 })
     }
 }
 
@@ -438,6 +448,7 @@ impl MixEngine {
             input: Vec::new(),
             monitor_only: false,
             recording: false,
+            no_suspend: false,
             metronome: false,
             external: false,
             adopt: HashMap::new(),
@@ -651,7 +662,7 @@ impl MixEngine {
             }
         }
         let busses = std::mem::take(&mut self.busses);
-        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording, no_suspend: self.no_suspend };
         run_strips(&mut work, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
                 process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
@@ -732,7 +743,7 @@ impl MixEngine {
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
             }
-            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording, no_suspend: self.no_suspend };
             process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
@@ -758,9 +769,7 @@ impl MixEngine {
                         && !slot.failed
                     {
                         apply_params(slot, ins, t, i, pos);
-                        slot.plugin.set_transport(&transport);
-                        slot.plugin.process(&mut strip.buf, frames);
-                        if contain_failure(slot, &mut strip.buf, frames) {
+                        if run_insert(slot, &mut strip.buf, frames, &transport, self.no_suspend) && contain_failure(slot, &mut strip.buf, frames) {
                             strip.failures.record(i);
                         }
                     }
@@ -892,6 +901,8 @@ struct LiveInput<'a> {
     input: &'a [Vec<f32>],
     monitor_only: bool,
     recording: bool,
+    /// [`MixEngine::no_suspend`]: every insert runs every block.
+    no_suspend: bool,
 }
 
 fn process_strip(
@@ -1027,9 +1038,7 @@ fn process_strip(
             continue;
         }
         apply_params(slot, ins, t, i, pos);
-        slot.plugin.set_transport(&transport);
-        slot.plugin.process(&mut strip.buf, frames);
-        if contain_failure(slot, &mut strip.buf, frames) {
+        if run_insert(slot, &mut strip.buf, frames, &transport, live.no_suspend) && contain_failure(slot, &mut strip.buf, frames) {
             strip.failures.record(i);
             continue;
         }
@@ -1083,6 +1092,44 @@ fn process_strip(
             }
         }
     }
+}
+
+/// Below this magnitude (about -120 dBFS) a sample counts as silence for insert suspension.
+const SILENCE_THRESHOLD: f32 = 1e-6;
+
+/// True when every sample of every channel in the block is below [`SILENCE_THRESHOLD`].
+fn is_silent(buf: &[Vec<f32>], frames: usize) -> bool {
+    // A branch-free fold vectorizes (see `contain_failure`).
+    buf.iter().all(|c| c.get(..frames).unwrap_or(c).iter().fold(true, |ok, x| ok & (x.abs() < SILENCE_THRESHOLD)))
+}
+
+/// Runs one insert over the block, or leaves it unprocessed when it is a hosted effect, its
+/// input is silent and its [`ProcessStatus`] allows that (`ContinueIfNotQuiet` and `Sleep` while
+/// silent, `Tail` once `tail_samples()` of silence have gone through). The buffers are then left
+/// as they are: silent in, silent out. Any non-silent block resumes it. `no_suspend` runs every
+/// insert. True when the plugin processed the block.
+fn run_insert(slot: &mut PluginSlot, buf: &mut [Vec<f32>], frames: usize, transport: &Transport, no_suspend: bool) -> bool {
+    if slot.suspendable {
+        let silent = is_silent(buf, frames);
+        if silent {
+            let skip = !no_suspend
+                && match slot.plugin.process_status() {
+                    ProcessStatus::Continue => false,
+                    ProcessStatus::ContinueIfNotQuiet | ProcessStatus::Sleep => true,
+                    ProcessStatus::Tail => slot.quiet >= slot.plugin.tail_samples(),
+                };
+            if skip {
+                return false;
+            }
+            slot.quiet = slot.quiet.saturating_add(frames);
+        } else {
+            slot.quiet = 0;
+        }
+        slot.plugin.set_input_silent(silent);
+    }
+    slot.plugin.set_transport(transport);
+    slot.plugin.process(buf, frames);
+    true
 }
 
 /// Silences a block the plugin filled with NaN or infinity and takes the plugin out until the
@@ -2675,6 +2722,125 @@ mod tests {
         let mut out = vec![vec![0.0f32; 512]; 2];
         eng.render(s, pos, 512, &mut out);
         out[0][500]
+    }
+
+    /// An effect that reports a fixed [`ProcessStatus`] and tail, counts its `process` calls and
+    /// records what it was told with `set_input_silent`.
+    struct Sleepy {
+        inner: Box<dyn Plugin>,
+        status: ProcessStatus,
+        tail: usize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        told: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    impl Plugin for Sleepy {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.process(io, frames);
+        }
+        fn tail_samples(&self) -> usize {
+            self.tail
+        }
+        fn process_status(&self) -> ProcessStatus {
+            self.status
+        }
+        fn set_input_silent(&mut self, silent: bool) {
+            self.told.lock().unwrap().push(silent);
+        }
+    }
+
+    #[test]
+    fn hosted_effects_are_suspended_by_their_own_status() {
+        use ProcessStatus::*;
+        // DC at 0.5 for the first 1024 samples, silence after: blocks at 4096.. are silent input.
+        const LOUD: i64 = 0;
+        const QUIET: [i64; 3] = [4096, 4608, 5120];
+        struct Row {
+            status: ProcessStatus,
+            tail: usize,
+            no_suspend: bool,
+            instrument: bool,
+            /// Block positions rendered, in order.
+            blocks: &'static [i64],
+            /// `process` calls after each block.
+            calls: &'static [usize],
+            /// Everything passed to `set_input_silent`, in order.
+            told: &'static [bool],
+        }
+        let rows = [
+            Row { status: Continue, tail: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
+            Row {
+                status: ContinueIfNotQuiet,
+                tail: 0,
+                no_suspend: false,
+                instrument: false,
+                blocks: &[QUIET[0], LOUD],
+                calls: &[0, 1],
+                told: &[false],
+            },
+            Row { status: Sleep, tail: 0, no_suspend: false, instrument: false, blocks: &[QUIET[0], LOUD], calls: &[0, 1], told: &[false] },
+            Row {
+                status: Tail,
+                tail: 1024,
+                no_suspend: false,
+                instrument: false,
+                blocks: &[QUIET[0], QUIET[1], QUIET[2], LOUD],
+                calls: &[1, 2, 2, 3],
+                told: &[true, true, false],
+            },
+            Row { status: Sleep, tail: 0, no_suspend: true, instrument: false, blocks: &[QUIET[0]], calls: &[1], told: &[true] },
+            Row { status: Sleep, tail: 0, no_suspend: false, instrument: true, blocks: &[QUIET[0], QUIET[1]], calls: &[1, 2], told: &[] },
+        ];
+        for (n, row) in rows.iter().enumerate() {
+            let (mut s, mut t) = session_with_dc(0.5, 1024);
+            let id = "clap:test.sleepy";
+            let slot = if row.instrument {
+                t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+                s.track_mut(t).unwrap().instrument = Some(Insert::new(id));
+                INSTRUMENT_SLOT
+            } else {
+                s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new(id));
+                0
+            };
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let fake = Sleepy {
+                inner: soundcraft_dsp::create("gain").unwrap(),
+                status: row.status,
+                tail: row.tail,
+                calls: Arc::clone(&calls),
+                told: Arc::clone(&told),
+            };
+            let mut eng = MixEngine::new(48_000.0, 512);
+            eng.set_external_instances(true);
+            eng.no_suspend = row.no_suspend;
+            let ch = if row.instrument { 2 } else { 1 };
+            eng.adopt(vec![PreparedInstance { track: t, slot, id: id.into(), ch, plugin: Box::new(fake) }]);
+            for (b, (&pos, &want)) in row.blocks.iter().zip(row.calls).enumerate() {
+                let out = render_block(&mut eng, &s, pos);
+                assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), want, "row {n} ({:?}), block {b} at {pos}", row.status);
+                if pos != LOUD {
+                    assert_eq!(out, 0.0, "row {n}: silent in, silent out");
+                }
+            }
+            assert_eq!(*told.lock().unwrap(), row.told, "row {n} ({:?}): set_input_silent", row.status);
+        }
     }
 
     #[test]
