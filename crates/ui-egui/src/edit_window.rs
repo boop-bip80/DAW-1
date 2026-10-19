@@ -1057,7 +1057,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     let m = &track.mixer;
     if h >= 37.0 {
         let (records, mixes) = (track.kind.has_playlist(), track.kind != TrackKind::Master);
-        let implied = !m.solo && app.engine.session().tracks.iter().any(|t| t.mixer.solo);
+        let implied = soundcraft_mix::solo_mutes(app.engine.session(), id);
         let keys = [
             (HeaderKey::Rec, m.record_arm, false, "mix.record_arm", records),
             (HeaderKey::Input, m.input_monitor, false, "mix.input_monitor", records),
