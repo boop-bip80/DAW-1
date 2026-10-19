@@ -4,7 +4,7 @@ use crate::dialogs::Dialog;
 use crate::spot::Spot;
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{groove, level_pos, meter_pos, raised_key, shade};
-use crate::{Gesture, SoundApp, toolbar};
+use crate::{Gesture, MainWindow, SoundApp, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_engine::edit as ops;
@@ -160,6 +160,7 @@ fn dock_tabs(app: &mut SoundApp, ui: &mut Ui) {
     let mut x = r.min.x + 10.0;
     for (label, on, id) in [
         ("MIDI EDITOR", app.ui.show_midi_editor, "window.midi_editor"),
+        ("MIXER", !app.ui.mix_separate && app.ui.window == MainWindow::Mix, "window.mix"),
         ("MEMORY LOCATIONS", app.ui.show_memory_locations, "window.memory_locations"),
         ("UNDO HISTORY", app.ui.show_undo_history, "window.undo_history"),
     ] {
