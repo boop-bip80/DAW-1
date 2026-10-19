@@ -304,6 +304,7 @@ pub struct SoundApp {
     /// An insert just picked from its menu, opened once the audio engine has its instance.
     pub(crate) pending_open: Option<(TrackId, usize)>,
     last_rev: u64,
+    last_session_generation: u64,
     fonts_ready: bool,
     fonts_installed: bool,
     /// The palette last applied to the context (light?), so visuals are set only on a change.
@@ -388,6 +389,7 @@ impl SoundApp {
             pending_shots: Vec::new(),
             pending_open: None,
             last_rev: 0,
+            last_session_generation: 0,
             fonts_ready: false,
             fonts_installed: false,
             theme_applied: None,
@@ -468,8 +470,8 @@ impl SoundApp {
     }
 
     fn start_play(&mut self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        self.sync_player_session();
         if let Some(p) = &self.player {
-            p.update_session(self.engine.session_arc());
             p.play(from, end, looped);
         } else {
             self.sim = Some((from, end, looped));
@@ -483,6 +485,18 @@ impl SoundApp {
         self.edit_layout.follow_hold = false;
         self.edit_layout.last_scroll = self.engine.session().edit.zoom.scroll;
         self.edit_layout.last_follow_to = None;
+    }
+
+    fn sync_player_session(&mut self) {
+        if let Some(p) = &self.player {
+            let generation = self.engine.session_generation();
+            if generation != self.last_session_generation {
+                p.replace_session(self.engine.session_arc());
+            } else {
+                p.update_session(self.engine.session_arc());
+            }
+            self.last_session_generation = generation;
+        }
     }
 
     fn stop_play(&mut self) {
@@ -610,6 +624,7 @@ impl SoundApp {
     /// Reads every live third-party plugin's state and stores it on its insert
     /// (`mix.insert_state`), so saves and bounces include it.
     pub fn capture_plugin_states(&mut self) {
+        self.sync_player_session();
         let Some(p) = &self.player else { return };
         for (t, slot, data) in p.capture_states() {
             let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
@@ -643,6 +658,9 @@ impl SoundApp {
 
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).
     fn apply_editor_edits(&mut self) {
+        if self.engine.session_generation() != self.last_session_generation {
+            self.sync_player_session();
+        }
         let Some(p) = &self.player else { return };
         for (t, slot, param, value) in p.idle() {
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
@@ -1173,9 +1191,7 @@ impl SoundApp {
         self.handle_transport(dt);
         if self.engine.revision != self.last_rev {
             self.last_rev = self.engine.revision;
-            if let Some(p) = &self.player {
-                p.update_session(self.engine.session_arc());
-            }
+            self.sync_player_session();
         }
         self.open_inserted();
         self.autosave_changes();
