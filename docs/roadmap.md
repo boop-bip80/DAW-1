@@ -31,7 +31,7 @@ main platform). Any **no** keeps SoundCraft **pre-alpha**, and those rows are th
 | Bounce mix and stems; save and reopen the session | yes (rough) | WAV/BWF/AIFF/FLAC bounce, stems, `.scraft` save/reopen with plugin state; bugs #59, #103 in bus bounce and aux latency (PRs open) | — |
 | Exchange a session with Pro Tools or a picture editor | **no** | No `.ptx`, AAF or OMF import or export (#40, G-03) | 50–90 |
 
-**Result: pre-alpha.** Three workflows fail. Passing them is ~110–180 h, about 70 % of it
+**Result: pre-alpha.** Three workflows fail. Passing them is ~105–180 h, about 70 % of it
 parallelizable (interfaces, MIDI and AAF are independent crates).
 
 ## Milestones

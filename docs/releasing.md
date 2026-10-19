@@ -90,16 +90,18 @@ plugins), and WebAudio in the browser.
   the default player. `NSMicrophoneUsageDescription` explains the recording prompt.
 - **Signing** goes inside-out with the hardened runtime and a secure timestamp. The executable is
   signed first, then the bundle. There's no `--deep` on the final signature. `entitlements.plist`
-  holds a single exception, `com.apple.security.device.audio-input`, without which the hardened
-  runtime blocks recording.
+  holds two exceptions: `com.apple.security.cs.disable-library-validation`, without which the
+  hardened runtime refuses third-party plug-in binaries signed by another Team ID and the plug-in
+  scan finds none of them (#153), and `com.apple.security.device.audio-input`, without which it
+  blocks recording.
 - **Notarization:** the app is zipped and sent with `xcrun notarytool submit --wait`, then the
   ticket is stapled to the app. The app goes on a DMG (`hdiutil`, with an `Applications` link).
   The DMG is signed, notarized and stapled too.
   Its Finder window (background, icon size and positions) comes from
   [`packaging/macos/dmg/`](../packaging/macos/dmg/README.md), and its volume is named `SoundCraft`
   without the version, which the window's background needs; the DMG file name keeps the version.
-- **CLI:** the universal `soundcraft-cli` is signed with the hardened runtime, zipped and
-  notarized.
+- **CLI:** the universal `soundcraft-cli` is signed with the hardened runtime and the same
+  entitlements (it hosts plug-ins in-process), zipped and notarized.
 
 Locally, without certificates, the script signs ad-hoc (`codesign -s -`) and skips notarization:
 
