@@ -554,8 +554,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             if !crate::cloud::available(app) {
                 return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
             }
-            let _ = crate::cloud::save(app);
-            return Some(Ok(json!({"cloud": "saving"})));
+            return Some(crate::cloud::save(app).map(|_| json!({"cloud": "saving"})));
         }
         "cloud.save_as" => {
             if !crate::cloud::available(app) {
