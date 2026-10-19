@@ -48,9 +48,6 @@ impl Service {
             Job::Account => {
                 let answer =
                     self.me().await.map(|me| Account { display: me.display, capabilities: me.capabilities, provider_linked: me.provider_linked });
-                if matches!(&answer, Err(Fault::Unauthenticated)) {
-                    offer_login();
-                }
                 post(Event::Account(answer));
             }
             Job::LinkStart => match self.client.link_start().await.map_err(fault) {
@@ -62,8 +59,9 @@ impl Service {
                 post(Event::Linked(answer));
             }
             Job::SignOut => {
-                let _ = fetch_logout().await;
-                let _ = web_sys::window().and_then(|w| w.location().reload().ok());
+                if fetch_logout().await.is_ok() {
+                    let _ = web_sys::window().and_then(|w| w.location().reload().ok());
+                }
             }
             Job::List(path) => {
                 let entries = self.client.list(&path).await.map_err(fault);
@@ -120,13 +118,22 @@ fn fault(e: Error) -> Fault {
 /// On the web, authentication is the service's responsibility: it has already
 /// set the session cookie. Unauthenticated means the cookie has expired or was
 /// never set. The only recovery is returning to the login page.
+fn auth_url(path: &str) -> String {
+    let base = Client::from_page().base().trim_end_matches('/');
+    if base.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{base}{path}")
+    }
+}
+
 fn offer_login() {
     let Some(window) = web_sys::window() else { return };
     let Ok(path) = window.location().pathname() else { return };
     if path.starts_with("/auth/") {
         return;
     }
-    let _ = window.location().set_href("/auth/login");
+    let _ = window.location().set_href(&auth_url("/auth/login"));
 }
 
 /// POST `/auth/logout` with the session cookie attached, so the service can revoke
@@ -140,9 +147,14 @@ async fn fetch_logout() -> Result<(), String> {
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
     init.set_credentials(web_sys::RequestCredentials::Include);
-    let req = web_sys::Request::new_with_str_and_init("/auth/logout", &init).map_err(|e| format!("{e:?}"))?;
+    let logout = auth_url("/auth/logout");
+    let req = web_sys::Request::new_with_str_and_init(&logout, &init).map_err(|e| format!("{e:?}"))?;
     let promised = fetch.call1(global.as_ref(), req.as_ref()).map_err(|e| format!("{e:?}"))?;
     let promised: js_sys::Promise = promised.dyn_into().map_err(|_| "not a promise".to_owned())?;
-    wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;
+    let value = wasm_bindgen_futures::JsFuture::from(promised).await.map_err(|e| format!("{e:?}"))?;
+    let response: web_sys::Response = value.dyn_into().map_err(|_| "logout did not return a Response".to_owned())?;
+    if !response.ok() {
+        return Err(format!("logout returned HTTP {}", response.status()));
+    }
     Ok(())
 }

@@ -1,8 +1,7 @@
 //! Talking to CollabCraft from the desktop application.
 //!
-//! Two things live here. [`service`] starts the blocking worker that Open and
-//! Save run on. [`CloudToken`] mints the relay token for shared editing.
-//! Both go through the same service and share one saved session.
+//! [`service`] starts the blocking worker that Open and Save run on. It goes
+//! through the CollabCraft service and uses the saved session when one exists.
 //!
 //! SoundCraft holds no provider credential and speaks no provider protocol.
 //! Everything goes through the CollabCraft service, which is the one place a
@@ -317,6 +316,11 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// True when a session token for the configured service is on disk.
+pub fn has_saved_token() -> bool {
+    load_token().is_some()
+}
+
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     // `cmd` splits its command line on `&` before anything else sees it, and
@@ -343,68 +347,6 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         c
     };
     command.spawn().map(|_| ())
-}
-
-// ---------------------------------------------------------------- shared editing
-
-/// A [`craft_collab::TokenSource`] backed by the CollabCraft service.
-///
-/// The service and the document come from the environment (passed in by the
-/// suite launcher or by the cloud file list's "Open in SoundCraft" action).
-/// Neither is compiled in. A client never holds the relay's signing key; it
-/// asks the service to authorise this document and hands back whatever it is
-/// given.
-pub struct CloudToken {
-    pub base: String,
-    /// The opaque entry handle the launcher passed in. Passed back unchanged.
-    pub id: String,
-}
-
-impl CloudToken {
-    pub fn from_env() -> Option<CloudToken> {
-        let base = base_url()?;
-        let id = var("COLLABCRAFT_FILE").or_else(|| var("CRAFT_FILE_ID")).or_else(|| var("CRAFT_DOCUMENT_ID"))?;
-        Some(CloudToken { base, id })
-    }
-}
-
-fn var(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
-}
-
-impl craft_collab::TokenSource for CloudToken {
-    fn join(&self) -> Option<(String, String)> {
-        // Runs before the window exists, so blocking here is the same trade the
-        // sign-in itself makes. A saved session opens no browser.
-        let mut client = Client::new(&self.base);
-        match load_token() {
-            Some(token) => client = client.with_token(token),
-            None => {
-                if let Err(e) = client.sign_in(|url| {
-                    if let Err(e) = open_browser(url) {
-                        log::warn!("could not open a browser: {e}");
-                    }
-                    log::info!("waiting for a cloud sign-in at {url}");
-                }) {
-                    log::warn!("cloud sign-in failed: {e}");
-                    return None;
-                }
-                if let Some(token) = client.token() {
-                    save_token(token);
-                }
-            }
-        }
-        match client.join(&self.id) {
-            Ok(join) => {
-                log::info!("collab: joining {} through {}", join.room, join.relay);
-                Some((join.relay, join.token))
-            }
-            Err(e) => {
-                log::warn!("could not get a relay token for {}: {e}", self.id);
-                None
-            }
-        }
-    }
 }
 
 #[cfg(test)]

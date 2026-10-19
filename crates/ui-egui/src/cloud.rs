@@ -203,14 +203,15 @@ impl CloudApp for SoundApp {
     }
 
     fn open_bytes(&mut self, name: &str, bytes: Vec<u8>) -> Result<Option<u64>, String> {
-        // Stop playback before replacing the session.
-        self.engine.transport_requests.push(soundcraft_engine::TransportRequest::ResetSession);
-        let missing = open_session_bytes(&mut self.engine, name, &bytes).map_err(|e| e.to_string())?;
-        if !missing.is_empty() {
-            self.ui.status = format!("Opened {name} ({} audio file{} missing in bundle)", missing.len(), if missing.len() == 1 { "" } else { "s" });
+        if crate::bounce::refuses_session_switch(self) {
+            return Err(self.ui.status.clone());
         }
-        self.ui.show_cloud = false;
-        Ok(Some(SESSION_UID))
+        if self.engine.is_dirty() {
+            self.pending_cloud_open = Some((name.to_owned(), bytes));
+            crate::dialogs::ask_to_save(self, "session.close", &serde_json::json!({}));
+            return Err("Save changes before opening another session.".into());
+        }
+        self.open_cloud_bytes(name, bytes)
     }
 
     fn encode(&mut self, uid: u64, into: Destination<'_>) -> Result<Vec<u8>, String> {
@@ -218,20 +219,50 @@ impl CloudApp for SoundApp {
             return Err("that session is no longer open".to_owned());
         }
         writes_as(into)?;
-        let est = estimated_bundle_bytes(self.engine.session());
-        if est > BUNDLE_SIZE_WARNING_BYTES {
-            let gib = est as f64 / (1024.0 * 1024.0 * 1024.0);
-            let msg = format!(
-                "Warning: session is ~{gib:.1} GiB. The bundle is assembled \
-                 in memory — upload may exhaust RAM or be rejected by the service.",
-            );
-            log::warn!("cloud save: {msg}");
-            self.ui.status = msg;
-        }
-        let snapshot = self.engine.session().clone();
-        let (bytes, _fresh) = session_bundle(&snapshot).map_err(|e| e.to_string())?;
-        self.cloud_sent = Some(Arc::new(snapshot));
+        let sent = self.engine.session_arc();
+        warn_large_bundle(self, estimated_bundle_bytes(&sent));
+        let bytes = bundle_bytes(&sent)?;
+        self.cloud_sent = Some(sent);
         Ok(bytes)
+    }
+
+    /// Snapshot and size warning on the UI thread; bundle off it (desktop) or on the calling task (wasm).
+    fn begin_encode(&mut self, intent: SaveIntent) -> Result<(), String> {
+        if self.cloud_encode {
+            return Err("a cloud save is already preparing".into());
+        }
+        if intent.uid != SESSION_UID {
+            return Err("that session is no longer open".to_owned());
+        }
+        let dest = Destination { name: &intent.name, mime: intent.mime.as_deref() };
+        writes_as(dest)?;
+        let sent = self.engine.session_arc();
+        warn_large_bundle(self, estimated_bundle_bytes(&sent));
+        self.cloud_sent = Some(Arc::clone(&sent));
+        let snapshot = (*sent).clone();
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let bytes = bundle_bytes(&snapshot).map_err(Fault::Refused);
+            self.cloud.post(Event::Encoded { intent, bytes });
+            return Ok(());
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.cloud_encode = true;
+            let tx = self.cloud.event_sender();
+            std::thread::Builder::new().name("cloud-encode".into()).spawn(move || {
+                let bytes = bundle_bytes(&snapshot).map_err(Fault::Refused);
+                let _ = tx.send(Event::Encoded { intent, bytes });
+            })
+            .map_err(|e| {
+                self.cloud_encode = false;
+                self.cloud_sent = None;
+                format!("could not start cloud encode: {e}")
+            })?;
+            Ok(())
+        }
     }
 
     fn close(&mut self, _uid: u64) {
@@ -239,9 +270,8 @@ impl CloudApp for SoundApp {
     }
 
     fn mark_saved(&mut self, uid: u64) {
-        let Some(_snapshot) = self.cloud_sent.take() else { return };
-        if uid == SESSION_UID {
-            // Mark the session clean so File > Save does not re-upload it.
+        let Some(sent) = self.cloud_sent.take() else { return };
+        if uid == SESSION_UID && Arc::ptr_eq(&sent, &self.engine.session_arc()) {
             self.engine.mark_clean();
         }
     }
@@ -371,6 +401,27 @@ pub fn show_cloud_overlay(app: &mut SoundApp, ctx: &egui::Context) {
         });
 
     conflict_modal(app, ctx);
+}
+
+impl crate::SoundApp {
+    /// Opens cloud bytes after session-switch guards have already passed.
+    pub(crate) fn open_cloud_bytes(&mut self, name: &str, bytes: Vec<u8>) -> Result<Option<u64>, String> {
+        self.engine.transport_requests.push(soundcraft_engine::TransportRequest::ResetSession);
+        let missing = open_session_bytes(&mut self.engine, name, &bytes).map_err(|e| e.to_string())?;
+        if !missing.is_empty() {
+            self.ui.status = format!("Opened {name} ({} audio file{} missing in bundle)", missing.len(), if missing.len() == 1 { "" } else { "s" });
+        }
+        self.ui.show_cloud = false;
+        Ok(Some(SESSION_UID))
+    }
+
+    /// After the user saved or discarded, open a cloud session that was waiting.
+    pub(crate) fn apply_pending_cloud_open(&mut self) {
+        let Some((name, bytes)) = self.pending_cloud_open.take() else { return };
+        if let Err(e) = self.open_cloud_bytes(&name, bytes) {
+            self.ui.status = e;
+        }
+    }
 }
 
 #[cfg(test)]

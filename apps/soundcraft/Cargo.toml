@@ -21,11 +21,7 @@ soundcraft-playback.workspace = true
 # Cloud storage transport: the blocking CollabCraft client that the desktop
 # worker thread uses.  No provider credential or provider URL lives here.
 craft-cloud-client.workspace = true
-# Shared editing: relay token minted by the service, handed to the hub.
-craft-collab.workspace = true
 collabcraft-share.workspace = true
-# The relay client is async; NativeHub needs a runtime to live on.
-tokio = { version = "1", features = ["rt-multi-thread"] }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "links"] }
 egui.workspace = true
 serde_json.workspace = true

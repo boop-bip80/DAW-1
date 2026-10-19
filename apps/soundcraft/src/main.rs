@@ -294,7 +294,9 @@ fn main() -> eframe::Result {
             // nothing cloud-shaped is offered in the interface.
             if let Some(backend) = cloud::service(cc.egui_ctx.clone()) {
                 app.cloud.connect(backend);
-                soundcraft_ui_egui::cloud::start(&mut app);
+                if cloud::has_saved_token() {
+                    soundcraft_ui_egui::cloud::start(&mut app);
+                }
             }
             app.share.connect(collabcraft_share::CollabCraft::from_fn(cloud::client));
             if let Some(port) = control_port {
