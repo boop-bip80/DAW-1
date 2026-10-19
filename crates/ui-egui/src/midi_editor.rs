@@ -345,8 +345,12 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         } else {
             0
         };
-        if (semi != 0 || ticks != 0) && !app.midi.selected.is_empty() {
-            let _ = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}));
+        if (semi != 0 || ticks != 0)
+            && !app.midi.selected.is_empty()
+            && let Ok(r) = app.run("midi.notes_move", json!({"clip": cid.0, "indices": app.midi.selected, "ticks": ticks, "semitones": semi}))
+            && let Some(a) = r.get("indices").and_then(|v| v.as_array())
+        {
+            app.midi.selected = a.iter().filter_map(|v| v.as_u64()).map(|v| v as usize).collect();
         }
     }
     if !app.midi.selected.is_empty()

@@ -124,14 +124,24 @@ fn notes_move(e: &mut Engine, p: &Value) -> Result<Value> {
     let dt = i64_or(p, "ticks", 0);
     let ds = i64_or(p, "semitones", 0);
     let seq = seq_mut(e, id, "midi.notes_move")?;
+    let mut moved = Vec::new();
     for (i, n) in seq.notes.iter_mut().enumerate() {
         if idx.contains(&i) {
             n.start = (n.start + dt).max(0);
             n.pitch = (i64::from(n.pitch) + ds).clamp(0, 127) as u8;
+            moved.push(*n);
         }
     }
     seq.sort();
-    Ok(json!({"moved": idx.len()}))
+    // Where the moved notes ended up after sorting, so callers can keep them selected.
+    let mut new_idx: Vec<usize> = Vec::new();
+    for m in &moved {
+        if let Some(j) = seq.notes.iter().enumerate().position(|(j, x)| x == m && !new_idx.contains(&j)) {
+            new_idx.push(j);
+        }
+    }
+    new_idx.sort_unstable();
+    Ok(json!({"moved": idx.len(), "indices": new_idx}))
 }
 
 #[cfg(test)]
@@ -155,6 +165,19 @@ mod tests {
         e.execute("midi.note_delete", &json!({"clip": clip, "indices": [0]})).unwrap();
         assert_eq!(e.execute("midi.notes", &json!({"clip": clip})).unwrap()["notes"].as_array().map(Vec::len), Some(1));
         assert!(e.execute("midi.note_edit", &json!({"clip": clip, "index": 99})).is_err());
+    }
+
+    #[test]
+    fn notes_move_reports_new_indices_of_moved_notes() {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let clip = e.execute("midi.new_clip", &json!({"track": t.0})).unwrap()["clip"].as_u64().unwrap();
+        e.execute("midi.note_add", &json!({"clip": clip, "pitch": 60, "start_ticks": 0})).unwrap();
+        e.execute("midi.note_add", &json!({"clip": clip, "pitch": 64, "start_ticks": 480})).unwrap();
+        let r = e.execute("midi.notes_move", &json!({"clip": clip, "indices": [0], "ticks": 960})).unwrap();
+        assert_eq!(r["indices"], json!([1]));
+        let n = e.execute("midi.notes", &json!({"clip": clip})).unwrap();
+        assert_eq!(n["notes"][1]["pitch"], 60);
     }
 
     #[test]
