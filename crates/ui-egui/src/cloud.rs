@@ -219,6 +219,7 @@ impl CloudApp for SoundApp {
             return Err("that session is no longer open".to_owned());
         }
         writes_as(into)?;
+        self.capture_plugin_states();
         let sent = self.engine.session_arc();
         warn_large_bundle(self, estimated_bundle_bytes(&sent));
         let bytes = bundle_bytes(&sent)?;
@@ -236,6 +237,7 @@ impl CloudApp for SoundApp {
         }
         let dest = Destination { name: &intent.name, mime: intent.mime.as_deref() };
         writes_as(dest)?;
+        self.capture_plugin_states();
         let sent = self.engine.session_arc();
         warn_large_bundle(self, estimated_bundle_bytes(&sent));
         self.cloud_sent = Some(Arc::clone(&sent));
