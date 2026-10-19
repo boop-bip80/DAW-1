@@ -16,6 +16,12 @@ pub fn strip_width(narrow: bool) -> f32 {
 }
 
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
+    // The same switch bar as the Edit window, so the Mix page can go back to Edit without the
+    // Window menu. A distinct panel id keeps the separate Mix viewport independent.
+    egui::Panel::bottom("lower_dock_tabs_mix")
+        .exact_size(22.0)
+        .frame(egui::Frame::NONE.fill(Tokens::current().panel_bg2))
+        .show(ui, |ui| crate::edit_window::dock_tabs(app, ui));
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 

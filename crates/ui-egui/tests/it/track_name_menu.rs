@@ -35,6 +35,7 @@ fn right_click_on_a_track_name_opens_the_track_menu() {
     h.run_steps(4);
     assert!(h.query_by_label("Make Inactive").is_none());
     let strip = h.get_by_label("Record enable").rect();
-    right_click(&mut h, pos2(strip.center().x, 900.0 - 17.0));
+    // The Mix page carries the Edit/MIXER bar (22 px) under the strips.
+    right_click(&mut h, pos2(strip.center().x, 900.0 - 22.0 - 17.0));
     assert!(h.query_by_label("Make Inactive").is_some(), "the Mix strip's name plate");
 }
