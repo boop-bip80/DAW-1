@@ -48,7 +48,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
 | Editors: AU | — | ❌ | Cocoa view hosting missing |
 | Multiple editor pages | ✅ | 🟡 | #6 |
-| macOS hardened-runtime entitlement for third-party code | ✅ | ✅ | #153: library validation is disabled in the signed app and CLI, so vendored CLAP/VST3/AU binaries (other Team IDs) load |
+| macOS hardened-runtime entitlement for third-party code | ✅ | ✅ | #153: library validation is disabled in the signed app and CLI, so vendored CLAP/VST3/AU binaries (other Team IDs) are accepted again (loading check pending the next signed release) |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
 | ARA 2 (pitch/time editors in the timeline) | ✅ | ❌ | Menu leaves Track/Clip/Window ▸ ARA still missing |
 | Crash isolation | in-process (DSP on HDX) | in-process | Out-of-process hosting would beat Pro Tools |
