@@ -3693,6 +3693,7 @@ name = "soundcraft-mix"
 version = "0.9.0"
 dependencies = [
  "log",
+ "proptest",
  "rayon",
  "soundcraft-au-host",
  "soundcraft-audio-io",

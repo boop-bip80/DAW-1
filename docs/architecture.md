@@ -46,9 +46,11 @@ report.
 
 `soundcraft_mix::MixEngine::render(session, pos, frames, out)` renders one block: clips (gain,
 fades, clip effects) → trim → inserts → pre-fader sends → fader/mute (automation, VCA, trim
-automation) → post-fader sends → pan → busses → aux inputs → master faders. Independent strips
-run on the audio thread itself, and are shared with SoundCraft's own worker pool only while they
-take a large share of the block (offline renders always share them); plugin delay compensation aligns every path, the master faders' inserts included. The same engine renders
+automation) → post-fader sends → pan → busses → aux inputs → master faders. Each block's clips are
+found through a `ClipIndex` of the snapshot (built on the UI thread with it), not by walking every
+clip. Independent strips run on the audio thread itself, and are shared with SoundCraft's own
+worker pool only while they take a large share of the block (offline renders always share them);
+plugin delay compensation aligns every path, the master faders' inserts included. The same engine renders
 bounces offline (`RangeRender`, streamed to the file block by block) and realtime playback
 (`soundcraft_playback::Player`, which owns it on the audio thread and receives new session
 snapshots through a channel).

@@ -61,7 +61,9 @@ use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
 
+mod clip_index;
 mod schedule;
+pub use clip_index::ClipIndex;
 
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
 pub const MAIN_CHANNELS: usize = 2;
@@ -619,7 +621,15 @@ impl MixEngine {
     }
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
+    /// Walks every clip of every track to find the ones under the block: a host rendering
+    /// repeatedly passes a [`ClipIndex`] of the session to [`MixEngine::render_with`] instead.
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
+        self.render_with(s, &ClipIndex::EMPTY, pos, frames, out);
+    }
+
+    /// [`MixEngine::render`], finding each block's clips with `clips` (built from `s`, off the
+    /// audio thread). The result is the same with any index: it only saves time.
+    pub fn render_with(&mut self, s: &Session, clips: &ClipIndex, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
         if pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
@@ -664,7 +674,7 @@ impl MixEngine {
         let period_ns = frames as f64 / f64::from(self.sample_rate) * 1e9;
         self.runner.run(&mut work, on_audio_thread(), period_ns, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
-                process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
+                process_strip(s, clips, t, st, &busses, &live_in, pos, frames, any_solo);
             }
         });
         self.busses = busses;
@@ -743,7 +753,7 @@ impl MixEngine {
                 st.scratch.resize(self.max_block, 0.0);
             }
             let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-            process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
+            process_strip(s, clips, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
             st.align.process(&mut st.buf, frames);
@@ -908,6 +918,7 @@ struct LiveInput<'a> {
 
 fn process_strip(
     s: &Session,
+    clips: &ClipIndex,
     t: &Track,
     strip: &mut Strip,
     busses: &HashMap<BusId, BusBuf>,
@@ -942,8 +953,8 @@ fn process_strip(
         TrackKind::Instrument | TrackKind::Midi if live.monitor_only => {}
         TrackKind::Audio => {
             let block = Range { start: pos, end: pos.saturating_add(frames as i64) };
-            for clip in t.clips() {
-                if clip.muted || !clip.is_audio() || !clip.range().overlaps(&block) {
+            for clip in clips.overlapping(t, block) {
+                if clip.muted || !clip.is_audio() {
                     continue;
                 }
                 match clip_fx_params(s, clip.id.0) {
@@ -1004,7 +1015,7 @@ fn process_strip(
                 if std::mem::take(&mut strip.chase) {
                     chase_controllers(s, t, pos, inst);
                 }
-                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+                schedule_notes(s, clips, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
@@ -1470,21 +1481,18 @@ fn midi_offset(s: &Session, t: &Track) -> i64 {
 }
 
 /// Send note on/offs and controllers for MIDI clips overlapping the block.
-fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
+fn schedule_notes(s: &Session, clips: &ClipIndex, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
     let sr = s.sample_rate;
     // MIDI Track Offsets: the track's notes sound `offset` samples later (earlier if negative), so
     // the block looks that far back into the clips.
     let offset = midi_offset(s, t);
     let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
-    for clip in t.clips() {
+    for clip in clips.overlapping(t, Range { start: pos, end }) {
         if clip.muted {
             continue;
         }
         let ClipContent::Midi { sequence } = &clip.content else { continue };
-        if !clip.range().overlaps(&Range { start: pos, end }) {
-            continue;
-        }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
         // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
         let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
@@ -2064,6 +2072,8 @@ pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
 /// [`render_range`] or [`render_bus`] of any length, a block at a time.
 pub struct RangeRender {
     eng: MixEngine,
+    /// Where the session's clips are, so that a long render does not walk them all every block.
+    clips: ClipIndex,
     bus: Option<BusId>,
     tmp: Vec<Vec<f32>>,
     start: Samples,
@@ -2079,16 +2089,16 @@ impl RangeRender {
         let eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
         let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
         let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
-        RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
+        RangeRender { eng, clips: ClipIndex::build(s), bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
     }
 
     fn render(&mut self, s: &Session, pos: Samples, n: usize) {
         match self.bus {
             Some(id) => {
-                self.eng.render(s, pos, n, &mut []);
+                self.eng.render_with(s, &self.clips, pos, n, &mut []);
                 self.eng.copy_bus(id, n, &mut self.tmp);
             }
-            None => self.eng.render(s, pos, n, &mut self.tmp),
+            None => self.eng.render_with(s, &self.clips, pos, n, &mut self.tmp),
         }
     }
 
@@ -2292,6 +2302,48 @@ mod tests {
         ins.params.insert("level".into(), level_db);
         tr.instrument = Some(ins);
         s
+    }
+
+    #[test]
+    fn a_clip_index_renders_the_same_audio_as_walking_every_clip() {
+        // A sliced drum edit (thousands of short clips with fades, butted, crossfaded and with gaps),
+        // a long clip under it all, a track whose clips are out of order (walked, not indexed) and
+        // MIDI clips: every block must come out bit for bit as without an index.
+        let mut s = synth_session(-6.0);
+        let noise: Vec<f32> = (0..96_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 8_388_608.0 - 1.0).collect();
+        s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![noise] })));
+        let drums = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let (mut at, mut x) = (0i64, 7u64);
+        let mut sliced = Vec::new();
+        for _ in 0..3000 {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let len = 40 + ((x >> 33) % 300) as i64;
+            let mut c = Clip::audio(s.new_clip_id(), "hit", SourceId(900), ((x >> 17) % 40_000) as i64, at, len);
+            c.fade_in.len = ((x >> 7) % 20) as i64;
+            c.fade_out.len = ((x >> 11) % 20) as i64;
+            sliced.push(c);
+            at += len + ((x >> 23) % 40) as i64 - 10;
+        }
+        s.track_mut(drums).unwrap().playlist_mut().unwrap().clips = sliced;
+        let room = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let long = Clip::audio(s.new_clip_id(), "room", SourceId(900), 0, 0, at);
+        let late = Clip::audio(s.new_clip_id(), "late", SourceId(900), 0, at / 2, 5_000);
+        s.track_mut(room).unwrap().playlist_mut().unwrap().clips = vec![late, long];
+        let index = ClipIndex::build(&s);
+        assert_eq!(index.len(), 3001, "the sliced and MIDI tracks are indexed, the unsorted one is not");
+        let (mut walk, mut indexed) = (MixEngine::new(48_000.0, 128), MixEngine::new(48_000.0, 128));
+        let (mut a, mut b) = (vec![vec![0.0f32; 128]; 2], vec![vec![0.0f32; 128]; 2]);
+        let (mut pos, mut heard) = (0, 0usize);
+        while pos < at + 128 {
+            walk.render(&s, pos, 128, &mut a);
+            indexed.render_with(&s, &index, pos, 128, &mut b);
+            for (x, y) in a.iter().zip(&b) {
+                assert!(x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()), "block at {pos} differs");
+            }
+            heard += usize::from(a[0].iter().any(|v| *v != 0.0));
+            pos += 128;
+        }
+        assert!(heard > 1000, "the comparison covers sound, not silence ({heard} blocks)");
     }
 
     #[test]
