@@ -1406,13 +1406,14 @@ fn solo_reach(s: &Session, order: &[usize], heard: &mut Vec<bool>) -> bool {
 }
 
 /// Per track (by index): the solo mutes it, as the mix engine renders it. For displays such as
-/// the implied-mute shade of a track's Mute key; compute it once per frame, not per track.
+/// the implied-mute shade of a track's Mute key; compute it once per frame, not per track. A VCA
+/// passes no audio, so the solo never mutes it: its fader still drives the members that sound.
 pub fn solo_muted_tracks(s: &Session) -> Vec<bool> {
     let mut heard = Vec::new();
     if !s.tracks.iter().any(|t| t.mixer.solo) || !solo_reach(s, &processing_order(s), &mut heard) {
         return vec![false; s.tracks.len()];
     }
-    s.tracks.iter().zip(heard).map(|(t, h)| !h && !t.mixer.solo && !t.mixer.solo_safe).collect()
+    s.tracks.iter().zip(heard).map(|(t, h)| !h && !t.mixer.solo && !t.mixer.solo_safe && t.kind != TrackKind::Vca).collect()
 }
 
 /// Metronome: a short synthesized blip on every beat of the tempo map, accented on beat 1 of
@@ -2445,6 +2446,10 @@ mod tests {
         s.track_mut(vca).unwrap().mixer.solo = true;
         assert_eq!(render_range(&s, Range::new(0, 4800), 512), only_member);
         assert_eq!(solo_muted_tracks(&s), [false, true, false], "member, other, VCA");
+        // A soloed member leaves its VCA unshaded.
+        s.track_mut(vca).unwrap().mixer.solo = false;
+        s.track_mut(member).unwrap().mixer.solo = true;
+        assert_eq!(solo_muted_tracks(&s), [false, true, false], "member soloed: member, other, VCA");
     }
 
     #[test]
