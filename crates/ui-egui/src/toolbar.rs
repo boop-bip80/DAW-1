@@ -64,10 +64,13 @@ fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
             let cell = Rect::from_min_size(pos2(inner.min.x + cw * cx as f32, inner.min.y + ch * cy as f32), vec2(cw, ch)).shrink(1.0);
             let resp = ui.interact(cell, ui.id().with(("mode", label)), Sense::click());
             let on = cur == m || (m == EditMode::Grid && cur == EditMode::GridRelative);
-            key(ui.painter(), cell, &resp, if on { t.mode_on } else { t.mode_off });
+            // `on` means `cur == m`, or Grid showing Relative Grid: the active colour is always cur's.
+            key(ui.painter(), cell, &resp, if on { t.edit_mode_on(cur) } else { t.mode_off });
             let fg = if on { t.mode_on_text } else { t.mode_off_text };
             if m == EditMode::Grid && snap {
-                ui.painter().rect_stroke(cell, 1.0, Stroke::new(1.5, t.mode_on), StrokeKind::Inside);
+                // The Snap to Grid outline wears the Grid colour, so it never reads as the green of Slip.
+                let grid = t.edit_mode_on(if cur.is_grid() { cur } else { EditMode::Grid });
+                ui.painter().rect_stroke(cell, 1.0, Stroke::new(1.5, grid), StrokeKind::Inside);
             }
             if m == EditMode::Shuffle && locked {
                 icons::draw(ui.painter(), Rect::from_center_size(cell.center(), vec2(15.0, 15.0)), "lock", fg);
