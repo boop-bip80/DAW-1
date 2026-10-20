@@ -104,3 +104,222 @@ fn sample_sizes(b: &[u8], body: usize, end: usize) -> Result<bool> {
     }
     Ok(fits)
 }
+
+// Edit-list support adapted from MarekSpodBiedry's SoundCraft pull request #713,
+// commit 4a6228af98d3533c932a91ee1d667e347af94d8b, under this project's MIT/Apache-2.0 license.
+/// The part of a decoded MP4 audio track that the file's edit list keeps, in frames at the
+/// track's sample rate. AAC streams start with encoder delay that only the edit list excludes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Trim {
+    /// Frames to drop from the start of the decoded stream.
+    pub skip: u64,
+    /// Frames to keep after those, or all that remain.
+    pub len: Option<u64>,
+}
+
+impl Trim {
+    /// Total frames left of a decoded stream of `total` frames.
+    pub(crate) fn frames(self, total: u64) -> u64 {
+        let rest = total.saturating_sub(self.skip);
+        self.len.map_or(rest, |n| n.min(rest))
+    }
+
+    /// Cut every channel down to the kept frames.
+    pub(crate) fn apply(self, channels: &mut [Vec<f32>]) {
+        for ch in channels {
+            let skip = usize::try_from(self.skip).unwrap_or(usize::MAX).min(ch.len());
+            ch.drain(..skip);
+            if let Some(n) = self.len {
+                ch.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+            }
+        }
+    }
+}
+
+/// Child atoms in `pos..end` as (kind, body start, atom end). Stops at the first header that
+/// does not fit.
+fn children(b: &[u8], mut pos: usize, end: usize) -> Vec<([u8; 4], usize, usize)> {
+    let end = end.min(b.len());
+    let mut out = Vec::new();
+    while pos < end {
+        if out.len() >= 65_536 {
+            break; // Metadata lookup must not allocate in proportion to an unbounded atom count.
+        }
+        let (Some(size), Some(kind)) = (be_u32(b, pos), crate::pcm::tag(b, pos + 4)) else { break };
+        let (head, len) = match size {
+            0 => (8, (end - pos) as u64),
+            1 => (16, be_u64(b, pos + 8).unwrap_or(0)),
+            n => (8, u64::from(n)),
+        };
+        let Some(atom_end) = usize::try_from(len).ok().filter(|_| len >= head).and_then(|n| pos.checked_add(n)).filter(|&n| n <= end) else { break };
+        out.push((kind, pos + head as usize, atom_end));
+        pos = atom_end;
+    }
+    out
+}
+
+/// The timescale of an `mvhd` or `mdhd` atom whose body starts at `body`.
+fn timescale(b: &[u8], body: usize) -> Option<u64> {
+    let at = match *b.get(body)? {
+        0 => body.checked_add(12)?,
+        1 => body.checked_add(20)?,
+        _ => return None,
+    };
+    be_u32(b, at).filter(|&t| t > 0).map(u64::from)
+}
+
+/// `value` units of a clock running at `from` Hz, as frames at `rate` Hz.
+fn rescale(value: u64, rate: u64, from: u64) -> Option<u64> {
+    u64::try_from(u128::from(value) * u128::from(rate) / u128::from(from)).ok()
+}
+
+/// The frames kept by the edit list of the first sound track of the MP4 file `b`, for a track
+/// decoded at `rate` Hz. None without a usable edit list: several entries, an empty edit, or a
+/// cut that keeps everything.
+pub(crate) fn edit_trim(b: &[u8], rate: u32) -> Option<Trim> {
+    let rate = u64::from(rate);
+    let moov = children(b, 0, b.len()).into_iter().find(|c| &c.0 == b"moov")?;
+    let parts = children(b, moov.1, moov.2);
+    let mvhd = parts.iter().find(|c| &c.0 == b"mvhd")?;
+    let movie_scale = timescale(b.get(..mvhd.2)?, mvhd.1)?;
+    for (_, trak, trak_end) in parts.iter().filter(|c| &c.0 == b"trak") {
+        let kids = children(b, *trak, *trak_end);
+        let mdia = kids.iter().find(|c| &c.0 == b"mdia")?;
+        let media = children(b, mdia.1, mdia.2);
+        let is_sound =
+            media.iter().find(|c| &c.0 == b"hdlr").is_some_and(|h| b.get(..h.2).and_then(|b| crate::pcm::tag(b, h.1 + 8)) == Some(*b"soun"));
+        if !is_sound {
+            continue;
+        }
+        let mdhd = media.iter().find(|c| &c.0 == b"mdhd")?;
+        let media_scale = timescale(b.get(..mdhd.2)?, mdhd.1)?;
+        let edts = kids.iter().find(|c| &c.0 == b"edts")?;
+        let elst = children(b, edts.1, edts.2).into_iter().find(|c| &c.0 == b"elst")?;
+        let b = b.get(..elst.2)?;
+        let body = elst.1;
+        let wide = match *b.get(body)? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        if be_u32(b, body + 4)? != 1 {
+            return None;
+        }
+        let (duration, start) = if wide {
+            (be_u64(b, body + 8)?, i64::from_be_bytes(be_u64(b, body + 16)?.to_be_bytes()))
+        } else {
+            (u64::from(be_u32(b, body + 8)?), i64::from(i32::from_be_bytes(be_u32(b, body + 12)?.to_be_bytes())))
+        };
+        let media_rate = if wide { body + 24 } else { body + 16 };
+        // Reverse, freeze and accelerated edits require timeline rendering, not a trim.
+        if be_u32(b, media_rate)? != 0x0001_0000 {
+            return None;
+        }
+        let skip = rescale(u64::try_from(start).ok()?, rate, media_scale)?;
+        let len = if duration == 0 { None } else { Some(rescale(duration, rate, movie_scale)?) };
+        return (skip > 0 || len.is_some()).then_some(Trim { skip, len });
+    }
+    None
+}
+
+/// Apple's encoder stores priming in iTunSMPB instead of an edit list. Its counts
+/// use the media clock, which is the core rate for dual-rate HE-AAC.
+pub(crate) fn itunes_trim(b: &[u8], rate: u32) -> Option<Trim> {
+    let find = |pos, end, kind: &[u8; 4]| children(b, pos, end).into_iter().find(|c| &c.0 == kind);
+    let moov = find(0, b.len(), b"moov")?;
+    let mut sound = children(b, moov.1, moov.2).into_iter().filter(|c| &c.0 == b"trak").filter_map(|trak| {
+        let mdia = find(trak.1, trak.2, b"mdia")?;
+        let hdlr = find(mdia.1, mdia.2, b"hdlr")?;
+        (crate::pcm::tag(b.get(..hdlr.2)?, hdlr.1 + 8)? == *b"soun").then_some(mdia)
+    });
+    let mdia = sound.next()?;
+    if sound.next().is_some() {
+        return None; // A global tag cannot identify which audio track it describes.
+    }
+    let mdhd = find(mdia.1, mdia.2, b"mdhd")?;
+    let scale = timescale(b.get(..mdhd.2)?, mdhd.1)?;
+    let udta = find(moov.1, moov.2, b"udta")?;
+    let meta = find(udta.1, udta.2, b"meta")?;
+    let ilst = find(meta.1.checked_add(4)?, meta.2, b"ilst")?;
+    for item in children(b, ilst.1, ilst.2).into_iter().filter(|c| &c.0 == b"----") {
+        let mean = find(item.1, item.2, b"mean")?;
+        let name = find(item.1, item.2, b"name")?;
+        if b.get(mean.1.checked_add(4)?..mean.2)? != b"com.apple.iTunes" || b.get(name.1.checked_add(4)?..name.2)? != b"iTunSMPB" {
+            continue;
+        }
+        let data = find(item.1, item.2, b"data")?;
+        let text = std::str::from_utf8(b.get(data.1.checked_add(8)?..data.2)?).ok()?;
+        let mut fields = text.split_ascii_whitespace();
+        let reserved = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let delay = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let _padding = u64::from_str_radix(fields.next()?, 16).ok()?;
+        let length = u64::from_str_radix(fields.next()?, 16).ok()?;
+        if reserved != 0 || length == 0 {
+            return None;
+        }
+        return Some(Trim { skip: rescale(delay, u64::from(rate), scale)?, len: Some(rescale(length, u64::from(rate), scale)?) });
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    }
+
+    fn header(scale: u32) -> Vec<u8> {
+        let mut v = vec![0u8; 12];
+        v.extend_from_slice(&scale.to_be_bytes());
+        v.extend_from_slice(&[0; 8]);
+        v
+    }
+
+    fn file(movie_scale: u32, media_scale: u32, entries: &[(u32, i32)]) -> Vec<u8> {
+        let mut elst = vec![0, 0, 0, 0];
+        elst.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for &(d, t) in entries {
+            elst.extend_from_slice(&d.to_be_bytes());
+            elst.extend_from_slice(&t.to_be_bytes());
+            elst.extend_from_slice(&[0, 1, 0, 0]);
+        }
+        let mut hdlr = vec![0u8; 8];
+        hdlr.extend_from_slice(b"soun");
+        let mdia = [atom(b"hdlr", &hdlr), atom(b"mdhd", &header(media_scale))].concat();
+        let trak = [atom(b"mdia", &mdia), atom(b"edts", &atom(b"elst", &elst))].concat();
+        let moov = [atom(b"mvhd", &header(movie_scale)), atom(b"trak", &trak)].concat();
+        [atom(b"ftyp", b"M4A \0\0\0\0"), atom(b"moov", &moov)].concat()
+    }
+
+    #[test]
+    fn edit_list_drops_priming_and_padding() {
+        let t = edit_trim(&file(48_000, 48_000, &[(48_000, 1024)]), 48_000);
+        assert_eq!(t, Some(Trim { skip: 1024, len: Some(48_000) }));
+        assert_eq!(t.map(|t| t.frames(49_152)), Some(48_000));
+    }
+
+    #[test]
+    fn edit_list_scales_movie_and_media_clocks() {
+        // A 1000 Hz movie clock (as ffmpeg writes) and a 44.1 kHz media clock.
+        let t = edit_trim(&file(1000, 44_100, &[(1000, 2112)]), 44_100);
+        assert_eq!(t, Some(Trim { skip: 2112, len: Some(44_100) }));
+    }
+
+    #[test]
+    fn empty_or_split_edit_lists_are_ignored() {
+        assert_eq!(edit_trim(&file(1000, 48_000, &[(500, -1)]), 48_000), None);
+        assert_eq!(edit_trim(&file(1000, 48_000, &[(500, 0), (500, 100)]), 48_000), None);
+    }
+
+    #[test]
+    fn trim_cuts_every_channel() {
+        let mut ch = vec![vec![1.0, 2.0, 3.0, 4.0], vec![5.0, 6.0, 7.0, 8.0]];
+        Trim { skip: 1, len: Some(2) }.apply(&mut ch);
+        assert_eq!(ch, vec![vec![2.0, 3.0], vec![6.0, 7.0]]);
+    }
+}

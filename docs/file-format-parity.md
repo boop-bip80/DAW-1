@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** trivial (WAV: empty data chunk with trailing metadata (#466); previously minor: continuous fade curvature in SoundCraft sessions) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-20 · **Change:** minor (AAC extension decoding and gapless trim; readiness estimate unchanged) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every format Pro Tools reads or writes, and ours. The Pro Tools list comes from the document types
 its bundle declares (`CFBundleDocumentTypes` in Info.plist: names only, nothing else read) and its
@@ -39,7 +39,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | AIFF / AIFF-C | native | ✅ | ✅ (`fl32`) | Native |
 | FLAC | import | ✅ | ✅ | Own encoder |
 | MP3 | import, bounce | ✅ (symphonia) | ❌ | G-21 |
-| AAC / M4A / MP4 audio | import, bounce | ✅ (symphonia) | ❌ | G-21 |
+| Advanced Audio Coding (AAC) / M4A / MP4 audio | import, bounce | ✅ (Symphonia demuxing, scalar rusty_aac decoding) | ❌ | High-efficiency extensions retain reconstructed rate and stereo; six-channel decoding tested. Single ordinary MP4 edit and Apple priming metadata handled. Export still G-21; complex edit lists and broad codec conformance remain unqualified |
 | ALAC | import | ✅ | ❌ | |
 | Ogg Vorbis | — | ✅ | ❌ | Beyond Pro Tools |
 | CAF | — | ✅ | ❌ | |
@@ -80,6 +80,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | AAC extensions and six-channel decoding use pure Rust with scalar dependency features. Regressions cover actual duration, rate, channels and ordinary priming metadata; no readiness percentage change |
 | 2026-10-13 | trivial | WAV: empty data chunk with trailing metadata (#466) |
 | 2026-10-13 | minor | Fade curvature round-trips in sessions with a zero default for older files. Format version and readiness estimate unchanged |
 | 2026-10-10 | major | Created: format inventory against Pro Tools 2026.4.1's declared document types and import/bounce options |

@@ -207,7 +207,10 @@ fn well_formed_caf_still_reads() {
     assert_eq!((info.format, buf.frames()), (FileFormat::Caf, 480));
     let table = packet_table(3, 3072, &[10, 0x81, 0x48, 5]);
     let aac = caf(&[caf_desc(b"aac ", 0, 1024, 2, 0), (b"pakt", table.len() as i64, table), (b"data", 219, vec![0; 219])]);
-    assert_eq!(probe(&aac, None).unwrap().frames, 3072);
+    // The packet table is valid, but its zero-filled payload is not AAC. AAC probes
+    // now decode packets to learn the actual SBR/PS rate and channel count.
+    assert!(matches!(probe(&aac, None), Err(AudioError::Malformed(_))));
+    assert!(matches!(decode(&aac, None), Err(AudioError::Malformed(_))));
 }
 
 fn atom(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
