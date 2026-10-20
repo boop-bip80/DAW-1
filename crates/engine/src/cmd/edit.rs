@@ -126,7 +126,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create...",
             ["Edit", "Fades"],
             Some("Cmd+F"),
-            "{shape?: linear|equal power|s-curve|exponential|logarithmic, tracks?, start?, end?} or {clip: id, side: in|out, length: samples, shape?, curvature?: -1..1}",
+            "{shape?: linear|equal power|s-curve|exponential|logarithmic, tracks?, start?, end?} or {clip: id, side: in|out, length: samples, shape?, curvature?: -1..1} or {clip: id of the later clip of a crossfade, side: crossfade, shape?, curvature?} (both fades, keeping their length)",
             has_range,
             fades_create
         ),
@@ -816,10 +816,13 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
             return Err(bad("edit.fades_create", "clip fades cannot also specify tracks or an edit range"));
         }
         let id = p.get("clip").and_then(Value::as_u64).map(soundcraft_model::ClipId).ok_or_else(|| bad("edit.fades_create", "clip must be an id"))?;
+        if str_param(p, "side") == Some("crossfade") {
+            return crossfade_fades(e, id, p, shape, curvature);
+        }
         let fade_in = match str_param(p, "side") {
             Some("in") => true,
             Some("out") => false,
-            _ => return Err(bad("edit.fades_create", "side must be in or out")),
+            _ => return Err(bad("edit.fades_create", "side must be in, out or crossfade")),
         };
         let length = p
             .get("length")
@@ -854,6 +857,37 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
         return Err(bad("edit.fades_create", "the selection must cover a clip start, end or the boundary between two clips"));
     }
     Ok(json!({"fades": n}))
+}
+
+/// `edit.fades_create` aimed at the crossfade leading into `later`: both of its fades take `shape`
+/// and keep their length (a missing one takes the overlap). A fade that already has the shape is left
+/// as it is, bend included, unless a `curvature` is given.
+fn crossfade_fades(e: &mut Engine, later: ClipId, p: &Value, shape: FadeShape, curvature: f32) -> Result<Value> {
+    if p.get("shape").is_some_and(|v| !v.is_string()) {
+        return Err(bad("edit.fades_create", "shape must be a fade shape name"));
+    }
+    let s = e.session();
+    let (track, b) = s.find_clip(later).ok_or_else(|| bad("edit.fades_create", "clip not found"))?;
+    let earlier = s
+        .track(track)
+        .and_then(|t| t.clips().iter().filter(|c| c.start < b.start && c.end() > b.start && c.end() <= b.end()).max_by_key(|c| c.start));
+    let earlier = earlier.ok_or_else(|| bad("edit.fades_create", "clip must be the later clip of a crossfade"))?;
+    let (overlap, bent) = (earlier.end().saturating_sub(b.start), p.get("curvature").is_some());
+    let changed = |old: Fade| {
+        (bent || old.len <= 0 || old.shape != shape).then_some(Fade { len: if old.len > 0 { old.len } else { overlap }, shape, curvature })
+    };
+    let (out, fade_in, earlier) = (changed(earlier.fade_out), changed(b.fade_in), earlier.id);
+    // Nothing to change leaves the document, and the undo history, alone.
+    if out.is_some() || fade_in.is_some() {
+        let s = e.session_mut();
+        if let (Some(fade), Some(clip)) = (out, s.find_clip_mut(earlier)) {
+            clip.fade_out = fade;
+        }
+        if let (Some(fade), Some(clip)) = (fade_in, s.find_clip_mut(later)) {
+            clip.fade_in = fade;
+        }
+    }
+    Ok(json!({"fades": usize::from(out.is_some()) + usize::from(fade_in.is_some())}))
 }
 
 fn fades_delete(e: &mut Engine, p: &Value) -> Result<Value> {

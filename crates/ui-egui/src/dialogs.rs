@@ -8,6 +8,42 @@ use soundcraft_engine::Engine;
 use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
 use soundcraft_time::Samples;
 
+/// What a Fades dialog opened by a double-click aims at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FadeTarget {
+    /// The fade-in or fade-out of one clip.
+    Single { clip: ClipId, fade_in: bool },
+    /// The crossfade leading into this clip, the later of the pair.
+    Crossfade { later: ClipId },
+}
+
+impl FadeTarget {
+    fn label(self) -> &'static str {
+        match self {
+            FadeTarget::Single { fade_in: true, .. } => "Fade In",
+            FadeTarget::Single { fade_in: false, .. } => "Fade Out",
+            FadeTarget::Crossfade { .. } => "Crossfade",
+        }
+    }
+
+    /// The command that gives what the dialog aims at the chosen `shape`, keeping each fade's length.
+    /// None when there is nothing to do: the fade has gone since the dialog opened, or already has the shape.
+    fn command(self, s: &soundcraft_model::Session, shape: &str) -> Option<(String, Value)> {
+        // ponytail: a new shape comes with the bend back at 0, as Create makes it; a bent fade keeps its bend only by keeping its shape.
+        let params = match self {
+            FadeTarget::Crossfade { later } => json!({"clip": later.0, "side": "crossfade", "shape": shape}),
+            FadeTarget::Single { clip, fade_in } => {
+                let fade = s.find_clip(clip).map(|(_, c)| if fade_in { c.fade_in } else { c.fade_out }).filter(|f| f.len > 0)?;
+                if soundcraft_model::FadeShape::from_id(shape) == Some(fade.shape) {
+                    return None;
+                }
+                json!({"clip": clip.0, "side": if fade_in { "in" } else { "out" }, "length": fade.len, "shape": shape})
+            }
+        };
+        Some(("edit.fades_create".into(), params))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
@@ -21,7 +57,8 @@ pub enum Dialog {
     Number { cmd: String, title: String, key: String, value: f64, suffix: String },
     TempoChange { at: Samples, bpm: f64 }, // from double-clicking the tempo ruler
     Spot(crate::spot::Spot),
-    Fades { shape: String },
+    // `target: None` fades the selection (Edit › Fades › Create…); `Some` aims at what was double-clicked.
+    Fades { shape: String, target: Option<FadeTarget> },
     StripSilence { threshold: f64, min_ms: f64, pre_ms: f64, post_ms: f64 },
     // `id: None` creates (Track › Group…); `id: Some` modifies that group (Groups list › Modify Group…).
     Group { id: Option<GroupId>, name: String, edit: bool, mix: bool, members: Vec<(u64, String, bool)> },
@@ -140,7 +177,7 @@ impl Dialogs {
             "event.quantize" => {
                 Dialog::Number { cmd: id.into(), title: "Quantize strength".into(), key: "strength".into(), value: 100.0, suffix: "%".into() }
             }
-            "edit.fades_create" => Dialog::Fades { shape: "equal power".into() },
+            "edit.fades_create" => Dialog::Fades { shape: "equal power".into(), target: None },
             "edit.strip_silence" => Dialog::StripSilence { threshold: -48.0, min_ms: 50.0, pre_ms: 5.0, post_ms: 20.0 },
             "track.group" => {
                 let s = e.session();
@@ -531,12 +568,21 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         action = d.command(app.engine.session());
                     }
                 }
-                Dialog::Fades { shape } => {
+                Dialog::Fades { shape, target } => {
+                    if let Some(target) = target {
+                        ui.label(target.label());
+                    }
                     for s in soundcraft_model::FadeShape::ALL {
                         ui.radio_value(shape, s.label().to_lowercase(), s.label());
                     }
                     if buttons(ui, "OK", enter) {
-                        action = Some(("edit.fades_create".into(), json!({"shape": shape})));
+                        match target {
+                            None => action = Some(("edit.fades_create".into(), json!({"shape": shape}))),
+                            Some(target) => {
+                                keep = false;
+                                action = target.command(app.engine.session(), shape);
+                            }
+                        }
                     }
                 }
                 Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms } => {
