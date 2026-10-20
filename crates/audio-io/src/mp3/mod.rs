@@ -391,6 +391,9 @@ pub(crate) struct Writer<W> {
     pcm: Vec<Vec<f32>>,
     /// Input frames received.
     received: u64,
+    /// Set when writing frames has failed: the sink may hold some of them while the reservoir
+    /// has let them go, so the writer refuses everything after (see [`crate::failed_write_error`]).
+    failed: bool,
 }
 
 impl<W: Write + Seek> Writer<W> {
@@ -413,6 +416,7 @@ impl<W: Write + Seek> Writer<W> {
             resampler: (rate != sample_rate).then(|| Resampler::new(channels, sample_rate, rate)),
             pcm: vec![Vec::with_capacity(2 * FRAME); channels],
             received: 0,
+            failed: false,
         })
     }
 
@@ -432,6 +436,9 @@ impl<W: Write + Seek> Writer<W> {
     /// Appends `frames` frames of planar audio (missing samples are silence), unless they don't
     /// fit (see [`Writer::check_room`]).
     pub(crate) fn write(&mut self, block: &[Vec<f32>], frames: usize) -> Result<()> {
+        if self.failed {
+            return Err(crate::failed_write_error());
+        }
         let total = self.check_room(frames as u64)?;
         let clamped: Vec<Vec<f32>> = (0..self.enc.channels)
             .map(|c| {
@@ -451,7 +458,9 @@ impl<W: Write + Seek> Writer<W> {
         }
         self.received = total;
         self.encode_ready()?;
-        self.enc.reservoir.flush(&mut self.out, false)
+        let flushed = self.enc.reservoir.flush(&mut self.out, false);
+        self.failed = flushed.is_err();
+        flushed
     }
 
     /// Encodes every whole frame of pending input.
@@ -471,6 +480,9 @@ impl<W: Write + Seek> Writer<W> {
     /// Encodes the rest, completes the `Info` frame and hands back `out`, positioned at the end
     /// of the file.
     pub(crate) fn finish(mut self) -> Result<W> {
+        if self.failed {
+            return Err(crate::failed_write_error());
+        }
         if let Some(r) = &mut self.resampler {
             r.finish(&mut self.pcm);
         }
