@@ -851,7 +851,7 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let n: usize = tracks.iter().map(|t| ops::create_fades(s, *t, r, shape)).sum();
     if n == 0 {
-        return Err(bad("edit.fades_create", "the selection must cover a clip start, end or the boundary between two clips"));
+        return Err(bad("edit.fades_create", "the selection must cover a clip start, a clip end or the cut between two clips"));
     }
     Ok(json!({"fades": n}))
 }
@@ -877,7 +877,7 @@ fn fade_to(e: &mut Engine, p: &Value, to_start: bool) -> Result<Value> {
                 .map(|c| if to_start { soundcraft_time::Range::new(c.start, at) } else { soundcraft_time::Range::new(at, c.end()) })
         });
         if let Some(r) = range {
-            n += ops::create_fades(s, *t, r, FadeShape::EqualPower);
+            n += ops::create_fades_keeping_crossfades(s, *t, r, FadeShape::EqualPower);
         }
     }
     Ok(json!({"fades": n}))

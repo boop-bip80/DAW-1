@@ -29,6 +29,10 @@ fn clip_json(e: &Engine, c: &Clip) -> Value {
     if !c.gain_env.is_empty() {
         v["gain_envelope"] = json!(c.gain_env);
     }
+    // The stored cut of a crossfade (on the later clip), as an offset from this clip's start.
+    if let Some(cut) = c.cut {
+        v["cut"] = json!(cut);
+    }
     v
 }
 
