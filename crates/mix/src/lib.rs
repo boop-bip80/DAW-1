@@ -61,6 +61,8 @@ use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
 
+mod schedule;
+
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
 pub const MAIN_CHANNELS: usize = 2;
 
@@ -368,8 +370,10 @@ pub struct MixEngine {
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
     /// Instances `sync` took out of service, for the host to drop (see [`MixEngine::take_retired`]).
     retired: Vec<Box<dyn Plugin>>,
-    /// Ownership workspace reused for parallel strip processing.
+    /// Ownership workspace reused for strip processing.
     work: Vec<(usize, Strip)>,
+    /// Shares the strips between threads when a block needs it (see `schedule`).
+    runner: schedule::StripRunner<(usize, Strip)>,
 }
 
 /// What `sync` needs to fill a slot.
@@ -418,6 +422,7 @@ impl SlotCtx<'_> {
 impl MixEngine {
     pub fn new(sample_rate: f32, max_block: usize) -> Self {
         let max_block = max_block.clamp(16, 16_384);
+        schedule::warm_up();
         MixEngine {
             sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 },
             max_block,
@@ -443,6 +448,7 @@ impl MixEngine {
             adopt: HashMap::new(),
             retired: Vec::new(),
             work: Vec::new(),
+            runner: schedule::StripRunner::new(),
         }
     }
 
@@ -639,7 +645,7 @@ impl MixEngine {
         let order = std::mem::take(&mut self.order);
         let live = |t: &Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
-        // Phase 1: independent strips (audio, instrument, MIDI) in parallel.
+        // Phase 1: independent strips (audio, instrument, MIDI), shared between threads when heavy.
         let mut work = std::mem::take(&mut self.work);
         work.clear();
         for &i in &order {
@@ -655,7 +661,8 @@ impl MixEngine {
         }
         let busses = std::mem::take(&mut self.busses);
         let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-        run_strips(&mut work, |(i, st)| {
+        let period_ns = frames as f64 / f64::from(self.sample_rate) * 1e9;
+        self.runner.run(&mut work, on_audio_thread(), period_ns, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
                 process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
             }
@@ -1278,24 +1285,6 @@ fn as_audio_thread(audio: bool, f: impl FnOnce()) {
     }
     let _restore = Restore(AUDIO_THREAD.replace(audio));
     f();
-}
-
-/// Process strips, in parallel on native targets when there are enough of them.
-#[cfg(not(target_arch = "wasm32"))]
-fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
-    use rayon::prelude::*;
-    if work.len() >= 4 {
-        // The workers render on behalf of this thread: on the audio thread, they are it too.
-        let audio = on_audio_thread();
-        work.par_iter_mut().for_each(|w| as_audio_thread(audio, || f(w)));
-    } else {
-        work.iter_mut().for_each(f);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
-    work.iter_mut().for_each(f);
 }
 
 fn strip_channels(t: &Track, main_ch: usize) -> usize {
@@ -2259,11 +2248,13 @@ mod audio_thread_tests {
     /// (or is not) the audio thread.
     fn seen_by_strips(audio: bool) -> Vec<bool> {
         std::thread::spawn(move || {
+            // The audio thread never makes the pool itself: a host makes it first (MixEngine::new).
+            schedule::warm_up();
             if audio {
                 mark_audio_thread();
             }
             let mut work = vec![None; 64];
-            run_strips(&mut work, |w| {
+            schedule::StripRunner::sharing_from_the_start().run(&mut work, audio, 1e6, |w| {
                 // Long enough that the pool's workers take part.
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 *w = Some(on_audio_thread());
