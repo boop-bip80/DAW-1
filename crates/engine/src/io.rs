@@ -910,6 +910,13 @@ pub fn save_session(e: &mut Engine, path: &str) -> Result<usize> {
     *e.session_mut() = fresh;
     e.path = Some(p.to_string_lossy().into_owned());
     e.mark_clean();
+    if let Some(dir) = e.recovered_autosave.take()
+        && let Err(err) = std::fs::remove_dir_all(&dir)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("could not remove saved recovery copy {}: {err}", dir.display());
+        e.recovered_autosave = Some(dir);
+    }
     Ok(written)
 }
 

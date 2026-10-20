@@ -55,6 +55,11 @@ fn an_exit_without_quit_offers_unsaved_changes_at_the_next_launch() {
     first.run("track.new", json!({"name": "Vocal"})).unwrap();
     first.close_autosave();
     drop(first);
+    // Distinct writes can have equal timestamps on a coarse-resolution filesystem.
+    let time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for file in std::iter::once(path.clone()).chain(std::fs::read_dir(&root).unwrap().flatten().map(|d| d.path().join("session.scraft"))) {
+        std::fs::File::options().write(true).open(file).unwrap().set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
 
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
         |ui, app: &mut SoundApp| {
