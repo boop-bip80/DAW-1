@@ -8,6 +8,37 @@ use soundcraft_ui_egui::{Services, SoundApp, edit_window};
 
 const SEC: i64 = 48_000;
 
+#[test]
+fn sliced_stereo_clip_uses_the_track_and_position_where_the_pointer_is_released() {
+    for (mode, tool) in [("slip", "grabber"), ("slip", "smart"), ("grid", "grabber"), ("grid", "smart")] {
+        let (mut app, ctx, tracks, _) = tracks(mode, tool, &[&[(0, 4 * SEC)], &[]]);
+        for t in &tracks {
+            app.engine.session_mut().track_mut(*t).unwrap().format = soundcraft_model::ChannelFormat::Stereo;
+        }
+        app.engine.session_mut().sources[0].channels = 2;
+        app.engine.execute("edit.select", &json!({"tracks": [tracks[0].0], "start": 2 * SEC, "end": 2 * SEC})).unwrap();
+        app.engine.execute("edit.separate", &json!({})).unwrap();
+        frame(&ctx, &mut app, vec![]);
+        let clip = app.engine.session().track(tracks[0]).unwrap().clips()[1].clone();
+        let before = app.engine.session().clone();
+        let from = point(&app, tracks[0], 3 * SEC);
+        let held = from + vec2(20.0, 0.0);
+        let release = point(&app, tracks[1], 3 * SEC + SEC / 2);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(from), button(from, true)]);
+        frame(&ctx, &mut app, vec![Event::PointerMoved(held)]);
+        frame(&ctx, &mut app, vec![]);
+        // A release may arrive at a new position with no preceding held-pointer frame there.
+        frame(&ctx, &mut app, vec![Event::PointerMoved(release), button(release, false)]);
+        let (track, moved) = app.engine.session().find_clip(clip.id).unwrap();
+        assert_eq!(track, tracks[1], "{tool}: clip stayed on the previous hover track");
+        assert_eq!(moved.start, clip.start + SEC / 2, "{tool}: final pointer position was ignored");
+        assert_eq!(moved.length, clip.length);
+        assert_eq!(moved.content, clip.content);
+        assert!(app.engine.undo());
+        assert_eq!(app.engine.session(), &before);
+    }
+}
+
 fn frame(ctx: &egui::Context, app: &mut SoundApp, events: Vec<Event>) {
     let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))), events, ..Default::default() };
     ctx.run_ui(raw, |ui| {
