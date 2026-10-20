@@ -1506,12 +1506,30 @@ fn schedule_notes(s: &Session, clips: &ClipIndex, t: &Track, pos: Samples, frame
                 rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
             )
         };
+        // The block in clip ticks, with a tick of slack each side for rounding. Worked out once so
+        // that only the notes starting or ending in the block are converted to samples: a tempo
+        // conversion walks the tempo map, and doing two per note of the clip on every block (a
+        // beat-tracked map has hundreds of tempos, a dense part thousands of notes) is more work
+        // than the audio thread has time for at small buffers.
+        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
+            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
+        // Notes still held at the clip's end are cut there: when that end falls in this block,
+        // every note ending at or after it ends here.
+        let cut_from = if clip.end() >= pos && clip.end() < end {
+            s.tempo.samples_to_ticks(clip.end(), sr).saturating_sub(base).saturating_sub(1)
+        } else {
+            i64::MAX
+        };
         for n0 in &sequence.notes {
             let mut n = *n0;
             n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
             n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
             n.length = ((n.length as f64 * dur) as i64).max(1);
             n.start = n.start.saturating_add(delay).max(0);
+            let end_tick = n.start.saturating_add(n.length);
+            if !near.contains(&n.start) && !near.contains(&end_tick) && end_tick < cut_from {
+                continue;
+            }
             let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
             let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
             if on >= clip.end() {
@@ -1528,8 +1546,6 @@ fn schedule_notes(s: &Session, clips: &ClipIndex, t: &Track, pos: Samples, frame
                 held.retain(|p| *p != n.pitch);
             }
         }
-        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
-            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
         // Events before tick 0 are what a start trim hid: they don't play.
         for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let tick = c.tick.saturating_add(delay).max(0);
@@ -2769,6 +2785,98 @@ mod tests {
         eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(keys) }]);
         render_block(&mut eng, &s, 0);
         assert_eq!(*heard.lock().unwrap(), vec![(72, 80)]);
+    }
+
+    /// Records the absolute sample of every note on and off it is sent.
+    struct NoteLog {
+        inner: Box<dyn Plugin>,
+        pos: Arc<std::sync::Mutex<i64>>,
+        heard: Arc<std::sync::Mutex<Vec<(i64, bool, u8)>>>,
+    }
+
+    impl Plugin for NoteLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, offset: usize, note: u8, _velocity: u8) {
+            let at = *self.pos.lock().unwrap() + offset as i64;
+            self.heard.lock().unwrap().push((at, true, note));
+        }
+        fn note_off(&mut self, offset: usize, note: u8) {
+            let at = *self.pos.lock().unwrap() + offset as i64;
+            self.heard.lock().unwrap().push((at, false, note));
+        }
+    }
+
+    #[test]
+    fn notes_land_on_the_same_samples_with_a_dense_tempo_map() {
+        // A beat-tracked tempo map (a tempo on every beat) and a dense part: only the notes near each
+        // block are converted now, and every on and off must still land on the exact sample a
+        // conversion of every note gives, including notes cut at the clip's end.
+        let mut s = Session::default();
+        let q = TICKS_PER_QUARTER;
+        for beat in 1..400i64 {
+            s.tempo.set_tempo(beat * q, 120.0 + ((beat * 37) % 11) as f64 * 0.7 - 3.0).unwrap();
+        }
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.keys"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        let mut x: u64 = 7;
+        for _ in 0..3000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let start = ((x >> 33) % (300 * q as u64)) as i64;
+            let length = 1 + ((x >> 13) % (3 * q as u64)) as i64;
+            let pitch = 36 + ((x >> 7) % 48) as u8;
+            seq.notes.push(soundcraft_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start, length });
+        }
+        seq.notes.sort_by_key(|n| n.start);
+        // Ends mid-block and inside the notes, so some are cut.
+        let clip_end = 48_000 * 140 + 77;
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, clip_end, seq.clone()));
+        let pos = Arc::new(std::sync::Mutex::new(0i64));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = NoteLog { inner: soundcraft_dsp::create("gain").unwrap(), pos: Arc::clone(&pos), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 128);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(log) }]);
+        let mut out = vec![vec![0.0f32; 128]; 2];
+        let mut at = 0i64;
+        while at < clip_end + 128 {
+            *pos.lock().unwrap() = at;
+            eng.render(&s, at, 128, &mut out);
+            at += 128;
+        }
+        let sr = s.sample_rate;
+        let mut want = Vec::new();
+        for n in &seq.notes {
+            let on = s.tempo.tick_to_samples(n.start, sr);
+            if on >= clip_end {
+                continue;
+            }
+            want.push((on, true, n.pitch));
+            want.push((s.tempo.tick_to_samples(n.start + n.length, sr).min(clip_end), false, n.pitch));
+        }
+        let mut got = heard.lock().unwrap().clone();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got.len(), want.len());
+        assert_eq!(got, want);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
