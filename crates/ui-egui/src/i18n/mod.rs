@@ -66,7 +66,7 @@ pub static LANGUAGES: [LangInfo; 3] = [
         name: "Italiano",
         source: include_str!("it.tsv"),
         plural: plural_one_other,
-        complete_menus: false,
+        complete_menus: true,
         catalog: OnceLock::new(),
     },
     LangInfo {
@@ -339,6 +339,18 @@ mod tests {
         assert_eq!(trn(it, 2, "{n} track", "{n} tracks"), "2 tracce");
         // Incomplete starter catalogs always retain a usable English fallback.
         assert_eq!(tr(it, "untranslated string"), "untranslated string");
+    }
+
+    #[test]
+    fn italian_catalog_has_the_complete_reference_key_set() {
+        let (reference, reference_errors) = parse_entries(Lang::from_code("zh-Hans").expect("Simplified Chinese registered").0.source);
+        let (italian, italian_errors) = parse_entries(IT().0.source);
+        assert!(reference_errors.is_empty(), "{reference_errors:?}");
+        assert!(italian_errors.is_empty(), "{italian_errors:?}");
+        let keys = |entries: Vec<catalog::Entry>| {
+            entries.into_iter().map(|(context, source, _)| format!("{context}\u{1}{source}")).collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(keys(italian), keys(reference), "Italian must cover the complete UI catalog");
     }
 
     #[test]
