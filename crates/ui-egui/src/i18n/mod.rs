@@ -59,8 +59,16 @@ fn plural_none(_: u64) -> usize {
 }
 
 /// The registry. English first: it is the fallback and the source language.
-pub static LANGUAGES: [LangInfo; 2] = [
+pub static LANGUAGES: [LangInfo; 3] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo {
+        code: "it",
+        name: "Italiano",
+        source: include_str!("it.tsv"),
+        plural: plural_one_other,
+        complete_menus: false,
+        catalog: OnceLock::new(),
+    },
     LangInfo {
         code: "zh-Hans",
         name: "简体中文",
@@ -271,6 +279,7 @@ mod tests {
     use super::*;
 
     const ZH: fn() -> Lang = || Lang::from_code("zh-Hans").expect("zh-Hans registered");
+    const IT: fn() -> Lang = || Lang::from_code("it").expect("Italian registered");
 
     #[test]
     fn chinese_tags_resolve_to_simplified() {
@@ -314,6 +323,22 @@ mod tests {
         assert_eq!(Lang::from_pref("auto"), Lang::EN);
         assert_eq!(Lang::from_pref(""), Lang::EN);
         assert_eq!(Lang::from_pref("xx-unknown"), Lang::EN);
+    }
+
+    #[test]
+    fn italian_is_registered_and_uses_italian_plural_forms() {
+        let it = IT();
+        for tag in ["it", "it-IT", "it_IT.UTF-8", "it-CH"] {
+            assert_eq!(lang_from_tag(tag), Some(it), "{tag}");
+        }
+        assert_eq!(Lang::from_pref("IT"), it);
+        assert_eq!(it.name(), "Italiano");
+        assert_eq!(tr(it, "Track"), "Traccia");
+        assert_eq!(tr(it, "MIDI Editor"), "Editor MIDI");
+        assert_eq!(trn(it, 1, "{n} track", "{n} tracks"), "1 traccia");
+        assert_eq!(trn(it, 2, "{n} track", "{n} tracks"), "2 tracce");
+        // Incomplete starter catalogs always retain a usable English fallback.
+        assert_eq!(tr(it, "untranslated string"), "untranslated string");
     }
 
     #[test]

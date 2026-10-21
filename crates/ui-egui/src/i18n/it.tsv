@@ -1,0 +1,273 @@
+# Italian (it) catalog. UTF-8, TAB-separated columns:
+# context <TAB> English source <TAB> Italian translation
+#
+# Empty context: plain UI text. @id: stable command ID. @plural: one|other source
+# with singular|plural Italian forms. Other contexts disambiguate the English meaning.
+# Escapes inside columns: \n, \t, \\. Keep {name} placeholders and trailing ….
+#
+# This is an original, editable starter translation for SoundCraft. Audio-production terms follow
+# common Italian DAW usage; product names, file formats, plug-in names and automation modes remain
+# in English where that is clearer to musicians and engineers.
+
+	1st Order Ambisonics	Ambisonics di 1° ordine
+	2nd Order Ambisonics	Ambisonics di 2° ordine
+	3rd Order Ambisonics	Ambisonics di 3° ordine
+	4th Order Ambisonics	Ambisonics di 4° ordine
+	5th Order Ambisonics	Ambisonics di 5° ordine
+	6th Order Ambisonics	Ambisonics di 6° ordine
+	7th Order Ambisonics	Ambisonics di 7° ordine
+	AFL (After Fader Listen)	AFL (Ascolto post-fader)
+	ARA Note Overlay	Sovrapposizione note ARA
+	ARA Plugins	Plug-in ARA
+	Activate HEAT	Attiva HEAT
+	Add Key Change...	Aggiungi cambio di tonalità...
+	After Playback	Dopo la riproduzione
+	All	Tutto
+	All Automation	Tutta l'automazione
+	All MIDI Notes Off	Tutte le note MIDI disattivate
+	All Marker Rulers	Tutti i righelli dei marker
+	Arrange	Disponi
+	At Selection	Alla selezione
+	At Transients	Ai transienti
+	Audio as MIDI	Audio come MIDI
+	Audio...	Audio...
+	AudioSuite	AudioSuite
+	Auto-Spot Clips	Posiziona automaticamente le clip
+	Auto-Update Active Configuration	Aggiorna automaticamente la configurazione attiva
+	Automation	Automazione
+	Automation Follows Edit	L'automazione segue la modifica
+	Bars|Beats	Battute|Beat
+	Beat Detective	Beat Detective
+	Big Counter	Contatore grande
+	Bounce Mix...	Esporta mix...
+	Bounce...	Esporta...
+	Bring to Front	Porta in primo piano
+	Bypass	Bypass
+	Bypass Inserts	Bypass insert
+	Calibration Mode	Modalità calibrazione
+	Can't Redo	Impossibile ripetere
+	Can't Undo	Impossibile annullare
+	Capture...	Cattura...
+	Cascade	Sovrapponi
+	Center Playhead	Centra testina di riproduzione
+	Change Duration...	Modifica durata...
+	Change Edit to Match Timeline	Adatta la modifica alla timeline
+	Change Meter...	Modifica indicazione di tempo...
+	Change Timeline to Match Edit	Adatta la timeline alla modifica
+	Change Track Width	Modifica larghezza traccia
+	Change Velocity...	Modifica velocity...
+	Channel Name	Nome canale
+	Channel Strip	Channel strip
+	Clear	Cancella
+	Clear All	Elimina tutto
+	Clear Clips	Rimuovi clip
+	Clear Special...	Cancellazione speciale...
+	Close	Chiudi
+	Close Session	Chiudi sessione
+	Clip	Clip
+	Clip Effects	Effetti clip
+	Clip Gain	Guadagno clip
+	Clip Group	Gruppo di clip
+	Clip Groups	Gruppi di clip
+	Clip List	Elenco clip
+	Clip Name	Nome clip
+	Clip Properties...	Proprietà clip...
+	Clips	Clip
+	Clock Source	Sorgente clock
+	Clone	Duplica
+	Colour	Colore
+	Commit	Applica
+	Compact	Compatto
+	Consolidate	Consolida
+	Consolidate Clip	Consolida clip
+	Convert	Converti
+	Copy	Copia
+	Copy Special	Copia speciale
+	Counter	Contatore
+	Create	Crea
+	Create Click Track	Crea traccia click
+	Create Group	Crea gruppo
+	Create Marker	Crea marker
+	Create New Playlist	Crea nuova playlist
+	Crossfade	Dissolvenza incrociata
+	Cut	Taglia
+	Cut Time	Taglia tempo
+	Data	Dati
+	Default	Predefinito
+	Delete	Elimina
+	Delete Empty Space	Elimina spazio vuoto
+	Delete Marker	Elimina marker
+	Delete Selected	Elimina selezionati
+	Delete Track	Elimina traccia
+	Deselect All	Deseleziona tutto
+	Detach	Separa
+	Disable	Disattiva
+	Display	Visualizzazione
+	Duplicate	Duplica
+	Duplicate...	Duplica...
+	Edit	Modifica
+	Edit Groups	Gruppi di modifica
+	Edit Selection	Modifica selezione
+	Elastic Audio	Elastic Audio
+	Enable	Attiva
+	Event List	Elenco eventi
+	Events	Eventi
+	Export	Esporta
+	Export MIDI...	Esporta MIDI...
+	Export Selected Tracks...	Esporta tracce selezionate...
+	Fade	Dissolvenza
+	Fade In	Dissolvenza in entrata
+	Fade Out	Dissolvenza in uscita
+	File	File
+	Fill	Fill
+	Find	Cerca
+	First	Primo
+	Folder	Cartella
+	Freeze	Congela
+	Full Screen	Schermo intero
+	Grid	Griglia
+	Grid Value	Valore griglia
+	Group	Gruppo
+	Group Clips	Raggruppa clip
+	Groups	Gruppi
+	Hide	Nascondi
+	Hide All	Nascondi tutto
+	Hide Selected	Nascondi selezionati
+	Import	Importa
+	Import Audio...	Importa audio...
+	Import MIDI...	Importa MIDI...
+	Import Session Data...	Importa dati sessione...
+	Insert	Inserisci
+	Inserts	Insert
+	Instrument	Strumento
+	Instruments	Strumenti
+	Keyboard	Tastiera
+	Last	Ultimo
+	Length	Durata
+	Link	Collega
+	Load	Carica
+	Loop	Loop
+	Loop Playback	Riproduzione in loop
+	Main	Principale
+	Marker	Marker
+	Markers	Marker
+	Master	Master
+	Memory Locations	Posizioni memoria
+	Menu	Menu
+	Meter	Misuratore
+	MIDI	MIDI
+	MIDI Editor	Editor MIDI
+	MIDI Event List	Elenco eventi MIDI
+	MIDI Merge	Unione MIDI
+	MIDI Notes	Note MIDI
+	MIDI Operations	Operazioni MIDI
+	MIDI Real-Time Properties	Proprietà MIDI in tempo reale
+	MIDI Track	Traccia MIDI
+	MIDI Velocity	Velocity MIDI
+	Mix	Mix
+	Mix Window	Finestra Mix
+	Mono	Mono
+	Move	Sposta
+	Move to	Sposta in
+	Multi-Mono	Multi-mono
+	Mute	Mute
+	New	Nuovo
+	New Clip	Nuova clip
+	New MIDI Clip	Nuova clip MIDI
+	New Session...	Nuova sessione...
+	New Track...	Nuova traccia...
+	Next	Successivo
+	Nudge	Scostamento
+	Nudge Left	Scosta a sinistra
+	Nudge Right	Scosta a destra
+	Nudge Value	Valore scostamento
+	Offline	Offline
+	Open	Apri
+	Open Recent	Apri recenti
+	Options	Opzioni
+	Output	Uscita
+	Pan	Pan
+	Paste	Incolla
+	Paste Special	Incolla speciale
+	Peak	Picco
+	Pencil	Matita
+	Performance	Prestazioni
+	Playlist	Playlist
+	Playlists	Playlist
+	Plug-In	Plug-in
+	Plug-Ins	Plug-in
+	Plugin	Plug-in
+	Plugins	Plug-in
+	Preferences...	Preferenze...
+	Previous	Precedente
+	Preview	Anteprima
+	Properties	Proprietà
+	Quantize	Quantizza
+	QuickPunch	QuickPunch
+	Record	Registra
+	Record Enable	Abilita registrazione
+	Redo	Ripeti
+	Refresh	Aggiorna
+	Remove	Rimuovi
+	Rename	Rinomina
+	Repeat	Ripeti
+	Reset	Ripristina
+	Restore	Ripristina
+	Return	Ritorno
+	Reverse	Inverti
+	Route	Instrada
+	Routing	Instradamento
+	Ruler	Righello
+	Save	Salva
+	Save As...	Salva con nome...
+	Save Copy In...	Salva una copia in...
+	Score	Editor partitura
+	Score Editor	Editor partitura
+	Scroll	Scorri
+	Select	Seleziona
+	Select All	Seleziona tutto
+	Selection	Selezione
+	Send	Mandata
+	Sends	Mandate
+	Session	Sessione
+	Session Setup...	Impostazioni sessione...
+	Show	Mostra
+	Show All	Mostra tutto
+	Show Selected	Mostra selezionati
+	Shuffle	Shuffle
+	Solo	Solo
+	Spot	Spot
+	Stereo	Stereo
+	Stop	Arresta
+	Stretch	Allunga
+	Sync	Sincronizzazione
+	Tempo	Tempo
+	Tempo Operations	Operazioni sul tempo
+	Tempo Ruler	Righello del tempo
+	Time	Tempo
+	Time Signature	Indicazione di tempo
+	Timeline	Timeline
+	Track	Traccia
+	Track Height	Altezza traccia
+	Track List	Elenco tracce
+	Track Presets	Preset traccia
+	Track View	Vista traccia
+	Tracks	Tracce
+	Transpose	Trasponi
+	Trim	Taglia
+	Trim Tool	Strumento taglio
+	Undo	Annulla
+	Ungroup	Separa gruppo
+	Unlink	Scollega
+	Unmute	Attiva audio
+	Unsolo	Disattiva solo
+	Video	Video
+	View	Visualizza
+	Volume	Volume
+	Waveform	Forma d'onda
+	Window	Finestra
+	Zoom	Zoom
+	Zoom In	Ingrandisci
+	Zoom Out	Riduci
+@plural	{n} clip|{n} clips	{n} clip|{n} clip
+@plural	{n} track|{n} tracks	{n} traccia|{n} tracce
