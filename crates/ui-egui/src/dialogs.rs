@@ -620,9 +620,9 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     let revert = then.0 == "session.revert";
                     if revert || cfg!(target_arch = "wasm32") {
                         let (question, ok) = if revert {
-                            (format!("Revert “{name}” to its last saved version?"), "Revert")
+                            (save_changes_question(name, true), "Revert")
                         } else {
-                            (format!("Close “{name}” without saving?"), "Don't Save")
+                            (save_changes_question(name, false), "Don't Save")
                         };
                         ui.label(if crate::i18n::is_korean() {  crate::i18n::format_fields("{question} Your changes will be lost.", &[("question", format!("{}", &question))]) } else { format!("{question} Your changes will be lost.") });
                         if buttons(ui, ok, false) {
@@ -861,5 +861,35 @@ mod tests {
             message(&d),
             "Remove 2 files from the session? They are used by 4 clips on the timeline, which are removed too. The files stay on disk."
         );
+    }
+}
+
+fn save_changes_question(name: &str, revert: bool) -> String {
+    if crate::i18n::is_korean() {
+        let source = if revert { "Revert “{name}” to its last saved version?" } else { "Close “{name}” without saving?" };
+        crate::i18n::format_fields(source, &[("name", name.to_owned())])
+    } else if revert {
+        format!("Revert “{name}” to its last saved version?")
+    } else {
+        format!("Close “{name}” without saving?")
+    }
+}
+
+#[cfg(test)]
+mod korean_question_tests {
+    use super::save_changes_question;
+    use crate::i18n::{Language, set_current};
+
+    #[test]
+    fn save_questions_keep_session_names_literal() {
+        set_current(Language::Korean);
+        let name = "Session {name}";
+        let question = save_changes_question(name, true);
+        assert_eq!(question, "“Session {name}”을(를) 마지막으로 저장한 버전으로 되돌릴까요?");
+        assert_eq!(crate::i18n::format_fields("{question} Your changes will be lost.", &[("question", question)]), "“Session {name}”을(를) 마지막으로 저장한 버전으로 되돌릴까요? 변경 내용이 사라집니다.");
+        assert_eq!(save_changes_question(name, false), "“Session {name}”을(를) 저장하지 않고 닫을까요?");
+        set_current(Language::English);
+        assert_eq!(save_changes_question(name, true), "Revert “Session {name}” to its last saved version?");
+        assert_eq!(save_changes_question(name, false), "Close “Session {name}” without saving?");
     }
 }
