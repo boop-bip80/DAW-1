@@ -689,6 +689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3668,6 +3677,7 @@ dependencies = [
 name = "soundcraft"
 version = "0.12.1"
 dependencies = [
+ "chrono",
  "eframe",
  "egui 0.37.0",
  "log",
