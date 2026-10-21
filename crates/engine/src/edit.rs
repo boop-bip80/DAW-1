@@ -811,9 +811,18 @@ pub fn create_fades(s: &mut Session, track: TrackId, range: Range, shape: FadeSh
 /// Remove fades on clips touching `range`.
 pub fn delete_fades(s: &mut Session, track: TrackId, range: Range) -> usize {
     let Some(pl) = s.track_mut(track).and_then(|t| t.playlist_mut()) else { return 0 };
+    pl.sort();
+    // Remember actual crossfade pairs before clearing their fades. Plain overlaps and
+    // isolated boundary fades must not change the underlying clip geometry.
+    let touching = |c: &Clip| c.range().overlaps(&range) || (range.is_empty() && c.range().contains(range.start));
+    let pairs: Vec<_> = pl
+        .clips
+        .windows(2)
+        .map(|w| w[0].end() > w[1].start && w[0].fade_out.len > 0 && w[1].fade_in.len > 0 && (touching(&w[0]) || touching(&w[1])))
+        .collect();
     let mut n = 0;
     for c in &mut pl.clips {
-        if c.range().overlaps(&range) || (range.is_empty() && c.range().contains(range.start)) {
+        if touching(c) {
             if c.fade_in.len > 0 || c.fade_out.len > 0 {
                 n += 1;
             }
@@ -821,9 +830,11 @@ pub fn delete_fades(s: &mut Session, track: TrackId, range: Range) -> usize {
             c.fade_out = Fade::default();
         }
     }
-    // Overlapping (crossfaded) neighbours are trimmed back to the midpoint.
-    pl.sort();
-    for i in 0..pl.clips.len().saturating_sub(1) {
+    // Only selected crossfades are trimmed back to the midpoint.
+    for (i, crossfaded) in pairs.into_iter().enumerate() {
+        if !crossfaded {
+            continue;
+        }
         let (Some(a_end), Some(b_start)) = (pl.clips.get(i).map(Clip::end), pl.clips.get(i + 1).map(|c| c.start)) else { continue };
         if a_end > b_start {
             let mid = b_start + (a_end - b_start) / 2;
@@ -835,6 +846,7 @@ pub fn delete_fades(s: &mut Session, track: TrackId, range: Range) -> usize {
             }
         }
     }
+    pl.sort();
     n
 }
 
@@ -862,6 +874,71 @@ mod tests {
             pl.clips.push(Clip::audio(id, "a", SourceId(500), 1000, 1000, 4000));
         }
         (s, t)
+    }
+
+    #[test]
+    fn deleting_fades_preserves_unfaded_and_unselected_overlaps() {
+        let (mut s, t) = session_with_clip();
+        let a = s.new_clip_id();
+        let b = s.new_clip_id();
+        let pl = s.track_mut(t).unwrap().playlist_mut().unwrap();
+        pl.clips.push(Clip::audio(a, "b", SourceId(500), 2000, 2000, 1000));
+        pl.clips.push(Clip::audio(b, "c", SourceId(500), 2500, 2500, 1000));
+        let before = pl.clips.clone();
+        assert_eq!(delete_fades(&mut s, t, Range::new(0, 6000)), 0);
+        assert_eq!(s.track(t).unwrap().clips(), before);
+        let pl = s.track_mut(t).unwrap().playlist_mut().unwrap();
+        pl.clips[0].fade_out.len = 1000;
+        pl.clips[1].fade_in.len = 1000;
+        let before = pl.clips.clone();
+        assert_eq!(delete_fades(&mut s, t, Range::new(6000, 7000)), 0);
+        assert_eq!(s.track(t).unwrap().clips(), before);
+    }
+
+    #[test]
+    fn deleting_one_crossfade_keeps_the_other_and_undo_restores_everything() {
+        let (mut s, t) = session_with_clip();
+        let ids = [s.new_clip_id(), s.new_clip_id(), s.new_clip_id(), s.new_clip_id()];
+        let pl = s.track_mut(t).unwrap().playlist_mut().unwrap();
+        pl.clips = vec![
+            Clip::audio(ids[0], "a", SourceId(500), 1000, 1000, 2100),
+            Clip::audio(ids[1], "b", SourceId(500), 2900, 2900, 2100),
+            Clip::audio(ids[2], "c", SourceId(500), 6000, 6000, 1100),
+            Clip::audio(ids[3], "d", SourceId(500), 6900, 6900, 1100),
+        ];
+        for pair in pl.clips.chunks_mut(2) {
+            pair[0].fade_out.len = 200;
+            pair[1].fade_in.len = 200;
+        }
+        let original = pl.clips.clone();
+        let name = s.track(t).unwrap().name.clone();
+        let mut e = crate::Engine::new(s);
+        e.execute("edit.fades_delete", &serde_json::json!({"tracks": [name], "start": 2900, "end": 3100})).unwrap();
+        let after = e.session().track(t).unwrap().clips();
+        assert_eq!((after[0].end(), after[1].start, after[1].source_offset()), (3000, 3000, 3000));
+        assert_eq!(&after[2..], &original[2..]);
+        e.undo();
+        assert_eq!(e.session().track(t).unwrap().clips(), original);
+        e.redo();
+        assert_eq!(e.session().track(t).unwrap().clips()[1].start, 3000);
+    }
+
+    #[test]
+    fn deleting_crossfades_sorts_nested_overlaps_and_keeps_source_anchors() {
+        let (mut s, t) = session_with_clip();
+        let a = s.new_clip_id();
+        let b = s.new_clip_id();
+        let pl = s.track_mut(t).unwrap().playlist_mut().unwrap();
+        pl.clips[0].fade_out.len = 3000;
+        let mut second = Clip::audio(a, "b", SourceId(500), 2000, 2000, 1000);
+        second.fade_in.len = 1000;
+        pl.clips.push(second);
+        pl.clips.push(Clip::audio(b, "c", SourceId(500), 2500, 2500, 1000));
+        assert_eq!(delete_fades(&mut s, t, Range::new(0, 6000)), 2);
+        let clips = s.track(t).unwrap().clips();
+        assert!(clips.windows(2).all(|w| w[0].start <= w[1].start));
+        assert!(clips.iter().all(|c| c.length > 0 && c.start == c.source_offset()));
+        assert!(clips.iter().all(|c| c.fade_in.len == 0 && c.fade_out.len == 0));
     }
 
     fn clips(s: &Session, t: TrackId) -> Vec<(Samples, Samples, Samples)> {

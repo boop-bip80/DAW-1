@@ -152,3 +152,22 @@ proptest! {
         prop_assert_eq!(back, orig);
     }
 }
+
+#[test]
+fn deleting_fades_after_insert_and_move_preserves_order_and_undo() {
+    let mut e = soundcraft_engine::demo::demo_engine();
+    let original = serde_json::to_value(e.session()).unwrap();
+    for (i, a, b, track) in [(38, 1_033_847, 1_033_847, "Kick"), (16, 1_836_729, 0, "Snare"), (11, 0, 0, "Snare")] {
+        e.execute("edit.select", &json!({"tracks": [track], "start": a.min(b), "end": a.max(b)})).unwrap();
+        e.execute(CMDS[i], &params(i, a, b, track)).unwrap();
+        assert!(check_invariants(&e).is_ok(), "after {}: {:?}", CMDS[i], check_invariants(&e));
+    }
+    while e.can_undo() {
+        e.undo();
+    }
+    let mut back = serde_json::to_value(e.session()).unwrap();
+    let mut original = original;
+    back.as_object_mut().unwrap().remove("edit");
+    original.as_object_mut().unwrap().remove("edit");
+    assert_eq!(back, original);
+}
