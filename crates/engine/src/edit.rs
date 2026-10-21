@@ -821,20 +821,28 @@ pub fn delete_fades(s: &mut Session, track: TrackId, range: Range) -> usize {
             c.fade_out = Fade::default();
         }
     }
-    // Overlapping (crossfaded) neighbours are trimmed back to the midpoint.
+    // Overlapping (crossfaded) neighbours are trimmed back to the midpoint, but only when they
+    // really are crossfade-shaped: the earlier clip starts and ends before the later one starts
+    // and ends. Stacked or nested clips (moving a selection can clamp several clips to the same
+    // start) overlap without being a crossfade, and splitting them would cut a clip short and
+    // could move it past a third one, so they are left alone. A midpoint can also land after a
+    // third clip's start, so sort again at the end.
     pl.sort();
     for i in 0..pl.clips.len().saturating_sub(1) {
-        let (Some(a_end), Some(b_start)) = (pl.clips.get(i).map(Clip::end), pl.clips.get(i + 1).map(|c| c.start)) else { continue };
-        if a_end > b_start {
-            let mid = b_start + (a_end - b_start) / 2;
-            if let Some(a) = pl.clips.get_mut(i) {
-                a.trim_end_to(mid);
-            }
-            if let Some(b) = pl.clips.get_mut(i + 1) {
-                b.trim_start_to(mid);
-            }
+        let (Some(a), Some(b)) = (pl.clips.get(i), pl.clips.get(i + 1)) else { continue };
+        let (a_start, a_end, b_start, b_end) = (a.start, a.end(), b.start, b.end());
+        if !(a_start < b_start && a_end > b_start && a_end < b_end) {
+            continue;
+        }
+        let mid = b_start + (a_end - b_start) / 2;
+        if let Some(a) = pl.clips.get_mut(i) {
+            a.trim_end_to(mid);
+        }
+        if let Some(b) = pl.clips.get_mut(i + 1) {
+            b.trim_start_to(mid);
         }
     }
+    pl.sort();
     n
 }
 
@@ -947,6 +955,24 @@ mod tests {
             ];
         }
         (s, t, ids)
+    }
+
+    #[test]
+    fn delete_fades_keeps_stacked_neighbours_in_order() {
+        let (mut s, t) = session_with_clip();
+        let ids = [s.new_clip_id(), s.new_clip_id(), s.new_clip_id()];
+        if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
+            // Moving a selection left clamps several clips to the same start; they overlap
+            // without being a crossfade.
+            pl.clips = vec![
+                Clip::audio(ids[0], "a", SourceId(500), 0, 0, 4000),
+                Clip::audio(ids[1], "b", SourceId(500), 0, 0, 3),
+                Clip::audio(ids[2], "c", SourceId(500), 0, 0, 15_000),
+            ];
+            pl.clips[0].fade_out = Fade { len: 100, shape: FadeShape::Linear, curvature: 0.0 };
+        }
+        assert_eq!(delete_fades(&mut s, t, Range::new(0, 0)), 1);
+        assert_eq!(clips(&s, t), vec![(0, 4000, 0), (0, 3, 0), (0, 15_000, 0)]);
     }
 
     #[test]
