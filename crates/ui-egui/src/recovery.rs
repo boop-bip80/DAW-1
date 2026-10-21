@@ -9,7 +9,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let Some(left) = app.leftovers.first().cloned() else { return };
     let mut open = true;
     let mut recover = None;
-    egui::Window::new(egui::RichText::new("Recover Unsaved Work").font(bold(13.0)))
+    egui::Window::new(egui::RichText::new(crate::i18n::tr("Recover Unsaved Work")).font(bold(13.0)))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -17,14 +17,14 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             let age = left.saved.elapsed().map_or_else(|_| "recently".into(), |d| ago(d.as_secs()));
             let what = if left.recording { "unsaved changes and an unfinished recording" } else { "unsaved changes" };
-            ui.label(format!("“{}” has {what} from an earlier run, autosaved {age}.", left.name));
+            ui.label(if crate::i18n::is_korean() { let __i18n_0 = &(left.name); crate::i18n::format_fields("“{}” has {what} from an earlier run, autosaved {age}.", &[("", format!("{}", __i18n_0)), ("what", format!("{}", &what)), ("age", format!("{}", &age))]) } else { format!("“{}” has {what} from an earlier run, autosaved {age}.", left.name) });
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Discard").clicked() {
+                if ui.button(crate::i18n::tr("Discard")).clicked() {
                     recover = Some(false);
                 }
-                let recover_button = egui::Button::new(egui::RichText::new("Recover").strong()).fill(Tokens::current().accent);
-                if ui.add_enabled(!app.engine.transport.recording, recover_button).on_disabled_hover_text("Stop recording first").clicked() {
+                let recover_button = egui::Button::new(egui::RichText::new(crate::i18n::tr("Recover")).strong()).fill(Tokens::current().accent);
+                if ui.add_enabled(!app.engine.transport.recording, recover_button).on_disabled_hover_text(crate::i18n::tr("Stop recording first")).clicked() {
                     recover = Some(true);
                 }
             });

@@ -344,7 +344,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
             match &mut d {
                 Dialog::NewTracks { count, format, kind, timebase, name } => {
                     ui.horizontal(|ui| {
-                        ui.label("Create");
+                        ui.label(crate::i18n::tr("Create"));
                         ui.add(egui::DragValue::new(count).range(1..=128));
                         ui.label("new");
                         egui::ComboBox::from_id_salt("nt_fmt").selected_text(format.as_str()).show_ui(ui, |ui| {
@@ -353,7 +353,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             }
                         });
                         egui::ComboBox::from_id_salt("nt_kind")
-                            .selected_text(soundcraft_model::TrackKind::from_id(kind).map_or("Audio Track", |k| k.label()))
+                            .selected_text(soundcraft_model::TrackKind::from_id(kind).map_or(crate::i18n::tr("Audio Track"), |k| k.label()))
                             .show_ui(ui, |ui| {
                                 for k in soundcraft_model::TrackKind::ALL {
                                     if ui.selectable_label(kind == k.id(), k.label()).clicked() {
@@ -363,14 +363,14 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                                 }
                             });
                         ui.label("in");
-                        egui::ComboBox::from_id_salt("nt_tb").selected_text(if timebase == "ticks" { "Ticks" } else { "Samples" }).show_ui(
+                        egui::ComboBox::from_id_salt("nt_tb").selected_text(if timebase == "ticks" { crate::i18n::tr("Ticks") } else { crate::i18n::tr("Samples") }).show_ui(
                             ui,
                             |ui| {
                                 ui.selectable_value(timebase, "samples".to_string(), "Samples");
                                 ui.selectable_value(timebase, "ticks".to_string(), "Ticks");
                             },
                         );
-                        ui.label("Name:");
+                        ui.label(crate::i18n::tr("Name:"));
                         ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
                     });
                     if buttons(ui, "Create", enter) {
@@ -380,12 +380,12 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
                 Dialog::NewSession { name, sample_rate, demo } => {
                     ui.horizontal(|ui| {
-                        ui.label("Name");
+                        ui.label(crate::i18n::tr("Name"));
                         ui.text_edit_singleline(name);
                     });
-                    egui::ComboBox::from_label("Sample Rate").selected_text(format!("{sample_rate} Hz")).show_ui(ui, |ui| {
+                    egui::ComboBox::from_label("Sample Rate").selected_text(if crate::i18n::is_korean() {  crate::i18n::format_fields("{sample_rate} Hz", &[("sample_rate", format!("{}", &sample_rate))]) } else { format!("{sample_rate} Hz") }).show_ui(ui, |ui| {
                         for r in soundcraft_time::SampleRate::COMMON {
-                            ui.selectable_value(sample_rate, r, format!("{r} Hz"));
+                            ui.selectable_value(sample_rate, r, if crate::i18n::is_korean() {  crate::i18n::format_fields("{r} Hz", &[("r", format!("{}", &r))]) } else { format!("{r} Hz") });
                         }
                     });
                     crate::widgets::checkbox(ui, demo, "Start from the demo session");
@@ -401,7 +401,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ui.label("File");
                         ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
                         if let Some(pick) = &app.services.pick_save
-                            && ui.button("Browse…").clicked()
+                            && ui.button(crate::i18n::tr("Browse…")).clicked()
                             && let Some(p) = pick("file.bounce_mix", path)
                         {
                             *path = p;
@@ -419,15 +419,15 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                                 ui.selectable_value(format, f.to_string(), f.to_uppercase());
                             }
                         });
-                        egui::ComboBox::from_label("Bit Depth").selected_text(format!("{bit_depth}-bit")).show_ui(ui, |ui| {
+                        egui::ComboBox::from_label("Bit Depth").selected_text(if crate::i18n::is_korean() {  crate::i18n::format_fields("{bit_depth}-bit", &[("bit_depth", format!("{}", &bit_depth))]) } else { format!("{bit_depth}-bit") }).show_ui(ui, |ui| {
                             for b in ["16", "24", "32f"] {
-                                ui.selectable_value(bit_depth, b.to_string(), format!("{b}-bit"));
+                                ui.selectable_value(bit_depth, b.to_string(), if crate::i18n::is_korean() {  crate::i18n::format_fields("{b}-bit", &[("b", format!("{}", &b))]) } else { format!("{b}-bit") });
                             }
                         });
                     });
                     crate::widgets::checkbox(ui, normalize, "Normalize to -0.1 dBFS");
                     ui.label(
-                        egui::RichText::new("Bounces the edit selection, or the whole session when nothing is selected.")
+                        egui::RichText::new(crate::i18n::tr("Bounces the edit selection, or the whole session when nothing is selected."))
                             .small()
                             .color(Tokens::current().text_dim),
                     );
@@ -493,7 +493,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     let file = soundcraft_engine::io::session_file(path);
                     let replaces = soundcraft_engine::io::replaces(&app.engine, cmd, &file);
                     if replaces {
-                        ui.label(format!("“{}” already exists. Do you want to replace it?", file.file_name().unwrap_or_default().to_string_lossy()));
+                        ui.label(if crate::i18n::is_korean() { let __i18n_0 = &(file.file_name().unwrap_or_default().to_string_lossy()); crate::i18n::format_fields("“{}” already exists. Do you want to replace it?", &[("", format!("{}", __i18n_0))]) } else { format!("“{}” already exists. Do you want to replace it?", file.file_name().unwrap_or_default().to_string_lossy()) });
                     }
                     if buttons(ui, if replaces { "Replace" } else { "OK" }, enter && !replaces) {
                         let mut v = json!({});
@@ -540,10 +540,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms } => {
-                    ui.add(egui::Slider::new(threshold, -96.0..=0.0).text("Threshold dB"));
-                    ui.add(egui::Slider::new(min_ms, 0.0..=2000.0).text("Min strip duration ms"));
-                    ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text("Clip start pad ms"));
-                    ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text("Clip end pad ms"));
+                    ui.add(egui::Slider::new(threshold, -96.0..=0.0).text(crate::i18n::tr("Threshold dB")));
+                    ui.add(egui::Slider::new(min_ms, 0.0..=2000.0).text(crate::i18n::tr("Min strip duration ms")));
+                    ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text(crate::i18n::tr("Clip start pad ms")));
+                    ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text(crate::i18n::tr("Clip end pad ms")));
                     if buttons(ui, "Strip", enter) {
                         action = Some((
                             "edit.strip_silence".into(),
@@ -560,7 +560,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         crate::widgets::checkbox(ui, edit, "Edit group");
                         crate::widgets::checkbox(ui, mix, "Mix group");
                     });
-                    ui.label("Tracks");
+                    ui.label(crate::i18n::tr("Tracks"));
                     egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                         for (_, n, on) in members.iter_mut() {
                             crate::widgets::checkbox(ui, on, n.as_str());
@@ -597,13 +597,13 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
                 Dialog::ScoreSetup { title, composer, bars_per_system, show_track_names } => {
                     egui::Grid::new("score_setup").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
-                        ui.label("Title");
+                        ui.label(crate::i18n::tr("Title"));
                         ui.text_edit_singleline(title);
                         ui.end_row();
-                        ui.label("Composer");
+                        ui.label(crate::i18n::tr("Composer"));
                         ui.text_edit_singleline(composer);
                         ui.end_row();
-                        ui.label("Bars per system");
+                        ui.label(crate::i18n::tr("Bars per system"));
                         ui.add(egui::DragValue::new(bars_per_system).range(1..=16));
                         ui.end_row();
                     });
@@ -624,15 +624,15 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         } else {
                             (format!("Close “{name}” without saving?"), "Don't Save")
                         };
-                        ui.label(format!("{question} Your changes will be lost."));
+                        ui.label(if crate::i18n::is_korean() {  crate::i18n::format_fields("{question} Your changes will be lost.", &[("question", format!("{}", &question))]) } else { format!("{question} Your changes will be lost.") });
                         if buttons(ui, ok, false) {
                             action = Some(then.clone());
                         }
                     } else {
-                        ui.label(format!("Save changes to “{name}” before closing?"));
+                        ui.label(if crate::i18n::is_korean() {  crate::i18n::format_fields("Save changes to “{name}” before closing?", &[("name", format!("{}", &name))]) } else { format!("Save changes to “{name}” before closing?") });
                         ui.separator();
                         ui.horizontal(|ui| {
-                            if ui.button("Don't Save").clicked() {
+                            if ui.button(crate::i18n::tr("Don't Save")).clicked() {
                                 action = Some(then.clone());
                             }
                             if buttons(ui, "Save", enter) {
@@ -748,22 +748,22 @@ fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
             match process.as_str() {
                 "normalize" => {
                     let v = params.entry("target_db".into()).or_insert(-0.1);
-                    ui.add(egui::Slider::new(v, -24.0..=0.0).text("Peak dB"));
+                    ui.add(egui::Slider::new(v, -24.0..=0.0).text(crate::i18n::tr("Peak dB")));
                 }
                 "time_stretch" => {
                     let v = params.entry("ratio".into()).or_insert(1.0);
-                    ui.add(egui::Slider::new(v, 0.25..=4.0).text("Length ratio"));
+                    ui.add(egui::Slider::new(v, 0.25..=4.0).text(crate::i18n::tr("Length ratio")));
                 }
                 "pitch_shift" => {
                     let v = params.entry("semitones".into()).or_insert(0.0);
-                    ui.add(egui::Slider::new(v, -24.0..=24.0).text("Semitones"));
+                    ui.add(egui::Slider::new(v, -24.0..=24.0).text(crate::i18n::tr("Semitones")));
                 }
                 "varispeed" => {
                     let v = params.entry("speed".into()).or_insert(1.0);
-                    ui.add(egui::Slider::new(v, 0.25..=4.0).text("Speed"));
+                    ui.add(egui::Slider::new(v, 0.25..=4.0).text(crate::i18n::tr("Speed")));
                 }
                 _ => {
-                    ui.label("No parameters.");
+                    ui.label(crate::i18n::tr("No parameters."));
                 }
             }
         }

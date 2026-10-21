@@ -7,6 +7,7 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("ui.language", "Language", "", None),
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
@@ -226,10 +227,14 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
         |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("SoundCraft", |ui| {
-                    if ui.button("About SoundCraft").clicked() {
+                    if let Some(language) = crate::i18n::chooser(ui, app.ui.language) {
+                        let _ = app.run("ui.language", json!({"language": language.code()}));
+                    }
+                    ui.separator();
+                    if ui.button(crate::i18n::tr("About SoundCraft")).clicked() {
                         app.ui.show_about = true;
                     }
-                    if ui.button("Session Info").clicked() {
+                    if ui.button(crate::i18n::tr("Session Info")).clicked() {
                         app.ui.show_session_info = true;
                     }
                     if ui.button("Session Audio Health").clicked() {
@@ -242,7 +247,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                 });
                 let extra = ui_aliases();
                 for root in tree() {
-                    ui.menu_button(&root.label, |ui| {
+                    ui.menu_button(crate::i18n::tr(&root.label), |ui| {
                         for c in &root.children {
                             menu_node(app, ui, c, &extra);
                             if c.path == "File > Open" {
@@ -254,14 +259,14 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                         }
                         if root.label == "AudioSuite" {
                             ui.separator();
-                            ui.label(egui::RichText::new("Processes selected clips offline").small().color(t.text_dim));
+                            ui.label(egui::RichText::new(crate::i18n::tr("Processes selected clips offline")).small().color(t.text_dim));
                         }
                         if root.label == "Window" {
                             ui.separator();
                             let mut separate = app.ui.mix_separate;
                             if ui
-                                .checkbox(&mut separate, "Mix in Separate Window")
-                                .on_hover_text("Show Edit and Mix at once, e.g. one per monitor")
+                                .checkbox(&mut separate, crate::i18n::tr("Mix in Separate Window"))
+                                .on_hover_text(crate::i18n::tr("Show Edit and Mix at once, e.g. one per monitor"))
                                 .changed()
                             {
                                 let _ = run_ui_command(app, "window.mix_separate", &json!({"value": separate}));
@@ -274,7 +279,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     "{}{}  —  {}",
                     app.engine.session().name,
                     if app.engine.is_dirty() { " *" } else { "" },
-                    if app.ui.window == MainWindow::Edit || app.ui.mix_separate { "Edit" } else { "Mix" }
+                    if app.ui.window == MainWindow::Edit || app.ui.mix_separate { crate::i18n::tr("Edit") } else { crate::i18n::tr("Mix") }
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(title).color(t.text_dim));
@@ -288,10 +293,10 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
 fn instrument_menu(app: &mut SoundApp, ui: &mut egui::Ui) {
     match instrument_track(app.engine.session()) {
         Some(id) => {
-            ui.menu_button("Instrument", |ui| crate::mix_window::instrument_menu(app, ui, id));
+            ui.menu_button(crate::i18n::tr("Instrument"), |ui| crate::mix_window::instrument_menu(app, ui, id));
         }
         None => {
-            ui.add_enabled(false, egui::Button::new("Instrument")).on_disabled_hover_text("Select an instrument track");
+            ui.add_enabled(false, egui::Button::new("Instrument")).on_disabled_hover_text(crate::i18n::tr("Select an instrument track"));
         }
     }
 }
@@ -303,7 +308,7 @@ fn instrument_track(s: &soundcraft_model::Session) -> Option<soundcraft_model::T
 
 fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str, &str)]) {
     if !n.children.is_empty() {
-        ui.menu_button(&n.label, |ui| {
+        ui.menu_button(crate::i18n::tr(&n.label), |ui| {
             for c in &n.children {
                 menu_node(app, ui, c, extra);
             }
@@ -312,7 +317,7 @@ fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str
     }
     let id = command_for_path(&n.path, extra);
     let (enabled, checked) = item_state(app, &n.path, id.as_deref());
-    let label = live_label(app, id.as_deref()).unwrap_or_else(|| n.label.clone());
+    let label = live_label(app, id.as_deref()).unwrap_or_else(|| crate::i18n::tr(&n.label).to_string());
     let label = if checked { format!("✔ {label}") } else { label };
     let shortcut = id.as_deref().and_then(shortcut_for).unwrap_or("");
     let btn = egui::Button::new(label).shortcut_text(crate::shortcuts::shortcut_label(shortcut, ui.ctx().os().is_mac()));
@@ -454,8 +459,8 @@ pub fn shortcut_for(id: &str) -> Option<&'static str> {
 pub fn live_label(app: &SoundApp, id: Option<&str>) -> Option<String> {
     let e = &app.engine;
     match id? {
-        "edit.undo" => Some(e.undo_label().map_or_else(|| "Can't Undo".into(), |l| format!("Undo {l}"))),
-        "edit.redo" => Some(e.redo_label().map_or_else(|| "Can't Redo".into(), |l| format!("Redo {l}"))),
+        "edit.undo" => Some(e.undo_label().map_or_else(|| if crate::i18n::is_korean() { crate::i18n::tr("Undo").into() } else { "Can't Undo".into() }, |l| crate::i18n::format_fields("Undo {action}", &[("action", l.to_string())]))),
+        "edit.redo" => Some(e.redo_label().map_or_else(|| if crate::i18n::is_korean() { crate::i18n::tr("Redo").into() } else { "Can't Redo".into() }, |l| crate::i18n::format_fields("Redo {action}", &[("action", l.to_string())]))),
         _ => None,
     }
 }

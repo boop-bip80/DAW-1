@@ -472,7 +472,7 @@ pub fn surround_panner(ui: &mut Ui, size: f32, speakers: &[PannerSpeaker], puck:
         if sresp.double_clicked() {
             edit = Some(if kind == 0 { PannerEdit::Divergence(0.0) } else { PannerEdit::Height(0.0) });
         }
-        let _ = sresp.on_hover_text(if kind == 0 { "Divergence (0 = point source)" } else { "Elevation (height speakers)" });
+        let _ = sresp.on_hover_text(if kind == 0 { crate::i18n::tr("Divergence (0 = point source)") } else { crate::i18n::tr("Elevation (height speakers)") });
     }
     edit
 }

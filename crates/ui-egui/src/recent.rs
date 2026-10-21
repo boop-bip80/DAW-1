@@ -84,9 +84,9 @@ impl SoundApp {
 
 /// The File › Open Recent submenu.
 pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
-    ui.menu_button("Open Recent", |ui| {
+    ui.menu_button(crate::i18n::tr("Open Recent"), |ui| {
         if app.ui.recent_sessions.is_empty() {
-            ui.add_enabled(false, egui::Button::new("No Recent Sessions"));
+            ui.add_enabled(false, egui::Button::new(crate::i18n::tr("No Recent Sessions")));
             return;
         }
         let now = ui.ctx().input(|i| i.time);
@@ -94,14 +94,14 @@ pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
         let mut open = None;
         for (i, path) in app.ui.recent_sessions.iter().enumerate() {
             let here = exists.get(i).copied().unwrap_or(true);
-            let text = if here { label(path) } else { format!("{}  (missing)", label(path)) };
-            let r = ui.add_enabled(here, egui::Button::new(text)).on_hover_text(path.as_str()).on_disabled_hover_text(format!("{path}\nnot found"));
+            let text = if here { label(path) } else { if crate::i18n::is_korean() { let __i18n_0 = &(label(path)); crate::i18n::format_fields("{}  (missing)", &[("", format!("{}", __i18n_0))]) } else { format!("{}  (missing)", label(path)) } };
+            let r = ui.add_enabled(here, egui::Button::new(text)).on_hover_text(path.as_str()).on_disabled_hover_text(if crate::i18n::is_korean() {  crate::i18n::format_fields("{path}\nnot found", &[("path", format!("{}", &path))]) } else { format!("{path}\nnot found") });
             if r.clicked() {
                 open = Some(path.clone());
             }
         }
         ui.separator();
-        if ui.button("Clear Recent").clicked() {
+        if ui.button(crate::i18n::tr("Clear Recent")).clicked() {
             app.ui.recent_sessions.clear();
             app.recent_changed = true;
             ui.close();
@@ -111,7 +111,7 @@ pub fn menu(app: &mut SoundApp, ui: &mut egui::Ui) {
             // Through the dialog layer, so unsaved changes are asked about first.
             if let Err(e) = crate::dialogs::run_or_ask(app, "session.open", json!({"path": path})) {
                 log::warn!("{path}: {e}");
-                app.ui.status = format!("Could not open {path}: {e}");
+                app.ui.status = if crate::i18n::is_korean() {  crate::i18n::format_fields("Could not open {path}: {e}", &[("path", format!("{}", &path)), ("e", format!("{}", &e))]) } else { format!("Could not open {path}: {e}") };
             }
         }
     });
