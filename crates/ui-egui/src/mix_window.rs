@@ -123,10 +123,11 @@ fn section_label(ui: &Ui, r: Rect, text: &str, narrow: bool) {
     let p = ui.painter();
     let color = Tokens::current().section_label;
     // The English caption stays the key for `short_label`; only the drawn text is translated.
-    let text = crate::i18n::t(if narrow { short_label(text) } else { text });
-    let mut galley = p.layout_no_wrap(text.to_owned(), bold(10.0), color);
+    let key = text;
+    let drawn = crate::i18n::t(if narrow { short_label(key) } else { key });
+    let mut galley = p.layout_no_wrap(drawn.to_owned(), bold(10.0), color);
     if galley.size().x > r.width() - 8.0 {
-        galley = p.layout_no_wrap(crate::i18n::t(short_label(text)).to_owned(), bold(10.0), color);
+        galley = p.layout_no_wrap(crate::i18n::t(short_label(key)).to_owned(), bold(10.0), color);
     }
     p.galley(Align2::CENTER_CENTER.anchor_size(pos2(r.center().x, r.min.y + 7.0), galley.size()).min, galley, color);
 }

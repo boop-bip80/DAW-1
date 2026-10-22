@@ -211,9 +211,12 @@ fn ffmpeg_h264_high_with_bframes() {
 fn scratch() -> std::path::PathBuf {
     option_env!("CARGO_TARGET_TMPDIR").map_or_else(
         || {
-            // `<workspace>/crates/<crate>` → `<workspace>/target/tmp`, without a literal `..`.
+            // `<workspace>/crates/<crate>` → `<workspace>`, without a literal `..`; an external
+            // `CARGO_TARGET_DIR` wins over `target`.
             let krate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            krate.parent().and_then(std::path::Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"))
+            let ws = krate.parent().and_then(std::path::Path::parent).unwrap_or(krate);
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| ws.join("target"), |t| ws.join(t));
+            target.join("tmp")
         },
         std::path::PathBuf::from,
     )

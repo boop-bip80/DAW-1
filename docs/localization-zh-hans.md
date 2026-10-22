@@ -23,9 +23,13 @@ offscreen renderer); anything that never calls it — library tests, embeddings 
 Auto, so no test depends on the machine's locale. With Auto, the first of these that names a
 supported language wins:
 
-1. `SOUNDCRAFT_LOCALE` (an explicit override for scripts and tests)
+1. `SOUNDCRAFT_LOCALE` (an explicit override for scripts; read by `init_system_locale()`)
 2. `LANGUAGE` (a colon-separated priority list, e.g. `zh_CN:en_US`)
 3. `LC_ALL`, then `LC_MESSAGES`, then `LANG`
+
+Library tests do not read these variables: under `cfg(test)` the desktop's answer comes from the
+thread-local `TEST_SYSTEM_TAGS` hook (set with `with_system_tags`), so `SOUNDCRAFT_LOCALE` does
+not control them.
 
 `zh`, `zh_CN.UTF-8`, `zh-CN`, `zh-SG`, `zh-Hans` and `zh-Hans-CN` all resolve to this catalog;
 `zh_TW`, `zh-HK` and `zh-Hant` resolve to no catalog and fall back to English (Traditional

@@ -144,6 +144,11 @@ fn load(_: &'static std::sync::OnceLock<Resolved>, _: &[(&str, u32)], _: &str, _
 }
 
 pub fn definitions() -> FontDefinitions {
+    definitions_for(false)
+}
+
+/// The fonts for an interface language: Han ahead of Hangul only for Simplified Chinese.
+pub fn definitions_for(han_first: bool) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut bold_family = base.clone();
@@ -160,25 +165,22 @@ pub fn definitions() -> FontDefinitions {
         bold_family.insert(0, "system-regular".into());
     }
     fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
-    if let Some(h) = load(&HANGUL_CACHE, HANGUL, "sans-serif:lang=ko", Some("ko")) {
-        fonts.font_data.insert("system-hangul".into(), Arc::new(h));
+    let hangul = load(&HANGUL_CACHE, HANGUL, "sans-serif:lang=ko", Some("ko")).map(|h| ("system-hangul", h));
+    let han = load(&HAN_CACHE, HAN, "sans-serif:lang=zh-cn", Some("zh-cn")).map(|h| ("system-han", h));
+    // Last in every family: Latin text keeps the system face and CJK glyphs fall through. Noto Sans
+    // CJK's Korean face also covers Han, so Hangul goes first unless the interface is Chinese.
+    let ordered = if han_first { [han, hangul] } else { [hangul, han] };
+    for (key, data) in ordered.into_iter().flatten() {
+        fonts.font_data.insert(key.into(), Arc::new(data));
         for family in fonts.families.values_mut() {
-            family.push("system-hangul".into());
-        }
-    }
-    // Han last: Latin text keeps the system face, Han glyphs fall through to this one, and Korean
-    // keeps its own face first (Noto Sans CJK's Korean face also covers Han).
-    if let Some(h) = load(&HAN_CACHE, HAN, "sans-serif:lang=zh-cn", Some("zh-cn")) {
-        fonts.font_data.insert("system-han".into(), Arc::new(h));
-        for family in fonts.families.values_mut() {
-            family.push("system-han".into());
+            family.push(key.into());
         }
     }
     fonts
 }
 
-pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(definitions());
+pub fn install(ctx: &egui::Context, lang_code: &str) {
+    ctx.set_fonts(definitions_for(lang_code == "zh-Hans"));
 }
 
 #[cfg(test)]

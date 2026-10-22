@@ -15,9 +15,12 @@ use std::path::{Path, PathBuf};
 pub(crate) fn root() -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR").map_or_else(
         || {
-            // `<workspace>/crates/<crate>` → `<workspace>/target/tmp`, by walking up the tree.
+            // `<workspace>/crates/<crate>` → `<workspace>`, by walking up the tree; an external
+            // `CARGO_TARGET_DIR` (relative ones are taken from the workspace) wins over `target`.
             let krate = Path::new(env!("CARGO_MANIFEST_DIR"));
-            krate.parent().and_then(Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"))
+            let ws = krate.parent().and_then(Path::parent).unwrap_or(krate);
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| ws.join("target"), |t| ws.join(t));
+            target.join("tmp")
         },
         PathBuf::from,
     );

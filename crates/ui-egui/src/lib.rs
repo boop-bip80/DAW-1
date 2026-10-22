@@ -228,7 +228,9 @@ pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR").map_or_else(
         || {
             let krate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            krate.parent().and_then(std::path::Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"))
+            let ws = krate.parent().and_then(std::path::Path::parent).unwrap_or(krate);
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| ws.join("target"), |t| ws.join(t));
+            target.join("tmp")
         },
         std::path::PathBuf::from,
     );
@@ -340,6 +342,7 @@ pub struct SoundApp {
     last_rev: u64,
     fonts_ready: bool,
     fonts_installed: bool,
+    fonts_lang: &'static str,
     /// The palette last applied to the context (light?), so visuals are set only on a change.
     theme_applied: Option<bool>,
     /// Last panel host context, used to cancel renderer-owned gestures on explicit replacement.
@@ -424,6 +427,7 @@ impl SoundApp {
             last_rev: 0,
             fonts_ready: false,
             fonts_installed: false,
+            fonts_lang: "",
             theme_applied: None,
             docking_context: None,
             sim: None,
@@ -1200,10 +1204,16 @@ impl SoundApp {
             if self.fonts_installed {
                 self.fonts_ready = true;
             } else {
-                fonts::install(ctx);
+                fonts::install(ctx, i18n::current().code());
                 self.fonts_installed = true;
+                self.fonts_lang = i18n::current().code();
                 ctx.request_repaint();
             }
+        }
+        if self.fonts_installed && self.fonts_lang != i18n::current().code() {
+            fonts::install(ctx, i18n::current().code());
+            self.fonts_lang = i18n::current().code();
+            ctx.request_repaint();
         }
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {

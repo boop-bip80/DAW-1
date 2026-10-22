@@ -1,10 +1,10 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** major (Simplified Chinese shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-10-22 · **Change:** minor (Italian shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
-SoundCraft ships **English** (the source language) and **简体中文**. Every menu path segment,
+SoundCraft ships **English** (the source language), **Italiano** and **简体中文**. Every menu path segment,
 every command label, every panel title, dialog, tooltip and status message the UI draws goes
-through a compiled-in catalog (`crates/ui-egui/src/i18n/`), and the Chinese catalog covers all of
+through a compiled-in catalog (`crates/ui-egui/src/i18n/`), and the Italian and Chinese catalogs cover all of
 them; engine-side diagnostics (audio trouble text, health-report issue text, plugin names) stay
 English because the control channel, the CLI and MCP report the same strings. Pro Tools ships its
 UI in **8 languages** (bundle `.lproj` folders: English, German, Spanish, French, Japanese, Korean,
@@ -43,6 +43,7 @@ and native-speaker review of the Chinese wording.
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | Est. to full (h) | In Pro Tools |
 |---|---|---|---|---|---|---|---:|---|
 | English | en | all (source) | ✅ | Latin ✅ | — | **full** | 0 | ✅ |
+| Italiano | it | all (menus, commands, dialogs, tooltips, status) | ✅ | Latin ✅ | no | **full** (engine diagnostics stay English) | 1–2 (review) | ❌ |
 | Simplified Chinese | zh-Hans | all (1,114 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Han fallback (`system-han`); IME untested | no | **full** (engine diagnostics stay English) | 3–5 (review) | ✅ |
 | Spanish | es | 0 (0 %) — PR #143 pending | ❌ | Latin ✅ | no | none | 3–5 | ✅ |
 | Hindi | hi | 0 (0 %) | ❌ | ❌ no Devanagari font or shaping | no | none | 8–15 | ❌ |
@@ -56,7 +57,7 @@ and native-speaker review of the Chinese wording.
 | Vietnamese | vi | 0 (0 %) | ❌ | 🟡 Latin with stacked diacritics, untested | no | none | 3–5 | ❌ |
 | Traditional Chinese | zh-hant | 0 (0 %) | ❌ | ✅ Han fallback | no | none | 6–10 | ✅ |
 
-Other languages shipped: **1** (Simplified Chinese, plus the English source).
+Other languages shipped: **2** (Italiano and Simplified Chinese, plus the English source). Italian is not one of Pro Tools' 8 languages, so the Pro Tools metric stays 2 of 8.
 
 Per-language hours exclude the shared catalog and script work, which are done.
 
@@ -64,5 +65,6 @@ Per-language hours exclude the shared catalog and script work, which are done.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-22 | minor | Italiano (it) shipped; two distributed languages besides English; Pro Tools metric unchanged at 2 of 8 |
 | 2026-10-19 | major | Simplified Chinese shipped: catalog (1,114 entries), language selector, locale detection, Han font fallback, coverage gates; localization re-measured 12 % → 25 % |
 | 2026-10-10 | major | Created: English only, no catalog; the twelve key languages at 0 %; Pro Tools' 8 languages listed from its bundle |
