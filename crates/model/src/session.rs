@@ -172,6 +172,12 @@ pub struct EditState {
     /// Clips explicitly selected (Grabber selection).
     #[serde(default)]
     pub selected_clips: Vec<ClipId>,
+    /// The later clip of the crossfade that the edit selection is: the selection then holds its zone, on
+    /// its track, and no clip. Set by `edit.select {crossfade}`, cleared by any other change of the
+    /// selection; only counts while the crossfade and the selection still agree (the engine's
+    /// `edit::selected_crossfade` says), as undo and other edits can leave it behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_crossfade: Option<ClipId>,
     /// Audio files selected in the Clip List.
     #[serde(default)]
     pub selected_sources: Vec<SourceId>,
@@ -251,6 +257,7 @@ impl Default for EditState {
             selection: Range::default(),
             selected_tracks: Vec::new(),
             selected_clips: Vec::new(),
+            selected_crossfade: None,
             selected_sources: Vec::new(),
             playhead: 0,
             grid: GridValue::default(),

@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (drag across checkboxes, #399; waveforms preview fades during drag; a plugin opens when inserted, #486) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-23 · **Last updated:** 2026-10-23 · **Change:** minor (a click selects a crossfade; Delete / Backspace remove a selected crossfade) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -37,6 +37,8 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Drag and drop: Clip List → tracks, files → tracks | ✅ macOS/Windows; 🟡 Wayland (PR #150) | |
 | Context menus (clip, track name, ruler, Clip List) | 🟡 | Clip and track menus exist; depth lower than Pro Tools'; Clip List delete (#4) |
 | Drag across checkboxes to check or uncheck several | ✅ | #399; every checkbox, as in the other Craft apps |
+| Select a crossfade | ✅ | A click on it with the Grabber (or the lower half of the Smart tool, away from the zone's edges; Shift-click still extends the clip selection) selects the crossfade alone: its zone on its track, no clip (`edit.select {crossfade}`). A drag still slides it, the Trim tool pulls its edges. No mark at the cut inside the zone, as in the incumbent |
+| Delete / Backspace in the Edit window | 🟡 | On a selected crossfade they remove that crossfade alone (`edit.fades_delete {crossfade}`: the clips go back butted at the cut, its two fades cleared, their other fades and every other clip kept). With anything else selected they do nothing: Delete = Clear is not bound yet (clearing a range that touches a crossfade also trims the neighbouring clip, so it wants its own change). Not while a text field or dialog has the keyboard, with the Clip List or Groups focus, or with MIDI notes selected in the editor |
 
 ## Windows and panels
 
@@ -69,6 +71,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | A click selects a crossfade (zone only); Delete / Backspace in the Edit window remove the selected crossfade alone (they do nothing otherwise); no cut line in a crossfade |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |
 | 2026-10-13 | minor | Waveforms and fade curves share temporary envelopes during drag, without rebuilding media or editing the document before release. Readiness estimate unchanged |

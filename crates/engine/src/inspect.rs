@@ -88,7 +88,7 @@ pub fn session(e: &Engine, full: bool) -> Value {
             "id": x.id, "name": x.name, "channels": x.channels, "frames": x.frames, "path": x.path,
             "loaded": s.pool.contains(x.id),
         })).collect::<Vec<_>>(),
-        "selection": {"start": s.edit.selection.start, "end": s.edit.selection.end, "tracks": s.edit.selected_tracks, "clips": s.edit.selected_clips},
+        "selection": {"start": s.edit.selection.start, "end": s.edit.selection.end, "tracks": s.edit.selected_tracks, "clips": s.edit.selected_clips, "crossfade": crate::edit::selected_crossfade(s).map(|c| c.0)},
         "edit_mode": s.edit.edit_mode, "tool": s.edit.tool, "grid": s.edit.grid.label(), "nudge": s.edit.nudge.label(),
         "zoom": {"samples_per_px": s.edit.zoom.samples_per_px, "scroll": s.edit.zoom.scroll},
         "transport": e.transport,

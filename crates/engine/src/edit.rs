@@ -749,6 +749,201 @@ pub fn trim_clip(s: &mut Session, id: ClipId, start: Option<Samples>, end: Optio
     Some(c)
 }
 
+/// The earlier clip of the audio crossfade that leads into `later`, among the clips of one playlist:
+/// the latest-starting clip that [`crossfaded`] with it. The one place that says which clips are a
+/// crossfade pair, for the engine and for the UI.
+pub fn crossfade_earlier<'a>(clips: &'a [Clip], later: &Clip) -> Option<&'a Clip> {
+    let a = clips.iter().filter(|c| crossfaded(c, later)).max_by_key(|c| c.start)?;
+    (a.is_audio() && later.is_audio()).then_some(a)
+}
+
+/// The later clip of the audio crossfade that `earlier` leads out of: the first clip for which
+/// `earlier` is the [`crossfade_earlier`].
+pub fn crossfade_later<'a>(clips: &'a [Clip], earlier: &Clip) -> Option<&'a Clip> {
+    let mut next: Vec<&Clip> = clips.iter().filter(|c| crossfaded(earlier, c)).collect();
+    next.sort_by_key(|c| c.start);
+    next.into_iter().find(|c| crossfade_earlier(clips, c).is_some_and(|a| a.id == earlier.id))
+}
+
+/// The audio crossfade that leads into `later`: the clip before it that runs into its start and ends
+/// inside it, with their track.
+fn crossfade_pair(s: &Session, later: ClipId) -> Option<(TrackId, Clip, Clip)> {
+    let (track, b) = s.find_clip(later)?;
+    let a = crossfade_earlier(s.track(track)?.clips(), b)?;
+    Some((track, a.clone(), b.clone()))
+}
+
+/// What a crossfade has to keep clear of, as the earliest position its zone may start at and the
+/// latest it may end at. The zone starts after whatever claims the start of the earlier clip `a` (its
+/// fade-in, a crossfade into it) and a sample later, so `a` keeps one sample of its own past its far
+/// fade; it ends a sample before whatever claims the end of the later clip `b` (its fade-out, a
+/// crossfade out of it), for the same reason.
+fn zone_bounds(s: &Session, track: TrackId, a: &Clip, b: &Clip) -> (Samples, Samples) {
+    let others = || s.track(track).map(|t| t.clips()).unwrap_or_default().iter().filter(|c| c.id != a.id && c.id != b.id);
+    let head = others().filter(|c| c.start < a.start).map(|c| c.end().saturating_sub(a.start)).max().unwrap_or(0);
+    let head = head.max(a.fade_in.len.saturating_add(1));
+    let tail = others().filter(|c| c.start > b.start).map(|c| b.end().saturating_sub(c.start)).max().unwrap_or(0);
+    let tail = tail.max(b.fade_out.len.saturating_add(1));
+    (a.start.saturating_add(head), b.end().saturating_sub(tail))
+}
+
+/// The pair can be slid or trimmed as a crossfade: neither clip is edit-locked (the audio stays in
+/// time, so a time lock does not matter, as for any trim) and neither is stretched (a start trim would
+/// ignore the stretch).
+fn trimmable(a: &Clip, b: &Clip) -> bool {
+    let plain = |c: &Clip| !c.edit_locked && (c.stretch - 1.0).abs() < 1e-9;
+    plain(a) && plain(b)
+}
+
+/// How much audio each clip of a crossfade has beyond its edge: `a` past its end, `b` ahead of its start.
+fn handles(s: &Session, a: &Clip, b: &Clip) -> (Samples, Samples) {
+    let after = material_len(s, a).map_or(0, |n| n.saturating_sub(a.source_offset()).saturating_sub(a.length)).max(0);
+    (after, b.source_offset().max(0))
+}
+
+/// The earliest and latest the joint of a crossfade can move, as shifts of `a`'s end and `b`'s start
+/// (so `lo <= 0 <= hi`). Each clip can only show file it has: `a` past its end, `b` ahead of its
+/// start. `b` stays after whatever already claims `a`'s start (its fade-in, a crossfade into it) and
+/// keeps room for the crossfade and whatever claims its own end, and both keep their fades inside
+/// them. None when either clip is edit-locked or stretched (see [`trimmable`]).
+fn slide_range(s: &Session, track: TrackId, a: &Clip, b: &Clip) -> Option<(Samples, Samples)> {
+    if !trimmable(a, b) {
+        return None;
+    }
+    let overlap = a.end().saturating_sub(b.start);
+    let (after, before) = handles(s, a, b);
+    let (floor, ceil) = zone_bounds(s, track, a, b);
+    // A fade-out longer than the overlap has to fit in `a` too.
+    let floor = floor.max(a.start.saturating_add(a.fade_out.len.saturating_sub(overlap)));
+    let room_left = floor.saturating_sub(b.start);
+    let room_right = ceil.saturating_sub(b.start).saturating_sub(overlap.max(b.fade_in.len));
+    Some((room_left.max(-before).min(0), after.min(room_right).max(0)))
+}
+
+/// How far the zone of a crossfade may be trimmed: the earliest its left edge (`b`'s start) and the
+/// latest its right edge (`a`'s end) can be. Each clip can only show file it has, the zone keeps clear
+/// of what its neighbours claim (see [`zone_bounds`]) and never shrinks because of that: an edge that
+/// already lies past its limit may stay. None when a clip is edit-locked or stretched.
+fn trim_bounds(s: &Session, track: TrackId, a: &Clip, b: &Clip) -> Option<(Samples, Samples)> {
+    if !trimmable(a, b) {
+        return None;
+    }
+    let (after, before) = handles(s, a, b);
+    let (floor, ceil) = zone_bounds(s, track, a, b);
+    Some((floor.max(b.start.saturating_sub(before)).min(b.start), ceil.min(a.end().saturating_add(after)).max(a.end())))
+}
+
+/// Where the audio crossfade leading into `later` lies, locked or not: its zone (from `later`'s start
+/// to the end of the clip before it) and its cut.
+pub fn crossfade_zone(s: &Session, later: ClipId) -> Option<(Range, Samples)> {
+    let (_, a, b) = crossfade_pair(s, later)?;
+    Some((Range::new(b.start, a.end()), crossfade_cut(&a, &b)))
+}
+
+/// The crossfade the edit selection is, as (its later clip, its track, its zone): the one
+/// `edit.select {crossfade}` named, as long as it is still a crossfade and the selection is still
+/// exactly its zone on its track, with no clip. Undo, and any edit that reshapes the pair or the
+/// selection, can leave the stored clip behind; then nothing is selected as a crossfade (the
+/// selection is a plain range).
+pub fn selected_crossfade(s: &Session) -> Option<(ClipId, TrackId, Range)> {
+    let later = s.edit.selected_crossfade?;
+    let (track, a, b) = crossfade_pair(s, later)?;
+    let zone = Range::new(b.start, a.end());
+    (s.edit.selection == zone && s.edit.selected_tracks == [track] && s.edit.selected_clips.is_empty()).then_some((later, track, zone))
+}
+
+/// How far the crossfade leading into `later` really moves when asked to move by `by` samples
+/// (negative = earlier): `by` held to what the two clips' files allow. None when `later` isn't the
+/// later clip of a crossfade, or one of its clips is edit-locked or stretched.
+pub fn crossfade_slide(s: &Session, later: ClipId, by: Samples) -> Option<Samples> {
+    let (track, a, b) = crossfade_pair(s, later)?;
+    let (lo, hi) = slide_range(s, track, &a, &b)?;
+    Some(by.max(lo).min(hi))
+}
+
+/// Slide the crossfade leading into `later` (see [`crossfade_slide`]): the earlier clip's end and
+/// `later`'s start move together, and the cut with them. Both keep their audio where it is on the
+/// timeline, so only the edit point changes; the crossfade keeps its length, so overlap, fade-out and
+/// fade-in still agree. Returns the shift made.
+pub fn move_crossfade(s: &mut Session, later: ClipId, by: Samples) -> Option<Samples> {
+    let (track, a, b) = crossfade_pair(s, later)?;
+    let by = crossfade_slide(s, later, by)?;
+    if by != 0 {
+        let pl = s.track_mut(track).and_then(|t| t.playlist_mut())?;
+        let ca = pl.clip_mut(a.id)?;
+        ca.trim_end_to(a.end().saturating_add(by));
+        ca.fade_out = a.fade_out;
+        let cb = pl.clip_mut(b.id)?;
+        cb.trim_start_to(b.start.saturating_add(by));
+        cb.fade_in = b.fade_in;
+        // A start trim keeps the cut where it is on the timeline; here it travels with the zone.
+        cb.cut = b.cut;
+        pl.sort();
+    }
+    Some(by)
+}
+
+/// Where the zone of the crossfade leading into `later` would end up if its left edge (`later`'s
+/// start) went to `start` and/or its right edge (the earlier clip's end) to `end`, as (left, right):
+/// each held to the audio its clip has beyond that edge, to what the neighbours claim, and to the cut,
+/// which no edge crosses. An edge that is not given stays. None when `later` isn't the later clip of
+/// a crossfade, or one of its clips is edit-locked or stretched.
+pub fn crossfade_trim(s: &Session, later: ClipId, start: Option<Samples>, end: Option<Samples>) -> Option<(Samples, Samples)> {
+    let (track, a, b) = crossfade_pair(s, later)?;
+    let (lo, hi) = trim_bounds(s, track, &a, &b)?;
+    let cut = crossfade_cut(&a, &b);
+    // B keeps a sample of its own, so butting the clips at a cut on its very end can't swallow it.
+    let start_max = cut.min(b.end().saturating_sub(1));
+    Some((start.map_or(b.start, |v| v.max(lo).min(start_max)), end.map_or(a.end(), |v| v.min(hi).max(cut))))
+}
+
+/// Lengthen or shorten the crossfade leading into `later` from one edge or both (see
+/// [`crossfade_trim`]): the cut stays where it is, the earlier clip's end and `later`'s start move to
+/// the new edges with the audio they uncover or hide, and both fades become the new overlap, shapes and
+/// curvature kept. An overlap that reaches 0 leaves the two clips butted at the cut, with no fade
+/// between them and no stored cut. Returns the new (left, right) edges.
+pub fn trim_crossfade(s: &mut Session, later: ClipId, start: Option<Samples>, end: Option<Samples>) -> Option<(Samples, Samples)> {
+    let (track, a, b) = crossfade_pair(s, later)?;
+    let (left, right) = crossfade_trim(s, later, start, end)?;
+    if (left, right) != (b.start, a.end()) {
+        let cut = crossfade_cut(&a, &b);
+        let overlap = right.saturating_sub(left).max(0);
+        let pl = s.track_mut(track).and_then(|t| t.playlist_mut())?;
+        let ca = pl.clip_mut(a.id)?;
+        ca.trim_end_to(right);
+        ca.fade_out.len = overlap;
+        let cb = pl.clip_mut(b.id)?;
+        cb.trim_start_to(left);
+        cb.fade_in.len = overlap;
+        cb.cut = (overlap > 0).then(|| cut.saturating_sub(left));
+        pl.sort();
+    }
+    Some((left, right))
+}
+
+/// Remove the crossfade leading into `later`, and nothing else: the two clips are butted at the cut (each
+/// takes back, as handle, the audio it had on the other's side), the earlier clip's fade-out and the later
+/// one's fade-in are cleared, and the fades on their far sides and every other clip stay as they are.
+/// Returns the cut. None when `later` isn't the later clip of a crossfade, or a clip is edit-locked or
+/// stretched (a start trim would ignore the stretch), as for a slide or a trim.
+pub fn delete_crossfade(s: &mut Session, later: ClipId) -> Option<Samples> {
+    let (track, a, b) = crossfade_pair(s, later)?;
+    if !trimmable(&a, &b) {
+        return None;
+    }
+    let cut = crossfade_cut(&a, &b);
+    let pl = s.track_mut(track).and_then(|t| t.playlist_mut())?;
+    let ca = pl.clip_mut(a.id)?;
+    ca.trim_end_to(cut);
+    ca.fade_out = Fade::default();
+    let cb = pl.clip_mut(b.id)?;
+    cb.trim_start_to(cut);
+    cb.fade_in = Fade::default();
+    cb.cut = None;
+    pl.sort();
+    Some(cut)
+}
+
 /// Length of the file or movie under a clip; None for MIDI, which has no end.
 fn material_len(s: &Session, c: &Clip) -> Option<Samples> {
     match c.content {
@@ -759,8 +954,9 @@ fn material_len(s: &Session, c: &Clip) -> Option<Samples> {
 }
 
 /// Two neighbours on a playlist are a crossfade when the later one starts inside the earlier one and
-/// does not end before it; a clip layered on top of another is no crossfade partner.
-fn crossfaded(a: &Clip, b: &Clip) -> bool {
+/// does not end before it; a clip layered on top of another is no crossfade partner. The one
+/// predicate for the geometry of a pair; [`crossfade_earlier`] adds the audio.
+pub fn crossfaded(a: &Clip, b: &Clip) -> bool {
     a.start < b.start && b.start < a.end() && a.end() <= b.end()
 }
 
