@@ -485,6 +485,8 @@ pub fn import(engine: &mut Engine, input: &Path, media_dir: Option<&Path>) -> Re
         engine.message(message.clone());
     }
     engine.replace_session(session);
+    // The imported session is a new document: saving must not overwrite the one it replaced.
+    engine.path = None;
     Ok(AafImportReport {
         composition: session_name,
         sample_rate: sample_rate.hz(),
@@ -575,25 +577,25 @@ fn media_sample_rate(media_dir: Option<&Path>) -> Result<Option<SampleRate>> {
     let Some(media_dir) = media_dir else {
         return Ok(None);
     };
-    let entries = crate::io::list_dir(media_dir, MAX_AAF_COLLECTION_ENTRIES)
+    let mut entries = crate::io::list_dir(media_dir, MAX_AAF_COLLECTION_ENTRIES)
         .map_err(|err| EngineError::Unsupported(format!("cannot list AAF media directory `{}`: {err}", media_dir.display())))?;
+    // Directory order is unspecified: sort so the chosen rate does not vary between runs.
+    entries.sort();
     for path in entries {
         let is_wav = path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("wav"));
-        if !is_wav {
+        if !is_wav || crate::file_access::check_read(&path).is_err() {
             continue;
         }
-        crate::file_access::check_read(&path).map_err(EngineError::Unsupported)?;
-        let len = crate::io::file_len(&path)?;
-        if len > MAX_AAF_MEDIA_BYTES {
+        // An unreadable or unrelated WAV only leaves its own source offline (see `load_wav_source`).
+        if crate::io::file_len(&path).map_or(true, |len| len > MAX_AAF_MEDIA_BYTES) {
             continue;
         }
-        let bytes = crate::io::read_file(&path)?;
-        let (info, _) = soundcraft_audio_io::decode(&bytes, Some("wav"))
-            .map_err(|err| EngineError::Unsupported(format!("cannot read AAF WAV `{}`: {err}", path.display())))?;
-        if info.format == soundcraft_audio_io::FileFormat::Wav {
-            return SampleRate::new(info.sample_rate)
-                .map(Some)
-                .map_err(|err| EngineError::Unsupported(format!("AAF WAV `{}` has an unsupported sample rate: {err}", path.display())));
+        let Ok(bytes) = crate::io::read_file(&path) else { continue };
+        let Ok((info, _)) = soundcraft_audio_io::decode(&bytes, Some("wav")) else { continue };
+        if info.format == soundcraft_audio_io::FileFormat::Wav
+            && let Ok(rate) = SampleRate::new(info.sample_rate)
+        {
+            return Ok(Some(rate));
         }
     }
     Ok(None)
@@ -2587,6 +2589,16 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_wav_does_not_abort_the_sample_rate_probe() {
+        let dir = crate::test_scratch::root().join(format!("soundcraft-aaf-badwav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.wav"), b"not a wav").unwrap();
+        assert_eq!(media_sample_rate(Some(&dir)).unwrap(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn importing_a_folder_uses_the_aaf_inside_it() {
         let dir = crate::test_scratch::root().join(format!("soundcraft-aaf-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2595,6 +2607,9 @@ mod tests {
         synthetic_aaf(&dir.join("session.aaf"));
         let mut engine = Engine::default();
         assert_eq!(import(&mut engine, &dir, None).unwrap().clips, 1);
+        assert!(engine.path.is_none());
+        engine.path = Some("old.scraft".into());
+        import(&mut engine, &dir, None).unwrap();
         assert!(engine.path.is_none());
         synthetic_aaf(&dir.join("other.AAF"));
         assert!(import(&mut engine, &dir, None).is_err());

@@ -73,18 +73,20 @@ pub fn specs() -> Vec<CommandSpec> {
             if bool_or(p, "save_in_folder", false) && crate::file_access::check_read(input).is_ok() && input.is_dir() {
                 let stem = crate::io::sanitize_name(&report.composition);
                 let ext = soundcraft_model::SESSION_EXTENSION;
-                let file = (1..)
+                let file = (1..1000u32)
                     .map(|n| if n == 1 { format!("{stem}.{ext}") } else { format!("{stem} {n}.{ext}") })
                     .map(|name| input.join(name))
                     .find(|f| !f.exists())
-                    .expect("an unbounded range has a free name");
-                let file = file.to_string_lossy().into_owned();
-                match crate::io::save_session(e, &file) {
-                    Ok(_) => result["saved_to"] = json!(file),
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .ok_or_else(|| EngineError::Unsupported("no free session file name".into()));
+                match file.and_then(|file| crate::io::save_session(e, &file).map(|_| file)) {
+                    Ok(file) => result["saved_to"] = json!(file),
                     Err(err) => {
                         let note = format!("the imported session could not be saved in `{}`: {err}", input.display());
                         e.message(note.clone());
-                        result["warnings"].as_array_mut().map(|w| w.push(json!(note)));
+                        if let Some(w) = result["warnings"].as_array_mut() {
+                            w.push(json!(note));
+                        }
                     }
                 }
             }
