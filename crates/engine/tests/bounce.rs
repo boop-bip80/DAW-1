@@ -85,3 +85,29 @@ fn dropping_an_unfinished_bounce_cancels_it_and_keeps_the_old_file() {
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_clipping_bounce_reports_the_levels_of_the_clipped_file() {
+    let mut e = soundcraft_engine::demo::demo_engine();
+    let ids: Vec<_> = e.session().all_clips().map(|c| c.id).collect();
+    for id in ids {
+        if let Some(c) = e.session_mut().find_clip_mut(id) {
+            c.gain_db = 36.0;
+        }
+    }
+    let s = e.session();
+    let dir = scratch("bounce-clipped");
+    let path = dir.join("Mix.wav");
+    let r = Range::new(s.sample_rate.samples(10.0), s.sample_rate.samples(13.0));
+    let hot = soundcraft_mix::render_range(s, r, 1024);
+    assert!(soundcraft_dsp::offline::peak(&hot) > 1.0);
+    let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Float32, dither: false, bwf: None };
+    let done = Bounce::new(e.session_arc(), &path, r, &opts, None, false, false).unwrap().run().unwrap();
+    let (_, file) = soundcraft_audio_io::decode(&std::fs::read(&path).unwrap(), None).unwrap();
+    let mut lm = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, file.channels.len());
+    lm.process(&file.channels, file.channels[0].len());
+    let levels = (soundcraft_dsp::offline::peak_db(&file.channels), lm.integrated_lufs(), lm.true_peak_db());
+    assert_eq!((done.peak_db, done.lufs, done.true_peak_db), levels);
+    assert!(done.peak_db <= 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

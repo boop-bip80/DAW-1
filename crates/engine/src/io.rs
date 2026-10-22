@@ -480,6 +480,12 @@ impl Bounce {
                 Some((chunk, n)) => {
                     fill(&mut self.block, chunk, n, self.fold, self.gain);
                     self.done += n;
+                    if !self.measuring {
+                        // The encoder clips to full scale, so the report must describe what it writes.
+                        for v in self.block.iter_mut().flatten() {
+                            *v = if v.is_nan() { 0.0 } else { v.clamp(-1.0, 1.0) };
+                        }
+                    }
                     self.peak = self.peak.max(soundcraft_dsp::offline::peak(&self.block));
                     if !self.measuring {
                         self.meter.process(&self.block, n);
