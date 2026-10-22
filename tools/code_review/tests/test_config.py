@@ -40,6 +40,15 @@ class GlobTests(unittest.TestCase):
 
 
 class LoadConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The documented workflow exports these on developer machines; the tests must not depend
+        # on the reviewer's shell.
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("REVIEW_BASE", "REVIEW_API_BASE", "REVIEW_MODEL", "REVIEW_API_KEY"):
+            os.environ.pop(name, None)
+
     def test_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = load_config(Path(directory))

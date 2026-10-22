@@ -7,17 +7,38 @@ never logs the API key.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 from .config import Config
 
 
 class LLMError(RuntimeError):
     """The model endpoint was unreachable, rejected the request or returned junk."""
+
+
+def _endpoint_parts(endpoint: str) -> tuple[str, str]:
+    """Return the endpoint's ``(host, scheme)``, rejecting anything that is not HTTP(S)."""
+    try:
+        parsed = urlparse(endpoint)
+        host = (parsed.hostname or "").strip()
+    except ValueError as exc:
+        raise LLMError(f"invalid endpoint URL: {endpoint}") from exc
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise LLMError(f"endpoint must be an http(s) URL with a host: {endpoint}")
+    return host, parsed.scheme
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == "localhost"
 
 
 def estimate_tokens(text: str) -> int:
@@ -80,9 +101,13 @@ class LLMClient:
         }
         if "deepseek" in self.config.base_url or "openai.com" in self.config.base_url:
             payload["response_format"] = {"type": "json_object"}
+        endpoint = self.endpoint
+        host, scheme = _endpoint_parts(endpoint)
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         key = self.config.api_key()
+        if key and scheme == "http" and not _is_loopback(host):
+            raise LLMError(f"refusing to send an API key over non-loopback HTTP: {endpoint}")
         if key:
             headers["Authorization"] = f"Bearer {key}"
 
@@ -93,10 +118,14 @@ class LLMClient:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                 data = json.loads(raw)
-                choices = data.get("choices") or []
-                if not choices:
+                if not isinstance(data, dict):
+                    raise LLMError(f"endpoint returned unexpected JSON: {raw[:300]!r}")
+                choices = data.get("choices")
+                if not isinstance(choices, list) or not choices:
                     raise LLMError(f"endpoint returned no choices: {raw[:300]!r}")
-                content = choices[0].get("message", {}).get("content")
+                first = choices[0]
+                message = first.get("message") if isinstance(first, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(content, str) or not content.strip():
                     raise LLMError("endpoint returned an empty message")
                 return content

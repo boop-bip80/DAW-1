@@ -42,6 +42,14 @@ class PanicRuleTests(unittest.TestCase):
     def test_comment_only_line_is_ignored(self) -> None:
         self.assertEqual(check("crates/model/src/lib.rs", ["/// Never call `.unwrap()` here.", "pub fn f() {}"]), [])
 
+    def test_dereference_line_is_checked(self) -> None:
+        found = check("crates/model/src/lib.rs", ["fn f() {", "    *x.lock().unwrap() = 1;", "}"])
+        self.assertEqual([finding.source for finding in found], ["panic.unwrap"])
+
+    def test_block_comment_continuation_is_ignored(self) -> None:
+        lines = ["/*", " * Never call `.unwrap()` here.", " */", "fn f() {}"]
+        self.assertEqual(check("crates/model/src/lib.rs", lines), [])
+
     def test_rule_severity_override(self) -> None:
         config = Config(rule_severity={"panic.unwrap": "nit"})
         found = check("crates/model/src/lib.rs", ["fn f() { a().unwrap(); }"], config=config)

@@ -22,6 +22,15 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].source, "panic.unwrap+llm")
 
+    def test_two_rule_hits_do_not_merge(self) -> None:
+        merged = merge_findings(
+            [
+                finding(10, "`.unwrap()` can panic", source="panic.unwrap"),
+                finding(11, "`.unwrap()` can panic", source="panic.unwrap"),
+            ]
+        )
+        self.assertEqual(len(merged), 2)
+
     def test_different_locations_do_not_merge(self) -> None:
         merged = merge_findings([finding(10, "Missing error handling"), finding(30, "Missing error handling")])
         self.assertEqual(len(merged), 2)

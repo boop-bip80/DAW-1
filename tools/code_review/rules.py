@@ -26,6 +26,10 @@ ASSET_EXTENSIONS = {
     "wav", "aif", "aiff", "flac", "mp3", "ogg", "gif", "webp",
 }  # fmt: skip
 
+# Block-comment continuation lines start with `*` followed by whitespace, a slash or nothing;
+# a leading `*` before anything else is a dereference and must still reach the panic rules.
+_COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*(?:\s|/|$))")
+
 _PANIC_RULES: tuple[tuple[str, re.Pattern[str], str, str, str, str], ...] = (
     (
         "panic.unwrap",
@@ -116,7 +120,7 @@ def _line_rules(path: str, lines: list[str], index: int, config: Config) -> list
     """Rules that look at a single added Rust line (``index`` is 0-based)."""
     text = lines[index]
     hits: list[_RuleHit] = []
-    if text.lstrip().startswith(("//", "/*", "*", "*/")):
+    if _COMMENT_LINE_RE.match(text):
         return hits  # documented examples are not violations
 
     for rule_id, pattern, severity, category, title, body in _PANIC_RULES:

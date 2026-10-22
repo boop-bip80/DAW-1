@@ -62,6 +62,10 @@ def _similar(left: Finding, right: Finding) -> bool:
     """Two findings are duplicates when they point at the same spot with a similar title."""
     if left.file != right.file:
         return False
+    # A rule hit is exact: two `.unwrap()` calls on neighbouring lines are two violations even
+    # though their titles are identical. Only model findings may be folded into rule ones.
+    if "llm" not in left.source.split("+") and "llm" not in right.source.split("+"):
+        return False
     if left.line and right.line and abs(left.line - right.line) > 2:
         return False
     a, b = _tokens(left.title), _tokens(right.title)

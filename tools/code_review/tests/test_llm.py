@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
-from tools.code_review.llm import LLMError, estimate_tokens, extract_json
+from tools.code_review.config import Config
+from tools.code_review.llm import LLMClient, LLMError, estimate_tokens, extract_json
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -23,6 +26,20 @@ class ExtractJsonTests(unittest.TestCase):
     def test_no_json_raises(self) -> None:
         with self.assertRaises(LLMError):
             extract_json("I could not review this.")
+
+
+class EndpointTests(unittest.TestCase):
+    def test_key_is_not_sent_over_remote_http(self) -> None:
+        config = Config(base_url="http://example.com/v1", api_key_env="REVIEW_TEST_KEY")
+        with mock.patch.dict(os.environ, {"REVIEW_TEST_KEY": "secret"}):
+            with self.assertRaisesRegex(LLMError, "non-loopback HTTP"):
+                LLMClient(config).chat("system", "user")
+
+    def test_non_http_endpoint_is_refused(self) -> None:
+        config = Config(base_url="ftp://example.com/v1", api_key_env="REVIEW_TEST_KEY")
+        with mock.patch.dict(os.environ, {"REVIEW_TEST_KEY": "secret"}):
+            with self.assertRaisesRegex(LLMError, "must be an http"):
+                LLMClient(config).chat("system", "user")
 
 
 class TokenTests(unittest.TestCase):

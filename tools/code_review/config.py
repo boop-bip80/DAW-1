@@ -91,7 +91,7 @@ class Config:
     @property
     def is_local_endpoint(self) -> bool:
         host = (urlparse(self.base_url).hostname or "").lower()
-        return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"} or host.endswith(".local")
+        return host in {"localhost", "127.0.0.1", "::1", "[::1]"} or host.endswith(".local")
 
 
 def _string(data: dict, key: str, default: str) -> str:

@@ -46,6 +46,9 @@ REVIEW_API_BASE=http://127.0.0.1:11434/v1 REVIEW_MODEL=qwen2.5-coder:14b \
 llama.cpp's server and LM Studio work the same way. Put the values in
 `[llm]` in `.code-review.toml` to make them the default.
 
+When an API key is configured it is only sent over HTTPS or to a loopback HTTP
+endpoint; a remote plain-HTTP endpoint is refused before any request is made.
+
 ## What it does
 
 1. **Collects the diff** against the merge-base of `--base` and `HEAD`
