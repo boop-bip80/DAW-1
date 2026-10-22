@@ -116,3 +116,42 @@ fn only_the_later_clip_of_a_crossfade_can_be_aimed_at() {
     e.session_mut().find_clip_mut(b).unwrap().trim_start_to(1200);
     assert!(e.execute("edit.fades_create", &json!({"clip": b.0, "side": "crossfade"})).is_err());
 }
+
+#[test]
+fn a_crossfade_takes_an_in_shape_on_the_later_clip_and_an_out_shape_on_the_earlier_one() {
+    let (mut e, _, a, b) = crossfade();
+    let before = e.session().clone();
+    let steps = e.undo_history().len();
+    let params =
+        json!({"clip": b.0, "side": "crossfade", "shape": "linear", "in_shape": "s-curve equal power", "out_shape": "logarithmic", "curvature": 0});
+    assert_eq!(e.execute("edit.fades_create", &params).unwrap(), json!({"fades": 2}));
+    assert_eq!(clip(&e, a).fade_out, Fade { len: 200, shape: FadeShape::Logarithmic, curvature: 0.0 });
+    assert_eq!(clip(&e, b).fade_in, Fade { len: 200, shape: FadeShape::SCurvePower, curvature: 0.0 });
+    assert_eq!(e.undo_history().len(), steps + 1, "both fades in one undo step");
+    assert!(e.undo());
+    assert_eq!(e.session(), &before);
+}
+
+#[test]
+fn a_crossfade_with_one_new_shape_leaves_the_other_fade_and_its_bend_alone() {
+    let (mut e, _, a, b) = crossfade();
+    // Only the fade-in is asked to change: the fade-out already has the shape it is asked for (Linear, bent).
+    assert_eq!(
+        e.execute("edit.fades_create", &json!({"clip": b.0, "side": "crossfade", "in_shape": "exponential", "out_shape": "linear"})).unwrap(),
+        json!({"fades": 1})
+    );
+    assert_eq!(clip(&e, a).fade_out, Fade { len: 200, shape: FadeShape::Linear, curvature: 0.4 });
+    assert_eq!(clip(&e, b).fade_in, Fade { len: 200, shape: FadeShape::Exponential, curvature: 0.0 });
+}
+
+#[test]
+fn a_crossfade_rejects_a_bad_in_shape_or_out_shape_without_an_edit() {
+    let (mut e, _, _, b) = crossfade();
+    for extra in [json!({"in_shape": "bad"}), json!({"out_shape": "bad"}), json!({"in_shape": null}), json!({"out_shape": 4})] {
+        let mut params = json!({"clip": b.0, "side": "crossfade", "shape": "s-curve"});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (before, history) = (e.session().clone(), e.undo_history());
+        assert!(e.execute("edit.fades_create", &params).is_err(), "{params}");
+        assert_eq!((e.session(), e.undo_history()), (&before, history), "{params}");
+    }
+}

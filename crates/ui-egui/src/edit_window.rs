@@ -1,6 +1,7 @@
 //! The Edit window: toolbar, rulers, track headers and playlists.
 
 use crate::dialogs::{Dialog, FadeTarget};
+use crate::fade_dialog::FadeEditor;
 use crate::spot::Spot;
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{groove, level_pos, meter_pos, raised_key, shade};
@@ -1788,7 +1789,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
 }
 
 /// The earlier clip of a crossfade pair: the one before `clip` in its playlist, overlapping its start.
-fn crossfade_partner<'a>(track: &'a Track, clip: &Clip) -> Option<&'a Clip> {
+pub(crate) fn crossfade_partner<'a>(track: &'a Track, clip: &Clip) -> Option<&'a Clip> {
     let (p, i) = track.playlists.iter().find_map(|p| {
         let i = p.clips.partition_point(|c| c.start < clip.start);
         p.clips.get(i).is_some_and(|c| c.id == clip.id).then_some((p, i))
@@ -2239,12 +2240,13 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
         && point_hit.is_none()
         && gain_icon_at(origin).is_none()
         && !matches!(eff, Tool::Pencil | Tool::Zoom | Tool::Scrubber)
-        && let Some(dialog) = fades_dialog_at(track, at)
+        && let Some(target) = fades_target_at(track, at)
+        && let Some(editor) = FadeEditor::for_target(app.engine.session(), target)
     {
         if let Some(c) = &hit {
             let _ = app.run("edit.select", json!({"clips": [c.id.0]}));
         }
-        app.dialogs.open = Some(dialog);
+        app.dialogs.open = Some(Dialog::FadeEditor(Box::new(editor)));
     } else if resp.double_clicked()
         && curve_handle.is_none()
         && point_hit.is_none()
@@ -2277,14 +2279,13 @@ fn place_insertion(app: &mut SoundApp, ui: &Ui, s: &Session, track: TrackId, at:
     }
 }
 
-/// The Fades dialog for what a double-click at `at` lands on: the crossfade there (both of its
-/// fades), else the fade-in or fade-out there. It opens on the shape that fade has now.
-fn fades_dialog_at(track: &Track, at: Samples) -> Option<Dialog> {
+/// What a double-click at `at` opens the Fades dialog on: the crossfade there (both of its fades), else the
+/// fade-in or fade-out there.
+fn fades_target_at(track: &Track, at: Samples) -> Option<FadeTarget> {
     let c = clip_at(track, at).filter(|c| c.is_audio())?;
-    let open = |target, shape: soundcraft_model::FadeShape| Dialog::Fades { shape: shape.label().to_lowercase(), target: Some(target) };
     // Only a pair the engine treats as a crossfade: the clip before ends inside this one.
     if crossfade_partner(track, c).is_some_and(|a| a.is_audio() && a.end() <= c.end() && at < a.end()) {
-        return Some(open(FadeTarget::Crossfade { later: c.id }, c.fade_in.shape));
+        return Some(FadeTarget::Crossfade { later: c.id });
     }
     let in_fade = c.fade_in.len > 0 && at < c.start.saturating_add(c.fade_in.len);
     let out_fade = c.fade_out.len > 0 && at >= c.end().saturating_sub(c.fade_out.len);
@@ -2296,8 +2297,7 @@ fn fades_dialog_at(track: &Track, at: Samples) -> Option<Dialog> {
         (true, true) => false,
         (false, false) => return None,
     };
-    let fade = if fade_in { c.fade_in } else { c.fade_out };
-    Some(open(FadeTarget::Single { clip: c.id, fade_in }, fade.shape))
+    Some(FadeTarget::Single { clip: c.id, fade_in })
 }
 
 /// The same bounded range drives the preview and the committed fade.
