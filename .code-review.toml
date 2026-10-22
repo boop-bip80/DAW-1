@@ -1,0 +1,78 @@
+# Local code review settings for `cargo xtask review`.
+#
+# This is independent of .coderabbit.yaml: the hosted bot keeps reviewing pull
+# requests, while this file configures the reviewer that runs on your machine
+# (and, if you wire it up, in CI). See tools/code_review/README.md.
+
+[review]
+# Compare HEAD (and the working tree) against the merge-base with this ref.
+#
+# `origin/main` is the upstream repository in a normal clone. In a fork whose
+# `origin` is the fork itself, either pass `--base upstream/main` after adding
+# the real upstream as a remote, or export REVIEW_BASE=upstream/main — the
+# stale fork `main` would otherwise make the review cover unrelated history.
+base = "origin/main"
+# Exit 1 when a finding this severe (or worse) survives verification.
+fail_on = "major"
+max_findings = 40
+# Input budget per model window; windows are built around the diff hunks.
+max_input_tokens = 24000
+context_lines = 40
+# Second pass that asks the model to confirm or reject its own findings.
+verify = true
+include_untracked = true
+
+exclude = [
+  "target/**",
+  "**/target/**",
+  "Cargo.lock",
+  "plan/**",
+  "docs/parity-checklist.md",
+  "contributors/contributors.json",
+  "**/__pycache__/**",
+  "*.pyc",
+]
+
+[[review.path_instructions]]
+path = "crates/engine/src/cmd/**"
+instructions = "This is the command registry: every user-visible behaviour needs id, label, menu path, shortcut, params doc, enabled and run, plus tests. Programmatic calls must not open dialogs. Flag anything that bypasses engine.execute or edits the document directly."
+
+[[review.path_instructions]]
+path = "crates/engine/src/**"
+instructions = "The engine owns undo, editing and import/export. Check that failures return an \"unsupported\" error instead of panicking, that input-derived numbers use get()/checked arithmetic, and that a crash fix lands with a regression test."
+
+[[review.path_instructions]]
+path = "crates/ui-egui/src/**"
+instructions = "The UI is thin: panels read engine state and act through engine.execute(id, params). Flag business logic that belongs in the engine and dialogs opened outside a ui.menu.invoke path."
+
+[[review.path_instructions]]
+path = "crates/*-host/src/ffi.rs"
+instructions = "This is the isolated unsafe FFI layer. Every unsafe block needs a // SAFETY: comment with the pointer/lifetime/aliasing argument, the surrounding API must stay safe (Result, no leaks), and no unsafe may spread to other modules."
+
+[[review.path_instructions]]
+path = "crates/playback/src/**"
+instructions = "The audio callback must not block, allocate in steady state, or panic. Check lock-free hand-offs, bounded channels, and that device errors surface instead of aborting."
+
+[[review.path_instructions]]
+path = "crates/model/src/**"
+instructions = "The session document is the user's work. Flag lossy round-trips, unchecked deserialization, and invariants that can be violated from hostile files."
+
+[[review.path_instructions]]
+path = "crates/*/tests/**"
+instructions = "Tests may unwrap and panic, but they must actually exercise the bug they claim to cover. Prefer asserting on observable behaviour over implementation details."
+
+[llm]
+# OpenAI-compatible endpoint. DeepSeek by default; any server that speaks
+# POST /chat/completions works.
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+timeout_seconds = 180
+max_retries = 2
+#
+# Local model instead (no key needed because the endpoint is loopback):
+#   base_url = "http://127.0.0.1:11434/v1"   # Ollama
+#   model = "qwen2.5-coder:14b"
+#
+# Environment overrides: REVIEW_BASE (git base ref), REVIEW_API_BASE, REVIEW_MODEL,
+# REVIEW_API_KEY (wins over the variable named by api_key_env).

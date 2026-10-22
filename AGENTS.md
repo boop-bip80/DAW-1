@@ -65,6 +65,8 @@ Parity is measured, not guessed: `crates/engine/catalog/menus.txt` lists the inc
 ## Quality gates (before every commit)
 `cargo xtask ci` = fmt check, `clippy --workspace --all-targets -D warnings`, tests, assets, layers, wasm check. Commit after each arc of work that builds; one topic per commit.
 
+Optional pre-PR review: `cargo xtask review --base origin/main` (deterministic SoundCraft rules plus a model pass; `--offline` for rules only; the model needs `DEEPSEEK_API_KEY` or a local OpenAI-compatible endpoint). See [`tools/code_review/README.md`](tools/code_review/README.md).
+
 ## Release
 Push to the `release` branch to build signed installers for macOS (universal DMG), Windows (x64/x86 MSI + zip), Linux (AppImage, deb, rpm, tar.gz, Flatpak; riscv64 tar.gz), FreeBSD and Web (wasm zip). Version: `cargo xtask version [set X.Y.Z]`. See `docs/release-playbook.md` and craftrules `release/playbook.md`.
 
