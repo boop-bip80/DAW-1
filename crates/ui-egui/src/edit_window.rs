@@ -2301,15 +2301,14 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
     let (s, tl) = (app.engine.session_arc(), rect(app.edit_layout.timeline));
     let p = ctx.pointer_latest_pos();
     if !ctx.input(|i| i.pointer.any_down()) {
-        finish_drag(app, &s, tl, p);
+        finish_drag(app, &s, tl, p, ctx);
         return;
     }
     let Some(p) = p else { return };
     let at = sample_at(&s, tl, p.x).max(0);
     let inside = pos2(p.x.max(tl.min.x).min(tl.max.x), p.y.max(tl.min.y).min(tl.max.y));
     let rows = &app.edit_layout.rows;
-    let gap = |r: &[f32; 4]| (r[1] - inside.y).max(inside.y - r[3]).max(0.0);
-    let to_track = rows.iter().min_by(|a, b| gap(&a.1).total_cmp(&gap(&b.1))).map(|(i, _)| TrackId(*i));
+    let to_track = drag_track(rows, tl, p);
     let mut invalid_fade = false;
     match &mut app.gesture {
         Some(Gesture::Select { track, tracks, .. }) => {
@@ -2416,9 +2415,24 @@ fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
     }
 }
 
-fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>) {
+fn drag_track(rows: &[(u64, [f32; 4])], tl: Rect, p: Pos2) -> Option<TrackId> {
+    let y = p.y.max(tl.min.y).min(tl.max.y);
+    let gap = |r: &[f32; 4]| (r[1] - y).max(y - r[3]).max(0.0);
+    rows.iter().min_by(|a, b| gap(&a.1).total_cmp(&gap(&b.1))).map(|(id, _)| TrackId(*id))
+}
+
+fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>, ctx: &egui::Context) {
     match app.gesture.take() {
-        Some(Gesture::MoveClips { clips, delta, from_track, to_track, .. }) => drop_clips(app, clips, delta, from_track, to_track),
+        Some(Gesture::MoveClips { clips, mut delta, from_track, mut to_track, grab_at }) => {
+            // A release can carry a new pointer position without an intervening held
+            // frame. Commit that position rather than the previous frame's preview.
+            if let Some(p) = p {
+                to_track = drag_track(&app.edit_layout.rows, tl, p).unwrap_or(to_track);
+                let plan = drag_plan(ctx, s, app.engine.revision, &clips, (from_track, to_track), grab_at);
+                delta = move_delta(&plan, s, from_track, sample_at(s, tl, p.x).max(0) - grab_at, ctx.input(|i| i.modifiers.command));
+            }
+            drop_clips(app, clips, delta, from_track, to_track);
+        }
         Some(Gesture::Fade { clip, fade_in, to, .. }) => {
             let to = p.map_or(to, |p| sample_at(s, tl, p.x).max(0));
             if let Some(fade) = s.find_clip(clip).and_then(|(_, c)| fade_drag_preview(c, fade_in, to)) {
