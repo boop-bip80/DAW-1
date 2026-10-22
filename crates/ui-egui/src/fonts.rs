@@ -47,10 +47,10 @@ const JAPANESE: &[(&str, u32)] = &[
 /// Chinese fallback for the Han characters the Japanese face lacks (页, 选, 删…) and for Chinese
 /// names in general. It follows the Japanese face, so shared ideographs keep Japanese glyph
 /// forms; a Traditional-Chinese-specific face is not selected yet (GB18030 coverage handles most
-/// of its characters). Face 2 of the Noto Sans CJK collection is its Simplified Chinese face;
-/// PingFang's first face is its Simplified Chinese one.
+/// of its characters). Face 2 of the Noto Sans CJK collection and face 2 of PingFang are their
+/// Simplified Chinese faces; PingFang's face 0 is the Hong Kong one.
 const CHINESE: &[(&str, u32)] = &[
-    ("/System/Library/Fonts/PingFang.ttc", 0),
+    ("/System/Library/Fonts/PingFang.ttc", 2),
     ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
     ("/System/Library/Fonts/STHeiti Light.ttc", 0),
     ("C:\\Windows\\Fonts\\msyh.ttc", 0),
@@ -198,9 +198,11 @@ mod tests {
             assert!(JAPANESE.iter().any(|(p, _)| p.starts_with(prefix)), "no Japanese candidate under {prefix}");
             assert!(CHINESE.iter().any(|(p, _)| p.starts_with(prefix)), "no Chinese candidate under {prefix}");
         }
-        // Face 0 of the Noto Sans CJK collection is Japanese, face 2 Simplified Chinese.
+        // Face 0 of the Noto Sans CJK collection is Japanese, face 2 Simplified Chinese. PingFang's
+        // collection is region-major: face 0 is Hong Kong Regular and face 2 Simplified Chinese.
         assert!(JAPANESE.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 0));
         assert!(CHINESE.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 2));
+        assert!(CHINESE.iter().filter(|(p, _)| p.ends_with("PingFang.ttc")).all(|(_, i)| *i == 2));
     }
 
     /// Japanese and Simplified Chinese names draw in every family, not as boxes: the fallbacks are
