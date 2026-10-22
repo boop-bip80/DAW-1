@@ -500,7 +500,7 @@ impl SoundApp {
     pub(crate) fn record_hint(&self) -> Option<&'static str> {
         let (at, why) = self.record_hint?;
         let fresh = self.last_frame.unwrap_or_default() - at < 4.0;
-        (fresh && !self.engine.session().tracks.iter().any(|t| t.mixer.record_arm)).then_some(why)
+        (fresh && !self.engine.session().tracks.iter().any(|t| t.mixer.record_arm)).then_some(crate::i18n::t(why))
     }
 
     /// Current transport position (playhead while playing, else the edit insertion).

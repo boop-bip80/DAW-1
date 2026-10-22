@@ -11,8 +11,11 @@ find at runtime.
 ```
 {"method":"engine.execute","params":{"command":"ui.language","params":{"language":"zh-Hans"}}}
 {"method":"engine.execute","params":{"command":"ui.language","params":{"language":"auto"}}}
-{"method":"engine.execute","params":{"command":"ui.language","params":{}}}   # {"language":"auto","resolved":"zh-Hans"}
+{"method":"engine.execute","params":{"command":"ui.language","params":{}}}
 ```
+
+The last request returns the saved preference and the resolved language, for example
+`{"language":"auto","resolved":"zh-Hans"}`.
 
 Without a `language` parameter the command reports the saved preference and the language it
 resolves to. The preference is saved with the rest of the UI state: `ui.set` writes it as

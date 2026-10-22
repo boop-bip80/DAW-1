@@ -591,6 +591,8 @@
 	Next	Successivo
 	no audio engine	nessun motore audio
 	No audio input: {error}	Nessun ingresso audio: {error}
+	No track is record-enabled: click the R button on the track to record.	Nessuna traccia è abilitata alla registrazione: fai clic sul pulsante R della traccia per registrare.
+	Nothing to record on yet: add a track with Track › New…, then click its R button.	Niente da registrare per ora: aggiungi una traccia con Traccia › Nuovo..., poi fai clic sul suo pulsante R.
 	No background tasks are running.	Nessuna attività in background in esecuzione.
 	No contributor data was built into this copy.	Questa copia non include dati sui collaboratori.
 	no device (silent clock)	nessun dispositivo (clock silenzioso)

@@ -613,6 +613,8 @@
 	New Group…	新建编组…
 	No Recent Sessions	没有最近的会话
 	No audio input: {error}	无音频输入：{error}
+	No track is record-enabled: click the R button on the track to record.	没有启用录音的轨道：请点击轨道上的 R 按钮进行录音。
+	Nothing to record on yet: add a track with Track › New…, then click its R button.	还没有可录音的轨道：请通过“轨道 › 新建…”添加轨道，然后点击其 R 按钮。
 	No background tasks are running.	没有正在运行的后台任务。
 	No contributor data was built into this copy.	此版本未内置贡献者数据。
 	No matches	没有匹配项
