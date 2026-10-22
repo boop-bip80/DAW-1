@@ -1366,8 +1366,10 @@ fn feeds(t: &Track, b: BusId) -> bool {
 }
 
 /// Marks in `heard` (by track index) the tracks the solo lets through: the soloed ones and,
-/// implicitly, every active track whose input bus they feed, hop after hop down a chain of
-/// auxes. A VCA's solo solos its members, so a VCA with none mutes nothing. Returns false when
+/// implicitly, every active aux or folder track whose input bus they feed, hop after hop down a
+/// chain of auxes. Only those strips read their input bus; an audio track with a bus input plays
+/// its own clips, so the solo mutes it (unless it is solo-safe) and goes no further through it.
+/// A VCA's solo solos its members, so a VCA with none mutes nothing. Returns false when
 /// nothing is soloed. `order` lists the track indices producers first (see
 /// [`processing_order`]), so a chain is usually marked in one pass. Reuses `heard`'s
 /// allocation: the callback stays allocation-free.
@@ -1387,6 +1389,9 @@ fn solo_reach(s: &Session, order: &[usize], heard: &mut Vec<bool>) -> bool {
         let mut marked = false;
         for &i in order {
             let Some(t) = s.tracks.get(i) else { continue };
+            if !matches!(t.kind, TrackKind::Aux | TrackKind::Folder) {
+                continue;
+            }
             let Route::Bus(b) = t.mixer.input else { continue };
             if t.inactive || heard.get(i).copied().unwrap_or(true) {
                 continue;
@@ -2530,6 +2535,52 @@ mod tests {
         let out = render_range(&s, Range::new(0, 4800), 512);
         assert!(out.iter().flatten().all(|x| x.is_finite()));
         assert!(out[0][2000].abs() > 0.1, "{}", out[0][2000]);
+    }
+
+    #[test]
+    fn an_audio_track_with_a_bus_input_is_solo_muted() {
+        // An audio track plays its own clips whatever its input route says: the solo mutes it,
+        // as it mutes any track that is not soloed, and solo safe lets it through.
+        let (mut s, src, _, [x1, _]) = aux_chain(false);
+        let b1 = s.track(x1).unwrap().mixer.input.clone();
+        let print = add_dc_track(&mut s, 0.5, 4800);
+        s.track_mut(print).unwrap().mixer.input = b1;
+        s.track_mut(src).unwrap().mixer.solo = true;
+        // Baseline: the soloed source alone, through the aux chain.
+        s.track_mut(print).unwrap().mixer.mute = true;
+        let only_src = render_range(&s, Range::new(0, 4800), 512);
+        assert!(only_src[0][2000].abs() > 0.1, "the soloed source should sound");
+        s.track_mut(print).unwrap().mixer.mute = false;
+        assert_eq!(render_range(&s, Range::new(0, 4800), 512), only_src);
+        assert_eq!(solo_muted_tracks(&s), [false, true, false, false, true], "src, other, X1, X2, print");
+        s.track_mut(print).unwrap().mixer.solo_safe = true;
+        assert_eq!(solo_muted_tracks(&s), [false, true, false, false, false], "print is solo safe");
+        let out = render_range(&s, Range::new(0, 4800), 512);
+        assert!(out[0][2000] > only_src[0][2000] + 0.1, "{} vs {}", out[0][2000], only_src[0][2000]);
+    }
+
+    #[test]
+    fn an_audio_track_with_a_bus_input_does_not_relay_the_solo() {
+        let (mut s, src, _, [x1, _]) = aux_chain(false);
+        let b1 = s.track(x1).unwrap().mixer.input.clone();
+        let b3 = s.add_bus("B3", ChannelFormat::Stereo);
+        // Audio track 4 reads bus 1 and writes bus 3; aux 5 reads bus 3; folder 6 reads bus 1.
+        let print = add_dc_track(&mut s, 0.5, 4800);
+        let x3 = s.add_track(TrackKind::Aux, ChannelFormat::Stereo, Some("X3"));
+        let folder = s.add_track(TrackKind::Folder, ChannelFormat::Stereo, Some("F"));
+        let m = &mut s.track_mut(print).unwrap().mixer;
+        m.input = b1.clone();
+        m.output = Route::Bus(b3);
+        s.track_mut(x3).unwrap().mixer.input = Route::Bus(b3);
+        s.track_mut(folder).unwrap().mixer.input = b1;
+        s.track_mut(src).unwrap().mixer.solo = true;
+        // Source, other, X1, X2, print, X3, folder: the aux chain and the folder hear the solo,
+        // the audio track does not, and neither does the aux after it.
+        let expected = [true, false, true, true, false, false, true];
+        let order = processing_order(&s);
+        assert_eq!(reach(&s, &order), expected);
+        let backwards: Vec<usize> = order.iter().rev().copied().collect();
+        assert_eq!(reach(&s, &backwards), expected);
     }
 
     #[test]
