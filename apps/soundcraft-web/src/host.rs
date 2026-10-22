@@ -9,7 +9,8 @@
 //!   file SoundCraft would otherwise download: Save (the `<name>.scraftz` bundle, which marks the
 //!   session saved), Save As, Save a Copy, bounces and the exports.
 //! - `soundcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
-//! - `soundcraft:failed` (to the parent): `{ error }` when the app couldn't start.
+//! - `soundcraft:failed` (to the parent): `{ error }` when the app couldn't start, or when a
+//!   `soundcraft:open` document is over `MAX_OPEN_BYTES` (1 GiB, the session-bundle cap).
 //!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the page
 //! starts on an empty session instead of the demo. SoundCraft has no user name, so there is no
@@ -95,7 +96,12 @@ impl Bridge {
                 return;
             }
             let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Session.scraftz".to_string());
-            let Some(bytes) = bytes(&data) else { return };
+            let Some(array) = byte_array(&data) else { return };
+            if let Err(error) = check_size(&name, f64::from(array.byte_length())) {
+                post_failed_to(&parent, &origin, &error);
+                return;
+            }
+            let bytes = array.to_vec();
             received.borrow_mut().push((name, bytes));
             ctx.request_repaint();
         });
@@ -131,14 +137,44 @@ fn string(data: &JsValue, key: &str) -> Option<String> {
     js_sys::Reflect::get(data, &JsValue::from_str(key)).ok()?.as_string()
 }
 
-/// `bytes` as an `ArrayBuffer` or `Uint8Array`.
-fn bytes(data: &JsValue) -> Option<Vec<u8>> {
+/// `bytes` (an `ArrayBuffer` or `Uint8Array`) as a view, not yet copied.
+fn byte_array(data: &JsValue) -> Option<js_sys::Uint8Array> {
     let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
     if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {
-        Some(array.to_vec())
+        Some(array.clone())
     } else if bytes.is_instance_of::<js_sys::ArrayBuffer>() {
-        Some(js_sys::Uint8Array::new(&bytes).to_vec())
+        Some(js_sys::Uint8Array::new(&bytes))
     } else {
         None
+    }
+}
+
+fn post_failed_to(parent: &web_sys::Window, origin: &str, error: &str) {
+    if let Some(m) = message(&[("type", "soundcraft:failed".into()), ("error", error.into())]) {
+        let _ = parent.post_message(&m, origin);
+    }
+}
+
+/// Most bytes `soundcraft:open` takes: the same cap a session bundle may unpack to
+/// ([`soundcraft_engine::io::MAX_BUNDLE_BYTES`]), checked before the bytes are copied.
+pub(crate) const MAX_OPEN_BYTES: u64 = soundcraft_engine::io::MAX_BUNDLE_BYTES;
+
+/// Refuse a document larger than [`MAX_OPEN_BYTES`] before copying it.
+pub(crate) fn check_size(name: &str, len: f64) -> Result<(), String> {
+    if len > MAX_OPEN_BYTES as f64 {
+        return Err(format!("{name}: file is too large to open ({len} bytes; the limit is {MAX_OPEN_BYTES} bytes)"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_cap_matches_bundle_cap() {
+        assert!(check_size("a.scraftz", MAX_OPEN_BYTES as f64).is_ok());
+        let e = check_size("a.scraftz", MAX_OPEN_BYTES as f64 + 1.0).unwrap_err();
+        assert!(e.contains("too large") && e.contains("a.scraftz"));
     }
 }
