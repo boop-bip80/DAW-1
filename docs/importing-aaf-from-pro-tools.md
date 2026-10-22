@@ -23,12 +23,15 @@ external media by file name, and SoundCraft looks for each WAV in the AAF's own 
 
 ## Import in SoundCraft
 
-Use the command-line importer with all files from the same export:
+In the app, choose **File > Import > AAF...** and select the export folder. SoundCraft imports the
+single `.aaf` in it, finds the WAV files beside it, and saves `<composition name>.scraft` in the
+same folder (an existing session file is never overwritten).
+
+Or use the command-line importer with all files from the same export (one line, so it works in any
+shell):
 
 ```text
-soundcraft-cli import-aaf "Song.aaf" "Song.scraft" ^
-  --midi "Song.mid" ^
-  --session-report "Song.txt"
+soundcraft-cli import-aaf "Song.aaf" "Song.scraft" --midi "Song.mid" --session-report "Song.txt"
 ```
 
 WAV files are found automatically in the folder that contains the AAF. `--media-dir DIR` is only
@@ -51,8 +54,10 @@ reporting the compatibility issue.
 - AAF timeline tracks, clip placement, clip duration, and references to external WAV media.
 - WAV/BWF audio, converted to the SoundCraft session's sample rate when required.
 - MIDI notes and tempo information from the separately exported MIDI file.
-- Session-report metadata that can be represented by SoundCraft, including the session name,
-  sample rate, bit depth, timecode, track names, and clip mute state.
+
+The session report is not applied to the session. The importer prints the lines that mention the
+sample rate, bit depth, timecode, track names, mute state, or plug-ins as notes: review them and
+migrate those settings manually.
 
 ## What needs manual migration
 
