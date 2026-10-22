@@ -2561,12 +2561,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         synthetic_aaf(&dir.join("session.aaf"));
         let mut engine = Engine::default();
-        let res = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
+        let res = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy(), "save_in_folder": true})).unwrap();
         let saved = std::path::PathBuf::from(res["saved_to"].as_str().unwrap());
         assert_eq!(saved.parent(), Some(dir.as_path()));
         assert!(saved.is_file());
         assert_eq!(engine.path.as_deref(), saved.to_str());
-        let again = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
+        let again = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy(), "save_in_folder": true})).unwrap();
+        let plain = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
+        assert!(plain.get("saved_to").is_none());
         assert_ne!(again["saved_to"], res["saved_to"]);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -526,6 +526,9 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         if replaces {
                             v["replace"] = json!(true);
                         }
+                        if cmd == "file.import_aaf" {
+                            v["save_in_folder"] = json!(true);
+                        }
                         action = Some((cmd.clone(), v));
                     }
                 }
@@ -694,6 +697,12 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         match run_then(app, &cmd, params) {
             Ok(v) if cmd == "file.export_clips" => {
                 app.ui.status = format!("Exported {} clip(s) to {}", v["written"], v["dir"].as_str().unwrap_or_default());
+            }
+            Ok(v) if cmd == "file.import_aaf" => {
+                let warnings: Vec<&str> = v["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
+                if !warnings.is_empty() {
+                    app.ui.status = warnings.join("\n");
+                }
             }
             Ok(_) => {}
             Err(e) => app.ui.status = e,

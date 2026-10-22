@@ -63,14 +63,14 @@ pub fn specs() -> Vec<CommandSpec> {
             always,
             import_audio
         ),
-        cmd!(noundo "file.import_aaf", "AAF...", ["File", "Import"], None, "{path (the .aaf file, or a folder containing exactly one), media_dir? (default: the AAF's folder)} — imports audio timeline tracks and WAV references exposed by the AAF reader; no PTX decoding; given a folder, also saves the session there as <name>.scraft", always, |e, p| {
+        cmd!(noundo "file.import_aaf", "AAF...", ["File", "Import"], None, "{path (the .aaf file, or a folder containing exactly one), media_dir? (default: the AAF's folder), save_in_folder?: false} — imports audio timeline tracks and WAV references exposed by the AAF reader; no PTX decoding; with save_in_folder and a folder, also saves the session there as <name>.scraft", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.import_aaf", "`path` required"))?;
             let media_dir = str_param(p, "media_dir").map(std::path::Path::new);
             let input = std::path::Path::new(path);
             let report = crate::aaf::import(e, input, media_dir)?;
             let mut result = report.json();
-            // Importing a Pro Tools export folder also saves the session in that folder.
-            if crate::file_access::check_read(input).is_ok() && input.is_dir() {
+            // Only the GUI asks for this: the CLI saves once itself, after its other steps.
+            if bool_or(p, "save_in_folder", false) && crate::file_access::check_read(input).is_ok() && input.is_dir() {
                 let stem = crate::io::sanitize_name(&report.composition);
                 let ext = soundcraft_model::SESSION_EXTENSION;
                 let file = (1..)
