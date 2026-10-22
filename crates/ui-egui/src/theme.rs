@@ -360,7 +360,7 @@ impl Tokens {
         counter_off: Color32::from_rgb(192, 212, 198),
         counter_border: Color32::from_rgb(118, 121, 127),
         counter_rule: Color32::from_rgb(188, 191, 196),
-        tool_bracket_off: Color32::from_rgb(172, 175, 181),
+        tool_bracket_off: Color32::from_rgb(108, 111, 117),
         row_selected: Color32::from_rgb(174, 196, 226),
         visible_dot: Color32::from_rgb(86, 89, 96),
         big_counter_bg: Color32::from_rgb(224, 226, 228),

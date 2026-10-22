@@ -1,7 +1,7 @@
 //! The Edit window toolbar.
 
 use crate::theme::{Tokens, bold, mono, regular};
-use crate::widgets::{icon_button, key, key_fill};
+use crate::widgets::{icon_button, joined_icon_button, key, key_fill};
 use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
@@ -149,15 +149,18 @@ fn zoom_group(app: &mut SoundApp, ui: &mut Ui) {
     });
 }
 
+/// Draw the edit tools and the shared Smart Tool frame around its three member buttons.
 fn tools(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let cur = app.engine.session().edit.tool;
     group(ui, 268.0 + 38.0, 52.0, |ui, r| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing = vec2(2.0, 3.0);
+            let mut smart_rect = None;
+            ui.add_space(2.0);
             let row = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if icon_button(ui, vec2(36.0, 26.0), "zoom_toggle", app.engine.session().edit.zoom_toggle.is_some(), "Zoom Toggle (E)").clicked() {
+                if icon_button(ui, vec2(36.0, 28.0), "zoom_toggle", app.engine.session().edit.zoom_toggle.is_some(), "Zoom Toggle (E)").clicked() {
                     crate::edit_window::zoom_toggle(app);
                 }
                 for (tool, icon) in [
@@ -168,21 +171,54 @@ fn tools(app: &mut SoundApp, ui: &mut Ui) {
                     (Tool::Scrubber, "scrubber"),
                     (Tool::Pencil, "pencil"),
                 ] {
+                    if tool == Tool::Trim {
+                        ui.add_space(6.0);
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                    }
                     let smart_member = cur == Tool::Smart && matches!(tool, Tool::Trim | Tool::Selector | Tool::Grabber);
                     let tip = format!("{}{}", tool.label(), tool.fkey().map(|k| format!(" ({k})")).unwrap_or_default());
-                    if icon_button(ui, vec2(36.0, 26.0), icon, cur == tool || smart_member, &tip).clicked() {
+                    let response = if matches!(tool, Tool::Trim | Tool::Selector | Tool::Grabber) {
+                        joined_icon_button(ui, vec2(40.0, 28.0), icon, cur == tool || smart_member, &tip)
+                    } else {
+                        icon_button(ui, vec2(36.0, 28.0), icon, cur == tool || smart_member, &tip)
+                    };
+                    if matches!(tool, Tool::Trim | Tool::Selector | Tool::Grabber) {
+                        smart_rect = Some(smart_rect.map_or(response.rect, |rect: Rect| rect.union(response.rect)));
+                    }
+                    if response.clicked() {
                         let _ = app.run("edit.tool", json!({"tool": tool.id()}));
+                    }
+                    if tool == Tool::Grabber {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        ui.add_space(6.0);
                     }
                 }
             });
-            // Smart tool bracket above Trim/Selector/Grabber.
+            // The Smart Tool target is the heavy top-and-side frame shared by
+            // Trim/Selector/Grabber. Each visible band is clickable without taking the member
+            // buttons away from their individual tools.
             let rr = row.response.rect;
-            let bx0 = rr.min.x + 76.0;
-            let bx1 = bx0 + 38.0 * 3.0 - 2.0;
-            let bracket = Rect::from_min_max(pos2(bx0 - 2.0, r.min.y + 1.0), pos2(bx1 + 2.0, r.min.y + 5.0));
-            let resp = ui.interact(bracket.expand2(vec2(0.0, 2.0)), ui.id().with("smart"), Sense::click());
-            ui.painter().rect_filled(bracket, 1.0, if cur == Tool::Smart { t.accent } else { t.tool_bracket_off });
-            if resp.on_hover_text("Smart Tool (F6+F7 / F7+F8)").clicked() {
+            let Some(smart_rect) = smart_rect else {
+                return;
+            };
+            let side = 6.0;
+            let top_hit = Rect::from_min_max(pos2(smart_rect.min.x - side, r.min.y), pos2(smart_rect.max.x + side, smart_rect.min.y));
+            let left_hit = Rect::from_min_max(pos2(smart_rect.min.x - side, r.min.y), pos2(smart_rect.min.x, rr.max.y + 2.0));
+            let right_hit = Rect::from_min_max(pos2(smart_rect.max.x, r.min.y), pos2(smart_rect.max.x + side, rr.max.y + 2.0));
+            let tip = "Smart Tool (hold any two of F6, F7 and F8)";
+            let top = ui.interact(top_hit, ui.id().with("smart"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
+            let left =
+                ui.interact(left_hit, ui.id().with("smart_left"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
+            let right = ui
+                .interact(right_hit, ui.id().with("smart_right"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(tip);
+            let color = if cur == Tool::Smart { t.accent } else { t.tool_bracket_off };
+            ui.painter().rect_filled(top_hit, CornerRadius::same(2), color);
+            ui.painter().rect_filled(left_hit, CornerRadius::same(1), color);
+            ui.painter().rect_filled(right_hit, CornerRadius::same(1), color);
+            top.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, cur == Tool::Smart, "Smart Tool"));
+            if top.clicked() || left.clicked() || right.clicked() {
                 let _ = app.run("edit.tool", json!({"tool": "smart"}));
             }
             ui.horizontal(|ui| {

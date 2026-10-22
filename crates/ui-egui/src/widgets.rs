@@ -101,16 +101,26 @@ fn button_style(selected_fill: Color32, normal_icon: Color32, radius: u8) -> Ico
     }
 }
 
-/// A toolbar button with an icon; `on` draws the blue selected state.
-pub fn icon_button(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str) -> Response {
+/// Paint an icon button with the requested corner radius.
+fn icon_button_with_radius(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str, radius: u8) -> Response {
     let t = Tokens::current();
-    let style = button_style(t.accent, t.text, 3);
+    let style = button_style(t.accent, t.text, radius);
     let resp = IconButton::new(tip, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
         key_light(ui.painter(), r.shrink(1.0));
         let s = r.height().min(r.width()) * 0.78;
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(s, s)), icon, tint);
     });
     resp.on_hover_text(tip)
+}
+
+/// A toolbar button with an icon; `on` draws the blue selected state.
+pub fn icon_button(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str) -> Response {
+    icon_button_with_radius(ui, size, icon, on, tip, 3)
+}
+
+/// A square-edged icon button that sits flush beside other members of one tool group.
+pub(crate) fn joined_icon_button(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str) -> Response {
+    icon_button_with_radius(ui, size, icon, on, tip, 1)
 }
 
 /// Square text toggle used for S / M / I / record etc.

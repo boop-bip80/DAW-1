@@ -103,6 +103,7 @@ fn tool_and_record_buttons_handle_keyboard_disabled_state_and_cancelled_clicks()
 }
 
 #[test]
+/// Tool buttons, the surrounding Smart target, and focused controls dispatch only their actions.
 fn toolbar_keyboard_activation_changes_tools_without_transport_or_marker_actions() {
     let app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
@@ -116,6 +117,39 @@ fn toolbar_keyboard_activation_changes_tools_without_transport_or_marker_actions
     h.get_by_label("Trim (F6)").click();
     h.run_steps(3);
     assert_eq!(h.state().engine.session().edit.tool, soundcraft_model::Tool::Trim);
+    let smart = h.get_by_label("Smart Tool").rect();
+    let selector = h.get_by_label("Selector (F7)").rect();
+    assert!(smart.width() >= 130.0 && smart.height() >= 7.0, "Smart Tool top target is too small: {smart:?}");
+    assert!(smart.max.y <= selector.min.y, "Smart Tool top target overlaps Selector: {smart:?} vs {selector:?}");
+    h.get_by_label("Smart Tool").click();
+    h.run_steps(3);
+    assert_eq!(h.state().engine.session().edit.tool, soundcraft_model::Tool::Smart);
+    for (button, x, tool) in [
+        ("Trim (F6)", 1.0, soundcraft_model::Tool::Trim),
+        ("Selector (F7)", 18.0, soundcraft_model::Tool::Selector),
+        ("Grabber (F8)", 35.0, soundcraft_model::Tool::Grabber),
+    ] {
+        let rect = h.get_by_label(button).rect();
+        let edge = pos2(rect.left() + x, rect.top() + 1.0);
+        h.event(Event::PointerMoved(edge));
+        h.event(pointer(edge, true));
+        h.run_steps(1);
+        h.event(pointer(edge, false));
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.tool, tool, "individual tool edge at {edge:?}");
+    }
+    for (button, x) in [("Trim (F6)", -4.0), ("Grabber (F8)", 4.0)] {
+        h.get_by_label("Selector (F7)").click();
+        h.run_steps(2);
+        let rect = h.get_by_label(button).rect();
+        let side = pos2(if x < 0.0 { rect.left() + x } else { rect.right() + x }, rect.center().y);
+        h.event(Event::PointerMoved(side));
+        h.event(pointer(side, true));
+        h.run_steps(1);
+        h.event(pointer(side, false));
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.tool, soundcraft_model::Tool::Smart, "Smart Tool side at {side:?}");
+    }
     let markers = h.state().engine.session().markers.len();
     for (label, tool, key) in
         [("Pencil (F10)", soundcraft_model::Tool::Pencil, Key::Enter), ("Grabber (F8)", soundcraft_model::Tool::Grabber, Key::Space)]

@@ -311,6 +311,11 @@ pub struct SoundApp {
     theme_applied: Option<bool>,
     /// Last panel host context, used to cancel renderer-owned gestures on explicit replacement.
     pub(crate) docking_context: Option<egui::Context>,
+    /// Physical F6–F8 state before the current frame, used to preserve Smart Tool chords when
+    /// one key is pressed and another is released in the same input batch.
+    pub(crate) smart_tool_keys_down: u8,
+    /// A lone F6–F8 press waiting briefly for another member of the Smart Tool chord.
+    pub(crate) pending_smart_tool_key: Option<(egui::Key, f64)>,
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
     /// When Record last found nothing to record on, and why: the Record buttons show it for a moment.
@@ -346,6 +351,7 @@ fn automation_step_due(pos: Samples, last: Samples, step: Samples) -> bool {
 }
 
 impl SoundApp {
+    /// Create the UI state around an engine, optional audio player, and platform services.
     pub fn new(engine: Engine, player: Option<Player>, services: Services) -> Self {
         SoundApp {
             recent_seen: engine.path.clone(),
@@ -393,6 +399,8 @@ impl SoundApp {
             fonts_installed: false,
             theme_applied: None,
             docking_context: None,
+            smart_tool_keys_down: 0,
+            pending_smart_tool_key: None,
             sim: None,
             record_hint: None,
             quit_requested: false,
