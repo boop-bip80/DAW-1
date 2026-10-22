@@ -508,7 +508,7 @@ pub(crate) fn empty_stream_info(b: &[u8], at: usize) -> Option<AudioInfo> {
         17..=24 => SampleFormat::Int24,
         _ => SampleFormat::Int32,
     };
-    Some(AudioInfo { format: FileFormat::Flac, sample_format, sample_rate, channels, frames: 0, bwf: None })
+    Some(AudioInfo { format: FileFormat::Flac, sample_format, sample_rate, channels, frames: 0, bwf: None, damage: None })
 }
 
 /// Whether a comment in a (little-endian) Vorbis comment block claims more than the block holds.
