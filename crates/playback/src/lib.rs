@@ -1,9 +1,10 @@
 //! Realtime playback through the system audio device (cpal: CoreAudio, WASAPI, ALSA/Pulse/
 //! PipeWire via ALSA, JACK, WebAudio).
 //!
-//! The UI thread owns a [`Player`]; the audio callback owns the [`MixEngine`] and a snapshot of
-//! the session (`Arc<Session>`) that the UI swaps whenever the document changes. Commands go to
-//! the callback through a channel; position and meters come back through atomics and a
+//! The UI thread owns a [`Player`]; the audio callback runs the [`MixEngine`] and a snapshot of
+//! the session (`Arc<Session>`) that the UI swaps whenever the document changes. Both live in a
+//! holder the callback only ever `try_lock`s, so the player can take them back at drop. Commands
+//! go to the callback through a channel; position and meters come back through atomics and a
 //! `try_lock`ed snapshot, so the callback never blocks. When no device is available the player
 //! falls back to a silent clock thread so the transport, meters and automation still run.
 //!
@@ -34,7 +35,7 @@ use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
 const BLOCK: usize = 512;
 
@@ -149,7 +150,42 @@ fn guarded_block(fault: &Fault, shared: &Shared, out: &mut [f32], fill: impl FnO
     }
 }
 
-/// State owned by the audio callback.
+/// Where the audio state lives: the callback (or the silent clock) renders from it, and the
+/// player takes it out at drop so every plug-in instance is torn down on the player's thread,
+/// whether or not the callback still runs.
+type Holder = Arc<Mutex<Option<AudioState>>>;
+
+/// One block from the state in `holder`, or silence when the player holds the lock (taking the
+/// state at drop) or has taken the state. Never a blocking lock: this runs on the audio thread.
+/// Returns false once the state is gone.
+fn render_held(holder: &Mutex<Option<AudioState>>, fault: &Fault, shared: &Shared, out: &mut [f32], channels: usize) -> bool {
+    let mut held = match holder.try_lock() {
+        Ok(g) => g,
+        // A panic escaped while the lock was held (`guarded_block` catches the block's own):
+        // the state is still whole enough to render or go silent.
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => {
+            out.fill(0.0);
+            return true;
+        }
+    };
+    match held.as_mut() {
+        Some(st) => {
+            if fault.failed.load(Ordering::Relaxed) {
+                // Never `fill` again; keep what the UI thread sends from piling up unseen.
+                st.discard_after_fault();
+            }
+            guarded_block(fault, shared, out, |o| st.fill(o, channels));
+            true
+        }
+        None => {
+            out.fill(0.0);
+            false
+        }
+    }
+}
+
+/// State the audio callback renders from (inside a [`Holder`]).
 struct AudioState {
     rx: Receiver<Cmd>,
     shared: Arc<Shared>,
@@ -202,6 +238,20 @@ impl AudioState {
             device_rate,
             input: None,
             recording: false,
+        }
+    }
+
+    /// After the engine has faulted nothing drains the queue any more: take every pending command
+    /// off it. New third-party instances go back down the garbage channel, so they drop on the UI
+    /// thread (a failed send means the receiver is gone and nothing is left to do); everything
+    /// else is dropped here, which frees nothing that matters (snapshots are `Arc<Session>`).
+    /// The instance vector is converted in place (`PreparedInstance` is a whole multiple of
+    /// `Box<dyn Plugin>` in size), so nothing new is allocated here.
+    fn discard_after_fault(&mut self) {
+        while let Ok(c) = self.rx.try_recv() {
+            if let Cmd::Session(_, instances) = c {
+                let _ = self.garbage.send(instances.into_iter().map(|i| i.plugin).collect());
+            }
         }
     }
 
@@ -461,6 +511,9 @@ pub struct Player {
     watch: Mutex<Option<(u64, std::time::Instant)>>,
     tx: Sender<Cmd>,
     side: Mutex<Side>,
+    /// The audio state the callback renders from; taken back at drop.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    state: Holder,
     #[cfg(not(target_arch = "wasm32"))]
     _stream: Option<cpal::Stream>,
     #[cfg(target_arch = "wasm32")]
@@ -473,6 +526,43 @@ pub struct Player {
     pub device_buffer: Option<u32>,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Player {
+    /// Takes the audio state (and so every plugin instance) back from the callback and drops it
+    /// here, then closes the stream, then collects what was retired before.
+    fn drop(&mut self) {
+        // Closing the stream joins the audio thread on WASAPI and ALSA, which destroys the callback
+        // there (on ASIO cpal drops the closure on the caller's thread inside `remove_callback`);
+        // plugin instances it owned would be dropped on the audio thread. A VST3's `terminate` may wait for
+        // the UI thread (Arturia's Jup-8000 V does), which is the thread waiting in the join: the
+        // app never exits. So the state is taken out of the holder here, without the callback's
+        // help: a device that has stopped calling (a device error, an unplugged interface, a
+        // stalled driver) must not leave the instances behind. The stream then holds only an
+        // empty holder.
+        if let Some(stream) = &self._stream {
+            use cpal::traits::StreamTrait;
+            if let Err(e) = stream.pause() {
+                log::debug!("audio stream did not pause at close: {e}");
+            }
+            // A couple of buffer periods for a callback already under way to finish. It only
+            // shortens the common case (a callback past the `playing` check); correctness rests
+            // on the lock below.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Blocking is fine here: the callback holds the lock for one block at most. If a plug-in's
+        // `process` never returns (it waits on the UI thread), this lock waits with it; that hang
+        // is the same class as before this change, not a new one.
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if state.is_some() {
+            log::debug!("audio state released at close");
+        }
+        drop(state);
+        // Before the fields drop (`side`, with the retire channel's receiver, is declared first).
+        drop(self._stream.take());
+        self.side().collect_garbage();
+    }
 }
 
 impl Player {
@@ -533,19 +623,20 @@ impl Player {
                         let channels = usize::from(config.channels);
                         let (tx, rx) = channel();
                         let (gtx, grx) = channel();
-                        let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
+                        let state: Holder =
+                            Arc::new(Mutex::new(Some(AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx))));
                         let fault = Arc::new(Fault::default());
                         let stream = match format {
-                            cpal::SampleFormat::I32 => build_output::<i32>(&device, config, state, channels, &fault, &shared),
-                            cpal::SampleFormat::I16 => build_output::<i16>(&device, config, state, channels, &fault, &shared),
-                            _ => build_output::<f32>(&device, config, state, channels, &fault, &shared),
+                            cpal::SampleFormat::I32 => build_output::<i32>(&device, config, &state, channels, &fault, &shared),
+                            cpal::SampleFormat::I16 => build_output::<i16>(&device, config, &state, channels, &fault, &shared),
+                            _ => build_output::<f32>(&device, config, &state, channels, &fault, &shared),
                         }?;
-                        Ok(Opened { stream, tx, grx, fault })
+                        Ok(Opened { stream, tx, grx, fault, state })
                     },
                     |opened| start_stream(&opened.stream),
                 );
                 match opened {
-                    Some((config, Opened { stream, tx, grx, fault })) => {
+                    Some((config, Opened { stream, tx, grx, fault, state })) => {
                         let rate = config.sample_rate.0;
                         let channels = usize::from(config.channels);
                         let buffer = match config.buffer_size {
@@ -563,6 +654,7 @@ impl Player {
                             watch: Mutex::new(None),
                             tx,
                             side: new_side(grx),
+                            state,
                             _stream: Some(stream),
                             device_name: name,
                             device_rate: rate,
@@ -610,23 +702,25 @@ impl Player {
         gtx: Sender<Vec<Box<dyn Plugin>>>,
     ) -> Player {
         let rate = session.sample_rate.hz();
-        let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
+        let device_rate = f64::from(rate);
+        let state: Holder = Arc::new(Mutex::new(Some(AudioState::new(rx, Arc::clone(&shared), session, device_rate, gtx))));
         let fault = Arc::new(Fault::default());
-        let failed = Arc::clone(&fault);
+        let (failed, held, clock) = (Arc::clone(&fault), Arc::clone(&state), Arc::clone(&shared));
         let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || {
             let mut buf = vec![0.0f32; 4096];
             let mut last = std::time::Instant::now();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 let now = std::time::Instant::now();
-                let frames = ((now - last).as_secs_f64() * state.device_rate) as usize;
+                let frames = ((now - last).as_secs_f64() * device_rate) as usize;
                 last = now;
                 let n = (frames * 2).min(buf.len());
-                if let Some(b) = buf.get_mut(..n) {
-                    let shared = Arc::clone(&state.shared);
-                    guarded_block(&failed, &shared, b, |b| state.fill(b, 2));
-                }
-                if Arc::strong_count(&state.shared) <= 1 {
+                let present = match buf.get_mut(..n) {
+                    Some(b) => render_held(&held, &failed, &clock, b, 2),
+                    None => true,
+                };
+                // The player took the state back, or is gone.
+                if !present || Arc::strong_count(&held) <= 1 {
                     break;
                 }
             }
@@ -634,12 +728,20 @@ impl Player {
         if let Err(e) = spawn {
             log::warn!("clock thread failed: {e}");
         }
+        Player::silent(shared, fault, tx, side, state, rate)
+    }
+
+    /// A silent player around `state`, shared with whatever renders it (the clock thread, or
+    /// nothing).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn silent(shared: Arc<Shared>, fault: Arc<Fault>, tx: Sender<Cmd>, side: Mutex<Side>, state: Holder, rate: u32) -> Player {
         Player {
             shared,
             fault,
             watch: Mutex::new(None),
             tx,
             side,
+            state,
             _stream: None,
             device_name: "No audio device (silent)".into(),
             device_rate: rate,
@@ -663,6 +765,7 @@ impl Player {
             fault: Arc::default(),
             tx,
             side,
+            state: Arc::default(),
             _stream: None,
             device_name: "No audio device".into(),
             device_rate: session.sample_rate.hz(),
@@ -714,8 +817,7 @@ impl Player {
         }
     }
 
-    /// Closes every plugin editor window (main thread). Call before replacing the player: its
-    /// instances may be dropped on the audio thread, where editor windows cannot be closed.
+    /// Closes every plugin editor window (main thread). Call before replacing the player.
     pub fn close_editors(&self) {
         for e in self.side().editors.values_mut() {
             e.close();
@@ -897,6 +999,7 @@ struct Opened {
     tx: Sender<Cmd>,
     grx: Receiver<Vec<Box<dyn Plugin>>>,
     fault: Arc<Fault>,
+    state: Holder,
 }
 
 /// Build and start the attempts in order; the first that builds and starts wins. A build error or
@@ -922,7 +1025,7 @@ fn first_started<A: std::fmt::Debug, S, E: std::fmt::Display>(
 fn build_output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut state: AudioState,
+    state: &Holder,
     channels: usize,
     fault: &Arc<Fault>,
     shared: &Arc<Shared>,
@@ -934,14 +1037,14 @@ where
     let frame = channels.max(1);
     let mut scratch = vec![0.0f32; 8192 * frame];
     let chunk = scratch.len();
-    let (failed, guard, gone) = (Arc::clone(fault), Arc::clone(shared), Arc::clone(fault));
+    let (failed, guard, gone, held) = (Arc::clone(fault), Arc::clone(shared), Arc::clone(fault), Arc::clone(state));
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             mark_audio_thread();
             for out in data.chunks_mut(chunk) {
                 let Some(s) = scratch.get_mut(..out.len()) else { return };
-                guarded_block(&failed, &guard, s, |d| state.fill(d, channels));
+                render_held(&held, &failed, &guard, s, channels);
                 for (o, x) in out.iter_mut().zip(s.iter()) {
                     *o = T::from_sample(*x);
                 }
@@ -1318,6 +1421,355 @@ mod tests {
         tx.send(Cmd::Session(Arc::new(s44), Vec::new())).unwrap();
         st.fill(&mut out, 2);
         assert_eq!(grx.try_recv().unwrap().len(), 1);
+    }
+
+    /// Records the thread of every lifecycle call, so a test can assert where teardown ran.
+    struct ThreadLog {
+        inner: Box<dyn Plugin>,
+        log: Arc<std::sync::Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+    }
+
+    impl ThreadLog {
+        fn note(&self, what: &'static str) {
+            let mut log = self.log.lock().unwrap();
+            if log.last().map(|(w, _)| *w) != Some(what) {
+                log.push((what, std::thread::current().id()));
+            }
+        }
+    }
+
+    impl Plugin for ThreadLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.note("prepare");
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.note("process");
+            self.inner.process(io, frames);
+        }
+    }
+
+    impl Drop for ThreadLog {
+        fn drop(&mut self) {
+            self.note("drop");
+        }
+    }
+
+    /// Gate (quit deadlock, 2026-10-18): a hosted plugin's teardown runs on the thread that owns the
+    /// player, never on the audio thread. A VST3's `terminate` may wait for the UI thread; if it ran on
+    /// the audio thread while the UI thread joined that thread, the app hung on quit. The fake records
+    /// where every call ran; the player here drives the real silent-clock thread and the real `Drop`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_teardown_never_runs_on_the_audio_thread() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.threads"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = ThreadLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance {
+                track: t,
+                slot: soundcraft_mix::INSTRUMENT_SLOT,
+                id: "clap:test.threads".into(),
+                ch: 2,
+                plugin: Box::new(plugin),
+            }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        // Wait until the clock thread has processed the instance (it runs every 10 ms).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !log.lock().unwrap().iter().any(|(w, _)| *w == "process") {
+            assert!(std::time::Instant::now() < deadline, "the clock thread never processed the instance: {:?}", log.lock().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(player);
+        let log = log.lock().unwrap();
+        let here = std::thread::current().id();
+        let processed_on = log.iter().find(|(w, _)| *w == "process").map(|(_, id)| *id).unwrap();
+        let dropped_on = log.iter().find(|(w, _)| *w == "drop").map(|(_, id)| *id);
+        assert_ne!(processed_on, here, "sanity: processing ran on the clock thread, not here");
+        assert_eq!(dropped_on, Some(here), "teardown must run on the player's thread, not the audio thread: {log:?}");
+    }
+
+    /// Review finding (PR 752): a device that stops calling (WASAPI after a device error, an
+    /// unplugged interface, a stalled driver) never runs the callback again, so nothing on the
+    /// audio side can hand the instances back. The player takes the state out of the holder
+    /// itself. Here a second thread renders once, then only waits for the player to go and
+    /// releases its share of the holder, as cpal's worker destroys the callback after a join.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_player_takes_the_state_back_when_the_callback_has_stopped() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.threads"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let state: Holder = Arc::new(Mutex::new(Some(AudioState::new(rx, Arc::clone(&shared), Arc::clone(&s), 48_000.0, gtx))));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = ThreadLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance {
+                track: t,
+                slot: soundcraft_mix::INSTRUMENT_SLOT,
+                id: "clap:test.threads".into(),
+                ch: 2,
+                plugin: Box::new(plugin),
+            }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let fault = Arc::new(Fault::default());
+        let (held, failed, clock) = (Arc::clone(&state), Arc::clone(&fault), Arc::clone(&shared));
+        let (rendered, once) = sync_channel(1);
+        let device = std::thread::spawn(move || {
+            let mut out = vec![0.0f32; 1024];
+            assert!(render_held(&held, &failed, &clock, &mut out, 2), "the state is there to render");
+            rendered.send(()).unwrap();
+            // The device stops calling: the holder is never locked again, only let go of once
+            // the player has gone.
+            while Arc::strong_count(&held) > 1 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        once.recv().unwrap();
+        assert!(log.lock().unwrap().iter().any(|(w, _)| *w == "process"), "sanity: the instance was processed");
+        let player = Player::silent(shared, fault, tx, Mutex::new(Side::new(48_000.0, grx)), state, 48_000);
+        drop(player);
+        device.join().unwrap();
+        let log = log.lock().unwrap();
+        let here = std::thread::current().id();
+        let processed_on = log.iter().find(|(w, _)| *w == "process").map(|(_, id)| *id).unwrap();
+        let dropped_on = log.iter().find(|(w, _)| *w == "drop").map(|(_, id)| *id);
+        assert_ne!(processed_on, here, "sanity: processing ran on the device thread, not here");
+        assert_eq!(dropped_on, Some(here), "teardown must run on the player's thread even when the callback has stopped: {log:?}");
+    }
+
+    /// Like `ThreadLog`, but `process` panics; records where `drop` ran.
+    struct PanicLog {
+        inner: Box<dyn Plugin>,
+        dropped_on: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
+    }
+
+    impl Plugin for PanicLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            std::panic::panic_any("a plug-in bug");
+        }
+    }
+
+    impl Drop for PanicLog {
+        fn drop(&mut self) {
+            *self.dropped_on.lock().unwrap() = Some(std::thread::current().id());
+        }
+    }
+
+    /// Gate (review finding, PR 752): after a plug-in panicked on the audio thread the player's
+    /// drop still gets the instances back and tears them down on its own thread.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn plugin_teardown_never_runs_on_the_audio_thread_after_a_fault() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.panics"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let dropped_on = Arc::new(std::sync::Mutex::new(None));
+        let plugin = PanicLog { inner: soundcraft_dsp::create("gain").unwrap(), dropped_on: Arc::clone(&dropped_on) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance {
+                track: t,
+                slot: soundcraft_mix::INSTRUMENT_SLOT,
+                id: "clap:test.panics".into(),
+                ch: 2,
+                plugin: Box::new(plugin),
+            }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !player.fault.failed.load(Ordering::Relaxed) {
+            assert!(std::time::Instant::now() < deadline, "the plug-in never faulted the engine");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drop(player);
+        let here = std::thread::current().id();
+        assert_eq!(*dropped_on.lock().unwrap(), Some(here), "after a fault, teardown must still run on the player's thread");
+    }
+
+    /// Like `ThreadLog`, but `process` is slow and says when it started and finished.
+    struct SlowLog {
+        inner: Box<dyn Plugin>,
+        log: Arc<std::sync::Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+    }
+
+    impl Plugin for SlowLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.log.lock().unwrap().push(("process started", std::thread::current().id()));
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            self.inner.process(io, frames);
+            self.log.lock().unwrap().push(("process finished", std::thread::current().id()));
+        }
+    }
+
+    impl Drop for SlowLog {
+        fn drop(&mut self) {
+            self.log.lock().unwrap().push(("dropped", std::thread::current().id()));
+        }
+    }
+
+    /// Review finding (PR 752): the player's drop must wait for a block in progress before it takes
+    /// the state; taking it mid-block would drop the instances under the running `process`.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_player_waits_for_a_block_in_progress_before_taking_the_state() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.slow"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let player = Player::silent_clock_with(shared, tx.clone(), rx, Arc::clone(&s), Mutex::new(Side::new(48_000.0, grx)), gtx);
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let plugin = SlowLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+        tx.send(Cmd::Session(
+            Arc::clone(&s),
+            vec![PreparedInstance { track: t, slot: soundcraft_mix::INSTRUMENT_SLOT, id: "clap:test.slow".into(), ch: 2, plugin: Box::new(plugin) }],
+        ))
+        .unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !log.lock().unwrap().iter().any(|(w, _)| *w == "process started") {
+            assert!(std::time::Instant::now() < deadline, "the clock thread never started a block: {:?}", log.lock().unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // The block is under way and holds the lock; the player's drop must wait for it.
+        drop(player);
+        let log = log.lock().unwrap();
+        let at = |what: &str| log.iter().position(|(w, _)| *w == what);
+        assert!(at("process finished").is_some(), "the drop must wait for the block in progress: {log:?}");
+        assert!(at("process finished") < at("dropped") && at("dropped").is_some(), "teardown must follow the block: {log:?}");
+        let here = std::thread::current().id();
+        assert_eq!(at("dropped").map(|i| log[i].1), Some(here), "teardown must run on the player's thread: {log:?}");
+    }
+
+    /// Review finding (PR 752): once the engine has faulted nothing drains the queue; commands the
+    /// UI keeps sending are taken off it, and their new instances go back to the UI thread.
+    #[test]
+    fn commands_after_a_fault_are_not_kept() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.late"));
+        let s = Arc::new(s);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (gtx, grx) = channel();
+        let holder: Holder = Arc::new(Mutex::new(Some(AudioState::new(rx, Arc::clone(&shared), Arc::new(Session::default()), 48_000.0, gtx))));
+        let fault = Fault::default();
+        let mut out = vec![0.0f32; 8];
+        guarded_block(&fault, &shared, &mut out, |_| std::panic::panic_any("a plug-in bug"));
+        assert!(fault.failed.load(Ordering::Relaxed));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let plugin = ThreadLog { inner: soundcraft_dsp::create("gain").unwrap(), log: Arc::clone(&log) };
+            let late =
+                PreparedInstance { track: t, slot: soundcraft_mix::INSTRUMENT_SLOT, id: "clap:test.late".into(), ch: 2, plugin: Box::new(plugin) };
+            tx.send(Cmd::Session(Arc::clone(&s), vec![late])).unwrap();
+        }
+        tx.send(Cmd::Stop).unwrap();
+        assert!(render_held(&holder, &fault, &shared, &mut out, 2));
+        assert!(log.lock().unwrap().iter().all(|(w, _)| *w != "drop"), "returned, not dropped on the audio side");
+        let returned: Vec<_> = std::iter::from_fn(|| grx.try_recv().ok()).collect();
+        assert_eq!(returned.iter().map(Vec::len).sum::<usize>(), 2, "the instances sent after the fault must come back to the UI thread");
+        let held = holder.lock().unwrap();
+        let pending = held.as_ref().map(|st| st.rx.try_recv().is_ok());
+        assert_eq!(pending, Some(false), "nothing may be left waiting in the queue");
     }
 
     #[test]
