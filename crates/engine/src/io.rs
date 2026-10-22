@@ -53,6 +53,24 @@ pub fn read_text(path: impl AsRef<Path>) -> Result<String> {
     String::from_utf8(read_file(path)?).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
 }
 
+/// Whether `path` is a directory the read-root check allows (false when it is not or may not be read).
+pub fn is_readable_dir(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).is_ok() && path.is_dir()
+}
+
+/// Whether `path` is a regular file the read-root check allows.
+pub fn is_readable_file(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).is_ok() && path.is_file()
+}
+
+/// Whether anything exists at `path`, after the read-root check (an unreadable place counts as taken).
+pub fn path_taken(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).is_err() || path.exists()
+}
+
 /// The entries of directory `path`, after the same read-root check as [`read_file`]. A directory
 /// with more than `max` entries is an error, so callers never act on a silently truncated listing.
 pub fn list_dir(path: impl AsRef<Path>, max: usize) -> Result<Vec<std::path::PathBuf>> {

@@ -299,9 +299,20 @@ struct DirectoryEntry {
     size: u64,
 }
 
+/// The files directly in `dir` whose extension is one of `exts` (any case), sorted.
+pub fn files_with_extension(dir: &Path, exts: &[&str]) -> Result<Vec<PathBuf>> {
+    let mut found: Vec<PathBuf> = crate::io::list_dir(dir, MAX_AAF_COLLECTION_ENTRIES)?
+        .into_iter()
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()).is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x))) && crate::io::is_readable_file(p)
+        })
+        .collect();
+    found.sort();
+    Ok(found)
+}
+
 fn find_aaf_in(dir: &Path) -> Result<PathBuf> {
-    let entries = crate::io::list_dir(dir, MAX_AAF_COLLECTION_ENTRIES)?;
-    let mut found = entries.into_iter().filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("aaf")));
+    let mut found = files_with_extension(dir, &["aaf"])?.into_iter();
     match (found.next(), found.next()) {
         (Some(only), None) => Ok(only),
         (None, _) => Err(EngineError::Unsupported(format!("no .aaf file found in `{}`", dir.display()))),
@@ -316,11 +327,8 @@ fn find_aaf_in(dir: &Path) -> Result<PathBuf> {
 /// session behind.
 pub fn import(engine: &mut Engine, input: &Path, media_dir: Option<&Path>) -> Result<AafImportReport> {
     // A folder (the usual Pro Tools export) stands for the single AAF inside it, with its WAVs beside it.
-    let (input, media_dir) = if crate::file_access::check_read(input).is_ok() && input.is_dir() {
-        (find_aaf_in(input)?, media_dir.or(Some(input)))
-    } else {
-        (input.to_path_buf(), media_dir)
-    };
+    let (input, media_dir) =
+        if crate::io::is_readable_dir(input) { (find_aaf_in(input)?, media_dir.or(Some(input))) } else { (input.to_path_buf(), media_dir) };
     let input = input.as_path();
     // Pro Tools exports keep the WAV files next to the AAF: that folder is the default media location.
     let media_dir = media_dir.or_else(|| Some(input.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))));
@@ -2572,6 +2580,33 @@ mod tests {
         let plain = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
         assert!(plain.get("saved_to").is_none());
         assert_ne!(again["saved_to"], res["saved_to"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_import_command_also_imports_the_midi_and_report_in_the_folder() {
+        let dir = crate::test_scratch::root().join(format!("soundcraft-aaf-companions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        synthetic_aaf(&dir.join("session.aaf"));
+        let mut smf = b"MThd\0\0\0\x06\0\0\0\x01\x01\xe0MTrk".to_vec();
+        let track = [0, 0x90, 60, 100, 0x83, 0x60, 0x80, 60, 0, 0, 0xff, 0x2f, 0];
+        smf.extend((track.len() as u32).to_be_bytes());
+        smf.extend(track);
+        std::fs::write(dir.join("song.mid"), smf).unwrap();
+        std::fs::write(dir.join("report.txt"), "SESSION NAME: The Gift\n").unwrap();
+        let mut engine = Engine::default();
+        let res = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
+        assert_eq!(res["midi_tracks"], 1, "{res}");
+        assert!(res["notes"].as_array().is_some_and(|n| !n.is_empty()), "{res}");
+
+        let none = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy(), "companions": false})).unwrap();
+        assert!(none.get("midi_tracks").is_none() && none.get("notes").is_none(), "{none}");
+
+        std::fs::write(dir.join("other.mid"), b"").unwrap();
+        let many = engine.execute("file.import_aaf", &json!({"path": dir.to_string_lossy()})).unwrap();
+        assert!(many.get("midi_tracks").is_none(), "{many}");
+        assert!(many["warnings"].as_array().is_some_and(|w| w.iter().any(|w| w.as_str().is_some_and(|w| w.contains("more than one")))), "{many}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

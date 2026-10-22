@@ -86,7 +86,7 @@
 	9.1.4	9.1.4
 	9.1.6	9.1.6
 	a clip on the timeline, which is removed too.	una clip sulla timeline, che viene rimossa anch'essa.
-	AAF...	AAF...
+	Import Session...	Importa sessione...
 	Ableton Link	Ableton Link
 	About SoundCraft	Informazioni su SoundCraft
 	Activate HEAT	Attiva HEAT
@@ -164,7 +164,7 @@
 	bpm	bpm
 	Bring to Front	Porta in primo piano
 	Browse…	Sfoglia…
-	Select the folder containing all the files exported from Pro Tools: the .AAF file, the .TXT report and the .WAV files.	Seleziona la cartella che contiene tutti i file esportati da Pro Tools: il file .AAF, il report .TXT e i file .WAV.
+	Select the folder containing all the files exported from Pro Tools: the .AAF file, the .MID file, the .TXT report and the .WAV files.	Seleziona la cartella che contiene tutti i file esportati da Pro Tools: il file .AAF, il file .MID, il report .TXT e i file .WAV.
 	Buffer size	Dimensione buffer
 	Built-in	Integrato
 	Bus	Bus

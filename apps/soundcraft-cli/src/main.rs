@@ -222,7 +222,7 @@ fn import_aaf(args: &[String]) -> ExitCode {
     };
 
     let mut e = Engine::default();
-    let mut params = json!({"path": input});
+    let mut params = json!({"path": input, "companions": false});
     if let Some(dir) = &opts.media_dir {
         params["media_dir"] = json!(dir);
     }
