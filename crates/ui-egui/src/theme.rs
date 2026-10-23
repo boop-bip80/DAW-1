@@ -280,7 +280,7 @@ impl Tokens {
         menu_bar: Color32::from_rgb(22, 22, 23),
         group_border: Color32::from_rgb(8, 8, 8),
         mode_off: Color32::from_rgb(20, 36, 22),
-        mode_shuffle: Color32::from_rgb(238, 96, 86),
+        mode_shuffle: Color32::from_rgb(246, 112, 102),
         mode_spot: Color32::from_rgb(236, 148, 38),
         mode_slip: Color32::from_rgb(92, 196, 108),
         mode_grid: Color32::from_rgb(86, 162, 238),
@@ -670,9 +670,12 @@ mod tests {
             for (i, a) in modes.into_iter().enumerate() {
                 let fill = t.edit_mode_on(a);
                 assert_ne!(fill, t.mode_off, "{name}: {a:?} active must differ from inactive");
-                // Small bold label: WCAG AA wants 4.5:1.
-                let ratio = contrast(fill, t.mode_on_text);
-                assert!(ratio >= 4.5, "{name}: {a:?} label contrast {ratio:.2} is below 4.5");
+                // Small bold label: WCAG AA wants 4.5:1, at rest and at both ends of the pressed gradient.
+                let pressed = crate::widgets::PRESSED_SHADE.map(|k| crate::widgets::shade(fill, k));
+                for (state, face) in [("active", fill), ("pressed top", pressed[0]), ("pressed bottom", pressed[1])] {
+                    let ratio = contrast(face, t.mode_on_text);
+                    assert!(ratio >= 4.5, "{name}: {a:?} {state} label contrast {ratio:.2} is below 4.5");
+                }
                 for b in &modes[i + 1..] {
                     assert_ne!(fill, t.edit_mode_on(*b), "{name}: {a:?} and {b:?} share an active colour");
                 }
