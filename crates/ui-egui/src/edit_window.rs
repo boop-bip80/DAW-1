@@ -2718,6 +2718,7 @@ fn follow_update(
 }
 
 /// Selection overlay, insertion point and playhead across rulers and tracks.
+/// The insertion point stays drawn while playing, beside the moving playhead.
 /// While playing, auto-scroll keeps the playhead in view for the follow
 /// modes (`page`/`continuous`/`center`) — but any outside view move (a manual
 /// pan, scrollbar, universe jump, or programmatic scroll) pauses it, so the
@@ -2741,7 +2742,9 @@ fn overlay(app: &mut SoundApp, ui: &mut Ui, tl: Rect, area: Rect) {
         }
     }
     let sel = s.edit.selection;
-    if sel.is_empty() && !app.is_playing() {
+    // The insertion point blinks while playing too, standing still at its place
+    // while the playhead (its own colour) moves on, like the incumbent.
+    if sel.is_empty() {
         let x = x_of(s, tl, sel.start);
         let now = ui.input(|i| i.time);
         let (id, key) = (ui.id().with("insertion_blink"), (sel.start, s.edit.selected_tracks.clone()));
@@ -3272,6 +3275,91 @@ mod tests {
         let a = lane_point(&h, 2);
         click(&mut h, a);
         assert_eq!(insertion_rows(&h), [2]);
+    }
+
+    /// x of every insertion-point stroke painted in the last frame.
+    fn insertion_xs(h: &Harness<SoundApp>) -> Vec<f32> {
+        lines(h, Tokens::current().insertion).iter().map(|l| l[0].x).collect()
+    }
+
+    /// Every line segment of `colour` painted in the last frame.
+    fn lines(h: &Harness<SoundApp>, colour: Color32) -> Vec<[Pos2; 2]> {
+        let line = |shape: &Shape| match shape {
+            Shape::LineSegment { points, stroke } if stroke.color == colour => Some(*points),
+            _ => None,
+        };
+        h.output().shapes.iter().filter_map(|c| line(&c.shape)).collect()
+    }
+
+    /// Centre x of the ruler arrow's head (a 20 px wide filled triangle in the marker colour) in the last frame.
+    fn arrow_xs(h: &Harness<SoundApp>) -> Vec<f32> {
+        let shapes: Vec<Shape> = h.output().shapes.iter().map(|c| c.shape.clone()).collect();
+        let heads = fills(&shapes).into_iter().filter(|(c, pts)| *c == Tokens::current().accent && pts.len() == 3);
+        heads.map(|piece| extent(&[piece])).filter(|(x0, x1, _, _)| (x1 - x0 - 20.0).abs() < 0.01).map(|(x0, x1, _, _)| (x0 + x1) / 2.0).collect()
+    }
+
+    /// Steps until the blinking insertion point is on (at most one second and a half).
+    fn step_to_insertion_on(h: &mut Harness<SoundApp>) {
+        for _ in 0..90 {
+            if !insertion_rows(h).is_empty() {
+                return;
+            }
+            h.step();
+        }
+    }
+
+    /// An insertion point on row 2, then playback from it with the view held still.
+    fn playing_from_an_insertion_point() -> (Harness<'static, SoundApp>, Samples) {
+        let mut h = harness(4);
+        h.state_mut().run("options.scrolling", json!({"mode": "none"})).unwrap();
+        let a = lane_point(&h, 2);
+        click(&mut h, a);
+        let at = h.state().engine.session().edit.selection.start;
+        h.state_mut().run("transport.play", json!({})).unwrap();
+        h.run_steps(5);
+        assert!(h.state().is_playing());
+        (h, at)
+    }
+
+    #[test]
+    fn the_insertion_point_stays_drawn_while_playing_beside_the_playhead() {
+        let (mut h, at) = playing_from_an_insertion_point();
+        step_to_insertion_on(&mut h);
+        assert!(h.state().is_playing());
+        assert!(h.state().position() > at, "the playhead did not move on");
+        let (s, tl) = (h.state().engine.session(), timeline(&h));
+        assert_eq!(insertion_rows(&h), [2], "only on the selected track");
+        let x = x_of(s, tl, at);
+        assert!(matches!(insertion_xs(&h)[..], [i] if (i - x).abs() < 0.01), "{:?} is not on {x}", insertion_xs(&h));
+        // The playhead has its own colour and is already further along.
+        assert_ne!(Tokens::current().insertion, Tokens::current().playhead);
+        // (The overview paints a small playhead of its own: keep the line that crosses all four tracks.)
+        let span = row(&h, 3).max.y - row(&h, 0).min.y;
+        let playhead: Vec<f32> = lines(&h, Tokens::current().playhead).iter().filter(|l| l[1].y - l[0].y >= span).map(|l| l[0].x).collect();
+        assert!(matches!(playhead[..], [p] if p > x), "{playhead:?} is not past the insertion point {x}");
+    }
+
+    #[test]
+    fn a_click_in_a_track_while_playing_moves_the_insertion_point_and_the_arrow_not_the_playback() {
+        let (mut h, at) = playing_from_an_insertion_point();
+        let (s, tl) = (h.state().engine.session(), timeline(&h));
+        assert!(matches!(arrow_xs(&h)[..], [a] if (a - x_of(s, tl, at)).abs() < 0.01), "{:?} is not on the insertion point", arrow_xs(&h));
+        let before = h.state().position();
+        let b = lane_point(&h, 0) + vec2(300.0, 0.0);
+        click(&mut h, b);
+        let s = h.state().engine.session();
+        let want = sample_at(s, timeline(&h), b.x);
+        assert_eq!(s.edit.selection, Range::point(want));
+        assert_eq!(s.edit.selected_tracks, row_ids(&h)[..1]);
+        let x = x_of(s, timeline(&h), want);
+        assert!(matches!(arrow_xs(&h)[..], [a] if (a - x).abs() < 0.01), "{:?} is not on {x}", arrow_xs(&h));
+        // Playback went on from where it was: it neither stopped nor jumped to the click.
+        let pos = h.state().position();
+        assert!(h.state().is_playing());
+        assert!(pos >= before && pos < before + 48_000 && pos < want, "playback went from {before} to {pos}, the click is at {want}");
+        step_to_insertion_on(&mut h);
+        assert!(matches!(insertion_xs(&h)[..], [i] if (i - x).abs() < 0.01), "{:?} is not on {x}", insertion_xs(&h));
+        assert_eq!(insertion_rows(&h), [0]);
     }
 
     #[test]
