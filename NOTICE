@@ -19,6 +19,6 @@ Droid Sans Mono 1.00, the first face of the monospace family (counters and reado
   File: assets/fonts/droid-sans-mono/DroidSansMono.ttf, unmodified, from the Android Open Source
   Project; its license notice is assets/fonts/droid-sans-mono/LICENSE.txt.
 
-Every other bundled asset is original to SoundCraft. Icons are drawn in code; demo audio is
-synthesised in code. The egui default fonts (Ubuntu-Light, Hack, Noto Emoji, Emoji Icon Font) ship
-inside the egui crate under their own open licenses (see ATTRIBUTION.md).
+ATTRIBUTION.md gives the origin of every other bundled asset. Icons are drawn in code; demo audio
+is synthesised in code. The egui default fonts (Ubuntu-Light, Hack, Noto Emoji, Emoji Icon Font)
+ship inside the egui crate under their own open licenses (see ATTRIBUTION.md).
