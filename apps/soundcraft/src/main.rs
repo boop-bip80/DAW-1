@@ -28,8 +28,9 @@ struct App {
     logger: Option<&'static logging::AppLogger>,
     #[cfg(target_os = "macos")]
     menu: Option<native_menu::NativeMenu>,
-    /// The engine preferences revision last written to `preferences.json`.
-    saved_prefs_revision: u64,
+    /// The engine preferences revision last written to `preferences.json`; `None` while a
+    /// migration that changed the preferences still has to be written by the frame loop.
+    saved_prefs_revision: Option<u64>,
 }
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
@@ -82,8 +83,8 @@ impl eframe::App for App {
         // Preferences change rarely (the Appearance window, agents): save them when they do, and
         // only record the revision once the file actually kept them.
         let prefs_revision = self.app.engine.prefs_revision();
-        if prefs_revision != self.saved_prefs_revision && save_engine_prefs(&self.app.engine) {
-            self.saved_prefs_revision = prefs_revision;
+        if self.saved_prefs_revision != Some(prefs_revision) && save_engine_prefs(&self.app.engine) {
+            self.saved_prefs_revision = Some(prefs_revision);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
@@ -180,27 +181,39 @@ fn preferences_path() -> Option<std::path::PathBuf> {
 
 /// Load the preference document leniently (a damaged value keeps its default, with a log line)
 /// and, on the first run with it, adopt the language older builds saved in `ui.json`.
-fn load_engine_prefs(engine: &mut Engine) {
+///
+/// Returns true when that migration changed the preferences but could not be written yet: the
+/// frame loop must retry the save instead of recording the revision as already persisted.
+fn load_engine_prefs(engine: &mut Engine) -> bool {
     if !prefs_enabled() {
-        return;
+        return false;
     }
-    let Some(path) = preferences_path() else { return };
+    let Some(path) = preferences_path() else { return false };
     match config::load_preferences(&path) {
         Ok(Some(bytes)) => {
             for warning in engine.load_prefs_json(&bytes) {
                 log::warn!("preferences: {warning}");
             }
+            false
         }
         Ok(None) => {
+            let mut pending = false;
             if let Some(ui_path) = prefs_path() {
                 match config::migrate_language(engine, &ui_path, &path) {
                     Ok(true) => log::info!("preferences: adopted the interface language saved in ui.json"),
                     Ok(false) => {}
-                    Err(error) => log::warn!("preferences: {error}"),
+                    Err(error) => {
+                        log::warn!("preferences: {error}");
+                        pending = true;
+                    }
                 }
             }
+            pending
         }
-        Err(error) => log::warn!("preferences: {error}"),
+        Err(error) => {
+            log::warn!("preferences: {error}");
+            false
+        }
     }
 }
 
@@ -313,7 +326,7 @@ fn main() -> eframe::Result {
     }
 
     let mut engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
-    load_engine_prefs(&mut engine);
+    let migration_needs_save = load_engine_prefs(&mut engine);
     let prefs = load_prefs().unwrap_or_default();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -364,8 +377,9 @@ fn main() -> eframe::Result {
                     None
                 }
             };
+            let prefs_revision = app.engine.prefs_revision();
             Ok(Box::new(App {
-                saved_prefs_revision: app.engine.prefs_revision(),
+                saved_prefs_revision: (!migration_needs_save).then_some(prefs_revision),
                 app,
                 logger,
                 #[cfg(target_os = "macos")]
