@@ -70,31 +70,55 @@ def zh_compare(s: str) -> str:
 # --------------------------------------------------------------------------- #
 
 def parse_po(path: Path) -> list[tuple[str, str]]:
-    """Return (english, chinese) pairs from a gettext .po file."""
+    """Return (english, chinese) pairs from a gettext .po file.
+
+    Plural entries carry one English source per form (`msgid` / `msgid_plural`) and the matching
+    indexed translations (`msgstr[0]`, `msgstr[1]`, ...); every form becomes its own pair, so the
+    corpus also votes on singular/plural labels.
+    """
     pairs: list[tuple[str, str]] = []
     msgid: list[str] | None = None
+    msgid_plural: list[str] | None = None
     msgstr: list[str] | None = None
+    msgstr_forms: dict[int, list[str]] = {}
+    last: list[str] | None = None
 
     def flush() -> None:
-        nonlocal msgid, msgstr
-        if msgid is not None and msgstr is not None:
+        nonlocal msgid, msgid_plural, msgstr, msgstr_forms, last
+        if msgid is not None:
             en = "".join(msgid)
-            zh = "".join(msgstr)
-            if en and zh and not zh.startswith(("没", "未")) or (en and zh):
-                pairs.append((en, zh))
-        msgid = msgstr = None
+            plural = "".join(msgid_plural) if msgid_plural is not None else None
+            if msgstr_forms:
+                for index in sorted(msgstr_forms):
+                    source = en if index == 0 or plural is None else plural
+                    zh = "".join(msgstr_forms[index])
+                    if source and zh:
+                        pairs.append((source, zh))
+            elif msgstr is not None:
+                zh = "".join(msgstr)
+                if en and zh:
+                    pairs.append((en, zh))
+        msgid = msgid_plural = msgstr = last = None
+        msgstr_forms = {}
 
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = raw.strip()
         if line.startswith("msgid "):
             flush()
-            msgid = [_po_unquote(line[6:])]
+            msgid = last = [_po_unquote(line[6:])]
+        elif line.startswith("msgid_plural "):
+            msgid_plural = last = [_po_unquote(line[13:])]
+        elif line.startswith("msgstr[") and "]" in line:
+            index, _, text = line[7:].partition("]")
+            try:
+                number = int(index)
+            except ValueError:
+                continue
+            msgstr_forms[number] = last = [_po_unquote(text.strip())]
         elif line.startswith("msgstr "):
-            msgstr = [_po_unquote(line[7:])]
-        elif line.startswith('"') and msgid is not None and msgstr is None:
-            msgid.append(_po_unquote(line))
-        elif line.startswith('"') and msgstr is not None:
-            msgstr.append(_po_unquote(line))
+            msgstr = last = [_po_unquote(line[7:])]
+        elif line.startswith('"') and last is not None:
+            last.append(_po_unquote(line))
     flush()
     return pairs
 
