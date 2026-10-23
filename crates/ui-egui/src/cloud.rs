@@ -180,6 +180,22 @@ fn estimated_bundle_bytes(s: &Session) -> u64 {
     })
 }
 
+fn bundle_bytes(s: &Session) -> Result<Vec<u8>, String> {
+    session_bundle(s).map(|(bytes, _)| bytes).map_err(|e| e.to_string())
+}
+
+fn warn_large_bundle(app: &mut SoundApp, n: u64) {
+    if n < BUNDLE_SIZE_WARNING_BYTES {
+        return;
+    }
+    let msg = format!(
+        "This session is about {:.1} GiB. Cloud upload may be slow or rejected.",
+        n as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
+    log::warn!("{msg}");
+    app.ui.status = msg;
+}
+
 impl CloudApp for SoundApp {
     fn cloud(&self) -> &CloudFiles {
         &self.cloud
@@ -225,46 +241,6 @@ impl CloudApp for SoundApp {
         let bytes = bundle_bytes(&sent)?;
         self.cloud_sent = Some(sent);
         Ok(bytes)
-    }
-
-    /// Snapshot and size warning on the UI thread; bundle off it (desktop) or on the calling task (wasm).
-    fn begin_encode(&mut self, intent: SaveIntent) -> Result<(), String> {
-        if self.cloud_encode {
-            return Err("a cloud save is already preparing".into());
-        }
-        if intent.uid != SESSION_UID {
-            return Err("that session is no longer open".to_owned());
-        }
-        let dest = Destination { name: &intent.name, mime: intent.mime.as_deref() };
-        writes_as(dest)?;
-        self.capture_plugin_states();
-        let sent = self.engine.session_arc();
-        warn_large_bundle(self, estimated_bundle_bytes(&sent));
-        self.cloud_sent = Some(Arc::clone(&sent));
-        let snapshot = (*sent).clone();
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let bytes = bundle_bytes(&snapshot).map_err(Fault::Refused);
-            self.cloud.post(Event::Encoded { intent, bytes });
-            return Ok(());
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.cloud_encode = true;
-            let tx = self.cloud.event_sender();
-            std::thread::Builder::new().name("cloud-encode".into()).spawn(move || {
-                let bytes = bundle_bytes(&snapshot).map_err(Fault::Refused);
-                let _ = tx.send(Event::Encoded { intent, bytes });
-            })
-            .map_err(|e| {
-                self.cloud_encode = false;
-                self.cloud_sent = None;
-                format!("could not start cloud encode: {e}")
-            })?;
-            Ok(())
-        }
     }
 
     fn close(&mut self, _uid: u64) {

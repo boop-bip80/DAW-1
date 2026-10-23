@@ -286,8 +286,6 @@ pub struct SoundApp {
     pub cloud_sent: cloud::Sent,
     /// Cloud session waiting until the user saves or discards the open session.
     pub(crate) pending_cloud_open: Option<(String, Vec<u8>)>,
-    /// True while a native cloud-encode worker is bundling the session off-thread.
-    pub(crate) cloud_encode: bool,
     /// Share dialog (open with the Share button or overflow menu).
     pub share: craft_ui::share::ShareDialog,
     /// Presence bar: who else is in the session right now.
@@ -390,7 +388,6 @@ impl SoundApp {
             cloud: cloud::CloudFiles::default(),
             cloud_sent: None,
             pending_cloud_open: None,
-            cloud_encode: false,
             share: craft_ui::share::ShareDialog::default(),
             presence: craft_ui::presence::PresenceBar::default(),
             native_menu_bar: false,
