@@ -28,7 +28,7 @@ menu checklist).
 |---|---:|---:|---|
 | Full target (ready for real work) | ~40 % | ~950–1,450 h | Hardware, the stock plugin catalogue, AAF/OMF and immersive, localization, fidelity |
 | Mainstream practitioner | ~36 % | ~380–600 h | Interface and MIDI recording, AAF/OMF, stock-plugin depth, core-path bugs |
-| Essentials user | ~57 % | ~110–200 h | Launch and platform fixes, onboarding, effect panels and presets, MP3/AAC export |
+| Essentials user | ~57 % | ~110–200 h | Launch and platform fixes, onboarding, effect panels and presets, AAC export |
 
 Hours are Opus 5.5 agent wall-clock hours, calibrated on this repo's PRs; 60–70 % parallelizes.
 Detail: [target-app-parity.md](docs/target-app-parity.md#readiness-by-audience).
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-20 (MP3 bounce):** Bounce Mix and Bounce Stems write MP3 (`format: mp3`, `bitrate` 32–320 kbps, default 320) with SoundCraft's own pure-Rust MPEG-1 Layer III encoder: joint stereo, bit reservoir, scalefactor noise shaping; other session rates are resampled to 44.1/48 kHz and surround mixes fold to stereo. Also `soundcraft-cli convert … out.mp3 --bitrate`. AAC remains (G-21). No readiness percentage change.
 - **2026-10-18:** Mono audio devices receive the average of the stereo channels before output clipping, retaining right-only audio. Surround mixes use the same average after their ITU stereo fold-down. Regression tests cover channel balance, polarity cancellation, clipping, centered mono tracks, each 5.1 channel and several callback sizes. No readiness percentage change.
 - **2026-10-16:** Master fader volume automation uses each render block's actual last sample, matching track faders. Breakpoints in the next block no longer pull the preceding block's level toward them, and ramps reach their last-sample value. Regression tests cover nonzero starts, one-sample callbacks and several block sizes. No readiness percentage change.
 - **2026-10-16:** Aux, folder and master latency calculations exclude inserts already taken out for producing NaN or infinity, matching audio tracks. Subsequent blocks no longer compensate for an insert that is bypassed after failure. Regression tests check impulse timing, healthy insert latency and reset/retry at 64- and 512-sample blocks. No readiness percentage change.
@@ -161,6 +162,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | trivial | Progress log: MP3 bounce |
 | 2026-10-18 | trivial | Mono device playback retains both stereo sides and surround fold-down channels; readiness estimates unchanged |
 | 2026-10-16 | trivial | Master volume automation block boundaries corrected; readiness estimates unchanged |
 | 2026-10-16 | trivial | Failed inserts no longer contribute aux, folder or master latency after containment; readiness estimates unchanged |
