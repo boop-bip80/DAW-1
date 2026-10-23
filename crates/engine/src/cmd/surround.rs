@@ -184,6 +184,7 @@ mod tests {
         assert!(e.session().track(t).unwrap().mixer.surround.is_none());
         // Sends.
         assert!(e.execute("mix.send_surround_pan", &json!({"track": t.0, "slot": "a", "x": 1.0})).is_err(), "empty slot");
+        e.execute("mix.new_bus", &json!({"name": "FX"})).unwrap();
         e.execute("mix.send", &json!({"track": t.0, "slot": 0, "bus": "FX"})).unwrap();
         e.execute("mix.send_surround_pan", &json!({"track": t.0, "slot": "a", "x": 1.0, "y": -1.0})).unwrap();
         let snd = e.session().track(t).unwrap().mixer.sends[0].clone().unwrap();
