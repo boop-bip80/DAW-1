@@ -7,6 +7,11 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    // Cloud
+    ("cloud.open", "Open from the Cloud", "", None),
+    ("cloud.save", "Save to the Cloud", "", None),
+    ("cloud.save_as", "Save to the Cloud As…", "", None),
+    ("cloud.link", "Link a Cloud Account", "", None),
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
@@ -221,9 +226,14 @@ pub fn tree() -> Vec<MenuNode> {
 
 pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::current();
-    egui::Panel::top("menu_bar").exact_size(24.0).frame(egui::Frame::NONE.fill(t.menu_bar).inner_margin(egui::Margin::symmetric(8, 2))).show(
-        ui,
-        |ui| {
+    // Height: accommodate the 26 px account badge / presence strip when a cloud
+    // service is configured; keep the compact 24 px bar when it is not.
+    let cloud_active = crate::cloud::available(app);
+    let bar_height = if cloud_active { 28.0 } else { 24.0 };
+    egui::Panel::top("menu_bar")
+        .exact_size(bar_height)
+        .frame(egui::Frame::NONE.fill(t.menu_bar).inner_margin(egui::Margin::symmetric(8, 1)))
+        .show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("SoundCraft", |ui| {
                     if ui.button("About SoundCraft").clicked() {
@@ -277,11 +287,38 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     if app.ui.window == MainWindow::Edit || app.ui.mix_separate { "Edit" } else { "Mix" }
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Title at the far right (first added in RTL = rightmost).
                     ui.label(egui::RichText::new(title).color(t.text_dim));
+                    ui.add_space(8.0);
+                    if cloud_active {
+                        // Cloud controls need the button frames and fills that
+                        // MenuBar's flat menu_style suppresses. A scope restores
+                        // button_frame without touching the menu items to the left.
+                        //
+                        // RTL group order (visual, left → right): Share · Account · title
+                        //   — account at outer edge (adjacent to title), Share inward.
+                        // All gaps inside the group are 8 px.
+                        ui.scope(|ui| {
+                            ui.visuals_mut().button_frame = true;
+                            // Account badge — outer edge, immediately left of title gap.
+                            crate::cloud::who(app, ui);
+                            ui.add_space(8.0);
+                            // Share split-button: only when the provider confirms it
+                            // supports sharing. Preserve the return value — copy
+                            // formats become actionable when copies is non-empty.
+                            if crate::cloud::shares(app) {
+                                let _copy = crate::cloud::share_button(
+                                    app,
+                                    ui,
+                                    &crate::cloud::copies(),
+                                );
+                                ui.add_space(8.0);
+                            }
+                        });
+                    }
                 });
             });
-        },
-    );
+        });
 }
 
 /// Track › Instrument: the instrument picker for the selected instrument track (#374).
@@ -502,6 +539,41 @@ fn wants_dialog(id: &str) -> bool {
 
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
+    // Cloud commands: open the cloud overlay, trigger saves, link an account.
+    match id {
+        "cloud.open" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            app.ui.show_cloud = true;
+            app.ui.cloud_page = crate::cloud::CloudPage::Open;
+            crate::cloud::start(app);
+            return Some(Ok(json!({"cloud": "open"})));
+        }
+        "cloud.save" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            return Some(crate::cloud::save(app).map(|_| json!({"cloud": "saving"})));
+        }
+        "cloud.save_as" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            app.ui.show_cloud = true;
+            app.ui.cloud_page = crate::cloud::CloudPage::SaveAs;
+            crate::cloud::start(app);
+            return Some(Ok(json!({"cloud": "save_as"})));
+        }
+        "cloud.link" => {
+            if !crate::cloud::available(app) {
+                return Some(Err(crate::cloud::UNAVAILABLE.to_owned()));
+            }
+            crate::cloud::link(app);
+            return Some(Ok(json!({"cloud": "linking"})));
+        }
+        _ => {}
+    }
     if matches!(id, "ui.dock" | "ui.dock.reset") {
         return Some(crate::docking::command(app, id == "ui.dock.reset", p));
     }
@@ -699,6 +771,35 @@ pub fn parity() -> Value {
 mod tests {
     use super::*;
     use crate::{Services, SoundApp};
+
+    // ---------------------------------------------------------------- title-bar layout contracts
+
+    /// SoundCraft has no Save-a-Copy variants; copies() must stay empty so the
+    /// share_button return value matters only when this changes in the future.
+    /// Guards against accidentally dropping the return when copies grow.
+    #[test]
+    fn copies_is_always_empty_for_soundcraft() {
+        assert!(
+            crate::cloud::copies().is_empty(),
+            "copies() became non-empty — share_button return must now be acted on, not dropped"
+        );
+    }
+
+    /// Without a configured cloud backend the shares() predicate must return
+    /// false, which suppresses the share split-button entirely.
+    #[test]
+    fn shares_predicate_is_false_without_cloud_backend() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        assert!(!crate::cloud::shares(&mut app), "shares() must be false when no cloud backend is wired");
+    }
+
+    /// No-cloud: available() must return false for a default app. This is the
+    /// gating condition for the 24 px compact bar and the absence of cloud controls.
+    #[test]
+    fn cloud_unavailable_without_backend() {
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        assert!(!crate::cloud::available(&app), "cloud must be unavailable without a backend");
+    }
 
     #[test]
     fn mix_view_aliases_are_allocated_once() {

@@ -647,6 +647,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         keep = false;
         app.dialogs.after_save = None;
         app.dialogs.pending_session = None;
+        app.pending_cloud_open = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::new("dlg_cancel")));
     }
     if let Some(then) = save_first {

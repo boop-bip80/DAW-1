@@ -22,9 +22,14 @@ egui = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
 rfd = { workspace = true }
+# Cloud storage transport: the async CollabCraft client for the browser build.
+# The session rides the same-origin cookie the service set at sign-in; there
+# is no device flow and no token file.
+craft-cloud-client.workspace = true
+collabcraft-share.workspace = true
 js-sys = "0.3"
 # `wgpu` pulls egui-wgpu's defaults: WebGPU plus the WebGL2 fallback.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Location", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "CssStyleDeclaration"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Location", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "CssStyleDeclaration", "RequestInit", "RequestCredentials", "Request"] }

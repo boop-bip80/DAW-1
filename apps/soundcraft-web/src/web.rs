@@ -1,5 +1,7 @@
 //! The browser shell: the eframe web runner around [`SoundApp`].
 
+mod cloud;
+
 use soundcraft_engine::{Engine, io};
 use soundcraft_ui_egui::dialogs::Dialog;
 use soundcraft_ui_egui::sampler_window::SampleRead;
@@ -40,7 +42,12 @@ pub fn start() {
                     }
                     let engine = if query().contains("empty") { Engine::default() } else { soundcraft_engine::demo::demo_engine() };
                     let player = soundcraft_playback::Player::new(Arc::new(engine.session().clone()));
-                    let app = SoundApp::new(engine, Some(player), Services::default());
+                    let mut app = SoundApp::new(engine, Some(player), Services::default());
+                    let backend = cloud::Service::new(cc.egui_ctx.clone());
+                    app.cloud.connect(backend);
+                    app.share.connect(
+                        collabcraft_share::CollabCraft::from_fn(|| Some(craft_cloud_client::Client::from_page())).for_app("soundcraft"),
+                    );
                     Ok(Box::new(WebShell { app, inbox: Rc::default(), samples: Rc::default() }))
                 }),
             )

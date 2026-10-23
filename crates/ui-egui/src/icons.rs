@@ -171,6 +171,14 @@ pub fn draw(painter: &Painter, r: Rect, name: &str, c: Color32) {
                 painter.line_segment([p(r, x, 0.5 - h), p(r, x, 0.5 + h)], s);
             }
         }
+        "folder" => {
+            // A simple open folder: a rectangular body with a tabbed top-left flap.
+            let tab_r = Rect::from_min_max(p(r, 0.16, 0.28), p(r, 0.44, 0.42));
+            let body_r = Rect::from_min_max(p(r, 0.16, 0.40), p(r, 0.84, 0.76));
+            painter.rect_stroke(tab_r, 2.0, s, egui::StrokeKind::Outside);
+            painter.rect_filled(body_r, 2.0, c.gamma_multiply(0.25));
+            painter.rect_stroke(body_r, 2.0, s, egui::StrokeKind::Middle);
+        }
         _ => {
             painter.rect_stroke(r.shrink(r.width() * 0.25), 1.0, s, egui::StrokeKind::Middle);
         }

@@ -11,6 +11,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod cloud;
 mod config;
 mod control_server;
 #[cfg(any(target_os = "windows", test))]
@@ -161,6 +162,19 @@ fn save_prefs(ui: &UiState) {
 
 fn services() -> Services {
     Services {
+        open_url: Some(Box::new(|url: &str| {
+            // Same quoting trick as cloud::open_browser: percent-encode `"` so
+            // it cannot break the cmd.exe quoted argument on Windows.
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt as _;
+                let _ = std::process::Command::new("cmd").raw_arg(format!("/C start \"\" \"{}\"", url.replace('"', "%22"))).spawn();
+            }
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(url).spawn();
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        })),
         pick_open: Some(Box::new(|purpose: &str, _exts: &[&str]| {
             let d = rfd::FileDialog::new();
             let d = match purpose {
@@ -275,6 +289,16 @@ fn main() -> eframe::Result {
             app.preset_dir = prefs_path().and_then(|p| p.parent().map(|d| d.join("Presets")));
             app.extra.ui_scale = prefs.ui_scale;
             app.ui = prefs;
+            // Cloud Open / Save / Share / account / presence. The worker blocks,
+            // so every call runs on its own thread. Without a service configured
+            // nothing cloud-shaped is offered in the interface.
+            if let Some(backend) = cloud::service(cc.egui_ctx.clone()) {
+                app.cloud.connect(backend);
+                if cloud::has_saved_token() {
+                    soundcraft_ui_egui::cloud::start(&mut app);
+                }
+            }
+            app.share.connect(collabcraft_share::CollabCraft::from_fn(cloud::client));
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
                 app = app.with_control(rx);

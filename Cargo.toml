@@ -36,20 +36,33 @@ rayon = "1"
 proptest = "1"
 
 # audio
-symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "wav", "pcm", "aiff", "isomp4", "aac", "alac", "adpcm", "caf", "mkv"] }
+# Main's dependabot bump to 0.6.1 left audio-io on the 0.5 API. Stay on 0.5 until that port lands.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "wav", "pcm", "aiff", "isomp4", "aac", "alac", "adpcm", "caf", "mkv"] }
 rustfft = "6"
 # Session bundles (one file holding a session and its audio, for the browser): stored entries only.
 zip = { version = "9", default-features = false }
-cpal = "0.18"
+cpal = "0.16"
 
 # Which file paths stored in a session may be opened.
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "82a24b006eefa036b43c09a67fb9a3fbd17ffe63" }
 
 # ui
-craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675", features = ["serde"] }
-egui = "0.37"
-eframe = { version = "0.37", default-features = false }
-egui_kittest = "0.37"
+# Pinned at the same rev every CollabCraft-integrated Craft app uses so all
+# crates resolve to a single copy. Cloud and presence are feature-gated; only
+# the crates that draw cloud UI enable them.
+# Main moved egui to 0.37; craft-ui cloud still targets 0.36, so stay on 0.36 until #160 lands.
+craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454", features = ["serde"] }
+craft-cloud = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "289d562cc6e8b567819aee51f759a78f41a65454" }
+# How every Craft app desktop host reaches CollabCraft: blocking client for the
+# worker thread (desktop) and async client for the browser.  No provider
+# credential, no provider URL and no provider protocol live in this workspace.
+craft-cloud-client = { git = "https://github.com/wdunn001/collab-craft", rev = "80bfaec" }
+# Shared editing relay client (presence + real-time co-editing hand-off).
+craft-collab = { git = "https://github.com/wdunn001/collab-craft", rev = "80bfaec", features = ["native-hub"] }
+collabcraft-share = { git = "https://github.com/wdunn001/collab-craft", rev = "80bfaec" }
+egui = "0.36"
+eframe = { version = "0.36", default-features = false }
+egui_kittest = "0.36"
 rfd = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
