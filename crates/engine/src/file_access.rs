@@ -459,6 +459,21 @@ mod tests {
                 }
             }
         }
+        /// True when the line uses the file system directly. `fs::` counts only at an identifier
+        /// boundary, so a module path such as `prefs::Store` is not mistaken for `std::fs`.
+        fn touches_the_filesystem(line: &str) -> bool {
+            let mut rest = line;
+            while let Some(at) = rest.find("fs::") {
+                let before = rest[..at].chars().next_back();
+                if !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return true;
+                }
+                rest = &rest[at + 3..];
+            }
+            ["std::fs", "File::open", "File::create", "OpenOptions", ".is_file()", ".exists()", ".is_dir()", "canonicalize"]
+                .iter()
+                .any(|w| line.contains(w))
+        }
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = vec![];
         walk(&src, &mut files);
@@ -479,11 +494,7 @@ mod tests {
             let code = text.split("#[cfg(test)]").next().unwrap_or("");
             for (n, line) in code.lines().enumerate() {
                 let line = line.trim_start();
-                let touches =
-                    ["std::fs", "fs::", "File::open", "File::create", "OpenOptions", ".is_file()", ".exists()", ".is_dir()", "canonicalize"]
-                        .iter()
-                        .any(|w| line.contains(w));
-                if !line.starts_with("//") && touches {
+                if !line.starts_with("//") && touches_the_filesystem(line) {
                     offenders.push(format!("{}:{}: {line}", path.display(), n + 1));
                 }
             }

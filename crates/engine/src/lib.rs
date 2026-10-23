@@ -17,8 +17,6 @@ pub mod inspect;
 pub mod io;
 pub mod prefs;
 pub mod score;
-#[cfg(test)]
-mod test_scratch;
 
 use serde_json::{Value, json};
 use soundcraft_model::{Clip, Session, TrackId, ZoomState};
@@ -487,6 +485,11 @@ fn install_panic_hook() {
 fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into())
 }
+
+/// Test-only scratch folder: creates the directory tests write into, not file access a command
+/// can reach. Below the last non-test item so the file-access audit scan sees the whole file.
+#[cfg(test)]
+mod test_scratch;
 
 #[cfg(test)]
 mod merge_tests {
