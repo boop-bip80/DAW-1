@@ -1503,8 +1503,9 @@ fn grid_lines(painter: &egui::Painter, s: &Session, tl: Rect, lane: Rect) {
     }
 }
 
-fn clip_name_height(s: &Session, lane: Rect) -> f32 {
-    if lane.height() >= 40.0 && s.edit.flag("view.clip.name") { 13.0 } else { 0.0 }
+/// Whether clips show their name (View › Clip › Name) in a lane tall enough to carry it.
+fn clip_name_shown(s: &Session, lane: Rect) -> bool {
+    lane.height() >= 40.0 && s.edit.flag("view.clip.name")
 }
 
 fn fade_curve_points(fade: soundcraft_model::Fade, fade_in: bool, a: f32, b: f32, body: Rect, pixels_per_point: f32) -> Vec<Pos2> {
@@ -1583,16 +1584,15 @@ fn grid_veil(line: Color32, bg: Color32) -> Color32 {
 }
 
 fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, clips: &[Clip], clip: &Clip, tl: Rect, lane: Rect, dim: bool) {
-    let x0 = x_of(s, tl, clip.start);
-    let x1 = x_of(s, tl, clip.end()).max(x0 + 1.0);
-    let r = Rect::from_min_max(pos2(x0, lane.min.y + 1.0), pos2(x1, lane.max.y - 1.0));
+    let r = clip_rect(s, tl, lane, clip);
+    let (x0, x1) = (r.min.x, r.max.x);
     let selected = s.edit.selected_clips.contains(&clip.id)
         || (s.edit.selected_tracks.contains(&track.id)
             && !s.edit.selection.is_empty()
             && s.edit.selection.start <= clip.start
             && s.edit.selection.end >= clip.end());
     let color = clip.color.unwrap_or(track.color);
-    let (mut body, bar, mut wave) = clip_colors(color, selected);
+    let (mut body, _, mut wave) = clip_colors(color, selected);
     if clip.muted || dim {
         body = body.gamma_multiply(0.45);
         wave = Color32::from_rgb(70, 70, 70);
@@ -1609,20 +1609,8 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     } else {
         painter.rect(r, corners, body, outline, StrokeKind::Inside);
     }
-    let name_h = clip_name_height(s, lane);
-    if name_h > 0.0 {
-        let nb = Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + name_h));
-        painter.rect_filled(nb, CornerRadius { sw: 0, se: 0, ..corners }, if clip.muted { Color32::from_rgb(70, 70, 70) } else { bar });
-        let name_clip = nb.intersect(lane);
-        painter.with_clip_rect(name_clip).text(
-            pos2(nb.min.x.max(lane.min.x) + 4.0, nb.center().y),
-            Align2::LEFT_CENTER,
-            &clip.name,
-            bold(10.5),
-            Color32::from_rgb(12, 12, 12),
-        );
-    }
-    let body_r = Rect::from_min_max(pos2(r.min.x, r.min.y + name_h), r.max);
+    // The body is the whole clip: the name is a small pill drawn over it (see `draw_clip_pills`).
+    let body_r = r;
     let vis = body_r.intersect(lane);
     // The waveform and fade curve share the same temporary envelope every frame.
     let (fade_in, fade_out) = clip_preview_fades(clip, app.gesture.as_ref().filter(|_| !dim));
@@ -1744,9 +1732,6 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     }
     // Optional clip overlays (View › Clip).
     let ov = Color32::from_rgb(16, 16, 16);
-    if s.edit.flag("view.clip.rating") && clip.rating > 0 && name_h > 0.0 {
-        painter.text(pos2(r.max.x - 18.0, r.min.y + 7.0), Align2::RIGHT_CENTER, "★".repeat(usize::from(clip.rating.min(5))), regular(9.0), ov);
-    }
     if s.edit.flag("view.clip.sync_point") && clip.sync_point > 0 {
         let x = x_of(s, tl, clip.start + clip.sync_point);
         painter.add(Shape::convex_polygon(
@@ -1754,7 +1739,7 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
             Color32::WHITE,
             Stroke::NONE,
         ));
-        painter.line_segment([pos2(x, r.min.y + name_h), pos2(x, r.max.y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+        painter.line_segment([pos2(x, r.min.y), pos2(x, r.max.y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
     }
     let time_text = if s.edit.flag("view.clip.time.current") {
         Some(s.format_position(clip.start, s.edit.main_counter))
@@ -1791,14 +1776,100 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
             }
         }
     }
-    if clip.edit_locked || clip.time_locked {
-        painter.text(pos2(r.max.x - 10.0, r.min.y + 7.0), Align2::CENTER_CENTER, "🔒", regular(9.0), Color32::WHITE);
+    // Video clips get their pills from `video_track::draw_lane`, after their thumbnails.
+    if !clip.is_video() {
+        draw_clip_labels(painter, s, tl, lane, clip);
     }
     if cut.left {
-        // The cut's one line, on top of the name bar and waveform so it runs the full height.
+        // The cut's one line, on top of the waveform so it runs the full height.
         painter.rect_filled(Rect::from_min_size(r.min, vec2(1.0, r.height())), 0.0, CLIP_OUTLINE);
     }
     let _ = app;
+}
+
+/// Where a clip sits in its lane: one point in from the lane's top and bottom, at least one point wide.
+fn clip_rect(s: &Session, tl: Rect, lane: Rect, clip: &Clip) -> Rect {
+    let x0 = x_of(s, tl, clip.start);
+    let x1 = x_of(s, tl, clip.end()).max(x0 + 1.0);
+    Rect::from_min_max(pos2(x0, lane.min.y + 1.0), pos2(x1, lane.max.y - 1.0))
+}
+
+/// The pills of `clip` (name, marks). Drawn right after the clip itself, so clips and overlays drawn later cover them.
+pub(crate) fn draw_clip_labels(painter: &egui::Painter, s: &Session, tl: Rect, lane: Rect, clip: &Clip) {
+    let r = clip_rect(s, tl, lane, clip);
+    if r.max.x < lane.min.x || r.min.x > lane.max.x {
+        return;
+    }
+    let show_name = clip_name_shown(s, lane);
+    let marks = clip_marks(clip, show_name && s.edit.flag("view.clip.rating"));
+    draw_clip_pills(painter, lane, r, show_name.then_some(clip.name.as_str()), &marks);
+}
+
+/// The marks a clip carries at its top-right: its star rating and a lock when edit- or time-locked.
+fn clip_marks(clip: &Clip, show_rating: bool) -> String {
+    let mut marks = if show_rating && clip.rating > 0 { "★".repeat(usize::from(clip.rating.min(5))) } else { String::new() };
+    if clip.edit_locked || clip.time_locked {
+        if !marks.is_empty() {
+            marks.push(' ');
+        }
+        marks.push('🔒');
+    }
+    marks
+}
+
+/// Gap between a pill and the clip outline's inner edge (so the pill sits 1 pt inside the outline).
+const PILL_INSET: f32 = 2.0;
+const PILL_HEIGHT: f32 = 13.0;
+/// Horizontal padding between a pill's edge and its text.
+const PILL_PAD: f32 = 3.0;
+/// The narrowest name pill worth drawing: its padding plus about one letter.
+const PILL_MIN_WIDTH: f32 = 12.0;
+/// Half-transparent black behind white text, readable on the light and the dark clip bodies alike.
+const PILL_BG: Color32 = Color32::from_black_alpha(125);
+
+/// Width of the name pill: the text plus its padding, capped to the `room` the clip leaves it (the text is then
+/// cut cleanly at the pill's edge, with no ellipsis). `None` when there is no room for anything useful.
+fn name_pill_width(room: f32, text_w: f32) -> Option<f32> {
+    if room.is_nan() || room < PILL_MIN_WIDTH {
+        return None;
+    }
+    Some((text_w.max(0.0) + 2.0 * PILL_PAD).min(room))
+}
+
+/// Left edge of the marks pill, which sits at the clip's top-right: `None` when the clip is too narrow to hold it
+/// (it would veil the clip), where `left` is the leftmost x a pill may use.
+fn marks_pill_left(left: f32, clip_right: f32, w: f32) -> Option<f32> {
+    let x = clip_right - PILL_INSET - w;
+    (x >= left).then_some(x)
+}
+
+/// The clip's name as a small rounded pill at its top-left, and its marks (rating, lock) as a matching pill at the
+/// top-right. The name keeps clear of the marks and floats to the left edge of the lane when the clip starts
+/// off-screen, so it stays readable while scrolling.
+fn draw_clip_pills(painter: &egui::Painter, lane: Rect, r: Rect, name: Option<&str>, marks: &str) {
+    let p = painter.with_clip_rect(painter.clip_rect().intersect(r));
+    let pill = |rect: Rect, galley: Arc<egui::Galley>| {
+        p.rect_filled(rect, CornerRadius::same(3), PILL_BG);
+        let at = pos2(rect.min.x + PILL_PAD, rect.center().y - galley.size().y * 0.5);
+        p.with_clip_rect(p.clip_rect().intersect(rect)).galley(at, galley, Color32::WHITE);
+    };
+    let top = r.min.y + PILL_INSET;
+    let left = r.min.x.max(lane.min.x) + PILL_INSET;
+    let mut right = r.max.x.min(lane.max.x) - PILL_INSET;
+    if !marks.is_empty() {
+        let galley = p.layout_no_wrap(marks.to_owned(), regular(9.0), Color32::WHITE);
+        let w = galley.size().x + 2.0 * PILL_PAD;
+        if let Some(x) = marks_pill_left(left, r.max.x, w) {
+            right = right.min(x - PILL_INSET);
+            pill(Rect::from_min_size(pos2(x, top), vec2(w, PILL_HEIGHT)), galley);
+        }
+    }
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        let galley = p.layout_no_wrap(name.to_owned(), bold(10.0), Color32::WHITE);
+        if let Some(w) = name_pill_width(right - left, galley.size().x) {
+            pill(Rect::from_min_size(pos2(left, top), vec2(w, PILL_HEIGHT)), galley);
+        }
+    }
 }
 
 /// The 1 pt outline around a clip.
@@ -1964,7 +2035,7 @@ fn fade_handle_at(s: &Session, tl: Rect, lane: Rect, clip: &Clip, p: Pos2) -> Op
     if clip.length <= 0 || clip.end() <= clip.start {
         return None;
     }
-    let y = lane.min.y + 1.0 + clip_name_height(s, lane);
+    let y = lane.min.y + 1.0;
     [(true, clip.fade_in), (false, clip.fade_out)]
         .into_iter()
         .filter(|(_, fade)| fade.len > 0)
@@ -1995,7 +2066,7 @@ fn fade_midpoint(s: &Session, tl: Rect, lane: Rect, clip: &Clip, fade_in: bool) 
     if b - a < 32.0 {
         return None;
     }
-    let body = Rect::from_min_max(pos2(a, lane.min.y + 1.0 + clip_name_height(s, lane)), pos2(b, lane.max.y - 1.0));
+    let body = Rect::from_min_max(pos2(a, lane.min.y + 1.0), pos2(b, lane.max.y - 1.0));
     let p = fade_control_position(fade, a, b, body);
     lane.contains(p).then_some(p)
 }
@@ -2193,7 +2264,7 @@ fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, lane: Rect, 
     {
         let fade = if fade_in { c.fade_in } else { c.fade_out };
         let anchor = (origin.y, fade.gain(0.5));
-        let height = (lane.height() - 2.0 - clip_name_height(&s, lane)).max(1.0);
+        let height = (lane.height() - 2.0).max(1.0);
         app.gesture = Some(Gesture::FadeCurve { clip: c.id, fade_in, curvature: fade_curve_drag_value(fade, anchor, height, p.y), anchor, height });
         ui.ctx().request_repaint();
     } else if resp.drag_started()
@@ -2926,6 +2997,80 @@ mod tests {
     }
 
     #[test]
+    fn name_pill_is_as_wide_as_its_text_and_cut_cleanly_on_short_clips() {
+        // Room to spare: the text plus its padding on both sides.
+        assert_eq!(name_pill_width(200.0, 50.0), Some(50.0 + 2.0 * PILL_PAD));
+        // A short clip caps the pill at the room it leaves; the text is then cut at the pill's edge.
+        assert_eq!(name_pill_width(30.0, 80.0), Some(30.0));
+        assert_eq!(name_pill_width(PILL_MIN_WIDTH, 80.0), Some(PILL_MIN_WIDTH));
+        // Too narrow to show anything useful, or nonsense numbers: no pill.
+        assert_eq!(name_pill_width(PILL_MIN_WIDTH - 0.1, 80.0), None);
+        assert_eq!(name_pill_width(-5.0, 80.0), None);
+        assert_eq!(name_pill_width(f32::NAN, 80.0), None);
+        // A bogus text width never makes a negative or NaN pill.
+        assert_eq!(name_pill_width(100.0, f32::NAN), Some(2.0 * PILL_PAD));
+        assert_eq!(name_pill_width(100.0, -40.0), Some(2.0 * PILL_PAD));
+    }
+
+    #[test]
+    fn marks_list_the_rating_and_the_lock() {
+        let mut clip = test_clip(1, 0, 100);
+        assert_eq!(clip_marks(&clip, true), "");
+        clip.rating = 3;
+        assert_eq!(clip_marks(&clip, true), "★★★");
+        assert_eq!(clip_marks(&clip, false), "");
+        clip.edit_locked = true;
+        assert_eq!(clip_marks(&clip, true), "★★★ 🔒");
+        assert_eq!(clip_marks(&clip, false), "🔒");
+        clip.rating = 200;
+        assert_eq!(clip_marks(&clip, true), "★★★★★ 🔒");
+    }
+
+    #[test]
+    fn the_clip_name_is_a_pill_over_the_waveform_not_a_bar() {
+        for show_name in [true, false] {
+            let mut h = smart_demo();
+            h.state_mut().engine.execute("view.clip_name", &json!({"value": show_name})).unwrap();
+            h.step();
+            let tl = timeline(&h);
+            let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
+            let s = h.state().engine.session();
+            let (xs, xe) = (x_of(s, tl, clip.start), x_of(s, tl, clip.end()));
+            let clip_rect = Rect::from_min_max(pos2(xs, lane.min.y), pos2(xe, lane.max.y));
+            let shapes = &h.output().shapes;
+            let pills: Vec<Rect> = shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    Shape::Rect(r) if r.fill == PILL_BG && clip_rect.contains_rect(r.rect) => Some(r.rect),
+                    _ => None,
+                })
+                .collect();
+            if !show_name {
+                assert!(pills.is_empty(), "names are off");
+                continue;
+            }
+            assert_eq!(pills.len(), 1, "one pill per clip");
+            let pill = pills[0];
+            // At the top-left, 1 pt inside the outline, as wide as its text plus padding: far from a full-width bar.
+            assert_eq!(pill.min, pos2(xs + PILL_INSET, lane.min.y + 1.0 + PILL_INSET));
+            assert_eq!(pill.height(), PILL_HEIGHT);
+            let text_w = shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(t) if t.galley.text() == clip.name && pill.contains(t.pos) => Some(t.galley.size().x),
+                    _ => None,
+                })
+                .expect("the name is drawn on the pill");
+            assert_eq!(pill.width(), text_w + 2.0 * PILL_PAD);
+            assert!(pill.width() < clip_rect.width() * 0.5);
+        }
+    }
+
+    fn test_clip(id: u64, start: Samples, len: Samples) -> Clip {
+        Clip::audio(ClipId(id), "c", soundcraft_model::SourceId(0), 0, start, len)
+    }
+
+    #[test]
     fn cut_is_found_among_the_playlist_neighbours() {
         // Selection never enters: it recolours the body, so a selected clip gets the same edges as any other.
         let clips = [test_clip(1, 0, 100), test_clip(2, 100, 100), test_clip(3, 200, 100), test_clip(4, 400, 50)];
@@ -2959,8 +3104,48 @@ mod tests {
         assert_eq!(clip_cut_in(&[], &test_clip(9, 0, 100)), ALONE);
     }
 
-    fn test_clip(id: u64, start: Samples, len: Samples) -> Clip {
-        Clip::audio(ClipId(id), "c", soundcraft_model::SourceId(0), 0, start, len)
+    #[test]
+    fn marks_pill_is_hidden_when_the_clip_is_too_narrow_for_it() {
+        // A 60 pt clip from x=100 (pills start at 102) holds a 30 pt pill at its right end.
+        assert_eq!(marks_pill_left(102.0, 160.0, 30.0), Some(128.0));
+        // Exactly full: the pill's left edge meets the leftmost x.
+        assert_eq!(marks_pill_left(102.0, 134.0, 30.0), Some(102.0));
+        // Any narrower and it would veil the clip: hidden.
+        assert_eq!(marks_pill_left(102.0, 133.0, 30.0), None);
+        assert_eq!(marks_pill_left(102.0, f32::NAN, 30.0), None);
+    }
+
+    #[test]
+    fn an_overlapping_clip_covers_the_pill_of_the_clip_below() {
+        let mut h = smart_demo();
+        h.step();
+        let tl = timeline(&h);
+        let (below, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
+        // A copy on top (last in the playlist), starting at the same place.
+        let s = h.state_mut().engine.session_mut();
+        let (track, _) = s.find_clip(below.id).unwrap();
+        let id = s.new_clip_id();
+        let top = Clip { id, name: "Top".into(), ..below.clone() };
+        s.track_mut(track).unwrap().playlist_mut().unwrap().clips.push(top);
+        h.step();
+        h.step();
+        let s = h.state().engine.session();
+        let at = pos2(x_of(s, tl, below.start) + PILL_INSET, lane.min.y + 1.0 + PILL_INSET);
+        let shapes = &h.output().shapes;
+        let pills: Vec<(usize, Rect)> = shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, shape)| match &shape.shape {
+                Shape::Rect(r) if r.fill == PILL_BG && r.rect.min == at => Some((i, r.rect)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pills.len(), 2, "both clips draw a pill at the same spot");
+        let ((lower, pill), (upper, _)) = (pills[0], pills[1]);
+        assert!(
+            shapes[lower + 1..upper].iter().any(|shape| matches!(&shape.shape, Shape::Rect(r) if r.fill != PILL_BG && r.rect.contains_rect(pill))),
+            "the top clip's body is painted between the two pills, so it hides the lower pill"
+        );
     }
 
     fn harness(n: usize) -> Harness<'static, SoundApp> {
@@ -3658,7 +3843,7 @@ mod tests {
                             h.step();
                             assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::ResizeVertical);
                             start_drag(&mut h, control);
-                            let to = control - vec2(0.0, (lane.height() - 2.0 - clip_name_height(&before, lane)) * 0.1);
+                            let to = control - vec2(0.0, (lane.height() - 2.0) * 0.1);
                             h.hover_at(to);
                             h.step();
                             assert!(
