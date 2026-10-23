@@ -523,6 +523,48 @@ impl MixEngine {
         self.main_meter = StripMeter::default();
     }
 
+    /// Release every held note on every instrument now. Unlike `reset`, this leaves plugin state,
+    /// the playback position and note chasing alone, so queued releases still sound out.
+    pub fn all_notes_off(&mut self) {
+        for st in self.strips.values_mut() {
+            if let Some(i) = &mut st.instrument {
+                i.plugin.all_notes_off();
+            }
+            st.held.clear();
+        }
+    }
+
+    /// Give every instrument exactly one processing pass over silence, so a host that delivers
+    /// queued events on its next `process` (a `reset` or `all_notes_off` only queues the release)
+    /// gets to send them, even when the engine would otherwise not run (playback ended, stopped
+    /// with nothing monitoring). `frames` is clamped to `max_block`. Nothing is scheduled, the
+    /// position is untouched, inserts do not run, and the output is discarded. Allocation-free.
+    pub fn flush_releases(&mut self, frames: usize) {
+        let frames = frames.min(self.max_block);
+        for st in self.strips.values_mut() {
+            let Some(inst) = st.instrument.as_mut().filter(|i| !i.failed) else { continue };
+            // Defensive: `sync` sizes `buf` and `scratch` to `max_block`, but a plug-in must never
+            // be handed a buffer shorter than `frames`, so clamp to the shortest one.
+            if st.buf.len() >= 2 {
+                let frames = frames.min(st.buf.iter().map(Vec::len).min().unwrap_or(0));
+                for c in st.buf.iter_mut() {
+                    c.iter_mut().take(frames).for_each(|x| *x = 0.0);
+                }
+                inst.plugin.process(&mut st.buf, frames);
+            } else if let Some(c0) = st.buf.first_mut() {
+                let mut io = [std::mem::take(c0), std::mem::take(&mut st.scratch)];
+                let frames = frames.min(io[0].len()).min(io[1].len());
+                for c in io.iter_mut() {
+                    c.iter_mut().take(frames).for_each(|x| *x = 0.0);
+                }
+                inst.plugin.process(&mut io, frames);
+                let [a, b] = io;
+                *c0 = a;
+                st.scratch = b;
+            }
+        }
+    }
+
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
     /// call outside the realtime thread when the document changes, or let `render` do it.
     pub fn sync(&mut self, s: &Session) {
@@ -547,6 +589,11 @@ impl MixEngine {
             let strip = self.strips.entry(t.id).or_insert_with(Strip::new);
             if strip.buf.len() != ch || strip.buf.first().map_or(0, Vec::len) != mb {
                 strip.buf = vec![vec![0.0; mb]; ch];
+            }
+            // The mono instrument path swaps `scratch` in as a second channel, and
+            // `flush_releases` can run before any `render`, so size it here too.
+            if strip.scratch.len() < mb {
+                strip.scratch.resize(mb, 0.0);
             }
             while strip.plugins.len() > t.mixer.inserts.len() {
                 let p = strip.plugins.pop().flatten();
@@ -1490,60 +1537,71 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
     let offset = midi_offset(s, t);
     let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
-    for clip in t.clips() {
-        if clip.muted {
-            continue;
-        }
-        let ClipContent::Midi { sequence } = &clip.content else { continue };
-        if !clip.range().overlaps(&Range { start: pos, end }) {
-            continue;
-        }
-        let base = s.tempo.samples_to_ticks(clip.start, sr);
-        // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
-        let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
-        let (dv, dp, dur, delay) = if s.edit.values.is_empty() {
-            (0i64, 0i64, 1.0f64, 0i64)
-        } else {
-            (
-                rtp("velocity", 0.0).clamp(-127.0, 127.0) as i64,
-                rtp("transpose", 0.0).clamp(-127.0, 127.0) as i64,
-                rtp("duration", 100.0).clamp(1.0, 1000.0) / 100.0,
-                rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
-            )
-        };
-        for n0 in &sequence.notes {
-            let mut n = *n0;
-            n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
-            n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
-            n.length = ((n.length as f64 * dur) as i64).max(1);
-            n.start = n.start.saturating_add(delay).max(0);
-            let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
-            let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
-            if on >= clip.end() {
+    // Two passes, so at any one sample offset every note-off precedes every note-on: a clip that
+    // ends where the next begins (or a repeated pitch) must not have its new note killed by the
+    // old one's release. Allocation-free; a note whose on and off share a sample keeps on-then-off.
+    for ons in [false, true] {
+        for clip in t.clips() {
+            if clip.muted {
                 continue;
             }
-            if on >= pos && on < end {
-                inst.plugin.note_on(usize::try_from(on - pos).unwrap_or(0), n.pitch, n.velocity);
-                if !held.contains(&n.pitch) && held.len() < 128 {
-                    held.push(n.pitch);
+            let ClipContent::Midi { sequence } = &clip.content else { continue };
+            // A note-off is clamped to `clip.end()`, which the half-open range excludes: when that
+            // sample is the first of this block (`pos == clip.end()`) the clip still has to be visited
+            // or the off is never sent and the note holds forever.
+            if clip.end() < pos || clip.start >= end {
+                continue;
+            }
+            let base = s.tempo.samples_to_ticks(clip.start, sr);
+            // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
+            let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
+            let (dv, dp, dur, delay) = if s.edit.values.is_empty() {
+                (0i64, 0i64, 1.0f64, 0i64)
+            } else {
+                (
+                    rtp("velocity", 0.0).clamp(-127.0, 127.0) as i64,
+                    rtp("transpose", 0.0).clamp(-127.0, 127.0) as i64,
+                    rtp("duration", 100.0).clamp(1.0, 1000.0) / 100.0,
+                    rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
+                )
+            };
+            for n0 in &sequence.notes {
+                let mut n = *n0;
+                n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
+                n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
+                n.length = ((n.length as f64 * dur) as i64).max(1);
+                n.start = n.start.saturating_add(delay).max(0);
+                let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
+                let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
+                if on >= clip.end() {
+                    continue;
+                }
+                if ons && on >= pos && on < end {
+                    inst.plugin.note_on(usize::try_from(on - pos).unwrap_or(0), n.pitch, n.velocity);
+                    if !held.contains(&n.pitch) && held.len() < 128 {
+                        held.push(n.pitch);
+                    }
+                }
+                if off >= pos && off < end && (ons == (off == on)) {
+                    inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
+                    held.retain(|p| *p != n.pitch);
                 }
             }
-            if off >= pos && off < end {
-                inst.plugin.note_off(usize::try_from(off - pos).unwrap_or(0), n.pitch);
-                held.retain(|p| *p != n.pitch);
-            }
-        }
-        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
-            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
-        // Events before tick 0 are what a start trim hid: they don't play.
-        for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
-            let tick = c.tick.saturating_add(delay).max(0);
-            if !near.contains(&tick) {
+            if !ons {
                 continue;
             }
-            let at = s.tempo.tick_to_samples(base.saturating_add(tick), sr);
-            if at >= pos && at < end && at < clip.end() {
-                inst.plugin.midi(usize::try_from(at - pos).unwrap_or(0), ctrl_message(c.kind, c.value, dp));
+            let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
+                ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
+            // Events before tick 0 are what a start trim hid: they don't play.
+            for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
+                let tick = c.tick.saturating_add(delay).max(0);
+                if !near.contains(&tick) {
+                    continue;
+                }
+                let at = s.tempo.tick_to_samples(base.saturating_add(tick), sr);
+                if at >= pos && at < end && at < clip.end() {
+                    inst.plugin.midi(usize::try_from(at - pos).unwrap_or(0), ctrl_message(c.kind, c.value, dp));
+                }
             }
         }
     }
@@ -2337,6 +2395,7 @@ mod tests {
     }
 
     fn add_dc_track(s: &mut Session, level: f32, frames: usize) -> TrackId {
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![level; frames]] };
         s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(buf)));
@@ -2730,6 +2789,212 @@ mod tests {
         assert_eq!(*heard.lock().unwrap(), vec![(72, 80)]);
     }
 
+    struct Ears2 {
+        inner: Box<dyn Plugin>,
+        heard: Arc<std::sync::Mutex<Vec<(&'static str, usize, u8)>>>,
+    }
+
+    impl Plugin for Ears2 {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, offset: usize, note: u8, _velocity: u8) {
+            self.heard.lock().unwrap().push(("on", offset, note));
+        }
+        fn note_off(&mut self, offset: usize, note: u8) {
+            self.heard.lock().unwrap().push(("off", offset, note));
+        }
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        on: Vec<u8>,
+        all_off: usize,
+        resets: usize,
+        processed: usize,
+        /// `(frames, shortest channel length)` of every `process` call.
+        shapes: Vec<(usize, usize)>,
+    }
+
+    struct Spy {
+        inner: Box<dyn Plugin>,
+        calls: Arc<std::sync::Mutex<Calls>>,
+    }
+
+    impl Plugin for Spy {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.calls.lock().unwrap().resets += 1;
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            {
+                let mut c = self.calls.lock().unwrap();
+                c.processed += 1;
+                c.shapes.push((frames, io.iter().map(Vec::len).min().unwrap_or(0)));
+            }
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, _offset: usize, note: u8, _velocity: u8) {
+            self.calls.lock().unwrap().on.push(note);
+        }
+        fn all_notes_off(&mut self) {
+            self.calls.lock().unwrap().all_off += 1;
+        }
+    }
+
+    #[test]
+    fn a_note_off_on_the_clip_end_block_boundary_is_sent() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears2"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        // Far longer than the clip, so the off is clamped to the clip end (sample 1024).
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 1024, seq));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears2 { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears2".into(), ch: 2, plugin: Box::new(ears) }]);
+        for pos in [0, 512, 1024] {
+            render_block(&mut eng, &s, pos);
+        }
+        assert_eq!(*heard.lock().unwrap(), vec![("on", 0, 60), ("off", 0, 60)]);
+        // Past the clip nothing more is sent.
+        render_block(&mut eng, &s, 1536);
+        assert_eq!(heard.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_note_off_at_a_clip_boundary_precedes_the_next_clips_note_on() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears2"));
+        let note = || {
+            let mut seq = soundcraft_midi::Sequence::default();
+            seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 });
+            seq
+        };
+        // The later clip is first in the playlist, so playlist order alone would send its on first.
+        let (late, early) = (s.new_clip_id(), s.new_clip_id());
+        let clips = &mut s.track_mut(t).unwrap().playlist_mut().unwrap().clips;
+        clips.push(Clip::midi(late, "b", 24_000, 24_000, note()));
+        clips.push(Clip::midi(early, "a", 0, 24_000, note()));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ears = Ears2 { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears2".into(), ch: 2, plugin: Box::new(ears) }]);
+        // One beat at 120 bpm / 48 kHz is 24 000 samples, so the boundary sits on a tick and lands
+        // at offset 256 of the block starting 256 samples before it.
+        render_block(&mut eng, &s, 0);
+        heard.lock().unwrap().clear();
+        render_block(&mut eng, &s, 23_744);
+        assert_eq!(*heard.lock().unwrap(), vec![("off", 256, 60), ("on", 256, 60)]);
+        assert_eq!(eng.strips[&t].held, vec![60]);
+    }
+
+    #[test]
+    fn all_notes_off_releases_every_held_note_without_resetting() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 48_000 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000 * 4, seq));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        render_block(&mut eng, &s, 0);
+        assert_eq!(eng.strips[&t].held, vec![60]);
+        let (offs, resets) = {
+            let c = calls.lock().unwrap();
+            assert_eq!(c.on, vec![60]);
+            (c.all_off, c.resets)
+        };
+        eng.all_notes_off();
+        let c = calls.lock().unwrap();
+        assert_eq!(c.all_off, offs + 1, "the instrument was told to release");
+        assert_eq!(c.resets, resets, "reset would discard the queued releases");
+        assert!(eng.strips[&t].held.is_empty());
+    }
+
+    #[test]
+    fn flush_releases_processes_every_instrument_once_without_scheduling() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000, seq));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        eng.ensure_synced(&s);
+        eng.flush_releases(512);
+        {
+            let c = calls.lock().unwrap();
+            assert_eq!(c.processed, 1, "one pass");
+            assert!(c.on.is_empty(), "nothing was scheduled");
+        }
+        render_block(&mut eng, &s, 0);
+        assert_eq!(calls.lock().unwrap().on, vec![60], "the position was untouched, so the first note still schedules");
+    }
+
+    #[test]
+    fn flush_releases_hands_a_mono_instrument_full_length_buffers_before_any_render() {
+        let mut s = Session::default();
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.spy"));
+        let calls = Arc::new(std::sync::Mutex::new(Calls::default()));
+        let spy = Spy { inner: soundcraft_dsp::create("gain").unwrap(), calls: Arc::clone(&calls) };
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.spy".into(), ch: 2, plugin: Box::new(spy) }]);
+        eng.ensure_synced(&s);
+        assert_eq!(eng.strips[&t].buf.len(), 1, "a mono strip");
+        eng.flush_releases(512);
+        let c = calls.lock().unwrap();
+        assert_eq!(c.shapes.len(), 1, "one pass");
+        assert_eq!(c.shapes[0].0, 512);
+        assert!(c.shapes[0].1 >= 512, "shortest channel of {} samples", c.shapes[0].1);
+    }
+
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
         let mut out = vec![vec![0.0f32; 512]; 2];
         eng.render(s, pos, 512, &mut out);
@@ -3105,6 +3370,7 @@ mod tests {
         let mut imp = vec![0.0f32; 48_000];
         imp[1000] = 1.0;
         s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![imp] })));
+        // A mono strip carrying an instrument (the one-channel buffer is what takes the scratch path).
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let bus = s.add_bus("Stem", ChannelFormat::Stereo);
         let cid = s.new_clip_id();

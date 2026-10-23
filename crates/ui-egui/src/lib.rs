@@ -1075,7 +1075,12 @@ impl SoundApp {
                     self.play_from_selection();
                 }
                 TransportRequest::Scrub(at) => self.engine.transport.position = at,
-                TransportRequest::AllNotesOff => {}
+                TransportRequest::AllNotesOff => {
+                    if let Some(p) = &self.player {
+                        p.all_notes_off();
+                    }
+                    self.ui.status = "All MIDI notes off".into();
+                }
             }
         }
         // Read back the position.
