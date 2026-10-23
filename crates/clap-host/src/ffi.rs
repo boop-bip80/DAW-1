@@ -28,6 +28,7 @@ use clap_sys::ext::params::{
     CLAP_EXT_PARAMS, clap_host_params, clap_param_clear_flags, clap_param_info, clap_param_rescan_flags, clap_plugin_params,
 };
 use clap_sys::ext::state::{CLAP_EXT_STATE, clap_host_state, clap_plugin_state};
+use clap_sys::ext::tail::{CLAP_EXT_TAIL, clap_host_tail, clap_plugin_tail};
 use clap_sys::factory::plugin_factory::{CLAP_PLUGIN_FACTORY_ID, clap_plugin_factory};
 use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
@@ -248,6 +249,7 @@ impl Bundle {
             params: std::ptr::null(),
             ports: std::ptr::null(),
             latency: std::ptr::null(),
+            tail: std::ptr::null(),
             notes: std::ptr::null(),
             state_ext: std::ptr::null(),
             gui: Arc::new(GuiLink::default()),
@@ -275,6 +277,7 @@ impl Bundle {
         inst.params = inst.extension::<clap_plugin_params>(CLAP_EXT_PARAMS);
         inst.ports = inst.extension::<clap_plugin_audio_ports>(CLAP_EXT_AUDIO_PORTS);
         inst.latency = inst.extension::<clap_plugin_latency>(CLAP_EXT_LATENCY);
+        inst.tail = inst.extension::<clap_plugin_tail>(CLAP_EXT_TAIL);
         inst.notes = inst.extension::<clap_plugin_note_ports>(CLAP_EXT_NOTE_PORTS);
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
@@ -472,6 +475,11 @@ static HOST_LOG: clap_host_log = clap_host_log { log: Some(host_log) };
 static HOST_PARAMS: clap_host_params =
     clap_host_params { rescan: Some(host_params_rescan), clear: Some(host_params_clear), request_flush: Some(host_params_request_flush) };
 static HOST_LATENCY: clap_host_latency = clap_host_latency { changed: Some(host_latency_changed) };
+static HOST_TAIL: clap_host_tail = clap_host_tail { changed: Some(host_tail_changed) };
+
+/// `clap_host_tail.changed` (audio thread): nothing to do, the tail is re-read after every
+/// `process` call.
+unsafe extern "C" fn host_tail_changed(_host: *const clap_host) {}
 
 unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_char) -> *const c_void {
     if id.is_null() {
@@ -485,6 +493,8 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
         (&HOST_PARAMS as *const clap_host_params).cast()
     } else if id == CLAP_EXT_LATENCY {
         (&HOST_LATENCY as *const clap_host_latency).cast()
+    } else if id == CLAP_EXT_TAIL {
+        (&HOST_TAIL as *const clap_host_tail).cast()
     } else if id == CLAP_EXT_STATE {
         (&HOST_STATE as *const clap_host_state).cast()
     } else if id == CLAP_EXT_GUI {
@@ -1047,6 +1057,8 @@ pub(crate) struct PortBuffers {
     ptrs: Vec<Vec<*mut f32>>,
     bufs: Vec<clap_audio_buffer>,
     frames: usize,
+    /// Every channel holds a constant (silent) block: `refresh` sets each `constant_mask` to all ones.
+    constant: bool,
 }
 
 // SAFETY: the raw pointers only ever point into `data`, which this struct owns; moving the struct
@@ -1063,7 +1075,7 @@ impl PortBuffers {
             .iter()
             .map(|_| clap_audio_buffer { data32: std::ptr::null_mut(), data64: std::ptr::null_mut(), channel_count: 0, latency: 0, constant_mask: 0 })
             .collect();
-        PortBuffers { data, ptrs, bufs, frames }
+        PortBuffers { data, ptrs, bufs, frames, constant: false }
     }
 
     pub fn channels(&self, port: usize) -> usize {
@@ -1078,8 +1090,14 @@ impl PortBuffers {
         self.data.get_mut(port).and_then(|p| p.get_mut(ch)).map(Vec::as_mut_slice)
     }
 
+    /// Marks every channel of the next block as constant (CLAP's way to say silent), or clears it.
+    pub fn set_constant(&mut self, constant: bool) {
+        self.constant = constant;
+    }
+
     /// Points the CLAP tables at the current data (no allocation).
     fn refresh(&mut self) {
+        let constant = self.constant;
         for ((d, p), b) in self.data.iter_mut().zip(self.ptrs.iter_mut()).zip(self.bufs.iter_mut()) {
             for (dc, pc) in d.iter_mut().zip(p.iter_mut()) {
                 *pc = dc.as_mut_ptr();
@@ -1087,9 +1105,14 @@ impl PortBuffers {
             b.data32 = p.as_mut_ptr();
             b.data64 = std::ptr::null_mut();
             b.channel_count = u32::try_from(p.len()).unwrap_or(0);
-            b.constant_mask = 0;
+            b.constant_mask = if constant { all_channels_mask(b.channel_count) } else { 0 };
         }
     }
+}
+
+/// A mask with one bit set per channel (`channels` low bits; all 64 from 64 channels up).
+pub(crate) fn all_channels_mask(channels: u32) -> u64 {
+    1u64.checked_shl(channels).map_or(u64::MAX, |b| b.wrapping_sub(1))
 }
 
 // ---- instances -----------------------------------------------------------------------------
@@ -1120,12 +1143,24 @@ pub(crate) struct NotePort {
     pub preferred: u32,
 }
 
+/// The plug-in's reported tail through `clap.tail`, if it offers the extension and the call succeeds.
+///
+/// # Safety
+/// `ext` is null or points to a valid `clap_plugin_tail` whose `get` accepts `plugin`.
+unsafe fn read_tail(ext: *const clap_plugin_tail, plugin: *const clap_plugin) -> Option<u32> {
+    // SAFETY: caller contract.
+    let f = unsafe { ext.as_ref() }.and_then(|t| t.get)?;
+    // SAFETY: caller contract.
+    Some(unsafe { f(plugin) })
+}
+
 /// A live plugin instance plus the host struct it was created with.
 pub(crate) struct Instance {
     plugin: *const clap_plugin,
     params: *const clap_plugin_params,
     ports: *const clap_plugin_audio_ports,
     latency: *const clap_plugin_latency,
+    tail: *const clap_plugin_tail,
     notes: *const clap_plugin_note_ports,
     state_ext: *const clap_plugin_state,
     gui: Arc<GuiLink>,
@@ -1296,6 +1331,14 @@ impl Instance {
             Some(f) => unsafe { f(self.plugin) },
             None => 0,
         }
+    }
+
+    /// The plugin's tail in samples from the `clap.tail` extension (`get` is callable from the
+    /// audio thread), as reported: `i32::MAX` and above mean an infinite tail. `None` without the
+    /// extension.
+    pub fn tail(&self) -> Option<u32> {
+        // SAFETY: `tail` is null or the plugin's extension struct, valid for the instance's life.
+        unsafe { read_tail(self.tail, self.plugin) }
     }
 
     pub fn is_active(&self) -> bool {
@@ -1666,5 +1709,46 @@ mod tests {
         assert_eq!((e.tempo, e.bar_number, e.tsig_num, e.tsig_denom), (90.0, 1, 3, 4));
         let nan = transport_event(&Transport { quarters: f64::NAN, ..t });
         assert_eq!(nan.song_pos_beats, 0);
+    }
+
+    #[test]
+    fn the_tail_is_read_through_the_extension_and_offered_to_the_plugin() {
+        unsafe extern "C" fn one_second(_: *const clap_plugin) -> u32 {
+            48_000
+        }
+        unsafe extern "C" fn infinite(_: *const clap_plugin) -> u32 {
+            u32::MAX
+        }
+        let finite = clap_plugin_tail { get: Some(one_second) };
+        let forever = clap_plugin_tail { get: Some(infinite) };
+        let no_get = clap_plugin_tail { get: None };
+        // SAFETY: the fakes ignore the plugin pointer.
+        unsafe {
+            assert_eq!(read_tail(&finite, std::ptr::null()), Some(48_000));
+            assert_eq!(read_tail(&forever, std::ptr::null()), Some(u32::MAX));
+            assert_eq!(read_tail(&no_get, std::ptr::null()), None);
+            assert_eq!(read_tail(std::ptr::null(), std::ptr::null()), None);
+        }
+        // SAFETY: a valid NUL-terminated id; the host pointer is unused.
+        let ext = unsafe { host_get_extension(std::ptr::null(), CLAP_EXT_TAIL.as_ptr()) };
+        assert_eq!(ext, (&HOST_TAIL as *const clap_host_tail).cast());
+        // SAFETY: `changed` ignores the host pointer.
+        unsafe { (HOST_TAIL.changed.unwrap())(std::ptr::null()) };
+    }
+
+    #[test]
+    fn silent_inputs_set_one_constant_bit_per_channel() {
+        assert_eq!(all_channels_mask(0), 0);
+        assert_eq!(all_channels_mask(1), 0b1);
+        assert_eq!(all_channels_mask(2), 0b11);
+        assert_eq!(all_channels_mask(6), 0b11_1111);
+        assert_eq!(all_channels_mask(64), u64::MAX);
+        let mut b = PortBuffers::new(&[2, 1], 4);
+        b.set_constant(true);
+        b.refresh();
+        assert_eq!(b.bufs.iter().map(|x| x.constant_mask).collect::<Vec<_>>(), vec![0b11, 0b1]);
+        b.set_constant(false);
+        b.refresh();
+        assert!(b.bufs.iter().all(|x| x.constant_mask == 0));
     }
 }

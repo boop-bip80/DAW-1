@@ -1,7 +1,7 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, ProcessStatus, Transport, Unit};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,13 @@ enum Mapping {
     Plain,
     /// Linear over the info range (the controller gave no usable plain range).
     Linear,
+}
+
+/// The status a VST3 plugin implies through its tail: an infinite tail (`kInfiniteTail`) must
+/// keep processing; a finite one (including none) may stop that many samples after the input
+/// goes silent.
+fn status_from_tail(tail: u32) -> ProcessStatus {
+    if tail == u32::MAX { ProcessStatus::Continue } else { ProcessStatus::Tail }
 }
 
 /// A hosted VST3 plugin. Parameter ids are VST3 `ParamID`s as decimal strings ("0", "17", …);
@@ -330,6 +337,14 @@ impl Plugin for Vst3Plugin {
         self.tail
     }
 
+    fn process_status(&self) -> ProcessStatus {
+        status_from_tail(u32::try_from(self.tail).unwrap_or(u32::MAX))
+    }
+
+    fn set_input_silent(&mut self, silent: bool) {
+        self.inputs.set_silent(silent);
+    }
+
     fn note_on(&mut self, offset: usize, note: u8, velocity: u8) {
         if note > 127 || !self.event_input {
             return;
@@ -515,5 +530,17 @@ impl PluginEditor for Vst3Editor {
         // but some plugins put them in both.
         let units = self.units.get(i).map_or("", |u| u.trim());
         if units.is_empty() || text.trim_end().to_lowercase().ends_with(&units.to_lowercase()) { Some(text) } else { Some(format!("{text} {units}")) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_status_follows_the_tail() {
+        assert_eq!(status_from_tail(u32::MAX), ProcessStatus::Continue);
+        assert_eq!(status_from_tail(0), ProcessStatus::Tail);
+        assert_eq!(status_from_tail(48_000), ProcessStatus::Tail);
     }
 }

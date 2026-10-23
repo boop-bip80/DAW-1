@@ -187,6 +187,25 @@ pub struct Transport {
     pub bar: i64,
 }
 
+/// What a plug-in needs after a `process` call, as CLAP reports it (`clap_process_status`); hosts
+/// of other formats derive it (VST3: from the tail). The mixer uses it to leave a plug-in
+/// unprocessed while its input is silent and it has said that is fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessStatus {
+    /// Keep calling `process` every block.
+    #[default]
+    Continue,
+    /// Keep calling `process` while its output is not quiet; once the input is silent and the
+    /// last output was silent too, stop until an input is not silent.
+    ContinueIfNotQuiet,
+    /// After the input goes silent, keep calling for `tail_samples()` more samples (and while the
+    /// output is still not silent), then stop until it returns.
+    Tail,
+    /// Stop calling `process` until an input sample is not exactly zero (or an event arrives);
+    /// unlike the other statuses this has no quietness threshold (CLAP's "sleep until a non-zero input").
+    Sleep,
+}
+
 /// A realtime audio processor or instrument.
 ///
 /// Contract: `process` never allocates or panics. It processes `min(frames, io[c].len())` frames
@@ -209,6 +228,14 @@ pub trait Plugin: Send {
     fn tail_samples(&self) -> usize {
         0
     }
+    /// What the plug-in said after its last `process` call (see [`ProcessStatus`]). Built-ins keep
+    /// the default: always processed.
+    fn process_status(&self) -> ProcessStatus {
+        ProcessStatus::Continue
+    }
+    /// Told before `process`: every audio input of the next block is silent (VST3 hosts pass this
+    /// on as the bus silence flags). The default ignores it.
+    fn set_input_silent(&mut self, _silent: bool) {}
     /// Gain reduction in dB for metering (a non-negative amount); 0 for non-dynamics plugins.
     fn gain_reduction_db(&self) -> f32 {
         0.0
@@ -392,6 +419,29 @@ mod trait_default_tests {
             p.close_editor();
             assert!(p.editor().is_none(), "{}", info.id);
         }
+    }
+
+    #[test]
+    fn process_status_defaults_to_continue() {
+        struct Fake;
+        impl Plugin for Fake {
+            fn info(&self) -> &'static PluginInfo {
+                plugins()[0]
+            }
+            fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+            fn reset(&mut self) {}
+            fn set_param(&mut self, _: &str, _: f32) -> bool {
+                false
+            }
+            fn param(&self, _: &str) -> Option<f32> {
+                None
+            }
+            fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        }
+        assert_eq!(ProcessStatus::default(), ProcessStatus::Continue);
+        let mut p = Fake;
+        p.set_input_silent(true);
+        assert_eq!(p.process_status(), ProcessStatus::Continue);
     }
 
     #[test]

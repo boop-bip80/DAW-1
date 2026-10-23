@@ -1011,6 +1011,8 @@ pub(crate) struct BusBuffers {
     ptrs: Vec<Vec<*mut f32>>,
     bufs: Vec<sv::AudioBusBuffers>,
     frames: usize,
+    /// Every channel of the next block is silent: `refresh` sets each bus's `silenceFlags` to all ones.
+    silent: bool,
 }
 
 // SAFETY: the raw pointers only ever point into `data`, which this struct owns; moving the struct
@@ -1031,7 +1033,7 @@ impl BusBuffers {
                 __field0: sv::AudioBusBuffers__type0 { channelBuffers32: std::ptr::null_mut() },
             })
             .collect();
-        BusBuffers { data, ptrs, bufs, frames }
+        BusBuffers { data, ptrs, bufs, frames, silent: false }
     }
 
     pub fn channels(&self, bus: usize) -> usize {
@@ -1046,17 +1048,29 @@ impl BusBuffers {
         self.data.get_mut(bus).and_then(|p| p.get_mut(ch)).map(Vec::as_mut_slice)
     }
 
+    /// Flags every channel of the next block silent, or clears the flags.
+    pub fn set_silent(&mut self, silent: bool) {
+        self.silent = silent;
+    }
+
     /// Points the VST3 tables at the current data (no allocation).
     fn refresh(&mut self) {
+        let silent = self.silent;
         for ((d, p), b) in self.data.iter_mut().zip(self.ptrs.iter_mut()).zip(self.bufs.iter_mut()) {
             for (dc, pc) in d.iter_mut().zip(p.iter_mut()) {
                 *pc = dc.as_mut_ptr();
             }
             b.numChannels = i32::try_from(p.len()).unwrap_or(0);
-            b.silenceFlags = 0;
+            b.silenceFlags = if silent { silence_flags(p.len()) } else { 0 };
             b.__field0.channelBuffers32 = p.as_mut_ptr();
         }
     }
+}
+
+/// `AudioBusBuffers::silenceFlags` with every one of `channels` channels silent (one bit per
+/// channel; all 64 from 64 channels up).
+pub(crate) fn silence_flags(channels: usize) -> u64 {
+    u32::try_from(channels).ok().and_then(|c| 1u64.checked_shl(c)).map_or(u64::MAX, |b| b.wrapping_sub(1))
 }
 
 // ---- instances -----------------------------------------------------------------------------
@@ -2151,6 +2165,22 @@ mod window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn silence_flags_set_one_bit_per_channel() {
+        assert_eq!(silence_flags(0), 0);
+        assert_eq!(silence_flags(1), 0b1);
+        assert_eq!(silence_flags(2), 0b11);
+        assert_eq!(silence_flags(6), 0b11_1111);
+        assert_eq!(silence_flags(64), u64::MAX);
+        let mut b = BusBuffers::new(&[2, 6], 4);
+        b.set_silent(true);
+        b.refresh();
+        assert_eq!(b.bufs.iter().map(|x| x.silenceFlags).collect::<Vec<_>>(), vec![0b11, 0b11_1111]);
+        b.set_silent(false);
+        b.refresh();
+        assert!(b.bufs.iter().all(|x| x.silenceFlags == 0));
+    }
 
     #[test]
     fn the_transport_fills_the_process_context() {
