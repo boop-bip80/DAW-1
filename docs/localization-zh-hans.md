@@ -21,9 +21,11 @@ Without the window, use the preference commands:
 
 ```json
 {"method":"engine.execute","params":{"command":"prefs.set","params":{"path":"interface.language","value":"zh-hans"}}}
-{"method":"engine.execute","params":{"command":"prefs.get","params":{"path":"interface.language"}}}   // "zh-hans"
-{"method":"engine.execute","params":{"command":"prefs.reset","params":{"path":"interface.language"}}} // "auto"
+{"method":"engine.execute","params":{"command":"prefs.get","params":{"path":"interface.language"}}}
+{"method":"engine.execute","params":{"command":"prefs.reset","params":{"path":"interface.language"}}}
 ```
+
+`prefs.get` answers `"zh-hans"` after the first request and `"auto"` after the reset.
 
 The preference is saved with the rest of the settings — `preferences.json` in the settings folder on
 the desktop, `localStorage` (`soundcraft.preferences`) on the web — so it survives a restart. The old

@@ -136,9 +136,10 @@ starting with `#` are comments and pass through the build unchanged; the shipped
 header to document the rules.
 
 ```
-# format examples; the shipped catalog has no @id rows today
-Play	播放
-Open {path}	打开 {path}
+# format examples; the shipped catalog has no @id rows today (each row begins with its context:
+# an empty first column for a plain key, then the English source and the translation)
+	Play	播放
+	Open {path}	打开 {path}
 @id	edit.undo	撤销
 @plural	{n} clip|{n} clips	{n} 个片段
 automation	Off	关闭
@@ -219,7 +220,7 @@ code calls:
 | `tr_ctx(lang, "context", "…")` | translate a namespaced string |
 | `tr_id(lang, "edit.undo", "Undo")` | translate by command id (falls back to the label) |
 | `trn(lang, n, "one", "other")` | plural form for `n`, then fill `{n}` |
-| `fmt("Open {path}", args)` | fill `{name}` placeholders from a lookup once |
+| `fmt(t("Open {path}"), args)` | translate the template, then fill its `{name}` placeholders once |
 | `has(lang, "…")` | is this key translated in that language |
 | `sentence_space()` | `""` in Chinese, `" "` elsewhere, for sentences joined from parts |
 
