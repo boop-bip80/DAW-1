@@ -700,6 +700,33 @@ fn a_click_in_the_zone_selects_the_crossfade_only() {
 }
 
 #[test]
+fn selecting_a_clip_of_a_crossfade_highlights_only_what_shows_of_it() {
+    let (mut app, ctx, t, a, b) = crossfade("grabber", 10 * SEC);
+    cut_at(&ctx, &mut app, b, 5000);
+    let lane = lane_of(&app, t);
+    let (start_a, cut_x, end_a) = (x_at(&app, t, 0), x_at(&app, t, cut(&app, a, b)), x_at(&app, t, 2 * SEC));
+    let (start_b, end_b) = (x_at(&app, t, B_START), x_at(&app, t, B_START + 2 * SEC));
+    let highlighted = |app: &mut SoundApp, ctx: &egui::Context, from: f32, to: f32| {
+        frame_shapes(ctx, app);
+        highlights(&frame_shapes(ctx, app), from, to, lane)
+    };
+    // The earlier clip, from its start to the cut: not to its end, which lies under the zone.
+    click_at(&ctx, &mut app, t, B_START - 5000, 0.75);
+    assert_eq!(app.engine.session().edit.selected_clips, vec![a]);
+    let ed = &app.engine.session().edit;
+    assert_eq!((ed.selection.start, ed.selection.end), (0, cut(&app, a, b)));
+    assert_eq!(highlighted(&mut app, &ctx, start_a, cut_x), 1, "the highlight stops at the cut");
+    assert_eq!(highlighted(&mut app, &ctx, start_a, end_a), 0, "and not at the earlier clip's end");
+    // The later clip, from the cut to its end: not from its start, which lies under the zone.
+    click_at(&ctx, &mut app, t, 2 * SEC + 5000, 0.75);
+    assert_eq!(app.engine.session().edit.selected_clips, vec![b]);
+    let ed = &app.engine.session().edit;
+    assert_eq!((ed.selection.start, ed.selection.end), (cut(&app, a, b), B_START + 2 * SEC));
+    assert_eq!(highlighted(&mut app, &ctx, cut_x, end_b), 1, "the highlight starts at the cut");
+    assert_eq!(highlighted(&mut app, &ctx, start_b, end_b), 0, "and not at the later clip's start");
+}
+
+#[test]
 fn a_click_that_is_not_on_the_crossfade_does_not_select_it() {
     // The upper half of the Smart tool places the insertion point, its lower half within reach of a zone edge is the
     // Trim tool's, and the Selector places the insertion point.

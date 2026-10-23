@@ -1910,7 +1910,8 @@ fn zone_at(clips: &[Clip], at: Samples) -> Option<(&Clip, &Clip)> {
 /// The part of a clip that shows: the two clips of a crossfade are butted at the cut, so the earlier one
 /// shows up to it and the later one from it. What lies under the zone belongs to the zone.
 fn shown_span(clip: &Clip, before: Option<&Clip>, after: Option<&Clip>) -> (Samples, Samples) {
-    (before.map_or(clip.start, |a| crossfade_cut(a, clip)), after.map_or(clip.end(), |b| crossfade_cut(clip, b)))
+    let span = ops::visible_span(clip, before, after);
+    (span.start, span.end)
 }
 
 /// A crossfade as it is on screen, in points: its two clips and where its zone and its cut are.

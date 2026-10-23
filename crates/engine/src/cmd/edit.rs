@@ -278,16 +278,33 @@ fn restore_selection(e: &mut Engine, _: &Value) -> Result<Value> {
     Ok(json!({"selection": range}))
 }
 
+/// The clips a Grabber selection of clips in crossfades stands for, when the command is given no range or clips of its own:
+/// Cut, Copy and Clear then act on those clips (see [`ops::crossfaded_selection`]), not on the range they show.
+fn crossfaded_selection(e: &Engine, p: &Value) -> Option<Vec<soundcraft_model::ClipId>> {
+    if ["start", "end", "length", "clip", "clips", "tracks", "track"].iter().any(|k| p.get(k).is_some()) {
+        return None;
+    }
+    ops::crossfaded_selection(e.session())
+}
+
 fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
     let tracks = tracks_required(e, id, p)?;
-    let range = range_param(e, id, p)?;
+    // Clips selected in crossfades are cut and copied whole, and what is left of their partners is rejoined at the cuts.
+    let by_clips = crossfaded_selection(e, p);
+    let range = match &by_clips {
+        Some(ids) => ops::clips_span(e.session(), ids, false).unwrap_or(e.session().edit.selection),
+        None => range_param(e, id, p)?,
+    };
     if range.is_empty() {
         return Err(bad(id, "selection is empty"));
     }
     let mut cb = Clipboard::of_range(e.session(), range);
     let follow = e.session().edit.automation_follows_edit;
     for t in &tracks {
-        cb.tracks.push(ops::copy_range(e.session(), *t, range));
+        cb.tracks.push(match &by_clips {
+            Some(ids) => ops::whole_clips(e.session(), *t, ids, range.start),
+            None => ops::copy_range(e.session(), *t, range),
+        });
         let lanes = e
             .session()
             .track(*t)
@@ -322,7 +339,19 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
             m
         })
         .collect();
-    if cut {
+    if cut && let Some(ids) = &by_clips {
+        let s = e.session_mut();
+        let shown = s.edit.selection;
+        if follow {
+            for tr in s.tracks.iter_mut().filter(|t| tracks.contains(&t.id)) {
+                for l in &mut tr.automation {
+                    l.clear_range(shown.start, shown.end);
+                }
+            }
+        }
+        ops::remove_clips_rejoining(s, ids);
+        leave_selection_at(s, shown.start);
+    } else if cut {
         let sh = shuffle(e.session());
         let s = e.session_mut();
         for t in &tracks {
@@ -385,6 +414,15 @@ fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
+    // Clips selected in crossfades are removed whole, and what is left of their partners is rejoined at the cuts: clearing
+    // only the range they show would leave their hidden tails behind, and clearing their whole range would eat into the partners.
+    if let Some(ids) = crossfaded_selection(e, p) {
+        let at = e.session().edit.selection.start;
+        let s = e.session_mut();
+        let removed = ops::remove_clips_rejoining(s, &ids).len();
+        leave_selection_at(s, at);
+        return Ok(json!({"removed": removed}));
+    }
     let tracks = tracks_required(e, "edit.clear", p)?;
     let range = range_param(e, "edit.clear", p)?;
     let ids = clip_ids_param(e, p);
@@ -535,18 +573,17 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
         _ => {}
     }
     if let Some(c) = clips {
-        // Selecting clips also selects their range and tracks (Grabber click).
-        let mut range: Option<soundcraft_time::Range> = None;
+        // Selecting clips also selects their range and tracks (Grabber click). A clip in a crossfade is selected as far
+        // as it shows: up to or from its cut, not under the crossfade's zone.
         let mut trs = Vec::new();
         for id in &c {
-            if let Some((tid, clip)) = s.find_clip(*id) {
-                range = Some(range.map_or(clip.range(), |r| soundcraft_time::Range::new(r.start.min(clip.start), r.end.max(clip.end()))));
-                if !trs.contains(&tid) {
-                    trs.push(tid);
-                }
+            if let Some((tid, _)) = s.find_clip(*id)
+                && !trs.contains(&tid)
+            {
+                trs.push(tid);
             }
         }
-        if let Some(r) = range {
+        if let Some(r) = ops::clips_span(s, &c, true) {
             ed.selection = r;
             ed.selected_tracks = trs;
         }
