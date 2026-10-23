@@ -507,3 +507,58 @@ fn in_shuffle_a_locked_clip_stops_the_gap_and_the_automation_needs_automation_fo
     assert_eq!(layout(&e, t), vec![(b, 0, 1000), (d, 4000, 5000)]);
     assert_eq!(points(&e, t), vec![500, 1500, 5500, 8000]);
 }
+
+/// `pair(0)` and, on a second track, the same crossfade again (A2, B2); volume automation at 500, 1500 and 3000 on both.
+fn two_pairs() -> (Engine, [TrackId; 2], [ClipId; 4]) {
+    let (mut e, t1, a1, b1, _) = pair(0);
+    let t2 = TrackId(e.execute("track.new", &json!({"count": 1})).unwrap()["tracks"][0].as_u64().unwrap());
+    let s = e.session_mut();
+    let (a2, b2) = (s.new_clip_id(), s.new_clip_id());
+    let copies: Vec<Clip> = [(a1, a2), (b1, b2)]
+        .iter()
+        .map(|&(from, id)| {
+            let mut c = s.find_clip(from).unwrap().1.clone();
+            c.id = id;
+            c
+        })
+        .collect();
+    s.track_mut(t2).and_then(|t| t.playlist_mut()).unwrap().clips = copies;
+    for t in [t1, t2] {
+        let lane = s.track_mut(t).unwrap().lane_mut(&AutoParam::Volume);
+        for at in [500, 1500, 3000] {
+            lane.set_point(at, -6.0);
+        }
+    }
+    (e, [t1, t2], [a1, b1, a2, b2])
+}
+
+#[test]
+fn narrowing_the_tracks_leaves_the_clips_of_the_other_track_out_of_a_crossfaded_cut_or_clear() {
+    // Clips in a crossfade on two tracks, then the selection narrowed to the first track: what the screen shows is that
+    // range on that track alone, so Cut and Clear act on it as a range and the clips of the other track are not touched.
+    for mode in ["slip", "shuffle"] {
+        for command in ["edit.cut", "edit.clear"] {
+            let why = format!("{mode} {command}");
+            let setup = || {
+                let (mut e, tracks, ids) = two_pairs();
+                e.execute("edit.mode", &json!({"mode": mode})).unwrap();
+                (e, tracks, ids)
+            };
+            let (mut e, [t1, t2], ids) = setup();
+            select(&mut e, &ids);
+            assert!(edit::crossfaded_selection(e.session()).is_some(), "{why}: both tracks are selected");
+            e.execute("edit.select", &json!({"tracks": [t1.0]})).unwrap();
+            assert_eq!(selection(&e), Range::new(0, 2000), "{why}");
+            let (other, other_layout, other_points) = (e.session().track(t2).cloned(), layout(&e, t2), points(&e, t2));
+            // The same range typed on the first track.
+            let (mut by_range, _, _) = setup();
+            by_range.execute("edit.select", &json!({"tracks": [t1.0], "start": 0, "end": 2000})).unwrap();
+            let (r1, r2) = (e.execute(command, &json!({})).unwrap(), by_range.execute(command, &json!({})).unwrap());
+            assert_eq!(layout(&e, t2), other_layout, "{why}: the other track keeps its clips");
+            assert_eq!(points(&e, t2), other_points, "{why}: and its automation");
+            assert_eq!(e.session().track(t2), other.as_ref(), "{why}: and the rest of it");
+            assert_eq!((r1, e.session().track(t1)), (r2, by_range.session().track(t1)), "{why}: the first track is cut as a range");
+            assert_eq!(e.clipboard.tracks, by_range.clipboard.tracks, "{why}");
+        }
+    }
+}

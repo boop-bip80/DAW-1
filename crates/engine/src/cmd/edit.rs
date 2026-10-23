@@ -334,7 +334,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         let s = e.session_mut();
         let shown = s.edit.selection;
         if follow {
-            for (t, r) in removed.iter().filter(|(t, _)| tracks.contains(t)) {
+            for (t, r) in &removed {
                 if let Some(tr) = s.track_mut(*t) {
                     for l in &mut tr.automation {
                         l.clear_range(r.start, r.end);

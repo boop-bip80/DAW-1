@@ -883,8 +883,8 @@ pub fn clips_span(s: &Session, ids: &[ClipId], visible: bool) -> Option<Range> {
 }
 
 /// The selected clips, when they are selected as far as they show (the edit selection is exactly what shows of them: a
-/// Grabber selection of clips) and one of them is in a crossfade whose partner, if it stays, can be rejoined (not
-/// edit-locked or stretched). None otherwise: the selection is then a range like any other.
+/// Grabber selection of clips), all on selected tracks, and one of them is in a crossfade whose partner, if it stays, can
+/// be rejoined (not edit-locked or stretched). None otherwise: the selection is then a range like any other.
 pub fn crossfaded_selection(s: &Session) -> Option<Vec<ClipId>> {
     let ids = &s.edit.selected_clips;
     if ids.is_empty() || clips_span(s, ids, true) != Some(s.edit.selection) {
@@ -893,6 +893,9 @@ pub fn crossfaded_selection(s: &Session) -> Option<Vec<ClipId>> {
     let mut in_crossfade = false;
     for id in ids {
         let (track, c) = s.find_clip(*id)?;
+        if !s.edit.selected_tracks.contains(&track) {
+            return None;
+        }
         let clips = s.track(track)?.clips();
         for partner in [crossfade_earlier(clips, c), crossfade_later(clips, c)].into_iter().flatten() {
             in_crossfade = true;
