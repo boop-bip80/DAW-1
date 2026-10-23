@@ -3353,10 +3353,12 @@ mod tests {
         assert_eq!(s.edit.selected_tracks, row_ids(&h)[..1]);
         let x = x_of(s, timeline(&h), want);
         assert!(matches!(arrow_xs(&h)[..], [a] if (a - x).abs() < 0.01), "{:?} is not on {x}", arrow_xs(&h));
-        // Playback went on from where it was: it neither stopped nor jumped to the click.
+        // Playback went on from where it was: it neither stopped nor jumped to the click. The harness steps
+        // 1/60 s per frame (800 samples at 48 kHz) and the click takes five of them (measured: 4 000 samples),
+        // so allow seven. The old bound, one second, let a seek up to 60 frames ahead pass.
         let pos = h.state().position();
         assert!(h.state().is_playing());
-        assert!(pos >= before && pos < before + 48_000 && pos < want, "playback went from {before} to {pos}, the click is at {want}");
+        assert!(pos >= before && pos < before + 7 * 800 && pos < want, "playback went from {before} to {pos}, the click is at {want}");
         step_to_insertion_on(&mut h);
         assert!(matches!(insertion_xs(&h)[..], [i] if (i - x).abs() < 0.01), "{:?} is not on {x}", insertion_xs(&h));
         assert_eq!(insertion_rows(&h), [0]);
