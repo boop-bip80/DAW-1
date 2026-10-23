@@ -90,7 +90,7 @@ files it was given rather than guarding against other software on the computer.
 |---|---|
 | `list_commands` | Discover every command (id, label, menu path, shortcut, params doc, enabled). |
 | `execute` | Run one command with JSON params. |
-| `batch` | Run several commands in order (`keep_going` optional). Any failed call makes the tool result `isError: true`; with `keep_going` the remaining calls still run and every result is listed. |
+| `batch` | Run up to 1000 commands in order (`keep_going` optional). Larger batches return `isError: true` before executing any command. Any failed call makes the tool result `isError: true`; with `keep_going` the remaining calls still run and every result is listed. |
 | `inspect_session` | Verify work: tracks, clips, mixer, plugins, sends, automation, markers, selection; each `sources[]` entry includes `loaded` (decoded audio in the pool). |
 | `new_session`, `open_session`, `save_session` | Session files (`.scraft`, audio in `Audio Files/`). `open_session` returns `missing`: the media files that could not be loaded (empty when all are found). `save_session` won't save over another existing file unless `replace` is true. |
 | `import_audio` | WAV, AIFF, FLAC, MP3, OGG, AAC/M4A, ALAC, CAF onto a new or existing track. |
@@ -107,6 +107,6 @@ Resources: `soundcraft://session` (full session JSON), `soundcraft://commands`.
 - Tracks by name or id; clips by id.
 - Every command is undoable through `edit.undo` unless it is a query or a view setting.
 
-The acceptance test `crates/automation/tests/agent_tasks.rs` drives a realistic session end to end
+The acceptance test `crates/automation/tests/it/agent_tasks.rs` drives a realistic session end to end
 through MCP only (mixing, plugins, routing, editing with undo, markers, tempo, automation, bounce,
 save and reopen).

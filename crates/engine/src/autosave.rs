@@ -1,7 +1,7 @@
 //! Crash-recovery copies of open sessions, one folder each, written in the background, and the
 //! recovery of the ones left behind with unsaved work.
 
-use crate::io::{Recording, open_session, sanitize_name};
+use crate::io::{Recording, open_session_linked, sanitize_name};
 use crate::{Engine, EngineError, Result};
 use soundcraft_audio_io::{BitDepth, EncodeOptions, FileFormat};
 use soundcraft_model::{Session, SourceAudio, SourceId};
@@ -176,11 +176,25 @@ struct Autosave {
 }
 
 impl Autosave {
-    /// A new folder under `root` for the session called `name`.
+    /// A new folder under `root` for the session called `name`. Two sessions started within the
+    /// same millisecond get folders of their own, never a shared one.
     fn create(root: &Path, name: &str) -> Result<Autosave> {
         let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis();
-        let dir = root.join(format!("{} {stamp}-{}", sanitize_name(name), std::process::id()));
-        let lock = std::fs::create_dir_all(&dir).and_then(|()| std::fs::File::create(dir.join(LOCK))).map_err(|err| io_error(&dir, err))?;
+        let base = format!("{} {stamp}-{}", sanitize_name(name), std::process::id());
+        std::fs::create_dir_all(root).map_err(|err| io_error(root, err))?;
+        let mut dir = root.join(&base);
+        let mut n = 1;
+        loop {
+            match std::fs::create_dir(&dir) {
+                Ok(()) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    n += 1;
+                    dir = root.join(format!("{base}-{n}"));
+                }
+                Err(err) => return Err(io_error(&dir, err)),
+            }
+        }
+        let lock = std::fs::File::create(dir.join(LOCK)).map_err(|err| io_error(&dir, err))?;
         lock.try_lock().map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
         Ok(Autosave { dir, lock: Some(lock), copies: BTreeMap::new(), next: 1, recording: false })
     }
@@ -197,7 +211,7 @@ impl Autosave {
             let file = if Path::new(&src.path).is_absolute() { Some(PathBuf::from(&src.path)) } else { base.as_ref().map(|b| b.join(&src.path)) };
             let audio = s.pool.get(src.id);
             if let Some(f) = &file
-                && (!src.unsaved && f.is_file() || audio.is_none())
+                && (audio.is_none() || !src.unsaved && f.is_file())
             {
                 src.path = f.to_string_lossy().into_owned();
                 continue;
@@ -291,7 +305,9 @@ pub fn leftovers(root: &Path) -> Vec<Leftover> {
 /// media that couldn't be loaded.
 pub fn recover(e: &mut Engine, left: &Leftover) -> Result<Vec<String>> {
     let mut r = Engine::default();
-    let mut missing = open_session(&mut r, &left.dir.join(SESSION).to_string_lossy())?;
+    let session = left.dir.join(SESSION);
+    let links = left.origin.as_deref().map_or(session.as_path(), Path::new);
+    let mut missing = open_session_linked(&mut r, &session.to_string_lossy(), links)?;
     let mut s = r.session().clone();
     let unfinished = unfinished_takes(left, &s, &mut missing);
     if let Some(home) = left.origin.as_deref().and_then(|o| Path::new(o).parent()) {
@@ -315,7 +331,8 @@ pub fn recover(e: &mut Engine, left: &Leftover) -> Result<Vec<String>> {
 /// is left untouched and added to `skipped`.
 fn unfinished_takes(left: &Leftover, s: &Session, skipped: &mut Vec<String>) -> Option<(Recording, Vec<(soundcraft_model::TrackId, PathBuf)>)> {
     let plan: Recording = serde_json::from_str(&std::fs::read_to_string(left.dir.join(RECORDING)).ok()?).ok()?;
-    let known: Vec<PathBuf> = s.sources.iter().filter_map(|src| std::fs::canonicalize(&src.path).ok()).collect();
+    let known: Vec<PathBuf> =
+        s.sources.iter().filter(|src| s.pool.get(src.id).is_some()).filter_map(|src| std::fs::canonicalize(&src.path).ok()).collect();
     let folders = take_folders(left);
     let mut takes = Vec::new();
     for t in &plan.takes {
@@ -413,6 +430,7 @@ fn io_error(path: &Path, err: std::io::Error) -> EngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::open_session;
     use serde_json::json;
     use soundcraft_audio_io::AudioBuffer;
     use soundcraft_model::{ChannelFormat, Clip, TrackKind};
@@ -421,6 +439,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("soundcraft-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Moves a saved session file's mtime a second into the past. Filesystems with coarse
+    /// timestamps (tmpfs) can give it and an autosave written right after it the same mtime,
+    /// and `leftovers` only offers autosaves strictly newer than the file they came from.
+    fn backdate(path: &Path) {
+        let then = SystemTime::now() - Duration::from_secs(1);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(then).unwrap();
     }
 
     fn record(e: &mut Engine, level: f32) {
@@ -449,6 +475,7 @@ mod tests {
         let mut e = Engine::default();
         record(&mut e, 0.5);
         crate::io::save_session(&mut e, &path.to_string_lossy()).unwrap();
+        backdate(&path);
         record(&mut e, -0.25);
         let mut a = Autosave::create(&dir.join("Autosave"), "Song").unwrap();
         a.write(e.session(), e.path.as_deref(), None).unwrap();
@@ -557,6 +584,8 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
         }
+        // Only the symlink case below adds to it, and symlinks are a Unix-only part of the test.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut paths: Vec<PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
         #[cfg(unix)]
         {
@@ -585,6 +614,21 @@ mod tests {
     }
 
     #[test]
+    fn sessions_started_together_get_folders_of_their_own() {
+        // #579: the folder name has millisecond resolution, so two sessions created back to back
+        // shared one folder and the second overwrote the first's unsaved work.
+        let dir = folder("autosave-unique");
+        let root = dir.join("Autosave");
+        let made: Vec<Autosave> = (0..20).map(|_| Autosave::create(&root, "Song").unwrap()).collect();
+        let mut dirs: Vec<&PathBuf> = made.iter().map(|a| &a.dir).collect();
+        dirs.sort();
+        dirs.dedup();
+        assert_eq!(dirs.len(), made.len());
+        drop(made);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn unsaved_work_is_offered_once_its_session_closes() {
         let dir = folder("autosave-leftovers");
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
@@ -592,6 +636,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut e = Engine::default();
         crate::io::save_session(&mut e, &path).unwrap();
+        backdate(Path::new(&path));
         record(&mut e, 0.5);
         let mut a = Autosave::create(&root, "Song").unwrap();
         a.write(e.session(), e.path.as_deref(), None).unwrap();

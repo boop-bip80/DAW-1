@@ -3,7 +3,9 @@
 use crate::prores::bits::Reader;
 use crate::prores::dct::idct8x8;
 use crate::prores::header::{FrameHeader, PictureHeader, row_slice_widths};
-use crate::prores::tables::*;
+use crate::prores::tables::{
+    DC_CB, DC_CTX_INIT, FIRST_DC_CB, LEVEL_CB, LEVEL_CTX_INIT, RUN_CB, RUN_CTX_INIT, SCAN_INTERLACED, SCAN_PROGRESSIVE, qscale,
+};
 use crate::prores::{AlphaType, ChromaFormat, Error, Frame, Interlace, Result};
 
 /// Decoder options.
@@ -109,12 +111,9 @@ pub fn decode_frame_with(data: &[u8], opts: &DecodeOptions) -> Result<Frame> {
 /// a sequence). On error the contents of `out` are unspecified.
 pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> Result<()> {
     let (hdr, mut off, frame_size) = FrameHeader::parse(data)?;
-    // `Movie` checks the decoded picture against the pixel budget, but only after decoding -- and
-    // decoding is where the planes further down are sized from the header's 16-bit width and
-    // height. A container whose own dimensions pass the opening check can carry a frame header
-    // declaring up to 65535x65535; refuse that here, before anything is allocated.
+    // The planes are sized from the header: refuse a size no movie may have before allocating.
     if u64::from(hdr.width) * u64::from(hdr.height) > crate::MAX_PIXELS {
-        return Err(Error::Unsupported("picture too large"));
+        return Err(Error::Unsupported("frame size"));
     }
     let data = &data[..frame_size];
     let depth = opts.bit_depth.unwrap_or(match hdr.chroma {
@@ -556,7 +555,7 @@ mod tests {
         // decoder must refuse the declared geometry before the plane allocations, not after:
         // `Movie`'s budget check runs on an already-decoded frame.
         match decode_frame(&frame_with_dims(65535, 65535)) {
-            Err(Error::Unsupported(m)) => assert_eq!(m, "picture too large"),
+            Err(Error::Unsupported(m)) => assert_eq!(m, "frame size"),
             other => panic!("expected the pixel-budget rejection, got {other:?}"),
         }
         // A frame at the budget (8192x8192) is not refused by the guard: the missing picture
