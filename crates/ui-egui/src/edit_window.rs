@@ -842,7 +842,7 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, 
         if !clip.range().overlaps(&view) {
             continue;
         }
-        draw_clip(app, &painter, &s, track, clip, tl, lane, auto_view.is_some());
+        draw_clip(app, &painter, &s, track, track.clips(), clip, tl, lane, auto_view.is_some());
     }
     draw_live_take(app, &painter, &s, track, tl, lane);
     crate::video_track::draw_lane(app, &painter, &s, track, tl, lane);
@@ -886,7 +886,7 @@ fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, mai
         ui.painter().text(pos2(head.min.x + 4.0, head.center().y), Align2::LEFT_CENTER, &pl.name, regular(10.5), t.text_dim);
         let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
         for c in &pl.clips {
-            draw_clip(app, &painter, &s, track, c, tl, lane, false);
+            draw_clip(app, &painter, &s, track, &pl.clips, c, tl, lane, false);
         }
         let resp = ui.interact(lane, ui.id().with(("pl_lane", track.id.0, i)), Sense::click());
         if resp.clicked()
@@ -1582,7 +1582,7 @@ fn grid_veil(line: Color32, bg: Color32) -> Color32 {
     }
 }
 
-fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, clip: &Clip, tl: Rect, lane: Rect, dim: bool) {
+fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, clips: &[Clip], clip: &Clip, tl: Rect, lane: Rect, dim: bool) {
     let x0 = x_of(s, tl, clip.start);
     let x1 = x_of(s, tl, clip.end()).max(x0 + 1.0);
     let r = Rect::from_min_max(pos2(x0, lane.min.y + 1.0), pos2(x1, lane.max.y - 1.0));
@@ -1598,11 +1598,21 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
         wave = Color32::from_rgb(70, 70, 70);
     }
     let body = if s.edit.flag("view.clip.transparency") { body.gamma_multiply(0.55) } else { body };
-    painter.rect(r, CornerRadius::same(2), body, Stroke::new(1.0, Color32::from_rgb(10, 10, 10)), StrokeKind::Inside);
+    let cut = clip_cut_in(clips, clip);
+    let corners = cut.corners();
+    let outline = Stroke::new(1.0, CLIP_OUTLINE);
+    if cut.right {
+        // The cut's single line is drawn by the next clip: stroke past our right edge and clip it away.
+        painter.rect_filled(r, corners, body);
+        let past = Rect::from_min_max(r.min, pos2(r.max.x + 2.0, r.max.y));
+        painter.with_clip_rect(painter.clip_rect().intersect(r)).rect_stroke(past, corners, outline, StrokeKind::Inside);
+    } else {
+        painter.rect(r, corners, body, outline, StrokeKind::Inside);
+    }
     let name_h = clip_name_height(s, lane);
     if name_h > 0.0 {
         let nb = Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + name_h));
-        painter.rect_filled(nb, CornerRadius { nw: 2, ne: 2, sw: 0, se: 0 }, if clip.muted { Color32::from_rgb(70, 70, 70) } else { bar });
+        painter.rect_filled(nb, CornerRadius { sw: 0, se: 0, ..corners }, if clip.muted { Color32::from_rgb(70, 70, 70) } else { bar });
         let name_clip = nb.intersect(lane);
         painter.with_clip_rect(name_clip).text(
             pos2(nb.min.x.max(lane.min.x) + 4.0, nb.center().y),
@@ -1784,7 +1794,59 @@ fn draw_clip(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track
     if clip.edit_locked || clip.time_locked {
         painter.text(pos2(r.max.x - 10.0, r.min.y + 7.0), Align2::CENTER_CENTER, "🔒", regular(9.0), Color32::WHITE);
     }
+    if cut.left {
+        // The cut's one line, on top of the name bar and waveform so it runs the full height.
+        painter.rect_filled(Rect::from_min_size(r.min, vec2(1.0, r.height())), 0.0, CLIP_OUTLINE);
+    }
     let _ = app;
+}
+
+/// The 1 pt outline around a clip.
+const CLIP_OUTLINE: Color32 = Color32::from_rgb(10, 10, 10);
+
+/// How a clip meets its neighbours in the playlist. Two clips butted at a cut share ONE 1 pt line, as in
+/// the incumbent: the later clip draws it (its left edge), the earlier one drops its right edge, and both
+/// sides of the cut have square corners. A gap or an overlap leaves the clip drawn on its own.
+/// Selection only recolours the body, so it never changes which edges are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClipCut {
+    /// Starts exactly where the clip before it ends.
+    left: bool,
+    /// Ends exactly where the clip after it starts.
+    right: bool,
+}
+
+impl ClipCut {
+    /// The body's corners: square on a side that meets another clip, rounded otherwise.
+    fn corners(self) -> CornerRadius {
+        let (nw, ne) = (if self.left { 0 } else { 2 }, if self.right { 0 } else { 2 });
+        CornerRadius { nw, ne, sw: nw, se: ne }
+    }
+}
+
+/// The cut of the clip spanning `start..end`, given the `(start, end)` of every other clip of its playlist, in any
+/// order (a playlist's order is its stacking order, not its time order). A side is butted when another clip ends
+/// (or starts) exactly there and no third clip covers that point.
+// ponytail: scans every clip of the playlist for each visible clip, O(visible x clips); fine up to a few thousand
+// clips per playlist, upgrade to a start-sorted index beyond that.
+fn clip_cut(start: Samples, end: Samples, others: impl IntoIterator<Item = (Samples, Samples)>) -> ClipCut {
+    // An empty clip has no span to share a line with.
+    if end <= start {
+        return ClipCut::default();
+    }
+    let (mut left, mut right, mut left_covered, mut right_covered) = (false, false, false, false);
+    for (s, e) in others.into_iter().filter(|(s, e)| e > s) {
+        left |= e == start;
+        right |= s == end;
+        left_covered |= s < start && start < e;
+        right_covered |= s < end && end < e;
+    }
+    ClipCut { left: left && !left_covered, right: right && !right_covered }
+}
+
+/// [`clip_cut`] for `clip` among its playlist's `clips`.
+fn clip_cut_in(clips: &[Clip], clip: &Clip) -> ClipCut {
+    clip_cut(clip.start, clip.end(), clips.iter().filter(|c| c.id != clip.id).map(|c| (c.start, c.end())))
 }
 
 /// The earlier clip of a crossfade pair: the one before `clip` in its playlist, overlapping its start.
@@ -2818,6 +2880,87 @@ mod tests {
     fn hold_clears_when_playhead_returns_or_transport_stops() {
         assert_eq!(follow_update(true, true, true, 9_000, 9_000, None, true, 96_000), (false, None));
         assert_eq!(follow_update(false, true, false, 9_000, 9_000, None, true, 96_000), (false, None));
+    }
+
+    const ALONE: ClipCut = ClipCut { left: false, right: false };
+
+    #[test]
+    fn butted_pair_shares_one_seam() {
+        // 0..100 then 100..200: the first drops its right edge, the second draws the seam on its left.
+        assert_eq!(clip_cut(0, 100, [(100, 200)]), ClipCut { left: false, right: true });
+        assert_eq!(clip_cut(100, 200, [(0, 100)]), ClipCut { left: true, right: false });
+    }
+
+    #[test]
+    fn middle_clip_of_a_run_is_butted_on_both_sides() {
+        let cut = clip_cut(100, 200, [(0, 100), (200, 300)]);
+        assert_eq!(cut, ClipCut { left: true, right: true });
+        let c = cut.corners();
+        assert_eq!((c.nw, c.sw, c.ne, c.se), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn gap_overlap_and_lone_clips_keep_their_own_outline() {
+        // First and last clips: nothing on the open side.
+        assert_eq!(clip_cut(0, 100, []), ALONE);
+        // A gap of one sample is not a cut.
+        assert_eq!(clip_cut(101, 200, [(0, 100), (201, 300)]), ALONE);
+        // Overlaps (crossfades, layers) keep both outlines.
+        assert_eq!(clip_cut(90, 200, [(0, 100), (150, 300)]), ALONE);
+        assert_eq!(clip_cut(0, 100, [(60, 160)]), ALONE);
+        // A third clip lying across the cut hides it: no shared seam.
+        assert_eq!(clip_cut(100, 200, [(0, 100), (50, 150)]), ALONE);
+        // Empty clips share nothing, and are not neighbours either.
+        assert_eq!(clip_cut(100, 100, [(0, 100), (100, 200)]), ALONE);
+        assert_eq!(clip_cut(100, 200, [(100, 100)]), ALONE);
+    }
+
+    #[test]
+    fn only_butted_sides_lose_their_round_corners() {
+        let round = ALONE.corners();
+        assert_eq!((round.nw, round.sw, round.ne, round.se), (2, 2, 2, 2));
+        let first = ClipCut { left: false, right: true }.corners();
+        assert_eq!((first.nw, first.sw, first.ne, first.se), (2, 2, 0, 0));
+        let second = ClipCut { left: true, right: false }.corners();
+        assert_eq!((second.nw, second.sw, second.ne, second.se), (0, 0, 2, 2));
+    }
+
+    #[test]
+    fn cut_is_found_among_the_playlist_neighbours() {
+        // Selection never enters: it recolours the body, so a selected clip gets the same edges as any other.
+        let clips = [test_clip(1, 0, 100), test_clip(2, 100, 100), test_clip(3, 200, 100), test_clip(4, 400, 50)];
+        let cuts: Vec<ClipCut> = clips.iter().map(|c| clip_cut_in(&clips, c)).collect();
+        assert_eq!(cuts, [ClipCut { left: false, right: true }, ClipCut { left: true, right: true }, ClipCut { left: true, right: false }, ALONE]);
+    }
+
+    #[test]
+    fn cut_does_not_depend_on_the_playlist_order() {
+        // Bring to Front / Send to Back reorder a playlist (its order is the stacking order): the seam stays.
+        let (a, b) = (test_clip(1, 0, 100), test_clip(2, 100, 100));
+        let reordered = [b.clone(), a.clone()];
+        assert_eq!(clip_cut_in(&reordered, &a), ClipCut { left: false, right: true });
+        assert_eq!(clip_cut_in(&reordered, &b), ClipCut { left: true, right: false });
+        let run = [test_clip(3, 200, 100), test_clip(1, 0, 100), test_clip(2, 100, 100)];
+        let cuts: Vec<ClipCut> = run.iter().map(|c| clip_cut_in(&run, c)).collect();
+        assert_eq!(cuts, [ClipCut { left: true, right: false }, ClipCut { left: false, right: true }, ClipCut { left: true, right: true }]);
+    }
+
+    #[test]
+    fn layered_clips_share_a_seam_only_where_they_really_meet() {
+        // A short clip inside a long one does not hide the seam between the long clip and the next.
+        let clips = [test_clip(1, 0, 100), test_clip(2, 10, 10), test_clip(3, 100, 100)];
+        assert_eq!(clip_cut_in(&clips, &clips[2]), ClipCut { left: true, right: false });
+        assert_eq!(clip_cut_in(&clips, &clips[0]), ClipCut { left: false, right: true });
+        assert_eq!(clip_cut_in(&clips, &clips[1]), ALONE);
+        // Two clips on one start, and a lone clip.
+        let same = [test_clip(1, 0, 100), test_clip(2, 0, 100), test_clip(3, 300, 100)];
+        assert_eq!(clip_cut_in(&same, &same[1]), ALONE);
+        assert_eq!(clip_cut_in(&same, &same[2]), ALONE);
+        assert_eq!(clip_cut_in(&[], &test_clip(9, 0, 100)), ALONE);
+    }
+
+    fn test_clip(id: u64, start: Samples, len: Samples) -> Clip {
+        Clip::audio(ClipId(id), "c", soundcraft_model::SourceId(0), 0, start, len)
     }
 
     fn harness(n: usize) -> Harness<'static, SoundApp> {
