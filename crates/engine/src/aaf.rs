@@ -37,8 +37,9 @@ const MAX_AAF_DIRECTORY_ENTRIES: usize = 65_536;
 const MAX_AAF_COMPOSITIONS: usize = 64;
 const MAX_AAF_TRACKS: usize = 256;
 const MAX_AAF_CLIPS: usize = 10_000;
-const MAX_AAF_MEDIA_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_AAF_MEDIA_SAMPLES: usize = 1 << 24;
+// Same ceiling as File > Import > Audio: Pro Tools exports hour-long mono WAVs per channel.
+const MAX_AAF_MEDIA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_AAF_MEDIA_SAMPLES: usize = crate::io::MAX_IMPORT_SAMPLES;
 const MAX_WARNINGS: usize = 200;
 /// A Pro Tools (or other DAW) session report is a plain-text export, not session state; this
 /// still bounds it so a hostile or enormous file cannot be read into memory wholesale.
