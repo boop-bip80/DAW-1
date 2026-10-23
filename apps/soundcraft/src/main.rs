@@ -31,6 +31,11 @@ struct App {
     /// The engine preferences revision last written to `preferences.json`; `None` while a
     /// migration that changed the preferences still has to be written by the frame loop.
     saved_prefs_revision: Option<u64>,
+    /// When the frame loop last tried to save a preference change (egui seconds); a failed save
+    /// is retried at most once a second instead of on every frame.
+    prefs_save_attempt: Option<f64>,
+    /// The last save failure: logged once, and again only when it changes.
+    prefs_save_error: Option<String>,
 }
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
@@ -81,10 +86,30 @@ impl eframe::App for App {
             save_prefs(&self.app.ui);
         }
         // Preferences change rarely (the Appearance window, agents): save them when they do, and
-        // only record the revision once the file actually kept them.
+        // only record the revision once the file actually kept them. A failure (read-only settings
+        // folder, full disk) is retried at most once a second — not on every frame, which would
+        // write a temp file and log a warning sixty times a second.
         let prefs_revision = self.app.engine.prefs_revision();
-        if self.saved_prefs_revision != Some(prefs_revision) && save_engine_prefs(&self.app.engine) {
-            self.saved_prefs_revision = Some(prefs_revision);
+        if self.saved_prefs_revision != Some(prefs_revision) {
+            let now = ctx.input(|i| i.time);
+            if self.prefs_save_attempt.is_none_or(|at| now - at >= 1.0) {
+                self.prefs_save_attempt = Some(now);
+                match save_engine_prefs(&self.app.engine) {
+                    Ok(()) => {
+                        self.saved_prefs_revision = Some(prefs_revision);
+                        self.prefs_save_error = None;
+                    }
+                    Err(error) => {
+                        if self.prefs_save_error.as_deref() != Some(error.as_str()) {
+                            log::warn!("preferences: {error}");
+                        }
+                        self.prefs_save_error = Some(error);
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    }
+                }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
@@ -109,7 +134,9 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         self.app.close_autosave();
         save_prefs(&self.app.ui);
-        save_engine_prefs(&self.app.engine);
+        if let Err(error) = save_engine_prefs(&self.app.engine) {
+            log::warn!("preferences: {error}");
+        }
         if let Some(logger) = self.logger {
             logger.report_audio_thread();
         }
@@ -217,26 +244,15 @@ fn load_engine_prefs(engine: &mut Engine) -> bool {
     }
 }
 
-/// Persist the engine preferences; true when they are stored (disabled or absent paths are a
-/// successful no-op, but a failed write is retried on the next frame).
-fn save_engine_prefs(engine: &Engine) -> bool {
+/// Persist the engine preferences. Disabled or absent paths are a successful no-op; a failed
+/// write is reported so the frame loop can retry it.
+fn save_engine_prefs(engine: &Engine) -> Result<(), String> {
     if !prefs_enabled() {
-        return true;
+        return Ok(());
     }
-    let Some(path) = preferences_path() else { return true };
-    match engine.prefs_json() {
-        Ok(json) => match config::save_preferences(&path, &json) {
-            Ok(()) => true,
-            Err(error) => {
-                log::warn!("preferences: {error}");
-                false
-            }
-        },
-        Err(error) => {
-            log::warn!("preferences: {error}");
-            false
-        }
-    }
+    let Some(path) = preferences_path() else { return Ok(()) };
+    let json = engine.prefs_json().map_err(|error| error.to_string())?;
+    config::save_preferences(&path, &json)
 }
 
 fn services() -> Services {
@@ -380,6 +396,8 @@ fn main() -> eframe::Result {
             let prefs_revision = app.engine.prefs_revision();
             Ok(Box::new(App {
                 saved_prefs_revision: (!migration_needs_save).then_some(prefs_revision),
+                prefs_save_attempt: None,
+                prefs_save_error: None,
                 app,
                 logger,
                 #[cfg(target_os = "macos")]

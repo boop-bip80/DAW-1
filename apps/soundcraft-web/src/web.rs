@@ -47,7 +47,14 @@ pub fn start() {
                     soundcraft_ui_egui::i18n::init_system_locale_with(navigator_languages());
                     let app = SoundApp::new(engine, Some(player), Services::default());
                     let saved_prefs_revision = app.engine.prefs_revision();
-                    Ok(Box::new(WebShell { app, inbox: Rc::default(), samples: Rc::default(), saved_prefs_revision }))
+                    Ok(Box::new(WebShell {
+                        app,
+                        inbox: Rc::default(),
+                        samples: Rc::default(),
+                        saved_prefs_revision,
+                        prefs_save_attempt: None,
+                        prefs_save_error: None,
+                    }))
                 }),
             )
             .await;
@@ -96,28 +103,15 @@ fn load_preferences(engine: &mut Engine) {
     }
 }
 
-/// Store the preference document (the same JSON as the desktop's file); true when it persisted, so
-/// the caller records the revision it saved and retries after a failed write.
-fn save_preferences(engine: &Engine) -> bool {
-    let Some(storage) = local_storage() else { return false };
-    let json = match engine.prefs_json() {
-        Ok(json) => json,
-        Err(error) => {
-            log::warn!("preferences: {error}");
-            return false;
-        }
-    };
+/// Store the preference document (the same JSON as the desktop's file). The caller records the
+/// revision only when this succeeds and retries a failure.
+fn save_preferences(engine: &Engine) -> Result<(), String> {
+    let Some(storage) = local_storage() else { return Err("no localStorage".to_string()) };
+    let json = engine.prefs_json().map_err(|error| error.to_string())?;
     if json.len() as u64 > soundcraft_engine::prefs::MAX_BYTES {
-        log::warn!("preferences: refusing to store a {} KiB document", json.len() / 1024);
-        return false;
+        return Err(format!("refusing to store a {} KiB document", json.len() / 1024));
     }
-    match storage.set_item(PREFERENCES_KEY, &json) {
-        Ok(()) => true,
-        Err(error) => {
-            log::warn!("preferences: could not be stored: {error:?}");
-            false
-        }
-    }
+    storage.set_item(PREFERENCES_KEY, &json).map_err(|error| format!("could not be stored: {error:?}"))
 }
 
 /// What a file read from the browser is for.
@@ -179,6 +173,11 @@ struct WebShell {
     samples: SampleInbox,
     /// The engine preferences revision last stored in `localStorage`.
     saved_prefs_revision: u64,
+    /// When the frame loop last tried to store a preference change (egui seconds); a failed store
+    /// is retried at most once a second instead of on every frame.
+    prefs_save_attempt: Option<f64>,
+    /// The last store failure: logged once, and again only when it changes.
+    prefs_save_error: Option<String>,
 }
 
 impl WebShell {
@@ -269,10 +268,29 @@ impl eframe::App for WebShell {
         }
         self.app.logic(ctx);
         // Preferences change rarely (the Appearance window, agents): store them when they do, and
-        // only record the revision once the browser actually kept the document.
+        // only record the revision once the browser actually kept the document. A failure (private
+        // mode, quota) is retried at most once a second instead of on every frame.
         let prefs_revision = self.app.engine.prefs_revision();
-        if prefs_revision != self.saved_prefs_revision && save_preferences(&self.app.engine) {
-            self.saved_prefs_revision = prefs_revision;
+        if prefs_revision != self.saved_prefs_revision {
+            let now = ctx.input(|i| i.time);
+            if self.prefs_save_attempt.is_none_or(|at| now - at >= 1.0) {
+                self.prefs_save_attempt = Some(now);
+                match save_preferences(&self.app.engine) {
+                    Ok(()) => {
+                        self.saved_prefs_revision = prefs_revision;
+                        self.prefs_save_error = None;
+                    }
+                    Err(error) => {
+                        if self.prefs_save_error.as_deref() != Some(error.as_str()) {
+                            log::warn!("preferences: {error}");
+                        }
+                        self.prefs_save_error = Some(error);
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                    }
+                }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
         }
         // A prompt opened during this frame becomes a picker on the next one.
         self.take_path_prompt(ctx);
