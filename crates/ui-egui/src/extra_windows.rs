@@ -177,6 +177,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
     let mut cancel = false;
     let mut reset = false;
     egui::Window::new(egui::RichText::new(crate::i18n::t("Appearance")).font(bold(13.0)))
+        .id(egui::Id::new("Appearance"))
         .open(&mut open)
         .default_size(vec2(380.0, 250.0))
         .resizable(false)

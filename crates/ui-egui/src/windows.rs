@@ -86,12 +86,20 @@ fn audio_health(app: &mut SoundApp, ctx: &egui::Context) {
     }
 }
 
+/// A window whose title and id are the English key `title`: the drawn title follows the
+/// language, the id does not, so changing language keeps the window's position, size and scroll
+/// state.
+pub(crate) fn keyed<'open>(title: &'static str) -> egui::Window<'open> {
+    egui::Window::new(crate::i18n::t(title)).id(egui::Id::new(title))
+}
+
 fn win(ctx: &egui::Context, open: &mut bool, title: &str, size: egui::Vec2, body: impl FnOnce(&mut egui::Ui)) {
     if !*open {
         return;
     }
-    // Titles are English keys until drawn, so the language can change while a window is open.
-    egui::Window::new(crate::i18n::t(title)).open(open).default_size(size).show(ctx, body);
+    // Titles are English keys until drawn, so the language can change while a window is open; the
+    // id stays on that English key too, so a language change keeps the window's position and size.
+    egui::Window::new(crate::i18n::t(title)).id(egui::Id::new(title)).open(open).default_size(size).show(ctx, body);
 }
 
 fn automation(app: &mut SoundApp, ctx: &egui::Context) {
@@ -339,7 +347,7 @@ fn workspace(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    egui::Window::new(crate::i18n::t("Workspace")).open(&mut open).default_size(vec2(460.0, 420.0)).show(ctx, |ui| {
+    crate::windows::keyed("Workspace").open(&mut open).default_size(vec2(460.0, 420.0)).show(ctx, |ui| {
         let dir = if app.ui.workspace_dir.is_empty() { std::env::var("HOME").unwrap_or_else(|_| ".".into()) } else { app.ui.workspace_dir.clone() };
         ui.horizontal(|ui| {
             if ui.button("⬆").on_hover_text(crate::i18n::t("Parent folder")).clicked()
