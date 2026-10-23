@@ -116,9 +116,14 @@ def _severity(config: Config, rule_id: str, default: str) -> str:
     return config.rule_severity.get(rule_id, default)
 
 
-def _line_rules(path: str, lines: list[str], index: int, config: Config) -> list[_RuleHit]:
-    """Rules that look at a single added Rust line (``index`` is 0-based)."""
-    text = lines[index]
+def _line_rules(path: str, lines: list[str], index: int, config: Config, text: str | None = None) -> list[_RuleHit]:
+    """Rules that look at a single added Rust line (``index`` is 0-based).
+
+    ``text`` is passed in when the added line lies beyond the (possibly truncated)
+    file content, so a diff can never index past the window the reviewer read.
+    """
+    if text is None:
+        text = lines[index]
     hits: list[_RuleHit] = []
     if _COMMENT_LINE_RE.match(text):
         return hits  # documented examples are not violations
@@ -142,7 +147,8 @@ def _line_rules(path: str, lines: list[str], index: int, config: Config) -> list
     unsafe_match = _UNSAFE_RE.search(text)
     if unsafe_match:
         allowed_file = path in ALLOWED_UNSAFE
-        safety_comment = any("SAFETY:" in previous for previous in lines[max(0, index - 3) : index])
+        window_end = min(index, len(lines))
+        safety_comment = any("SAFETY:" in previous for previous in lines[max(0, window_end - 3) : window_end])
         if not allowed_file:
             hits.append(
                 _RuleHit(
@@ -258,7 +264,7 @@ def check(files: list[FileDiff], contents: dict[str, str], config: Config) -> li
                 if test_path or (test_start is not None and number >= test_start):
                     continue  # tests may unwrap, panic and print
                 if is_rust:
-                    for hit in _line_rules(file.path, lines, number - 1, config):
+                    for hit in _line_rules(file.path, lines, number - 1, config, text):
                         findings.append(
                             Finding(
                                 file=file.path,

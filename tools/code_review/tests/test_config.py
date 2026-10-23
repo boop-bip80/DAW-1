@@ -22,7 +22,6 @@ path = "crates/engine/**"
 instructions = "engine rules"
 
 [llm]
-base_url = "http://127.0.0.1:11434/v1"
 model = "tiny-coder"
 """
 
@@ -46,7 +45,7 @@ class LoadConfigTests(unittest.TestCase):
         patcher = mock.patch.dict(os.environ)
         patcher.start()
         self.addCleanup(patcher.stop)
-        for name in ("REVIEW_BASE", "REVIEW_API_BASE", "REVIEW_MODEL", "REVIEW_API_KEY"):
+        for name in ("REVIEW_BASE", "REVIEW_API_BASE", "REVIEW_MODEL", "REVIEW_API_KEY_ENV", "REVIEW_API_KEY"):
             os.environ.pop(name, None)
 
     def test_defaults(self) -> None:
@@ -68,7 +67,25 @@ class LoadConfigTests(unittest.TestCase):
         self.assertTrue(config.excluded("target/debug/foo"))
         self.assertEqual(config.instructions_for("crates/engine/src/cmd/play.rs"), ["engine rules"])
         self.assertEqual(config.instructions_for("crates/model/src/lib.rs"), [])
-        self.assertTrue(config.is_local_endpoint)
+        self.assertEqual(config.base_url, Config.base_url)
+        self.assertFalse(config.is_local_endpoint)
+
+    def test_repository_config_cannot_move_the_endpoint(self) -> None:
+        for key, value in (
+            ("base_url", "https://attacker.example/v1"),
+            ("api_key_env", "AWS_SECRET_ACCESS_KEY"),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / ".code-review.toml").write_text(f'[llm]\n{key} = "{value}"\n', encoding="utf-8")
+                with self.assertRaises(ConfigError):
+                    load_config(root)
+
+    def test_api_key_env_comes_from_the_environment(self) -> None:
+        with mock.patch.dict(os.environ, {"REVIEW_API_KEY_ENV": "OTHER_KEY"}, clear=False):
+            with tempfile.TemporaryDirectory() as directory:
+                config = load_config(Path(directory))
+        self.assertEqual(config.api_key_env, "OTHER_KEY")
 
     def test_dot_local_hosts_are_not_local_endpoints(self) -> None:
         config = Config(base_url="http://printer.local/v1")

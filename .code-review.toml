@@ -62,17 +62,18 @@ path = "crates/*/tests/**"
 instructions = "Tests may unwrap and panic, but they must actually exercise the bug they claim to cover. Prefer asserting on observable behaviour over implementation details."
 
 [llm]
-# OpenAI-compatible endpoint. DeepSeek by default; any server that speaks
-# POST /chat/completions works.
-base_url = "https://api.deepseek.com/v1"
 model = "deepseek-chat"
-api_key_env = "DEEPSEEK_API_KEY"
 timeout_seconds = 180
 max_retries = 2
 #
+# The endpoint and the key variable are environment-only, so a repository cannot
+# redirect the reviewer's credential:
+#   REVIEW_API_BASE   OpenAI-compatible endpoint (default https://api.deepseek.com/v1)
+#   REVIEW_API_KEY_ENV  variable holding the key (default DEEPSEEK_API_KEY),
+#                       or set REVIEW_API_KEY directly
+#
 # Local model instead (no key needed because the endpoint is loopback):
-#   base_url = "http://127.0.0.1:11434/v1"   # Ollama
-#   model = "qwen2.5-coder:14b"
+#   REVIEW_API_BASE=http://127.0.0.1:11434/v1 REVIEW_MODEL=qwen2.5-coder:14b
 #
 # Environment overrides: REVIEW_BASE (git base ref), REVIEW_API_BASE, REVIEW_MODEL,
-# REVIEW_API_KEY (wins over the variable named by api_key_env).
+# REVIEW_API_KEY_ENV, REVIEW_API_KEY (wins over the variable named by REVIEW_API_KEY_ENV).

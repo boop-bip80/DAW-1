@@ -43,13 +43,14 @@ REVIEW_API_BASE=http://127.0.0.1:11434/v1 REVIEW_MODEL=qwen2.5-coder:14b \
   cargo xtask review --base origin/main
 ```
 
-llama.cpp's server and LM Studio work the same way. Put the values in
-`[llm]` in `.code-review.toml` to make them the default.
+llama.cpp's server and LM Studio work the same way. The endpoint and the name of
+the key variable are environment-only (`REVIEW_API_BASE`, `REVIEW_API_KEY_ENV`):
+a checked-in file must not be able to redirect where an API key is sent.
 
 When an API key is configured it is only sent over HTTPS or to a loopback HTTP
 endpoint; a remote plain-HTTP endpoint is refused before any request is made.
-Redirects are refused for the same reason: `[llm] base_url` must be the final
-URL, so a 3xx cannot forward the key or the review prompt somewhere else.
+Redirects are refused for the same reason: the endpoint must be the final URL,
+so a 3xx cannot forward the key or the review prompt somewhere else.
 
 ## What it does
 
@@ -62,7 +63,9 @@ URL, so a 3xx cannot forward the key or the review prompt somewhere else.
    assets. Tests are exempt.
 3. **Asks the model** about numbered windows around each hunk, with
    path-specific instructions from `.code-review.toml` and the repository
-   standards in the system prompt.
+   standards in the system prompt. File content is fenced in `<file_content>`
+   tags and findings are passed as JSON, so reviewed code cannot end the data
+   block and inject instructions.
 4. **Verifies** every model finding in a second, skeptical pass; rejected
    findings are dropped, uncertain ones are marked.
 5. **Merges, de-duplicates and sorts** the results, then renders a console,
@@ -85,13 +88,13 @@ URL, so a 3xx cannot forward the key or the review prompt somewhere else.
 | `review.exclude` | Glob list of paths to skip. |
 | `review.path_instructions` | Extra guidance for matching paths. |
 | `review.rule_severity` | Override the severity of a deterministic rule id. |
-| `llm.base_url` | OpenAI-compatible endpoint. |
 | `llm.model` | Model name. |
-| `llm.api_key_env` | Environment variable holding the key. |
 | `llm.timeout_seconds`, `llm.max_retries` | Request behaviour. |
 
 Environment overrides: `REVIEW_BASE`, `REVIEW_API_BASE`, `REVIEW_MODEL`,
-`REVIEW_API_KEY` (wins over `llm.api_key_env`).
+`REVIEW_API_KEY_ENV`, and `REVIEW_API_KEY` (wins over the variable named by
+`REVIEW_API_KEY_ENV`). The endpoint and key variable are deliberately
+environment-only, so a repository cannot move the reviewer's credential.
 
 ## Exit codes
 

@@ -101,6 +101,10 @@ class Config:
             return False
 
 
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, "").strip() or default
+
+
 def _string(data: dict, key: str, default: str) -> str:
     value = data.get(key, default)
     if not isinstance(value, str):
@@ -139,6 +143,15 @@ def load_config(root: Path, path: Path | None = None) -> Config:
     if not isinstance(review, dict) or not isinstance(llm, dict):
         raise ConfigError(f"{file}: [review] and [llm] must be tables")
 
+    # The endpoint and the key's variable name are environment-only. A checked-in file must not
+    # be able to point the reviewer (and its API key) at a different host.
+    for key in ("base_url", "api_key_env"):
+        if key in llm:
+            raise ConfigError(
+                f"{file}: llm.{key} is set from the environment, not the repository "
+                "(REVIEW_API_BASE / REVIEW_API_KEY_ENV); remove it from the file"
+            )
+
     config = Config(
         base=_string(review, "base", Config.base),
         fail_on=_string(review, "fail_on", Config.fail_on),
@@ -148,9 +161,7 @@ def load_config(root: Path, path: Path | None = None) -> Config:
         include_untracked=_boolean(review, "include_untracked", Config.include_untracked),
         context_lines=_integer(review, "context_lines", Config.context_lines),
         max_file_chars=_integer(review, "max_file_chars", Config.max_file_chars),
-        base_url=_string(llm, "base_url", Config.base_url),
         model=_string(llm, "model", Config.model),
-        api_key_env=_string(llm, "api_key_env", Config.api_key_env),
         timeout_seconds=_integer(llm, "timeout_seconds", Config.timeout_seconds),
         max_retries=_integer(llm, "max_retries", Config.max_retries),
     )
@@ -180,8 +191,11 @@ def load_config(root: Path, path: Path | None = None) -> Config:
     config.rule_severity = dict(severity)
 
     # Environment overrides keep per-machine endpoints (Ollama, llama.cpp) out of the file.
-    config.base = os.environ.get("REVIEW_BASE", config.base)
-    config.base_url = os.environ.get("REVIEW_API_BASE", config.base_url)
-    config.model = os.environ.get("REVIEW_MODEL", config.model)
+    config.base = _env("REVIEW_BASE", config.base)
+    config.base_url = _env("REVIEW_API_BASE", config.base_url)
+    config.model = _env("REVIEW_MODEL", config.model)
+    config.api_key_env = _env("REVIEW_API_KEY_ENV", config.api_key_env)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.api_key_env):
+        raise ConfigError(f"REVIEW_API_KEY_ENV must name an environment variable, got {config.api_key_env!r}")
 
     return config

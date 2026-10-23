@@ -32,11 +32,16 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(len(merged), 2)
 
     def test_different_locations_do_not_merge(self) -> None:
-        merged = merge_findings([finding(10, "Missing error handling"), finding(30, "Missing error handling")])
+        merged = merge_findings(
+            [finding(10, "Missing error handling", source="llm"), finding(30, "Missing error handling", source="llm")]
+        )
         self.assertEqual(len(merged), 2)
 
     def test_strongest_severity_wins(self) -> None:
-        merged = merge_findings([finding(10, "Same problem", "minor"), finding(10, "Same problem", "critical")])
+        merged = merge_findings(
+            [finding(10, "Same problem", "minor", source="llm"), finding(10, "Same problem", "critical", source="llm")]
+        )
+        self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].severity, "critical")
 
 

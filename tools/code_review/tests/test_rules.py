@@ -50,6 +50,13 @@ class PanicRuleTests(unittest.TestCase):
         lines = ["/*", " * Never call `.unwrap()` here.", " */", "fn f() {}"]
         self.assertEqual(check("crates/model/src/lib.rs", lines), [])
 
+    def test_added_line_beyond_truncated_content_is_checked(self) -> None:
+        hunk = Hunk(0, 0, 1, 90)
+        hunk.lines.append(DiffLine("+", "    let x = a().unwrap();", None, 90))
+        diff = FileDiff(path="crates/model/src/lib.rs", status="added", hunks=[hunk])
+        found = rules.check([diff], {"crates/model/src/lib.rs": "truncated"}, Config())
+        self.assertEqual([item.source for item in found], ["panic.unwrap"])
+
     def test_rule_severity_override(self) -> None:
         config = Config(rule_severity={"panic.unwrap": "nit"})
         found = check("crates/model/src/lib.rs", ["fn f() { a().unwrap(); }"], config=config)

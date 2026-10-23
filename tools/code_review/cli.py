@@ -101,6 +101,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 3
 
+    if use_llm:
+        progress(f"model endpoint {config.base_url} (key from REVIEW_API_KEY or {config.api_key_env})")
+
     try:
         result = run(
             repo,

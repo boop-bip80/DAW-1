@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+GIT_TIMEOUT_SECONDS = 300
+
+
 class GitError(RuntimeError):
     """A git command that the reviewer needs failed."""
 
@@ -17,23 +20,31 @@ class Repo:
 
     @classmethod
     def discover(cls, start: Path | None = None) -> "Repo":
-        completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(start or Path.cwd()),
-            capture_output=True,
-            text=True,
-        )
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=str(start or Path.cwd()),
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git rev-parse timed out after {GIT_TIMEOUT_SECONDS}s") from exc
         if completed.returncode != 0:
             raise GitError("not inside a git repository")
         return cls(Path(completed.stdout.strip()))
 
     def git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        completed = subprocess.run(
-            ["git", "-C", str(self.root), *args],
-            capture_output=True,
-            text=True,
-            errors="replace",
-        )
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(self.root), "-c", "core.quotepath=false", *args],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"git {' '.join(args)} timed out after {GIT_TIMEOUT_SECONDS}s") from exc
         if check and completed.returncode != 0:
             message = completed.stderr.strip() or completed.stdout.strip() or "git command failed"
             raise GitError(f"git {' '.join(args)}: {message}")
@@ -88,7 +99,10 @@ class Repo:
         return completed.stdout if completed.returncode == 0 else None
 
     def read_worktree(self, path: str) -> str | None:
-        target = self.root / path
+        root = self.root.resolve()
+        target = (self.root / path).resolve()
+        if not target.is_relative_to(root):
+            return None  # a symlink that leaves the repository is not part of the diff
         try:
             if target.stat().st_size > 2_000_000:
                 return None
@@ -97,8 +111,8 @@ class Repo:
             return None
 
     def untracked(self) -> list[str]:
-        out = self.git("ls-files", "--others", "--exclude-standard", check=False).stdout
-        return [line for line in out.splitlines() if line.strip()]
+        out = self.git("ls-files", "--others", "--exclude-standard", "-z", check=False).stdout
+        return [name for name in out.split("\x00") if name.strip()]
 
     def tracked_changed_files(self, *revs: str, cached: bool = False) -> list[str]:
         args = ["diff", "--name-only", "--no-color", "--no-ext-diff"]
