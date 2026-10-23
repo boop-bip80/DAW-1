@@ -1,4 +1,4 @@
-//! `cargo xtask <ci|layers|assets|parity|wasm>` — repository gates.
+//! `cargo xtask <ci|layers|assets|parity|wasm|review>` — repository gates.
 
 mod ico;
 mod version;
@@ -144,6 +144,19 @@ fn wasm() -> Result<(), String> {
     cargo(&args)
 }
 
+/// Local, CodeRabbit-style review of the current changes. Arguments are forwarded
+/// to `tools/code_review`; the exit code mirrors the reviewer (see its README).
+fn review(args: &[String]) -> ExitCode {
+    let python = std::env::var("PYTHON").unwrap_or_else(|_| "python3".into());
+    match Command::new(&python).args(["-m", "tools.code_review"]).args(args).current_dir(root()).status() {
+        Ok(status) => ExitCode::from(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1)),
+        Err(e) => {
+            eprintln!("xtask: cannot run {python} -m tools.code_review: {e} (set PYTHON to your interpreter)");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn ci() -> Result<(), String> {
     let steps: Vec<(&str, Box<dyn Fn() -> Result<(), String>>)> = vec![
         ("fmt", Box::new(|| cargo(&["fmt", "--all", "--", "--check"]))),
@@ -176,9 +189,10 @@ fn main() -> ExitCode {
         Some("assets") => assets(),
         Some("parity") => parity(),
         Some("wasm") => wasm(),
+        Some("review") => return review(args.get(1..).unwrap_or(&[])),
         Some("version") => version::run(args.get(1..).unwrap_or(&[])),
         Some("ico") => ico::run(args.get(1..).unwrap_or(&[])),
-        _ => Err("usage: cargo xtask <ci|layers|assets|parity|wasm|version>".into()),
+        _ => Err("usage: cargo xtask <ci|layers|assets|parity|wasm|review|version>".into()),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
