@@ -95,12 +95,16 @@ fn expected_probe_format(marker: &[u8; 4]) -> &'static [&'static str] {
 /// check has to run before the stream is decoded.
 const SIZE_CHECKED_PROBE_FORMATS: &[&str] = &["caf", "flac", "isomp4", "wave"];
 
-/// Find the first container marker at or after `at`, within symphonia's probe depth.
+/// Find the first container marker at or after `at`, within symphonia's probe depth. A RIFF form
+/// other than WAVE is skipped, as the probe skips it and reads a WAVE behind it.
 fn find_marker<'a>(bytes: &[u8], at: usize, markers: &'a [&'static [u8; 4]]) -> Option<(usize, &'a [u8; 4])> {
     let end = bytes.len().min(at.saturating_add(MAX_PROBE_DEPTH));
     for pos in at..end.saturating_sub(3) {
         let window = bytes.get(pos..pos + 4)?;
         if let Some(marker) = markers.iter().find(|marker| window == marker.as_slice()) {
+            if matches!(*marker, b"RIFF" | b"RF64" | b"BW64") && bytes.get(pos + 8..pos + 12) != Some(&b"WAVE"[..]) {
+                continue;
+            }
             return Some((pos, *marker));
         }
     }
