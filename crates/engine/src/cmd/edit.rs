@@ -340,6 +340,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         })
         .collect();
     if cut && let Some(ids) = &by_clips {
+        let sh = shuffle(e.session());
         let s = e.session_mut();
         let shown = s.edit.selection;
         if follow {
@@ -349,7 +350,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
                 }
             }
         }
-        ops::remove_clips_rejoining(s, ids);
+        ops::remove_clips_rejoining(s, ids, sh);
         leave_selection_at(s, shown.start);
     } else if cut {
         let sh = shuffle(e.session());
@@ -417,9 +418,9 @@ fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
     // Clips selected in crossfades are removed whole, and what is left of their partners is rejoined at the cuts: clearing
     // only the range they show would leave their hidden tails behind, and clearing their whole range would eat into the partners.
     if let Some(ids) = crossfaded_selection(e, p) {
-        let at = e.session().edit.selection.start;
+        let (at, sh) = (e.session().edit.selection.start, shuffle(e.session()));
         let s = e.session_mut();
-        let removed = ops::remove_clips_rejoining(s, &ids).len();
+        let removed = ops::remove_clips_rejoining(s, &ids, sh).len();
         leave_selection_at(s, at);
         return Ok(json!({"removed": removed}));
     }

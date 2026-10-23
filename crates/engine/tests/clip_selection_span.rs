@@ -5,7 +5,7 @@
 
 use serde_json::json;
 use soundcraft_engine::{Engine, edit};
-use soundcraft_model::{Clip, ClipId, Fade, FadeShape, Source, SourceId, TrackId};
+use soundcraft_model::{AutoParam, Clip, ClipId, Fade, FadeShape, Source, SourceId, TrackId};
 use soundcraft_time::Range;
 
 fn source(id: u64) -> Source {
@@ -356,4 +356,112 @@ fn a_partner_that_cannot_be_rejoined_leaves_the_selection_a_range() {
         select(&mut e, &[a]);
         assert!(edit::crossfaded_selection(e.session()).is_none(), "{how}");
     }
+}
+
+fn points(e: &Engine, t: TrackId) -> Vec<i64> {
+    e.session().track(t).unwrap().lane(&AutoParam::Volume).map(|l| l.points.iter().map(|p| p.at).collect()).unwrap_or_default()
+}
+
+/// `pair(base)` in the given edit mode, with volume automation at `base` + 500 (under A), 1500 (under B), 5500 (under D)
+/// and 8000 (past everything).
+fn with_automation(mode: &str, base: i64) -> (Engine, TrackId, ClipId, ClipId, ClipId) {
+    let (mut e, t, a, b, d) = pair(base);
+    e.execute("edit.mode", &json!({"mode": mode})).unwrap();
+    let lane = e.session_mut().track_mut(t).unwrap().lane_mut(&AutoParam::Volume);
+    for at in [500, 1500, 5500, 8000] {
+        lane.set_point(base + at, -6.0);
+    }
+    (e, t, a, b, d)
+}
+
+#[test]
+fn in_shuffle_removing_crossfaded_clips_closes_the_gap_and_the_automation_follows() {
+    // What shows of A is [0, 1000), of B [1000, 2000): the gap is what shows of the clips removed. D (5000..6000) and the
+    // points after it move left by its length, the points inside it go, and the partner that stays is rejoined first, so
+    // it slides back to where the gap began. Cut and Clear do the same.
+    type Case<'a> = (&'a [&'a str], &'a [(&'a str, i64, i64)], &'a [i64], i64);
+    let cases: [Case; 3] = [
+        (&["a"], &[("b", 0, 1000), ("d", 4000, 5000)], &[500, 4500, 7000], 0),
+        (&["b"], &[("a", 0, 1000), ("d", 4000, 5000)], &[500, 4500, 7000], 1000),
+        (&["a", "b"], &[("d", 3000, 4000)], &[3500, 6000], 0),
+    ];
+    for command in ["edit.clear", "edit.cut"] {
+        for base in [0, 500] {
+            for (picked, left, want_points, caret) in cases {
+                let why = format!("{command} {picked:?} from {base}");
+                let (mut e, t, a, b, d) = with_automation("shuffle", base);
+                let id = |n: &str| match n {
+                    "a" => a,
+                    "b" => b,
+                    _ => d,
+                };
+                select(&mut e, &picked.iter().map(|n| id(n)).collect::<Vec<_>>());
+                let selected = e.session().clone();
+                let steps = e.undo_history().len();
+                e.execute(command, &json!({})).unwrap();
+                assert_eq!(layout(&e, t), left.iter().map(|&(n, s, f)| (id(n), base + s, base + f)).collect::<Vec<_>>(), "{why}");
+                assert_eq!(points(&e, t), want_points.iter().map(|p| base + p).collect::<Vec<_>>(), "{why}");
+                assert_eq!(selection(&e), Range::point(base + caret), "{why}: the insertion point stays where the selection began");
+                // One undo step brings everything back: clips, automation, selection.
+                assert_eq!(e.undo_history().len(), steps + 1, "{why}");
+                assert!(e.undo(), "{why}");
+                assert_eq!(e.session(), &selected, "{why}");
+            }
+        }
+    }
+}
+
+#[test]
+fn in_shuffle_a_partner_that_stays_between_two_removed_clips_closes_up_on_both_sides() {
+    // A (0..1050 shown) and C (2900..4800 shown) go, B stays between them and is rejoined at both cuts: 1050..2900. E, past
+    // C, follows C's gap; then B and E follow A's. The gaps close from the last, so each is still where it was read.
+    let (mut e, t, a, b, c) = chain();
+    e.execute("edit.mode", &json!({"mode": "shuffle"})).unwrap();
+    let id = e.session_mut().new_clip_id();
+    let clips = e.session_mut().track_mut(t).and_then(|t| t.playlist_mut()).unwrap();
+    clips.clips.push(Clip::audio(id, "e", SourceId(2), 0, 6000, 1000));
+    let lane = e.session_mut().track_mut(t).unwrap().lane_mut(&AutoParam::Volume);
+    for at in [500, 2000, 4000, 6500] {
+        lane.set_point(at, -6.0);
+    }
+    select(&mut e, &[a, c]);
+    assert_eq!(selection(&e), Range::new(0, 4800));
+    let selected = e.session().clone();
+    e.execute("edit.clear", &json!({})).unwrap();
+    assert_eq!(layout(&e, t), vec![(b, 0, 1850), (id, 3050, 4050)]);
+    // 500 and 4000 were inside the gaps; 2000 (under B) and 6500 (under E) moved with their clips.
+    assert_eq!(points(&e, t), vec![950, 3550]);
+    assert!(e.undo());
+    assert_eq!(e.session(), &selected);
+}
+
+#[test]
+fn outside_shuffle_removing_crossfaded_clips_leaves_what_follows_where_it_is() {
+    for (command, left) in [("edit.clear", vec![500, 1500, 5500, 8000]), ("edit.cut", vec![1500, 5500, 8000])] {
+        let (mut e, t, a, b, d) = with_automation("slip", 0);
+        select(&mut e, &[a]);
+        e.execute(command, &json!({})).unwrap();
+        // B is rejoined at the cut and stays there; D is where it was. A cut also takes the automation it shows (as ever).
+        assert_eq!(layout(&e, t), vec![(b, 1000, 2000), (d, 5000, 6000)], "{command}");
+        assert_eq!(points(&e, t), left, "{command}");
+        assert_eq!(selection(&e), Range::point(0), "{command}");
+    }
+}
+
+#[test]
+fn in_shuffle_a_locked_clip_stops_the_gap_and_the_automation_needs_automation_follows_edit() {
+    // D locked: B slides back, D stays, and so do the points from D on.
+    let (mut e, t, a, b, d) = with_automation("shuffle", 0);
+    e.session_mut().find_clip_mut(d).unwrap().time_locked = true;
+    select(&mut e, &[a]);
+    e.execute("edit.clear", &json!({})).unwrap();
+    assert_eq!(layout(&e, t), vec![(b, 0, 1000), (d, 5000, 6000)]);
+    assert_eq!(points(&e, t), vec![500, 5500, 8000]);
+    // Without Automation Follows Edit the clips close up and the points stay.
+    let (mut e, t, a, b, d) = with_automation("shuffle", 0);
+    e.session_mut().edit.automation_follows_edit = false;
+    select(&mut e, &[a]);
+    e.execute("edit.clear", &json!({})).unwrap();
+    assert_eq!(layout(&e, t), vec![(b, 0, 1000), (d, 4000, 5000)]);
+    assert_eq!(points(&e, t), vec![500, 1500, 5500, 8000]);
 }

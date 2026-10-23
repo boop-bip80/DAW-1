@@ -920,17 +920,22 @@ pub fn whole_clips(s: &Session, track: TrackId, ids: &[ClipId], origin: Samples)
 
 /// Remove the clips `ids`, each whole, and rejoin the crossfade partners that stay at the cut they had with the removed
 /// clip: a later partner starts at the cut (its hidden head dropped from view, its fade-in cleared, no stored cut), an
-/// earlier one ends at it (its fade-out cleared). A partner that is removed too is not rejoined. Returns the clips removed,
-/// as they were.
-// ponytail: the gap is not closed in Shuffle mode, and the automation of a removed clip stays (as for any removal by
-// id). Upgrade: ripple what lies after, as `clear_range` does.
-pub fn remove_clips_rejoining(s: &mut Session, ids: &[ClipId]) -> Vec<Clip> {
-    // Where each partner that stays is rejoined, read before anything moves.
+/// earlier one ends at it (its fade-out cleared). A partner that is removed too is not rejoined. In `shuffle` mode the
+/// gap each removed clip leaves (what showed of it) is closed as `clear_range` closes a range: what lies after moves left,
+/// up to a locked clip, and with Automation Follows Edit its automation follows. Returns the clips removed, as they were.
+pub fn remove_clips_rejoining(s: &mut Session, ids: &[ClipId], shuffle: bool) -> Vec<Clip> {
+    // Where each partner that stays is rejoined, and the gaps to close, read before anything moves.
     let (mut ends, mut starts): (Vec<(ClipId, Samples)>, Vec<(ClipId, Samples)>) = (Vec::new(), Vec::new());
+    let mut gaps: Vec<(TrackId, Range)> = Vec::new();
     for id in ids {
         let Some((track, c)) = s.find_clip(*id) else { continue };
         let Some(tr) = s.track(track) else { continue };
         let clips = tr.clips();
+        if shuffle {
+            // As `clips_span` counts it: a clip that shows nothing is taken whole.
+            let shown = clip_visible_span(clips, c);
+            gaps.push((track, if shown.is_empty() { c.range() } else { shown }));
+        }
         if let Some(a) = crossfade_earlier(clips, c).filter(|a| !ids.contains(&a.id)) {
             ends.push((a.id, crossfade_cut(a, c)));
         }
@@ -964,8 +969,26 @@ pub fn remove_clips_rejoining(s: &mut Session, ids: &[ClipId]) -> Vec<Clip> {
     for pl in s.tracks.iter_mut().filter_map(|t| t.playlist_mut()) {
         pl.sort();
     }
+    close_gaps(s, gaps);
     s.edit.selected_clips.retain(|c| !ids.contains(c));
     removed
+}
+
+/// Shuffle: close the `gaps` removed clips left, each as `clear_range` closes its range. Gaps that touch or overlap close
+/// as one, and the last first, so the others are still where they were read.
+fn close_gaps(s: &mut Session, mut gaps: Vec<(TrackId, Range)>) {
+    gaps.sort_by_key(|(t, r)| (t.0, r.start));
+    let mut merged: Vec<(TrackId, Range)> = Vec::new();
+    for (t, r) in gaps {
+        match merged.last_mut() {
+            Some((last_t, last)) if *last_t == t && r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push((t, r)),
+        }
+    }
+    for (t, r) in merged.into_iter().rev() {
+        let moved = ripple(s, t, r.end, -r.len());
+        follow_automation(s, t, r.end, moved);
+    }
 }
 
 /// How far the crossfade leading into `later` really moves when asked to move by `by` samples
