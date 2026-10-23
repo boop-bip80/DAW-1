@@ -449,6 +449,48 @@ fn outside_shuffle_removing_crossfaded_clips_leaves_what_follows_where_it_is() {
 }
 
 #[test]
+fn a_partner_that_stays_between_two_removed_clips_keeps_the_automation_under_it() {
+    // A and C go, B stays between them (rejoined at both cuts). The selection is 0..4800, but only what showed of A
+    // (0..1050) and of C (2900..4800) goes with a cut: the point under B (2000) stays, and in Shuffle follows B.
+    // Clear never touched the automation outside Shuffle (and in Shuffle it is the existing test above).
+    type Case<'a> = (&'a str, &'a str, (i64, i64), &'a [i64]);
+    let cases: [Case; 3] = [
+        ("slip", "edit.clear", (1050, 2900), &[500, 2000, 4000]),
+        ("slip", "edit.cut", (1050, 2900), &[2000]),
+        ("shuffle", "edit.cut", (0, 1850), &[950]),
+    ];
+    for (mode, command, (start, end), want) in cases {
+        let (mut e, t, a, b, c) = chain();
+        e.execute("edit.mode", &json!({"mode": mode})).unwrap();
+        let lane = e.session_mut().track_mut(t).unwrap().lane_mut(&AutoParam::Volume);
+        for at in [500, 2000, 4000] {
+            lane.set_point(at, -6.0);
+        }
+        select(&mut e, &[a, c]);
+        assert_eq!(selection(&e), Range::new(0, 4800), "{mode} {command}");
+        e.execute(command, &json!({})).unwrap();
+        assert_eq!(layout(&e, t), vec![(b, start, end)], "{mode} {command}");
+        assert_eq!(points(&e, t), want, "{mode} {command}");
+    }
+}
+
+#[test]
+fn clips_removed_around_a_crossfaded_partner_and_a_gap_keep_the_automation_under_both() {
+    // A (shows 0..1000) and D (5000..6000) go; B (rejoined at 1000..2000) and the gap between them stay. Points: 500 under
+    // A, 1500 under B, 3000 in the gap, 5500 under D, 8000 past everything. A cut takes the first and the fourth only.
+    for (command, want) in [("edit.clear", vec![500, 1500, 3000, 5500, 8000]), ("edit.cut", vec![1500, 3000, 8000])] {
+        let (mut e, t, a, b, d) = with_automation("slip", 0);
+        e.session_mut().track_mut(t).unwrap().lane_mut(&AutoParam::Volume).set_point(3000, -6.0);
+        select(&mut e, &[a, d]);
+        assert_eq!(selection(&e), Range::new(0, 6000), "{command}");
+        e.execute(command, &json!({})).unwrap();
+        assert_eq!(layout(&e, t), vec![(b, 1000, 2000)], "{command}");
+        assert_eq!(points(&e, t), want, "{command}");
+        assert_eq!(selection(&e), Range::point(0), "{command}");
+    }
+}
+
+#[test]
 fn in_shuffle_a_locked_clip_stops_the_gap_and_the_automation_needs_automation_follows_edit() {
     // D locked: B slides back, D stays, and so do the points from D on.
     let (mut e, t, a, b, d) = with_automation("shuffle", 0);

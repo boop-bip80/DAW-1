@@ -345,12 +345,18 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         .collect();
     if cut && let Some(ids) = &by_clips {
         let sh = shuffle(e.session());
+        // What showed of each removed clip, read before anything moves: only that automation goes with the cut, not the
+        // automation under a partner that stays between two removed clips (the selection is the union of them all).
+        let removed: Vec<(TrackId, soundcraft_time::Range)> =
+            ids.iter().filter_map(|id| Some((e.session().find_clip(*id)?.0, ops::clips_span(e.session(), &[*id], true)?))).collect();
         let s = e.session_mut();
         let shown = s.edit.selection;
         if follow {
-            for tr in s.tracks.iter_mut().filter(|t| tracks.contains(&t.id)) {
-                for l in &mut tr.automation {
-                    l.clear_range(shown.start, shown.end);
+            for (t, r) in removed.iter().filter(|(t, _)| tracks.contains(t)) {
+                if let Some(tr) = s.track_mut(*t) {
+                    for l in &mut tr.automation {
+                        l.clear_range(r.start, r.end);
+                    }
                 }
             }
         }
