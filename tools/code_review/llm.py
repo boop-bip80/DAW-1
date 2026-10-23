@@ -18,6 +18,13 @@ from urllib.parse import urlparse
 from .config import Config
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects so the prompt and the Authorization header stay on the endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        raise LLMError(f"endpoint redirected to {newurl}; set [llm] base_url to the final URL")
+
+
 class LLMError(RuntimeError):
     """The model endpoint was unreachable, rejected the request or returned junk."""
 
@@ -111,11 +118,12 @@ class LLMClient:
         if key:
             headers["Authorization"] = f"Bearer {key}"
 
+        opener = urllib.request.build_opener(_NoRedirect())
         last_error: Exception | None = None
         for attempt in range(self.config.max_retries + 1):
             request = urllib.request.Request(self.endpoint, data=body, headers=headers, method="POST")
             try:
-                with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+                with opener.open(request, timeout=self.config.timeout_seconds) as response:
                     raw = response.read().decode("utf-8", errors="replace")
                 data = json.loads(raw)
                 if not isinstance(data, dict):

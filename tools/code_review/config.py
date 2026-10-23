@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import ipaddress
 import os
 import re
 import tomllib
@@ -90,8 +91,14 @@ class Config:
 
     @property
     def is_local_endpoint(self) -> bool:
+        """True only for a loopback endpoint, which may run without an API key."""
         host = (urlparse(self.base_url).hostname or "").lower()
-        return host in {"localhost", "127.0.0.1", "::1", "[::1]"} or host.endswith(".local")
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
 
 def _string(data: dict, key: str, default: str) -> str:

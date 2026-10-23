@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from tools.code_review.config import Config
-from tools.code_review.llm import LLMClient, LLMError, estimate_tokens, extract_json
+from tools.code_review.llm import LLMClient, LLMError, _NoRedirect, estimate_tokens, extract_json
 
 
 class ExtractJsonTests(unittest.TestCase):
@@ -40,6 +40,13 @@ class EndpointTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"REVIEW_TEST_KEY": "secret"}):
             with self.assertRaisesRegex(LLMError, "must be an http"):
                 LLMClient(config).chat("system", "user")
+
+
+class RedirectTests(unittest.TestCase):
+    def test_redirects_are_refused(self) -> None:
+        handler = _NoRedirect()
+        with self.assertRaisesRegex(LLMError, "redirected"):
+            handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/v1")
 
 
 class TokenTests(unittest.TestCase):

@@ -70,6 +70,14 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(config.instructions_for("crates/model/src/lib.rs"), [])
         self.assertTrue(config.is_local_endpoint)
 
+    def test_dot_local_hosts_are_not_local_endpoints(self) -> None:
+        config = Config(base_url="http://printer.local/v1")
+        self.assertFalse(config.is_local_endpoint)
+
+    def test_loopback_hosts_are_local_endpoints(self) -> None:
+        for base_url in ("http://localhost:8080/v1", "http://127.0.0.1:8080/v1", "http://[::1]:8080/v1"):
+            self.assertTrue(Config(base_url=base_url).is_local_endpoint, base_url)
+
     def test_api_key_precedence(self) -> None:
         with mock.patch.dict(os.environ, {"REVIEW_API_KEY": "direct", "DEEPSEEK_API_KEY": "fallback"}, clear=False):
             with tempfile.TemporaryDirectory() as directory:
