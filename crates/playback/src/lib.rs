@@ -1028,15 +1028,19 @@ mod tests {
     }
 
     impl cpal::traits::StreamTrait for Fake {
+        /// Play reports the device's refusal when `starts` is false.
         fn play(&self) -> Result<(), cpal::Error> {
             if self.starts { Ok(()) } else { Err(cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable)) }
         }
+        /// Pause always succeeds on the fake stream.
         fn pause(&self) -> Result<(), cpal::Error> {
             Ok(())
         }
+        /// The fake stream claims one fixed buffer.
         fn buffer_size(&self) -> Result<cpal::FrameCount, cpal::Error> {
             Ok(1024)
         }
+        /// The fake stream has no clock.
         fn now(&self) -> cpal::StreamInstant {
             cpal::StreamInstant::new(0, 0)
         }

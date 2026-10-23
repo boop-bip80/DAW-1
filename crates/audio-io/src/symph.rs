@@ -23,6 +23,8 @@ use crate::{AudioBuffer, AudioError, AudioInfo, FileFormat, Result, SampleFormat
 /// takes its frame length from the file (encoders use 4096).
 const MAX_PACKET_FRAMES: u64 = 1 << 20;
 
+/// Turn a symphonia error into the audio layer's error, keeping "unsupported" and "too large"
+/// distinct from a malformed file.
 fn map_err(e: SymError) -> AudioError {
     match e {
         SymError::Unsupported(m) => AudioError::Unsupported(m.to_string()),
@@ -65,7 +67,8 @@ const MAX_PROBE_DEPTH: usize = 1024 * 1024;
 /// The container marker each detected format starts with, if its reader needs size checks first.
 fn container_markers(detected: FileFormat) -> &'static [&'static [u8; 4]] {
     match detected {
-        FileFormat::Wav => &[b"RIFF"],
+        // RF64 and BW64 are the >4 GiB RIFF forms.
+        FileFormat::Wav => &[b"RIFF", b"RF64", b"BW64"],
         FileFormat::Flac => &[b"fLaC"],
         FileFormat::Caf => &[b"caff"],
         // MP4/M4A put `ftyp` after the first atom's size field.
@@ -75,6 +78,22 @@ fn container_markers(detected: FileFormat) -> &'static [&'static [u8; 4]] {
         FileFormat::Aiff | FileFormat::Mp3 | FileFormat::Ogg => &[],
     }
 }
+
+/// The probe short names a container marker stands for.
+fn expected_probe_format(marker: &[u8; 4]) -> &'static [&'static str] {
+    match marker {
+        b"caff" => &["caf"],
+        // The isomp4 reader reads the `ftyp` atom.
+        b"ftyp" => &["isomp4"],
+        b"fLaC" => &["flac"],
+        b"RIFF" | b"RF64" | b"BW64" => &["wave"],
+        _ => &[],
+    }
+}
+
+/// Probe short names whose demuxer allocates from sizes in the file, so the matching container
+/// check has to run before the stream is decoded.
+const SIZE_CHECKED_PROBE_FORMATS: &[&str] = &["caf", "flac", "isomp4", "wave"];
 
 /// Find the first container marker at or after `at`, within symphonia's probe depth.
 fn find_marker<'a>(bytes: &[u8], at: usize, markers: &'a [&'static [u8; 4]]) -> Option<(usize, &'a [u8; 4])> {
@@ -90,27 +109,56 @@ fn find_marker<'a>(bytes: &[u8], at: usize, markers: &'a [&'static [u8; 4]]) -> 
 
 /// Probe for a container, checking the container it finds before its reader allocates whatever the
 /// file claims.
+///
+/// The check has to run on the container the probe actually selects, but the probe reports that
+/// container only through the reader it returns. The check therefore runs on the first marker the
+/// detected format allows, and the reader is refused if its format is not the checked one: a
+/// misleading marker must not let a later container slip through unchecked.
 fn open(bytes: &[u8], detected: FileFormat) -> Result<Opened> {
     let mut mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), MediaSourceStreamOptions::default());
     let at = skip_leading_id3(&mut mss, bytes)?;
+    let mut checked: Option<&'static [&'static str]> = None;
     if let Some((found, marker)) = find_marker(bytes, at, container_markers(detected)) {
         match marker {
-            b"caff" => crate::caf::check(bytes, found)?,
-            b"ftyp" => crate::mp4::check(bytes, found.saturating_sub(4))?,
+            b"caff" => {
+                crate::caf::check(bytes, found)?;
+                checked = Some(expected_probe_format(marker));
+            }
+            b"ftyp" => {
+                crate::mp4::check(bytes, found.saturating_sub(4))?;
+                checked = Some(expected_probe_format(marker));
+            }
             b"fLaC" => {
                 crate::flac::check_metadata(bytes, found)?;
                 if let Some(info) = crate::flac::empty_stream_info(bytes, found) {
                     return Ok(Opened::Empty(info));
                 }
+                checked = Some(expected_probe_format(marker));
             }
-            b"RIFF" => crate::wav::check_info(bytes, found)?,
+            b"RIFF" | b"RF64" | b"BW64" => {
+                crate::wav::check_info(bytes, found)?;
+                checked = Some(expected_probe_format(marker));
+            }
             _ => {}
         }
     }
     let reader = symphonia::default::get_probe().probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default()).map_err(map_err)?;
+    let probed = reader.format_info().short_name;
+    // Only containers whose readers allocate from sizes in the file need the check. A stream the
+    // probe reads with another reader (MP3, Ogg, AIFF, ...) has no such size fields, so a marker
+    // found in its audio data must not reject it.
+    if let Some(names) = checked.filter(|_| SIZE_CHECKED_PROBE_FORMATS.contains(&probed)) {
+        if !names.contains(&probed) {
+            return Err(AudioError::Malformed(format!("the probed container ({probed}) is not the one whose size checks ran")));
+        }
+    } else if checked.is_none() && SIZE_CHECKED_PROBE_FORMATS.contains(&probed) {
+        return Err(AudioError::Malformed(format!("the probed container ({probed}) was not size-checked")));
+    }
     Ok(Opened::Reader(reader))
 }
 
+/// The container `detected` stands for: the detection wins when it knows the file, otherwise the
+/// decoded codec names the family.
 fn format_from_codec(codec: AudioCodecId, detected: FileFormat) -> FileFormat {
     if detected != FileFormat::Other {
         return detected;
@@ -125,6 +173,8 @@ fn format_from_codec(codec: AudioCodecId, detected: FileFormat) -> FileFormat {
     }
 }
 
+/// The stored sample format, using the codec and its declared bit depth. Lossy and unusual
+/// codecs decode to `Compressed`.
 fn sample_format_of(p: &AudioCodecParameters) -> SampleFormat {
     let c = p.codec;
     if c == CODEC_ID_PCM_F32LE || c == CODEC_ID_PCM_F32BE {
@@ -159,6 +209,7 @@ fn sample_format_of(p: &AudioCodecParameters) -> SampleFormat {
     }
 }
 
+/// The first track with a decodable audio codec, with the stream information the UI shows.
 fn info_of(reader: &dyn FormatReader, detected: FileFormat) -> Result<(u32, AudioInfo)> {
     let (track, p) = reader
         .tracks()

@@ -451,6 +451,22 @@ fn garbage_in_compressed_containers_errors() {
     assert!(decode(&[], None).is_err());
 }
 
+/// A marker that passes its container check must not let the probe select a different container
+/// without its own checks: the reader is refused when the probed format disagrees.
+#[test]
+fn a_probed_container_that_disagrees_with_the_checked_marker_is_refused() {
+    let flac = small(FileFormat::Flac, BitDepth::Int24, 2);
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(b"FAKE");
+    bytes.extend_from_slice(&flac);
+    match decode(&bytes, None) {
+        Err(AudioError::Malformed(message)) => assert!(message.contains("probed container"), "unexpected message: {message}"),
+        Err(other) => panic!("unexpected error kind: {other:?}"),
+        Ok(_) => panic!("the mismatched container must be refused"),
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 

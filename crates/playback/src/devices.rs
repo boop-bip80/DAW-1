@@ -64,6 +64,7 @@ pub struct AudioSystem {
     pub inputs: Vec<DeviceInfo>,
 }
 
+/// The name the host gives `d`, if it can produce a description for it.
 pub(crate) fn device_name(d: &cpal::Device) -> Option<String> {
     d.description().ok().map(|description| description.name().to_owned())
 }
