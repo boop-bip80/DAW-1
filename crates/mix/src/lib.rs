@@ -61,6 +61,10 @@ use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;
 
+mod clip_index;
+mod schedule;
+pub use clip_index::ClipIndex;
+
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
 pub const MAIN_CHANNELS: usize = 2;
 
@@ -368,8 +372,10 @@ pub struct MixEngine {
     adopt: HashMap<(TrackId, usize), PreparedInstance>,
     /// Instances `sync` took out of service, for the host to drop (see [`MixEngine::take_retired`]).
     retired: Vec<Box<dyn Plugin>>,
-    /// Ownership workspace reused for parallel strip processing.
+    /// Ownership workspace reused for strip processing.
     work: Vec<(usize, Strip)>,
+    /// Shares the strips between threads when a block needs it (see `schedule`).
+    runner: schedule::StripRunner<(usize, Strip)>,
 }
 
 /// What `sync` needs to fill a slot.
@@ -418,6 +424,7 @@ impl SlotCtx<'_> {
 impl MixEngine {
     pub fn new(sample_rate: f32, max_block: usize) -> Self {
         let max_block = max_block.clamp(16, 16_384);
+        schedule::warm_up();
         MixEngine {
             sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 },
             max_block,
@@ -443,6 +450,7 @@ impl MixEngine {
             adopt: HashMap::new(),
             retired: Vec::new(),
             work: Vec::new(),
+            runner: schedule::StripRunner::new(),
         }
     }
 
@@ -613,7 +621,15 @@ impl MixEngine {
     }
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
+    /// Walks every clip of every track to find the ones under the block: a host rendering
+    /// repeatedly passes a [`ClipIndex`] of the session to [`MixEngine::render_with`] instead.
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
+        self.render_with(s, &ClipIndex::EMPTY, pos, frames, out);
+    }
+
+    /// [`MixEngine::render`], finding each block's clips with `clips` (built from `s`, off the
+    /// audio thread). The result is the same with any index: it only saves time.
+    pub fn render_with(&mut self, s: &Session, clips: &ClipIndex, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
         if pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
@@ -639,7 +655,7 @@ impl MixEngine {
         let order = std::mem::take(&mut self.order);
         let live = |t: &Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
-        // Phase 1: independent strips (audio, instrument, MIDI) in parallel.
+        // Phase 1: independent strips (audio, instrument, MIDI), shared between threads when heavy.
         let mut work = std::mem::take(&mut self.work);
         work.clear();
         for &i in &order {
@@ -655,9 +671,10 @@ impl MixEngine {
         }
         let busses = std::mem::take(&mut self.busses);
         let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-        run_strips(&mut work, |(i, st)| {
+        let period_ns = frames as f64 / f64::from(self.sample_rate) * 1e9;
+        self.runner.run(&mut work, on_audio_thread(), period_ns, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
-                process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
+                process_strip(s, clips, t, st, &busses, &live_in, pos, frames, any_solo);
             }
         });
         self.busses = busses;
@@ -736,7 +753,7 @@ impl MixEngine {
                 st.scratch.resize(self.max_block, 0.0);
             }
             let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
-            process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
+            process_strip(s, clips, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
             st.align.process(&mut st.buf, frames);
@@ -901,6 +918,7 @@ struct LiveInput<'a> {
 
 fn process_strip(
     s: &Session,
+    clips: &ClipIndex,
     t: &Track,
     strip: &mut Strip,
     busses: &HashMap<BusId, BusBuf>,
@@ -935,8 +953,8 @@ fn process_strip(
         TrackKind::Instrument | TrackKind::Midi if live.monitor_only => {}
         TrackKind::Audio => {
             let block = Range { start: pos, end: pos.saturating_add(frames as i64) };
-            for clip in t.clips() {
-                if clip.muted || !clip.is_audio() || !clip.range().overlaps(&block) {
+            for clip in clips.overlapping(t, block) {
+                if clip.muted || !clip.is_audio() {
                     continue;
                 }
                 match clip_fx_params(s, clip.id.0) {
@@ -997,7 +1015,7 @@ fn process_strip(
                 if std::mem::take(&mut strip.chase) {
                     chase_controllers(s, t, pos, inst);
                 }
-                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+                schedule_notes(s, clips, t, pos, frames, inst, &mut strip.held);
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
@@ -1280,24 +1298,6 @@ fn as_audio_thread(audio: bool, f: impl FnOnce()) {
     f();
 }
 
-/// Process strips, in parallel on native targets when there are enough of them.
-#[cfg(not(target_arch = "wasm32"))]
-fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
-    use rayon::prelude::*;
-    if work.len() >= 4 {
-        // The workers render on behalf of this thread: on the audio thread, they are it too.
-        let audio = on_audio_thread();
-        work.par_iter_mut().for_each(|w| as_audio_thread(audio, || f(w)));
-    } else {
-        work.iter_mut().for_each(f);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
-    work.iter_mut().for_each(f);
-}
-
 fn strip_channels(t: &Track, main_ch: usize) -> usize {
     match t.kind {
         TrackKind::Master => main_ch,
@@ -1483,21 +1483,18 @@ fn midi_offset(s: &Session, t: &Track) -> i64 {
 }
 
 /// Send note on/offs and controllers for MIDI clips overlapping the block.
-fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
+fn schedule_notes(s: &Session, clips: &ClipIndex, t: &Track, pos: Samples, frames: usize, inst: &mut PluginSlot, held: &mut Vec<u8>) {
     let sr = s.sample_rate;
     // MIDI Track Offsets: the track's notes sound `offset` samples later (earlier if negative), so
     // the block looks that far back into the clips.
     let offset = midi_offset(s, t);
     let pos = pos.saturating_sub(offset);
     let end = pos.saturating_add(frames as i64);
-    for clip in t.clips() {
+    for clip in clips.overlapping(t, Range { start: pos, end }) {
         if clip.muted {
             continue;
         }
         let ClipContent::Midi { sequence } = &clip.content else { continue };
-        if !clip.range().overlaps(&Range { start: pos, end }) {
-            continue;
-        }
         let base = s.tempo.samples_to_ticks(clip.start, sr);
         // MIDI Real-Time Properties (non-destructive velocity/transpose/duration/delay).
         let rtp = |name: &str, d: f64| Key::new(format_args!("rtp.{}.{name}", t.id.0)).map_or(d, |k| s.edit.value(k.as_str(), d));
@@ -1511,12 +1508,30 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
                 rtp("delay", 0.0).clamp(-1e7, 1e7) as i64,
             )
         };
+        // The block in clip ticks, with a tick of slack each side for rounding. Worked out once so
+        // that only the notes starting or ending in the block are converted to samples: a tempo
+        // conversion walks the tempo map, and doing two per note of the clip on every block (a
+        // beat-tracked map has hundreds of tempos, a dense part thousands of notes) is more work
+        // than the audio thread has time for at small buffers.
+        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
+            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
+        // Notes still held at the clip's end are cut there: when that end falls in this block,
+        // every note ending at or after it ends here.
+        let cut_from = if clip.end() >= pos && clip.end() < end {
+            s.tempo.samples_to_ticks(clip.end(), sr).saturating_sub(base).saturating_sub(1)
+        } else {
+            i64::MAX
+        };
         for n0 in &sequence.notes {
             let mut n = *n0;
             n.velocity = (i64::from(n.velocity) + dv).clamp(1, 127) as u8;
             n.pitch = (i64::from(n.pitch) + dp).clamp(0, 127) as u8;
             n.length = ((n.length as f64 * dur) as i64).max(1);
             n.start = n.start.saturating_add(delay).max(0);
+            let end_tick = n.start.saturating_add(n.length);
+            if !near.contains(&n.start) && !near.contains(&end_tick) && end_tick < cut_from {
+                continue;
+            }
             let on = s.tempo.tick_to_samples(base.saturating_add(n.start), sr);
             let off = s.tempo.tick_to_samples(base.saturating_add(n.start).saturating_add(n.length), sr).min(clip.end());
             if on >= clip.end() {
@@ -1533,8 +1548,6 @@ fn schedule_notes(s: &Session, t: &Track, pos: Samples, frames: usize, inst: &mu
                 held.retain(|p| *p != n.pitch);
             }
         }
-        let near = s.tempo.samples_to_ticks(pos, sr).saturating_sub(base).saturating_sub(1)
-            ..=s.tempo.samples_to_ticks(end, sr).saturating_sub(base).saturating_add(1);
         // Events before tick 0 are what a start trim hid: they don't play.
         for c in sequence.ctrls.iter().filter(|c| c.tick >= 0) {
             let tick = c.tick.saturating_add(delay).max(0);
@@ -2077,6 +2090,8 @@ pub fn source_channels(s: &Session, bus: Option<BusId>) -> usize {
 /// [`render_range`] or [`render_bus`] of any length, a block at a time.
 pub struct RangeRender {
     eng: MixEngine,
+    /// Where the session's clips are, so that a long render does not walk them all every block.
+    clips: ClipIndex,
     bus: Option<BusId>,
     tmp: Vec<Vec<f32>>,
     start: Samples,
@@ -2092,16 +2107,16 @@ impl RangeRender {
         let eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
         let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
         let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
-        RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
+        RangeRender { eng, clips: ClipIndex::build(s), bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
     }
 
     fn render(&mut self, s: &Session, pos: Samples, n: usize) {
         match self.bus {
             Some(id) => {
-                self.eng.render(s, pos, n, &mut []);
+                self.eng.render_with(s, &self.clips, pos, n, &mut []);
                 self.eng.copy_bus(id, n, &mut self.tmp);
             }
-            None => self.eng.render(s, pos, n, &mut self.tmp),
+            None => self.eng.render_with(s, &self.clips, pos, n, &mut self.tmp),
         }
     }
 
@@ -2261,11 +2276,13 @@ mod audio_thread_tests {
     /// (or is not) the audio thread.
     fn seen_by_strips(audio: bool) -> Vec<bool> {
         std::thread::spawn(move || {
+            // The audio thread never makes the pool itself: a host makes it first (MixEngine::new).
+            schedule::warm_up();
             if audio {
                 mark_audio_thread();
             }
             let mut work = vec![None; 64];
-            run_strips(&mut work, |w| {
+            schedule::StripRunner::sharing_from_the_start().run(&mut work, audio, 1e6, |w| {
                 // Long enough that the pool's workers take part.
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 *w = Some(on_audio_thread());
@@ -2303,6 +2320,48 @@ mod tests {
         ins.params.insert("level".into(), level_db);
         tr.instrument = Some(ins);
         s
+    }
+
+    #[test]
+    fn a_clip_index_renders_the_same_audio_as_walking_every_clip() {
+        // A sliced drum edit (thousands of short clips with fades, butted, crossfaded and with gaps),
+        // a long clip under it all, a track whose clips are out of order (walked, not indexed) and
+        // MIDI clips: every block must come out bit for bit as without an index.
+        let mut s = synth_session(-6.0);
+        let noise: Vec<f32> = (0..96_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 8_388_608.0 - 1.0).collect();
+        s.pool.insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![noise] })));
+        let drums = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let (mut at, mut x) = (0i64, 7u64);
+        let mut sliced = Vec::new();
+        for _ in 0..3000 {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let len = 40 + ((x >> 33) % 300) as i64;
+            let mut c = Clip::audio(s.new_clip_id(), "hit", SourceId(900), ((x >> 17) % 40_000) as i64, at, len);
+            c.fade_in.len = ((x >> 7) % 20) as i64;
+            c.fade_out.len = ((x >> 11) % 20) as i64;
+            sliced.push(c);
+            at += len + ((x >> 23) % 40) as i64 - 10;
+        }
+        s.track_mut(drums).unwrap().playlist_mut().unwrap().clips = sliced;
+        let room = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let long = Clip::audio(s.new_clip_id(), "room", SourceId(900), 0, 0, at);
+        let late = Clip::audio(s.new_clip_id(), "late", SourceId(900), 0, at / 2, 5_000);
+        s.track_mut(room).unwrap().playlist_mut().unwrap().clips = vec![late, long];
+        let index = ClipIndex::build(&s);
+        assert_eq!(index.len(), 3001, "the sliced and MIDI tracks are indexed, the unsorted one is not");
+        let (mut walk, mut indexed) = (MixEngine::new(48_000.0, 128), MixEngine::new(48_000.0, 128));
+        let (mut a, mut b) = (vec![vec![0.0f32; 128]; 2], vec![vec![0.0f32; 128]; 2]);
+        let (mut pos, mut heard) = (0, 0usize);
+        while pos < at + 128 {
+            walk.render(&s, pos, 128, &mut a);
+            indexed.render_with(&s, &index, pos, 128, &mut b);
+            for (x, y) in a.iter().zip(&b) {
+                assert!(x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()), "block at {pos} differs");
+            }
+            heard += usize::from(a[0].iter().any(|v| *v != 0.0));
+            pos += 128;
+        }
+        assert!(heard > 1000, "the comparison covers sound, not silence ({heard} blocks)");
     }
 
     #[test]
@@ -2728,6 +2787,98 @@ mod tests {
         eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(keys) }]);
         render_block(&mut eng, &s, 0);
         assert_eq!(*heard.lock().unwrap(), vec![(72, 80)]);
+    }
+
+    /// Records the absolute sample of every note on and off it is sent.
+    struct NoteLog {
+        inner: Box<dyn Plugin>,
+        pos: Arc<std::sync::Mutex<i64>>,
+        heard: Arc<std::sync::Mutex<Vec<(i64, bool, u8)>>>,
+    }
+
+    impl Plugin for NoteLog {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.inner.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+        fn note_on(&mut self, offset: usize, note: u8, _velocity: u8) {
+            let at = *self.pos.lock().unwrap() + offset as i64;
+            self.heard.lock().unwrap().push((at, true, note));
+        }
+        fn note_off(&mut self, offset: usize, note: u8) {
+            let at = *self.pos.lock().unwrap() + offset as i64;
+            self.heard.lock().unwrap().push((at, false, note));
+        }
+    }
+
+    #[test]
+    fn notes_land_on_the_same_samples_with_a_dense_tempo_map() {
+        // A beat-tracked tempo map (a tempo on every beat) and a dense part: only the notes near each
+        // block are converted now, and every on and off must still land on the exact sample a
+        // conversion of every note gives, including notes cut at the clip's end.
+        let mut s = Session::default();
+        let q = TICKS_PER_QUARTER;
+        for beat in 1..400i64 {
+            s.tempo.set_tempo(beat * q, 120.0 + ((beat * 37) % 11) as f64 * 0.7 - 3.0).unwrap();
+        }
+        let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.keys"));
+        let mut seq = soundcraft_midi::Sequence::default();
+        let mut x: u64 = 7;
+        for _ in 0..3000 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let start = ((x >> 33) % (300 * q as u64)) as i64;
+            let length = 1 + ((x >> 13) % (3 * q as u64)) as i64;
+            let pitch = 36 + ((x >> 7) % 48) as u8;
+            seq.notes.push(soundcraft_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start, length });
+        }
+        seq.notes.sort_by_key(|n| n.start);
+        // Ends mid-block and inside the notes, so some are cut.
+        let clip_end = 48_000 * 140 + 77;
+        let cid = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, clip_end, seq.clone()));
+        let pos = Arc::new(std::sync::Mutex::new(0i64));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = NoteLog { inner: soundcraft_dsp::create("gain").unwrap(), pos: Arc::clone(&pos), heard: Arc::clone(&heard) };
+        let mut eng = MixEngine::new(48_000.0, 128);
+        eng.set_external_instances(true);
+        eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(log) }]);
+        let mut out = vec![vec![0.0f32; 128]; 2];
+        let mut at = 0i64;
+        while at < clip_end + 128 {
+            *pos.lock().unwrap() = at;
+            eng.render(&s, at, 128, &mut out);
+            at += 128;
+        }
+        let sr = s.sample_rate;
+        let mut want = Vec::new();
+        for n in &seq.notes {
+            let on = s.tempo.tick_to_samples(n.start, sr);
+            if on >= clip_end {
+                continue;
+            }
+            want.push((on, true, n.pitch));
+            want.push((s.tempo.tick_to_samples(n.start + n.length, sr).min(clip_end), false, n.pitch));
+        }
+        let mut got = heard.lock().unwrap().clone();
+        want.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got.len(), want.len());
+        assert_eq!(got, want);
     }
 
     fn render_block(eng: &mut MixEngine, s: &Session, pos: i64) -> f32 {
