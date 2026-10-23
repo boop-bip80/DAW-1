@@ -875,6 +875,7 @@ fn track_row(app: &mut SoundApp, ui: &mut Ui, id: TrackId, row: Rect, tl: Rect, 
 fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, main_h: f32, tl: Rect) {
     let t = Tokens::current();
     let s = app.engine.session_arc();
+    let view = Range::new(sample_at(&s, tl, tl.min.x), sample_at(&s, tl, tl.max.x));
     let mut y = row.min.y + main_h;
     for (i, pl) in track.playlists.iter().enumerate() {
         if i == track.active_playlist {
@@ -885,7 +886,8 @@ fn playlist_lanes(app: &mut SoundApp, ui: &mut Ui, track: &Track, row: Rect, mai
         ui.painter().rect_filled(lane, 0.0, t.playlist_lane);
         ui.painter().text(pos2(head.min.x + 4.0, head.center().y), Align2::LEFT_CENTER, &pl.name, regular(10.5), t.text_dim);
         let painter = ui.painter().with_clip_rect(lane.intersect(ui.clip_rect()));
-        for c in &pl.clips {
+        // Off-screen clips are skipped, as in the main lane: each `draw_clip` scans its whole playlist for seams.
+        for c in pl.clips.iter().filter(|c| c.range().overlaps(&view)) {
             draw_clip(app, &painter, &s, track, &pl.clips, c, tl, lane, false);
         }
         let resp = ui.interact(lane, ui.id().with(("pl_lane", track.id.0, i)), Sense::click());
@@ -3064,6 +3066,36 @@ mod tests {
             assert_eq!(pill.width(), text_w + 2.0 * PILL_PAD);
             assert!(pill.width() < clip_rect.width() * 0.5);
         }
+    }
+
+    #[test]
+    fn alternate_playlist_lanes_draw_only_the_clips_on_screen() {
+        let mut h = harness(1);
+        let tl = timeline(&h);
+        let s = h.state().engine.session();
+        let (view, color) = (Range::new(sample_at(s, tl, tl.min.x), sample_at(s, tl, tl.max.x)), s.tracks[0].color);
+        let len = (view.end - view.start) / 20;
+        // One clip well inside the view, one running past its right edge, two far beyond it.
+        let starts = [view.start + 4 * len, view.end - len / 2, view.end + 20 * len, view.end + 2_000 * len];
+        let s = h.state_mut().engine.session_mut();
+        let mut alt = soundcraft_model::Playlist::new("alt");
+        alt.clips = starts.iter().map(|&at| test_clip(s.new_clip_id().0, at, len)).collect();
+        let track = s.tracks.first_mut().unwrap();
+        (track.view, track.active_playlist) = ("playlists".into(), 0);
+        track.playlists.push(alt);
+        h.run_steps(3);
+        // The main playlist is empty: every clip body in the track's rows belongs to the alternate lane.
+        let bodies: Vec<Rect> = h
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                Shape::Rect(r) if r.fill == clip_colors(color, false).0 => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bodies.len(), 2, "only the two clips that show are drawn: {bodies:?}");
+        assert!(bodies.iter().all(|r| r.max.x > tl.min.x && r.min.x < tl.max.x), "{bodies:?} are not all on screen");
     }
 
     fn test_clip(id: u64, start: Samples, len: Samples) -> Clip {
