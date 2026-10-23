@@ -209,14 +209,16 @@ fn ffmpeg_h264_high_with_bframes() {
 
 /// Scratch files live beside the build, not in a `/tmp` some systems mount on a small tmpfs.
 fn scratch() -> std::path::PathBuf {
-    option_env!("CARGO_TARGET_TMPDIR").map_or_else(
-        || {
-            // `<workspace>/crates/<crate>` → `<workspace>/target/tmp`, without a literal `..`.
-            let krate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-            krate.parent().and_then(std::path::Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"))
-        },
-        std::path::PathBuf::from,
-    )
+    option_env!("CARGO_TARGET_TMPDIR").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        // Unit tests run from `<target>/<profile>/deps/`, so three parents give the target
+        // directory: this honours `CARGO_TARGET_DIR` and works from a read-only checkout.
+        if let Some(target) = std::env::current_exe().ok().and_then(|exe| exe.parent()?.parent()?.parent().map(std::path::Path::to_path_buf)) {
+            return target.join("tmp");
+        }
+        // Last resort: `<workspace>/target/tmp`, without a literal `..`.
+        let krate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        krate.parent().and_then(std::path::Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"))
+    })
 }
 
 fn ffmpeg_dir() -> Option<std::path::PathBuf> {
