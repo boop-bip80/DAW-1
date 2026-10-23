@@ -11,14 +11,20 @@ const MAX_BUNDLES: usize = 4096;
 const MAX_ENTRIES: usize = 100_000;
 
 /// The standard CLAP search locations for this OS (existing or not), followed by every entry
-/// of the `CLAP_PATH` environment variable.
+/// of the `CLAP_PATH` environment variable. With `SOUNDCRAFT_NO_SYSTEM_PLUGINS` set (test runs:
+/// `cargo xtask ci` sets it), only `CLAP_PATH`, so tests never load the machine's plugins.
 pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut v = os_search_paths(
-        std::env::var_os("HOME").map(PathBuf::from),
-        std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-    );
-    if let Some(cp) = std::env::var_os("CLAP_PATH") {
+    search_paths(|k| std::env::var_os(k))
+}
+
+/// [`default_search_paths`] with the environment given.
+fn search_paths(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut v = if env("SOUNDCRAFT_NO_SYSTEM_PLUGINS").is_some_and(|v| !v.is_empty()) {
+        Vec::new()
+    } else {
+        os_search_paths(env("HOME").map(PathBuf::from), env("COMMONPROGRAMFILES").map(PathBuf::from), env("LOCALAPPDATA").map(PathBuf::from))
+    };
+    if let Some(cp) = env("CLAP_PATH") {
         v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
     }
     v
@@ -195,7 +201,34 @@ mod tests {
         } else {
             assert_eq!(v, vec![PathBuf::from("/home/u/.clap"), PathBuf::from("/usr/lib/clap"), PathBuf::from("/usr/local/lib/clap")]);
         }
-        assert!(default_search_paths().len() >= v.len().saturating_sub(1));
+        let env = |k: &str| match k {
+            "HOME" => Some("/home/u".into()),
+            "COMMONPROGRAMFILES" => Some("C:/CPF".into()),
+            "LOCALAPPDATA" => Some("C:/LAD".into()),
+            _ => None,
+        };
+        assert_eq!(search_paths(env), v);
+    }
+
+    #[test]
+    fn no_system_plugins_keeps_only_clap_path() {
+        let extra = std::env::join_paths(["/opt/clap-a", "/opt/clap-b"]).unwrap();
+        let env = |k: &str| match k {
+            "SOUNDCRAFT_NO_SYSTEM_PLUGINS" => Some("1".into()),
+            "HOME" => Some("/home/u".into()),
+            "CLAP_PATH" => Some(extra.clone()),
+            _ => None,
+        };
+        assert_eq!(search_paths(env), vec![PathBuf::from("/opt/clap-a"), PathBuf::from("/opt/clap-b")]);
+        // Set but empty counts as unset.
+        let env = |k: &str| match k {
+            "SOUNDCRAFT_NO_SYSTEM_PLUGINS" => Some("".into()),
+            "HOME" => Some("/home/u".into()),
+            "COMMONPROGRAMFILES" => Some("C:/CPF".into()),
+            "LOCALAPPDATA" => Some("C:/LAD".into()),
+            _ => None,
+        };
+        assert_eq!(search_paths(env), os_search_paths(Some("/home/u".into()), Some("C:/CPF".into()), Some("C:/LAD".into())));
     }
 
     #[test]

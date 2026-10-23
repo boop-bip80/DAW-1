@@ -65,6 +65,7 @@ Parity is measured, not guessed: `crates/engine/catalog/menus.txt` lists the inc
 
 ## Quality gates (before every commit)
 `cargo xtask ci` = fmt check, `clippy --workspace --all-targets -D warnings`, tests, assets, layers, wasm check. Commit after each arc of work that builds; one topic per commit.
+Its test step sets `SOUNDCRAFT_NO_SYSTEM_PLUGINS=1` so tests never load the machine's installed VST3/CLAP plugins (some never let a process exit once loaded). Set it yourself when running `cargo test` directly on a machine with plugins installed.
 
 ## Release
 Push to the `release` branch to build signed installers for macOS (universal DMG), Windows (x64/x86 MSI + zip), Linux (AppImage, deb, rpm, tar.gz, Flatpak; riscv64 tar.gz), FreeBSD and Web (wasm zip). Version: `cargo xtask version [set X.Y.Z]`. See `docs/release-playbook.md` and craftrules `release/playbook.md`.

@@ -34,15 +34,21 @@ impl Os {
 }
 
 /// The standard VST3 search locations for this OS (existing or not), followed by every entry of
-/// the `VST3_PATH` environment variable.
+/// the `VST3_PATH` environment variable. With `SOUNDCRAFT_NO_SYSTEM_PLUGINS` set (test runs:
+/// `cargo xtask ci` sets it), only `VST3_PATH`: tests must not load the machine's installed
+/// plugins, some of which never let the process exit once loaded.
 pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut v = os_search_paths(
-        Os::current(),
-        std::env::var_os("HOME").map(PathBuf::from),
-        std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-    );
-    if let Some(cp) = std::env::var_os("VST3_PATH") {
+    search_paths(Os::current(), |k| std::env::var_os(k))
+}
+
+/// [`default_search_paths`] for `os` with the environment given.
+fn search_paths(os: Os, env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let mut v = if env("SOUNDCRAFT_NO_SYSTEM_PLUGINS").is_some_and(|v| !v.is_empty()) {
+        Vec::new()
+    } else {
+        os_search_paths(os, env("HOME").map(PathBuf::from), env("COMMONPROGRAMFILES").map(PathBuf::from), env("LOCALAPPDATA").map(PathBuf::from))
+    };
+    if let Some(cp) = env("VST3_PATH") {
         v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
     }
     v
@@ -300,7 +306,27 @@ mod tests {
         assert_eq!(win.len(), 2);
         let unix = os_search_paths(Os::Unix, Some("/home/u".into()), None, None);
         assert_eq!(unix, vec![PathBuf::from("/home/u/.vst3"), PathBuf::from("/usr/lib/vst3"), PathBuf::from("/usr/local/lib/vst3")]);
-        assert!(!default_search_paths().is_empty());
+        let env = |k: &str| (k == "HOME").then(|| "/home/u".into());
+        assert_eq!(search_paths(Os::Unix, env), unix);
+    }
+
+    #[test]
+    fn no_system_plugins_keeps_only_vst3_path() {
+        let extra = std::env::join_paths(["/opt/vst-a", "/opt/vst-b"]).unwrap();
+        let env = |k: &str| match k {
+            "SOUNDCRAFT_NO_SYSTEM_PLUGINS" => Some("1".into()),
+            "HOME" => Some("/home/u".into()),
+            "VST3_PATH" => Some(extra.clone()),
+            _ => None,
+        };
+        assert_eq!(search_paths(Os::Unix, env), vec![PathBuf::from("/opt/vst-a"), PathBuf::from("/opt/vst-b")]);
+        // Set but empty counts as unset.
+        let env = |k: &str| match k {
+            "SOUNDCRAFT_NO_SYSTEM_PLUGINS" => Some("".into()),
+            "HOME" => Some("/home/u".into()),
+            _ => None,
+        };
+        assert_eq!(search_paths(Os::Unix, env).len(), 3);
     }
 
     #[test]

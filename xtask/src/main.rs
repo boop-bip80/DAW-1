@@ -11,8 +11,16 @@ fn root() -> PathBuf {
 }
 
 fn cargo(args: &[&str]) -> Result<(), String> {
-    let st =
-        Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())).args(args).current_dir(root()).status().map_err(|e| e.to_string())?;
+    cargo_with_env(args, &[])
+}
+
+fn cargo_with_env(args: &[&str], env: &[(&str, &str)]) -> Result<(), String> {
+    let st = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(root())
+        .status()
+        .map_err(|e| e.to_string())?;
     if st.success() { Ok(()) } else { Err(format!("cargo {} failed", args.join(" "))) }
 }
 
@@ -148,7 +156,9 @@ fn ci() -> Result<(), String> {
     let steps: Vec<(&str, Box<dyn Fn() -> Result<(), String>>)> = vec![
         ("fmt", Box::new(|| cargo(&["fmt", "--all", "--", "--check"]))),
         ("clippy", Box::new(|| cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))),
-        ("test", Box::new(|| cargo(&["test", "--workspace"]))),
+        // Tests never load the machine's installed plugins: some never let a process exit once
+        // loaded, which hangs the run (seen on Windows with large plugin collections).
+        ("test", Box::new(|| cargo_with_env(&["test", "--workspace"], &[("SOUNDCRAFT_NO_SYSTEM_PLUGINS", "1")]))),
         ("assets", Box::new(assets)),
         ("layers", Box::new(layers)),
         ("wasm", Box::new(wasm)),
