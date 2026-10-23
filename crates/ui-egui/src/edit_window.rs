@@ -1803,7 +1803,7 @@ pub(crate) fn draw_clip_labels(painter: &egui::Painter, s: &Session, tl: Rect, l
         return;
     }
     let show_name = clip_name_shown(s, lane);
-    let marks = clip_marks(clip, show_name && s.edit.flag("view.clip.rating"));
+    let marks = clip_marks(clip, s.edit.flag("view.clip.rating"));
     draw_clip_pills(painter, lane, r, show_name.then_some(clip.name.as_str()), &marks);
 }
 
@@ -3065,6 +3065,20 @@ mod tests {
                 .expect("the name is drawn on the pill");
             assert_eq!(pill.width(), text_w + 2.0 * PILL_PAD);
             assert!(pill.width() < clip_rect.width() * 0.5);
+        }
+    }
+
+    #[test]
+    fn the_rating_stars_follow_the_rating_switch_whatever_the_name_switch_says() {
+        for (show_name, show_rating) in [(false, true), (true, true), (true, false), (false, false)] {
+            let mut h = smart_demo();
+            for (cmd, on) in [("view.clip_name", show_name), ("view.clip_rating", show_rating)] {
+                h.state_mut().engine.execute(cmd, &json!({"value": on})).unwrap();
+            }
+            h.state_mut().engine.session_mut().tracks.iter_mut().flat_map(|t| &mut t.playlists).flat_map(|p| &mut p.clips).for_each(|c| c.rating = 3);
+            h.step();
+            let stars = h.output().shapes.iter().filter(|c| matches!(&c.shape, Shape::Text(t) if t.galley.text() == "★★★")).count();
+            assert_eq!(stars > 0, show_rating, "names {show_name}, rating {show_rating}: {stars} rated clips drew their stars");
         }
     }
 
