@@ -123,6 +123,8 @@ pub struct Engine {
     pub journal: Vec<(String, Value)>,
     /// Path of the session file, if saved.
     pub path: Option<String>,
+    /// Recovery copy retired only after this document is successfully saved.
+    recovered_autosave: Option<std::path::PathBuf>,
     /// Revision counter; bumps on every document change but zoom/scroll (UI caches key on it).
     pub revision: u64,
     dirty: bool,
@@ -162,6 +164,7 @@ impl Engine {
             transport: TransportStatus::default(),
             journal: Vec::new(),
             path: None,
+            recovered_autosave: None,
             revision: 1,
             dirty: false,
             dirty_at: Cell::new((0, false)),
@@ -195,6 +198,8 @@ impl Engine {
 
     /// Replace the whole document (open / new); clears history.
     pub fn replace_session(&mut self, s: Session) {
+        // Replacing unsaved recovered work must leave its copy available for a later launch.
+        self.recovered_autosave = None;
         self.transport = TransportStatus { position: s.edit.selection.start.max(0), ..TransportStatus::default() };
         self.transport_requests.clear();
         self.transport_requests.push(TransportRequest::ResetSession);

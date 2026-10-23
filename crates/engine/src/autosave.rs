@@ -179,8 +179,24 @@ impl Autosave {
     /// A new folder under `root` for the session called `name`.
     fn create(root: &Path, name: &str) -> Result<Autosave> {
         let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis();
-        let dir = root.join(format!("{} {stamp}-{}", sanitize_name(name), std::process::id()));
-        let lock = std::fs::create_dir_all(&dir).and_then(|()| std::fs::File::create(dir.join(LOCK))).map_err(|err| io_error(&dir, err))?;
+        Self::create_at(root, name, stamp)
+    }
+
+    fn create_at(root: &Path, name: &str, stamp: u128) -> Result<Autosave> {
+        std::fs::create_dir_all(root).map_err(|err| io_error(root, err))?;
+        let stem = format!("{} {stamp}-{}", sanitize_name(name), std::process::id());
+        let mut suffix = 0u64;
+        let dir = loop {
+            let dir = root.join(if suffix == 0 { stem.clone() } else { format!("{stem}-{suffix}") });
+            match std::fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    suffix = suffix.checked_add(1).ok_or_else(|| EngineError::Io("autosave folder names exhausted".into()))?;
+                }
+                Err(err) => return Err(io_error(&dir, err)),
+            }
+        };
+        let lock = std::fs::File::create(dir.join(LOCK)).map_err(|err| io_error(&dir, err))?;
         lock.try_lock().map_err(|err| EngineError::Io(format!("{}: {err}", dir.display())))?;
         Ok(Autosave { dir, lock: Some(lock), copies: BTreeMap::new(), next: 1, recording: false })
     }
@@ -257,7 +273,9 @@ pub struct Leftover {
 }
 
 /// Leftover autosaves under `root`, newest first: folders no open session holds, written after the
-/// session file they came from or holding a recording. Empty and outdated ones are deleted.
+/// session file they came from or holding a recording. Equal timestamps remain recoverable:
+/// filesystems can round distinct writes to the same time. Outdated copies are deleted;
+/// metadata failures leave folders untouched, including incomplete first writes.
 pub fn leftovers(root: &Path) -> Vec<Leftover> {
     let mut out = Vec::new();
     for dir in std::fs::read_dir(root).into_iter().flatten().flatten().map(|d| d.path()) {
@@ -271,15 +289,16 @@ pub fn leftovers(root: &Path) -> Vec<Leftover> {
         let recording = dir.join(RECORDING).is_file();
         drop(lock);
         match saved {
-            Ok(saved) if recording || origin_saved.is_none_or(|o| saved > o) => {
+            Ok(saved) if recording || origin_saved.is_none_or(|o| saved >= o) => {
                 let text = std::fs::read_to_string(dir.join(SESSION)).unwrap_or_default();
                 let named = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("name")?.as_str().map(str::to_string));
                 let name = named.unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().into_owned());
                 out.push(Leftover { dir, name, origin, saved, recording });
             }
-            _ => {
+            Ok(_) => {
                 let _ = std::fs::remove_dir_all(&dir);
             }
+            Err(err) => log::warn!("could not inspect autosave {}: {err}", dir.display()),
         }
     }
     out.sort_by_key(|l| std::cmp::Reverse(l.saved));
@@ -306,6 +325,7 @@ pub fn recover(e: &mut Engine, left: &Leftover) -> Result<Vec<String>> {
     e.replace_session(Session::default());
     *e.session_mut() = s;
     e.path = left.origin.clone();
+    e.recovered_autosave = Some(left.dir.clone());
     if let Some((plan, takes)) = unfinished {
         crate::io::place_recording(e, &plan, takes);
     }
@@ -588,6 +608,86 @@ mod tests {
             assert_eq!(&std::fs::read(path).unwrap(), bytes, "{} untouched", path.display());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_with_identical_names_and_timestamps_get_distinct_folders() {
+        let root = folder("autosave-collisions");
+        let mut first = Autosave::create_at(&root, "Song", 123).unwrap();
+        let mut e = Engine::default();
+        record(&mut e, 0.5);
+        first.write(e.session(), None, None).unwrap();
+        let first_dir = first.dir.clone();
+        drop(first);
+        let mut others = Vec::new();
+        for _ in 0..20 {
+            let a = Autosave::create_at(&root, "Song", 123).unwrap();
+            assert_ne!(a.dir, first_dir);
+            assert!(others.iter().all(|b: &Autosave| b.dir != a.dir));
+            others.push(a);
+        }
+        let left = leftovers(&root);
+        assert_eq!(left.len(), 1);
+        let mut recovered = Engine::default();
+        recover(&mut recovered, &left[0]).unwrap();
+        assert_eq!(levels(&recovered), [0.5]);
+        drop(others);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_missing_manifest_keeps_partial_recovery_audio() {
+        let root = folder("autosave-missing-manifest");
+        let mut e = Engine::default();
+        record(&mut e, 0.5);
+        let mut a = Autosave::create(&root, "Song").unwrap();
+        a.write(e.session(), None, None).unwrap();
+        let dir = a.dir.clone();
+        let audio = std::fs::read_dir(dir.join("Audio Files")).unwrap().next().unwrap().unwrap().path();
+        let bytes = std::fs::read(&audio).unwrap();
+        // A crash during the first write can leave audio without a published session manifest.
+        std::fs::remove_file(dir.join(SESSION)).unwrap();
+        drop(a);
+        assert!(leftovers(&root).is_empty());
+        assert!(dir.exists());
+        assert_eq!(std::fs::read(audio).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn set_modified(path: &Path, time: SystemTime) {
+        std::fs::File::options().write(true).open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(time)).unwrap();
+    }
+
+    #[test]
+    fn equal_timestamps_preserve_audio_until_a_successful_recovery_save() {
+        let dir = folder("autosave-equal-time");
+        let path = dir.join("Song.scraft").to_string_lossy().into_owned();
+        let root = dir.join("Autosave");
+        let mut e = Engine::default();
+        crate::io::save_session(&mut e, &path).unwrap();
+        record(&mut e, 0.5);
+        let mut a = Autosave::create(&root, "Song").unwrap();
+        a.write(e.session(), Some(&path), None).unwrap();
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        set_modified(Path::new(&path), time);
+        set_modified(&a.dir.join(SESSION), time);
+        drop(a);
+        let left = leftovers(&root);
+        assert_eq!(left.len(), 1, "equal timestamps cannot prove an autosave obsolete");
+        let mut r = Engine::default();
+        recover(&mut r, &left[0]).unwrap();
+        assert_eq!(levels(&r), [0.5]);
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"block").unwrap();
+        assert!(crate::io::save_session(&mut r, &blocker.join("Song.scraft").to_string_lossy()).is_err());
+        assert!(left[0].dir.exists(), "failed saves must retain the recovery audio");
+        crate::io::save_session(&mut r, &path).unwrap();
+        set_modified(Path::new(&path), time);
+        assert!(leftovers(&root).is_empty(), "successful recovery save explicitly retires its copy");
+        let mut reopened = Engine::default();
+        open_session(&mut reopened, &path).unwrap();
+        assert_eq!(levels(&reopened), [0.5]);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
