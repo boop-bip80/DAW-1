@@ -2,13 +2,14 @@
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
-use soundcraft_ui_egui::{SoundApp, menus};
+use soundcraft_ui_egui::{SoundApp, menus, i18n};
 use std::sync::mpsc::{Receiver, channel};
 
 struct Entry {
     item: CheckMenuItem,
     command: Option<String>,
     path: String,
+    label: String,
     enabled: bool,
     checked: bool,
 }
@@ -16,6 +17,8 @@ struct Entry {
 pub struct NativeMenu {
     menu: Menu,
     entries: Vec<Entry>,
+    branches: Vec<(Submenu, String)>,
+    languages: Vec<(CheckMenuItem, i18n::Language)>,
     events: Receiver<MenuEvent>,
     /// When `sync` last walked the entries; see `SYNC_EVERY`.
     last_sync: Option<std::time::Instant>,
@@ -28,10 +31,17 @@ const SYNC_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 impl NativeMenu {
     /// Called on the UI thread after eframe has created NSApplication.
     pub fn new(app: &SoundApp, ctx: &egui::Context) -> muda::Result<Self> {
+        i18n::set_current(app.ui.language);
         let menu = Menu::new();
         let (tx, events) = channel();
-        let mut native = Self { menu, entries: Vec::new(), events, last_sync: None };
+        let mut native = Self { menu, entries: Vec::new(), branches: Vec::new(), languages: Vec::new(), events, last_sync: None };
         let app_menu = Submenu::new("SoundCraft", true);
+        for language in i18n::Language::ALL {
+            let item = CheckMenuItem::new(language.name(), true, language == app.ui.language, None);
+            app_menu.append(&item)?;
+            native.languages.push((item, language));
+        }
+        app_menu.append(&PredefinedMenuItem::separator())?;
         native.add_item(app, &app_menu, "About SoundCraft", "", Some("window.about".into()))?;
         native.add_item(app, &app_menu, "Session Info", "", Some("window.session_info".into()))?;
         native.add_item(app, &app_menu, "Session Audio Health", "", Some("window.audio_health".into()))?;
@@ -61,7 +71,8 @@ impl NativeMenu {
     }
 
     fn add_branch(&mut self, app: &SoundApp, node: &menus::MenuNode, aliases: &[(&str, &str)]) -> muda::Result<Submenu> {
-        let submenu = Submenu::new(&node.label, true);
+        let submenu = Submenu::new(i18n::tr(&node.label), true);
+        self.branches.push((submenu.clone(), node.label.clone()));
         for child in &node.children {
             if child.children.is_empty() {
                 self.add_item(app, &submenu, &child.label, &child.path, menus::command_for_path(&child.path, aliases))?;
@@ -75,14 +86,19 @@ impl NativeMenu {
     fn add_item(&mut self, app: &SoundApp, parent: &Submenu, label: &str, path: &str, command: Option<String>) -> muda::Result<()> {
         let (enabled, checked) = menus::item_state(app, path, command.as_deref());
         // egui owns keyboard shortcuts, so a key press is dispatched only once.
-        let item = CheckMenuItem::new(label, enabled, checked, None);
+        let item = CheckMenuItem::new(i18n::command(command.as_deref().unwrap_or(""), label), enabled, checked, None);
         parent.append(&item)?;
-        self.entries.push(Entry { item, command, path: path.into(), enabled, checked });
+        self.entries.push(Entry { item, command, path: path.into(), label: label.into(), enabled, checked });
         Ok(())
     }
 
     pub fn process(&mut self, app: &mut SoundApp) {
         while let Ok(event) = self.events.try_recv() {
+            if let Some((_, language)) = self.languages.iter().find(|(item, _)| item.id() == &event.id) {
+                let _ = app.run("ui.language", serde_json::json!({"language": language.code()}));
+                self.last_sync = None;
+                continue;
+            }
             // A click changes state (and Cocoa flips the item's check mark): sync on the next pass.
             self.last_sync = None;
             if (event.id == "hide" || event.id == "hide_others")
@@ -106,6 +122,9 @@ impl NativeMenu {
 
     /// Refresh after engine/control changes; avoid touching Cocoa items with unchanged state.
     pub fn sync(&mut self, app: &SoundApp) {
+        i18n::set_current(app.ui.language);
+        for (branch, english) in &self.branches { branch.set_text(i18n::tr(english)); }
+        for (item, language) in &self.languages { item.set_checked(*language == app.ui.language); }
         let now = std::time::Instant::now();
         if self.last_sync.is_some_and(|t| now.duration_since(t) < SYNC_EVERY) {
             return;
@@ -113,7 +132,7 @@ impl NativeMenu {
         self.last_sync = Some(now);
         for entry in &mut self.entries {
             let (enabled, checked) = menus::item_state(app, &entry.path, entry.command.as_deref());
-            if let Some(label) = menus::live_label(app, entry.command.as_deref())
+            if let Some(label) = Some(menus::live_label(app, entry.command.as_deref()).unwrap_or_else(|| i18n::command(entry.command.as_deref().unwrap_or(""), &entry.label).to_string()))
                 && entry.item.text() != label
             {
                 entry.item.set_text(label);

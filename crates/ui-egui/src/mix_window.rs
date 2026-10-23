@@ -199,7 +199,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             _ if track.kind == TrackKind::Instrument => instrument_slot(app, ui, track, sr),
             Some(k) => insert_slot(app, ui, track, k, sr),
             None if track.kind == TrackKind::Midi => {
-                ui.painter().text(sr.center(), Align2::CENTER_CENTER, "MIDI in: all", regular(9.0), t.text_dim);
+                ui.painter().text(sr.center(), Align2::CENTER_CENTER, crate::i18n::tr("MIDI in: all"), regular(9.0), t.text_dim);
             }
             None => {}
         }
@@ -210,8 +210,8 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         if has_input {
             let on = app.engine.session().edit.flag(&format!("object.{}", id.0));
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(sec));
-            let label = egui::RichText::new(if on { "OBJECT" } else { "BED" }).font(bold(9.0));
-            if c.add_sized(sec.size(), egui::Button::new(label).selected(on)).on_hover_text("Route as an immersive object or to the bed").clicked() {
+            let label = egui::RichText::new(if on { crate::i18n::tr("OBJECT") } else { crate::i18n::tr("BED") }).font(bold(9.0));
+            if c.add_sized(sec.size(), egui::Button::new(label).selected(on)).on_hover_text(crate::i18n::tr("Route as an immersive object or to the bed")).clicked() {
                 let _ = app.run("track.object", json!({"tracks": [id.0], "object": !on}));
             }
         }
@@ -506,7 +506,7 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
     if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
         app.ui.plugin_windows.push((id, slot));
     }
-    let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
+    let menu_resp = if hosted { resp.clone().on_hover_text(crate::i18n::tr("Click: open instrument · right-click: change")) } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| instrument_menu(app, ui, id));
@@ -628,7 +628,7 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         if ui.button("Bypass").clicked() {
             run_pick(app, ui, "mix.insert_bypass", json!({"track": id.0, "slot": slot}));
         }
-        if ui.button("no insert").clicked() {
+        if ui.button(crate::i18n::tr("no insert")).clicked() {
             run_pick(app, ui, "mix.insert_remove", json!({"track": id.0, "slot": slot}));
         }
         ui.separator();
@@ -668,7 +668,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
-        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
+        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button(crate::i18n::tr("Edit Parameters…")).clicked() {
             if !app.ui.plugin_windows.contains(&(id, slot)) {
                 app.ui.plugin_windows.push((id, slot));
             }
@@ -678,11 +678,11 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             && p.has_editor(id, slot)
         {
             if p.editor_open(id, slot) {
-                if ui.button("Close Plugin Editor").clicked() {
+                if ui.button(crate::i18n::tr("Close Plugin Editor")).clicked() {
                     p.close_editor(id, slot);
                     ui.close();
                 }
-            } else if ui.button("Open Plugin Editor").clicked() {
+            } else if ui.button(crate::i18n::tr("Open Plugin Editor")).clicked() {
                 if let Err(e) = p.open_editor(id, slot) {
                     app.ui.status = format!("{}: {e}", info.name);
                 }
@@ -692,7 +692,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         ui.separator();
     }
     let mut picked = None;
-    ui.menu_button("Built-in", |ui| {
+    ui.menu_button(crate::i18n::tr("Built-in"), |ui| {
         for p in soundcraft_dsp::plugins().iter().filter(|p| p.is_instrument) {
             if ui.button(p.name).clicked() {
                 picked = Some(p.id.to_string());
@@ -755,15 +755,15 @@ fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<
         }
     });
     if n == 0 {
-        ui.weak("No matches");
+        ui.weak(crate::i18n::tr("No matches"));
     }
     if clap.is_none() || vst3.is_none() {
         ui.separator();
         ui.horizontal(|ui| {
-            if clap.is_none() && ui.small_button("Scan CLAP").clicked() {
+            if clap.is_none() && ui.small_button(crate::i18n::tr("Scan CLAP")).clicked() {
                 soundcraft_clap_host::scan();
             }
-            if vst3.is_none() && ui.small_button("Scan VST3").clicked() {
+            if vst3.is_none() && ui.small_button(crate::i18n::tr("Scan VST3")).clicked() {
                 soundcraft_vst3_host::scan();
             }
         });
@@ -857,20 +857,20 @@ fn hosted_menus(ui: &mut Ui, instruments: bool) -> Option<String> {
     let mut picked = None;
     ui.menu_button("CLAP", |ui| {
         let list = soundcraft_clap_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No CLAP plugins found") {
+        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), crate::i18n::tr("No CLAP plugins found")) {
             picked = Some(p);
         }
     });
     ui.menu_button("VST3", |ui| {
         let list = soundcraft_vst3_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No VST3 plugins found") {
+        if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), crate::i18n::tr("No VST3 plugins found")) {
             picked = Some(p);
         }
     });
     if cfg!(target_os = "macos") {
         ui.menu_button("Audio Units", |ui| {
             let list = soundcraft_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
-            if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No Audio Units found")
+            if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), crate::i18n::tr("No Audio Units found"))
             {
                 picked = Some(p);
             }
@@ -893,7 +893,7 @@ fn vendor_menus(ui: &mut Ui, mut list: Vec<MenuPlugin>, none: &str) -> Option<St
     let mut picked = None;
     egui::ScrollArea::vertical().id_salt("vendors").max_height(max_h).show(ui, |ui| {
         for v in vendors {
-            ui.menu_button(if v.is_empty() { "Unknown vendor" } else { v }, |ui| {
+            ui.menu_button(if v.is_empty() { crate::i18n::tr("Unknown vendor") } else { v }, |ui| {
                 egui::ScrollArea::vertical().id_salt("plugins").max_height(max_h).show(ui, |ui| {
                     for p in list.iter().filter(|p| p.vendor == v) {
                         if ui.button(&p.name).clicked() {
@@ -926,7 +926,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     let level_r = if compact { r } else { level_icon(r).expand2(vec2(3.0, 0.0)).with_min_y(r.min.y).with_max_y(r.max.y) };
     let route_r = Rect::from_min_max(r.min, pos2((level_r.min.x - 1.0).max(r.min.x), r.max.y));
     let route_resp = ui.interact(if snd.is_some() { route_r } else { r }, ui.id().with(("snd-route", id.0, slot)), Sense::click());
-    route_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Send {}", (b'A' + slot as u8) as char)));
+    route_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, if crate::i18n::is_korean() { let __i18n_0 = &((b'A' + slot as u8) as char); crate::i18n::format_fields("Send {}", &[("", format!("{}", __i18n_0))]) } else { format!("Send {}", (b'A' + slot as u8) as char) }));
     let mark = if compact { Mark::Arrow } else { Mark::Letter((b'a' + slot as u8) as char) };
     match &snd {
         Some(s) => {
@@ -956,10 +956,10 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
                 let _ =
                     app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
             }
-            let _ = level_resp.clone().on_hover_text(format!(
+            let _ = level_resp.clone().on_hover_text(if crate::i18n::is_korean() { let __i18n_0 = &(db_text(s.level_db)); crate::i18n::format_fields("Send {which} to {name}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options", &[("which", format!("{}", &which)), ("name", format!("{}", &name)), ("", format!("{}", __i18n_0))]) } else { format!(
                 "Send {which} to {name}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
                 db_text(s.level_db)
-            ));
+            ) });
             level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
         }
         None => empty_slot(ui.painter(), r, ui.rect_contains_pointer(r), mark),
@@ -968,15 +968,15 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
         egui::Popup::menu(&route_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(250.0);
             ui.horizontal(|ui| {
-                ui.strong(format!("Send {}", (b'A' + slot as u8) as char));
+                ui.strong(if crate::i18n::is_korean() { let __i18n_0 = &((b'A' + slot as u8) as char); crate::i18n::format_fields("Send {}", &[("", format!("{}", __i18n_0))]) } else { format!("Send {}", (b'A' + slot as u8) as char) });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(route_name(app, &send.target)).color(Tokens::current().counter_text));
                 });
             });
-            ui.label(egui::RichText::new("DESTINATION").size(8.0).color(Tokens::current().text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr("DESTINATION")).size(8.0).color(Tokens::current().text_dim));
             send_route_menu(app, ui, id, slot, Some(&send.target));
             ui.separator();
-            if ui.button("Remove send").clicked() {
+            if ui.button(crate::i18n::tr("Remove send")).clicked() {
                 let _ = app.run("mix.send_remove", json!({"track": id.0, "slot": slot}));
                 ui.close();
             }
@@ -984,7 +984,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     } else {
         egui::Popup::menu(&route_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(250.0);
-            ui.strong(format!("Send {} · Choose destination", (b'A' + slot as u8) as char));
+            ui.strong(if crate::i18n::is_korean() { let __i18n_0 = &((b'A' + slot as u8) as char); crate::i18n::format_fields("Send {} · Choose destination", &[("", format!("{}", __i18n_0))]) } else { format!("Send {} · Choose destination", (b'A' + slot as u8) as char) });
             send_route_menu(app, ui, id, slot, None);
         });
     }
@@ -1013,7 +1013,7 @@ fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
     };
     let t = Tokens::current();
     let mut open = true;
-    egui::Window::new(format!("{name} · Send {}", (b'A' + slot as u8) as char))
+    egui::Window::new(if crate::i18n::is_korean() { let __i18n_0 = &((b'A' + slot as u8) as char); crate::i18n::format_fields("{name} · Send {}", &[("name", format!("{}", &name)), ("", format!("{}", __i18n_0))]) } else { format!("{name} · Send {}", (b'A' + slot as u8) as char) })
         .id(egui::Id::new("send_window"))
         .open(&mut open)
         .auto_sized()
@@ -1069,9 +1069,9 @@ fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
 /// Secondary controls live behind the amount readout, separate from the bus selector like Logic.
 fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, send: &soundcraft_model::SendSlot) {
     ui.set_min_width(230.0);
-    ui.strong(format!("Send {} · {}", (b'A' + slot as u8) as char, route_name(app, &send.target)));
+    ui.strong(if crate::i18n::is_korean() { let __i18n_0 = &((b'A' + slot as u8) as char); let __i18n_1 = &(route_name(app, &send.target)); crate::i18n::format_fields("Send {} · {}", &[("", format!("{}", __i18n_0)), ("", format!("{}", __i18n_1))]) } else { format!("Send {} · {}", (b'A' + slot as u8) as char, route_name(app, &send.target)) });
     let mut db = send.level_db.max(-60.0);
-    if ui.add(egui::Slider::new(&mut db, -60.0..=12.0).text("Level").suffix(" dB")).changed() {
+    if ui.add(egui::Slider::new(&mut db, -60.0..=12.0).text(crate::i18n::tr("Level")).suffix(" dB")).changed() {
         let _ = app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
     }
     send_level_scale(ui, send.level_db);
@@ -1082,7 +1082,7 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
                 let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
             }
         }
-        if ui.small_button("0 dB").clicked() {
+        if ui.small_button(crate::i18n::tr("0 dB")).clicked() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
         }
         if ui.small_button("−∞").clicked() {
@@ -1090,7 +1090,7 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
         }
     });
     let mut pan = send.pan;
-    if ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).text("Pan")).changed() {
+    if ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).text(crate::i18n::tr("Pan"))).changed() {
         let _ = app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "pan": pan}), &format!("send-pan:{}:{slot}", id.0));
     }
     ui.horizontal(|ui| {
@@ -1106,7 +1106,7 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
     if let Route::Bus(bus) = send.target
         && let Some(aux) =
             app.engine.session().tracks.iter().find(|t| t.kind == TrackKind::Aux && t.mixer.input == Route::Bus(bus)).map(|t| (t.id, t.name.clone()))
-        && ui.button("Rename bus…").clicked()
+        && ui.button(crate::i18n::tr("Rename bus…")).clicked()
     {
         app.dialogs.open_rename_track(aux.0, &aux.1);
         ui.close();
@@ -1245,7 +1245,7 @@ fn send_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, cu
         ui.close();
     }
     ui.separator();
-    if ui.button("new bus...").clicked() {
+    if ui.button(crate::i18n::tr("new bus...")).clicked() {
         let mut n = busses.len() + 1;
         while busses.iter().any(|bus| bus.name.eq_ignore_ascii_case(&format!("Bus {n}")))
             || app.engine.session().track_by_name(&format!("Bus {n}")).is_some()
@@ -1262,7 +1262,7 @@ fn send_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, cu
 fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
-    if ui.button(if input { "no input" } else { "no output" }).clicked() {
+    if ui.button(if input { crate::i18n::tr("no input") } else { crate::i18n::tr("no output") }).clicked() {
         let _ = app.run(cmd, json!({"track": id.0, key: "none"}));
         ui.close();
     }
@@ -1273,15 +1273,15 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     }
     if input {
         for i in 1..=8 {
-            if ui.button(format!("In {i}")).clicked() {
-                let _ = app.run(cmd, json!({"track": id.0, key: format!("In {i}")}));
+            if ui.button(if crate::i18n::is_korean() {  crate::i18n::format_fields("In {i}", &[("i", format!("{}", &i))]) } else { format!("In {i}") }).clicked() {
+                let _ = app.run(cmd, json!({"track": id.0, key: if crate::i18n::is_korean() {  crate::i18n::format_fields("In {i}", &[("i", format!("{}", &i))]) } else { format!("In {i}") }}));
                 ui.close();
             }
         }
     }
     ui.separator();
     let busses: Vec<String> = app.engine.session().busses.iter().map(|b| b.name.clone()).collect();
-    ui.strong("Bus");
+    ui.strong(crate::i18n::tr("Bus"));
     let search = MenuSearch::show(ui, egui::Id::new(("route-bus-search", id.0, input)), "Search buses…");
     let visible: Vec<&String> = busses.iter().filter(|b| search.matches(b)).collect();
     if let Some(i) = search.rows(ui, visible.len(), 420.0, |ui, i, highlighted| menu_row(ui, highlighted, visible[i])) {

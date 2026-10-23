@@ -21,11 +21,11 @@ fn entries() -> Vec<Entry> {
     let mut v: Vec<Entry> = soundcraft_engine::command_specs()
         .iter()
         .map(|c| Entry {
-            id: c.id.to_string(), label: c.label.to_string(), path: c.menu.join(" › "), shortcut: c.shortcut.unwrap_or("").to_string()
+            id: c.id.to_string(), label: crate::i18n::command(c.id, c.label).to_string(), path: crate::i18n::path(&c.menu.join(" › ")), shortcut: c.shortcut.unwrap_or("").to_string()
         })
         .collect();
     for (id, label, path, sc) in crate::menus::UI_COMMANDS {
-        v.push(Entry { id: id.to_string(), label: label.to_string(), path: path.replace(" > ", " › "), shortcut: sc.unwrap_or("").to_string() });
+        v.push(Entry { id: id.to_string(), label: crate::i18n::command(id, label).to_string(), path: crate::i18n::path(&path.replace(" > ", " › ")), shortcut: sc.unwrap_or("").to_string() });
     }
     v
 }
@@ -65,7 +65,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let t = Tokens::current();
     let mut run: Option<String> = None;
     let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
-    egui::Window::new("Search")
+    egui::Window::new(crate::i18n::tr("Search"))
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
@@ -73,7 +73,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         .fixed_size(vec2(560.0, 380.0))
         .show(ctx, |ui| {
             let r = ui
-                .add(egui::TextEdit::singleline(&mut app.palette.query).hint_text("Search commands…").desired_width(f32::INFINITY).font(mono(15.0)));
+                .add(egui::TextEdit::singleline(&mut app.palette.query).hint_text(crate::i18n::tr("Search commands…")).desired_width(f32::INFINITY).font(mono(15.0)));
             r.request_focus();
             let q = app.palette.query.trim().to_string();
             let mut hits: Vec<(i32, Entry)> =

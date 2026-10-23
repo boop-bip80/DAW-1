@@ -45,3 +45,17 @@ and, at runtime, the operating system's own UI fonts when available (never redis
 | `assets/app-icon/soundcraft.ico` | SoundCraft contributors | original, rendered from `icon.svg` | MIT OR Apache-2.0 |
 | `assets/app-icon/hicolor/` | SoundCraft contributors | original, rendered from `icon.svg` (16–512 px PNGs and the scalable SVG) | MIT OR Apache-2.0 |
 | `docs/images/` | SoundCraft contributors | screenshots of SoundCraft rendered from the synthesised demo session | MIT OR Apache-2.0 |
+
+
+## Korean interface
+The Korean display catalog in crates/ui-egui/src/i18n/ko.rs contains original,
+contributor-supplied and reviewed translations of this repository's English UI,
+integrated with Codex under MIT OR Apache-2.0. Identifiers, document values and
+user names retain their original values.
+
+Korean glyphs use Nanum Gothic Regular/Bold from
+[craft-fonts 4fcc4b2](https://github.com/arksky1/craft-fonts/commit/4fcc4b2672a2a6765052c2f59fa3021485d32269).
+The font source is Google Fonts ofl/nanumgothic; its OFL-1.1 notice and original
+binaries are preserved in that shared input. No vendor UI localization is used.
+
+Generic alignment captions and undo/redo templates also reuse the contributor-reviewed PdfCraft and DesignCraft Korean catalogs where their meanings agree.

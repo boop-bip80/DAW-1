@@ -108,6 +108,8 @@ fn load(_: &[(&str, u32)], _: &str, _: Option<&str>) -> Option<FontData> {
     None
 }
 
+include!(concat!(env!("OUT_DIR"), "/korean_ui_fonts.rs"));
+
 pub fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
@@ -125,6 +127,14 @@ pub fn definitions() -> FontDefinitions {
         bold_family.insert(0, "system-regular".into());
     }
     fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
+    for (style, bytes) in KOREAN_UI_FONTS {
+        fonts.font_data.insert(format!("nanum-{style}"), Arc::new(FontData::from_static(bytes)));
+    }
+    for (family, stack) in &mut fonts.families {
+        let bold = *family == FontFamily::Name("bold".into()) && fonts.font_data.contains_key("nanum-Bold");
+        let name = if bold { "nanum-Bold" } else { "nanum-Regular" };
+        if fonts.font_data.contains_key(name) { stack.push(name.into()); }
+    }
     if let Some(h) = load(HANGUL, "sans-serif:lang=ko", Some("ko")) {
         fonts.font_data.insert("system-hangul".into(), Arc::new(h));
         for family in fonts.families.values_mut() {
