@@ -7,6 +7,44 @@ use std::io::Write;
 /// Maximum number of decoded `f32` samples (all channels) we will produce: 4 GiB of output.
 pub(crate) const MAX_DECODE_SAMPLES: u64 = (4u64 << 30) / 4;
 
+pub(crate) fn check_decode_samples(frames: u64, channels: u16, rate: u32) -> Result<()> {
+    if frames.saturating_mul(u64::from(channels)) > MAX_DECODE_SAMPLES {
+        return Err(decode_limit_error(frames, channels, rate));
+    }
+    Ok(())
+}
+
+/// Compressed file size is not the decoded allocation. Keep the guard and explain
+/// what users can do, rather than suggesting an apparently small file is corrupt.
+pub(crate) fn decode_limit_error(frames: u64, channels: u16, rate: u32) -> AudioError {
+    let samples = frames.saturating_mul(u64::from(channels));
+    let gib = samples as f64 * 4.0 / (1u64 << 30) as f64;
+    let minutes = if rate == 0 { 0.0 } else { frames as f64 / f64::from(rate) / 60.0 };
+    AudioError::TooLarge(format!(
+        "{minutes:.1} minutes at {rate} Hz with {channels} channels requires {gib:.2} GiB of decoded audio; \
+         the per-file decode limit is 4 GiB regardless of compressed file size. Split the source into shorter files before importing"
+    ))
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn large_compressed_import_error_explains_decoded_memory_and_recovery() {
+        assert!(check_decode_samples(MAX_DECODE_SAMPLES / 2, 2, 48_000).is_ok());
+        assert!(matches!(check_decode_samples(MAX_DECODE_SAMPLES / 2 + 1, 2, 48_000), Err(AudioError::TooLarge(_))));
+        assert!(check_decode_samples(u64::MAX, u16::MAX, 48_000).is_err());
+        let error = decode_limit_error(MAX_DECODE_SAMPLES / 2 + 1, 2, 48_000);
+        assert!(matches!(error, AudioError::TooLarge(_)));
+        let text = error.to_string();
+        assert!(text.contains("4 GiB"));
+        assert!(text.contains("compressed file size"));
+        assert!(text.contains("Split the source"));
+        assert!(decode_limit_error(u64::MAX, u16::MAX, 0).to_string().contains("decode limit"));
+    }
+}
+
 /// Little-endian `u16` at `pos`.
 pub(crate) fn le_u16(b: &[u8], pos: usize) -> Option<u16> {
     let s = b.get(pos..pos.checked_add(2)?)?;

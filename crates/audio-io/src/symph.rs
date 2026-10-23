@@ -16,7 +16,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions, ReadBytes
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Instantiate;
 
-use crate::pcm::{MAX_DECODE_SAMPLES, be_u32};
+use crate::pcm::{be_u32, check_decode_samples};
 use crate::{AudioBuffer, AudioError, AudioInfo, FileFormat, Result, SampleFormat};
 
 /// The most frames a packet may declare: decoders allocate a packet's frames up front, and ALAC
@@ -160,11 +160,10 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
         }
     };
     let (track_id, mut info) = info_of(reader.as_ref(), detected)?;
-    if let Some(n) = reader.tracks().iter().find(|t| t.id == track_id).and_then(|t| t.codec_params.n_frames) {
-        let total = n.saturating_mul(u64::from(info.channels.max(1)));
-        if !count_only && total > MAX_DECODE_SAMPLES {
-            return Err(AudioError::TooLarge(format!("{total} samples exceeds the decode limit")));
-        }
+    if let Some(n) = reader.tracks().iter().find(|t| t.id == track_id).and_then(|t| t.codec_params.n_frames)
+        && !count_only
+    {
+        check_decode_samples(n, info.channels.max(1), info.sample_rate)?;
     }
     let params = reader
         .tracks()
@@ -175,6 +174,16 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
     let alac = params.extra_data.as_deref().filter(|_| params.codec == CODEC_TYPE_ALAC).and_then(|d| be_u32(d, 0));
     if params.max_frames_per_packet.into_iter().chain(alac.map(u64::from)).any(|n| n > MAX_PACKET_FRAMES) {
         return Err(AudioError::Malformed("the file declares packets far longer than any codec uses".into()));
+    }
+    if params.codec == CODEC_TYPE_AAC {
+        let (mut info, mut audio) = crate::aac::run(reader, &params, track_id, info, count_only)?;
+        if let Some(trim) = crate::mp4::edit_trim(bytes, info.sample_rate).or_else(|| crate::mp4::itunes_trim(bytes, info.sample_rate)) {
+            info.frames = trim.frames(info.frames);
+            if !count_only {
+                trim.apply(&mut audio.channels);
+            }
+        }
+        return Ok((info, audio));
     }
     let mut decoder = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()).map_err(map_err)?;
 
@@ -216,16 +225,15 @@ fn run(bytes: &[u8], detected: FileFormat, count_only: bool) -> Result<(AudioInf
         if ch == 0 {
             continue;
         }
+        let channels = u16::try_from(ch).map_err(|_| AudioError::Unsupported("too many channels".into()))?;
         if planar.is_empty() {
             // The decoded stream is authoritative for the channel count.
-            info.channels = u16::try_from(ch).map_err(|_| AudioError::Unsupported("too many channels".into()))?;
+            info.channels = channels;
             planar = (0..ch).map(|_| Vec::new()).collect();
         }
         let n = decoded.frames() as u64;
         frames = frames.saturating_add(n);
-        if frames.saturating_mul(ch as u64) > MAX_DECODE_SAMPLES {
-            return Err(AudioError::TooLarge("decoded audio exceeds the 4 GiB limit".into()));
-        }
+        check_decode_samples(frames, channels, info.sample_rate)?;
         if count_only {
             continue;
         }
@@ -259,6 +267,11 @@ pub(crate) fn probe(bytes: &[u8], detected: FileFormat) -> Result<AudioInfo> {
             Opened::Empty(info) => return Ok(info),
         };
         let (_, info) = info_of(reader.as_ref(), detected)?;
+        if reader.tracks().iter().any(|t| t.codec_params.codec == CODEC_TYPE_AAC) {
+            // AAC extensions may change rate and channels only when packets are decoded.
+            // Header-only answers otherwise describe the core, not the audible stream.
+            return run(bytes, detected, true).map(|(i, _)| i);
+        }
         if info.frames > 0 && info.channels > 0 {
             return Ok(info);
         }

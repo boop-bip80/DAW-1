@@ -3448,6 +3448,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_aac"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9408128402e729f7f5b71f05870198b9140bcb597e6e09dddc75f1272f7aec48"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3698,6 +3704,7 @@ version = "0.12.1"
 dependencies = [
  "log",
  "proptest",
+ "rusty_aac",
  "serde",
  "serde_json",
  "symphonia",

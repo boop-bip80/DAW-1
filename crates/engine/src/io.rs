@@ -153,8 +153,13 @@ fn stamp_at_rate(stamp: u64, file_rate: u32, session_rate: u32) -> u64 {
 pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
     let ext = Path::new(name).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
     let (info, buf) = soundcraft_audio_io::decode(bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
-    let buf = at_rate(buf, e.session().sample_rate.hz(), MAX_IMPORT_SAMPLES)
-        .ok_or_else(|| EngineError::Io(format!("{name}: file is too large to import")))?;
+    let buf = at_rate(buf, e.session().sample_rate.hz(), MAX_IMPORT_SAMPLES).ok_or_else(|| {
+        EngineError::Io(format!(
+            "{name}: decoded audio would exceed the 4 GiB per-file memory limit after conversion to the session's {} Hz sample rate. \
+             Compressed file size does not determine decoded memory; split the source into shorter files before importing",
+            e.session().sample_rate.hz()
+        ))
+    })?;
     if buf.frames() == 0 {
         return Err(EngineError::Io(format!("{name}: no audio")));
     }
