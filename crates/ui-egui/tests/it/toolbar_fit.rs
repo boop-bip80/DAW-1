@@ -44,10 +44,15 @@ fn paint(width: f32) -> Painted {
     let mut painted = Painted { panel, groups: vec![], bars: vec![], right: 0.0 };
     for s in &output.shapes {
         let r = s.shape.visual_bounding_rect();
-        if r.min.y < panel.min.y - 1.0 || r.max.y > panel.min.y + toolbar::HEIGHT + 1.0 || r.width() >= panel.width() - 1.0 {
+        // Skip shapes outside the toolbar and the panel itself, but keep a full-width scroll bar track.
+        let full_width = r.width() >= panel.width() - 1.0;
+        if r.min.y < panel.min.y - 1.0 || r.max.y > panel.min.y + toolbar::HEIGHT + 1.0 || (full_width && r.height() >= toolbar::HEIGHT - 2.0) {
             continue;
         }
-        painted.right = painted.right.max(r.max.x);
+        // Full-width shapes (borders, a scroll bar track) span the window: they say nothing about the content's reach.
+        if !full_width {
+            painted.right = painted.right.max(r.max.x);
+        }
         if let Shape::Rect(rs) = &s.shape {
             if rs.fill == t.toolbar_group || rs.fill == t.counter_bg {
                 painted.groups.push(r);
