@@ -42,6 +42,7 @@ mod send_window;
 mod shared_controls;
 mod shortcuts;
 mod side_lists_access;
+mod toolbar_fit;
 mod toolbar_tempo;
 mod track_height;
 mod track_list;
