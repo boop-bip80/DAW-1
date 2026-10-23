@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-19 · **Change:** minor (macOS plug-in-hosting entitlement in the signed build (#153); previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265)) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -48,7 +48,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
 | Editors: AU | — | ❌ | Cocoa view hosting missing |
 | Multiple editor pages | ✅ | 🟡 | #6 |
-| macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
+| macOS hardened-runtime entitlement for third-party code | ✅ | ✅ | #153: library validation is disabled in the signed app and CLI, so vendored CLAP/VST3/AU binaries (other Team IDs) are accepted again (loading check pending the next signed release) |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
 | ARA 2 (pitch/time editors in the timeline) | ✅ | ❌ | Menu leaves Track/Clip/Window ▸ ARA still missing |
 | Crash isolation | in-process (DSP on HDX) | in-process | Out-of-process hosting would beat Pro Tools |

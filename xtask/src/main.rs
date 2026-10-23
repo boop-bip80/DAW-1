@@ -188,3 +188,71 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::root;
+
+    /// A plain flat plist dict reader for entitlements checking: strips `<!-- -->` comments, then
+    /// walks the `<key>`/value pairs and reads boolean values. xtask is dependency-light, so this
+    /// stays string-based; the entitlements file is a `<dict>` of `<true/>`/`<false/>` entries.
+    fn plist_dict_bool(src: &str, key: &str) -> Option<bool> {
+        let mut flat = String::with_capacity(src.len());
+        let mut rest = src;
+        while let Some(start) = rest.find("<!--") {
+            match rest[start..].find("-->") {
+                Some(end) => {
+                    flat.push_str(&rest[..start]);
+                    rest = &rest[start + end + 3..];
+                }
+                None => break,
+            }
+        }
+        flat.push_str(rest);
+        let body = flat.split_once("<dict>")?.1;
+        for chunk in body.split("<key>") {
+            if let Some((k, value)) = chunk.split_once("</key>")
+                && k.trim() == key
+            {
+                return Some(value.trim_start().starts_with("<true/>"));
+            }
+        }
+        None
+    }
+
+    /// macOS: hardened-runtime library validation only maps code signed by the same Team ID, so the
+    /// signed (Developer ID + hardened runtime) app and CLI refuse to load third-party plug-in
+    /// bundles — every scan fails with "mapping process and mapped file have different Team IDs"
+    /// (#153, #149). Both binaries must be signed with the plug-in-hosting entitlement.
+    #[test]
+    fn macos_binaries_sign_with_the_plugin_hosting_entitlements() {
+        let entitlements = std::fs::read_to_string(root().join("packaging/macos/entitlements.plist")).expect("entitlements.plist");
+        assert_eq!(
+            plist_dict_bool(&entitlements, "com.apple.security.cs.disable-library-validation"),
+            Some(true),
+            "packaging/macos/entitlements.plist must set disable-library-validation to true: the \
+             hardened-runtime build would refuse third-party plug-ins (#153, #149)"
+        );
+        let script = std::fs::read_to_string(root().join("packaging/macos/package.sh")).expect("package.sh");
+        let targets = ["$APP/Contents/MacOS/SoundCraft", "\"$APP\"", "$CLI_DIR/soundcraft-cli"];
+        for target in targets {
+            assert!(
+                script.lines().any(|l| l.contains("--entitlements \"$HERE/entitlements.plist\"") && l.contains(target)),
+                "the sign call for {target} must pass --entitlements \"$HERE/entitlements.plist\""
+            );
+        }
+    }
+
+    #[test]
+    fn plist_dict_bool_reads_a_plain_dict() {
+        let src = "<plist><dict><!-- misleading comment with <key>sneaky</key> <true/> --> \
+                   <key>a</key><false/><key>b</key>\n        <true/></dict></plist>";
+        assert_eq!(plist_dict_bool(src, "a"), Some(false));
+        assert_eq!(plist_dict_bool(src, "b"), Some(true));
+        // Text inside a comment never becomes a key or a claim of one.
+        assert_eq!(plist_dict_bool(src, "sneaky"), None);
+        assert_eq!(plist_dict_bool(src, "missing"), None);
+        assert_eq!(plist_dict_bool("<plist></plist>", "a"), None);
+        assert_eq!(plist_dict_bool("<plist><dict></dict></plist>", "a"), None);
+    }
+}

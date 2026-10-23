@@ -1,8 +1,8 @@
 # SoundCraft roadmap
 
-**Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
+**Stage: pre-alpha** · next: alpha, ~5% and ~105–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** trivial (mono device playback fold-down) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-19 · **Change:** minor (G-05: the macOS plug-in-hosting entitlement ships in the signed app and CLI (#153); alpha distance ~110–180 → ~105–180 h) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -20,7 +20,7 @@ menu checklist).
 | **Ready for real work** | **~40 %** | estimated, weighted by dimension |
 | Mainstream practitioner (tracking/mixing engineer) | **~36 %** | estimated: 50.6 % weekly-area depth × 0.90 interaction × 0.92 stability × 0.85 file exchange ([how](docs/target-app-parity.md#mainstream-practitioner-and-essentials-user)) |
 | Essentials user (song or podcast, defaults) | **~57 %** | estimated: 72.4 % core-feature depth × 0.90 launch/stability × 0.90 discoverability × 0.97 files ([how](docs/target-app-parity.md#mainstream-practitioner-and-essentials-user)) |
-| Remaining to alpha | **~110–180 Opus 5.5 agent-hours** (the failing gate rows) | estimated, calibrated on PR history |
+| Remaining to alpha | **~105–180 Opus 5.5 agent-hours** (the failing gate rows) | estimated, calibrated on PR history |
 | Remaining to beta | **~350–570 Opus 5.5 agent-hours** (includes the alpha work; ~60–70 % parallelizable) | estimated |
 | Remaining to full parity | **~950–1,450 Opus 5.5 agent-hours** | estimated |
 
@@ -105,7 +105,7 @@ Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadm
 1. **Alpha blocker:** audio interfaces: device and buffer-size choice, duplex stream, ASIO; record to disk (G-01, G-06). 35–55 h.
 2. **Alpha blocker:** MIDI devices: record from keyboards, play instruments live, output (G-02). 20–35 h.
 3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
-4. macOS plugin entitlement (#153), then AU editors (G-05). 1 h for the entitlement (needed for the mix row), then 15–25 h.
+4. macOS plugin hosting: AU editors (G-05; the plug-in-hosting entitlement is in the signed build, #153). 14–24 h.
 5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
 6. PR CI running `cargo xtask ci` on three OSes (G-14). 5–10 h.
 7. Fidelity harness against Pro Tools (G-07). 20–30 h.
@@ -161,6 +161,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | G-05: the macOS plug-in-hosting entitlement ships in the signed app and CLI (#153); alpha distance ~110–180 → ~105–180 h |
 | 2026-10-18 | trivial | Mono device playback retains both stereo sides and surround fold-down channels; readiness estimates unchanged |
 | 2026-10-16 | trivial | Master volume automation block boundaries corrected; readiness estimates unchanged |
 | 2026-10-16 | trivial | Failed inserts no longer contribute aux, folder or master latency after containment; readiness estimates unchanged |

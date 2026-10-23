@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** trivial (G-04: mono device playback fold-down) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-19 · **Change:** minor (G-05: macOS plug-in-hosting entitlement in the signed binaries) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -19,7 +19,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 | G-02 | **Alpha blocker.** No MIDI device input or output | Hardware / MIDI | [hardware-parity.md](hardware-parity.md) | 20–35 |
 | G-03 | **Alpha blocker.** Cannot exchange sessions with Pro Tools (no AAF/OMF, no `.ptx`) | File formats | [file-format-parity.md](file-format-parity.md) | 50–90 |
 | G-04 | Open correctness bugs in features counted as done (~25 issues) | Stability | this file | 25–40 |
-| G-05 | (Entitlement part: alpha blocker for the mix row) Third-party VST3s blocked in the signed macOS build; AU editors missing | Ecosystem | [plugin-parity.md](plugin-parity.md) | 15–25 |
+| G-05 | (Entitlement part: done) Third-party plug-ins are unblocked in the signed macOS builds; loading check pending the next signed release; AU editors still missing | Ecosystem | [plugin-parity.md](plugin-parity.md) | 14–24 |
 | G-06 | (Record-to-disk part: alpha blocker for the tracking row) Sources decoded whole into RAM; recording into RAM | Performance | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-07 | Nothing is compared against Pro Tools' output (no fidelity harness) | Features | this file | 20–30 |
 | G-08 | Built-in plugin catalogue thin and unverified | Features | [plugin-parity.md](plugin-parity.md) | 80–120 |
@@ -107,11 +107,14 @@ launch #142; Linux #45, #107.
 
 ### G-05. Plugin hosting on macOS
 
-- **Missing:** the `com.apple.security.cs.disable-library-validation` entitlement in the signed
-  build, so hardened runtime refuses third-party VST3 bundles (#153, #149). AU editor views
-  (`crates/au-host/src/lib.rs` header: "Not hosted yet: Audio Unit editor views"). Embedded CLAP
-  GUIs; VST3 editors on Windows/Linux.
-- **Estimate:** ≈ 15–25 h (entitlement ≈ 1 h; AU Cocoa views and VST3 HWND/X11 views most of it).
+- **Missing:** AU editor views (`crates/au-host/src/lib.rs` header: "Not hosted yet: Audio Unit
+  editor views"). Embedded CLAP GUIs; VST3 editors on Linux.
+- **Done 2026-10-19:** the `com.apple.security.cs.disable-library-validation` entitlement is in the
+  signed app and CLI, so hardened runtime will accept third-party CLAP/VST3/AU bundles (#153,
+  #149). Without it, macOS refuses every vendored plug-in with "mapping process and mapped file
+  have different Team IDs" and the scan finds nothing; the end-to-end load check on a signed
+  build still runs with the next signed release.
+- **Estimate:** ≈ 14–24 h (entitlement done; AU Cocoa views and VST3 X11 views most of it).
 
 ### G-06. Memory-bound media
 
@@ -214,6 +217,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-19 | minor | G-05 shrunk: the macOS plug-in-hosting entitlement is in the signed app and CLI (#153, #149) |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: failed aux/folder/master inserts excluded from latency compensation after containment; estimates unchanged |

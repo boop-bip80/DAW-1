@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Hardened-runtime entitlements for SoundCraft. The app is pure Rust, loads no unsigned code,
-     needs no JIT, and is not sandboxed (it opens files by path, from the command line and
-     drag-and-drop). Add exceptions here only with a reason in a comment. -->
+<!-- Hardened-runtime entitlements for SoundCraft. The host is pure Rust and is not sandboxed (it
+     opens files by path, from the command line and drag-and-drop), but it maps third-party
+     plug-in code. Add exceptions here only with a reason in a comment. -->
 <plist version="1.0">
 <dict>
+  <!-- Plug-in hosting: hardened-runtime library validation only maps code signed by the same Team
+       ID, so without this every third-party CLAP/VST3/AU plug-in fails to load with "mapping
+       process and mapped file (non-platform) have different Team IDs" (#153, #149). Plug-in
+       bundles are signed by their own vendors by design; that is the one thing a host must accept. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
   <!-- Recording: the hardened runtime blocks audio input (CoreAudio via cpal) without this,
        even after the user grants microphone access (NSMicrophoneUsageDescription). -->
   <key>com.apple.security.device.audio-input</key>

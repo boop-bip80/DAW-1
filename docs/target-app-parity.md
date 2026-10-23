@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** minor (hours to ~95 % for each audience; full number confirmed as an additive weighted sum) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-19 · **Change:** minor (the macOS plug-in-hosting entitlement is in the signed build (#153); previously minor: hours to ~95 % for each audience; full number confirmed as an additive weighted sum) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -182,7 +182,7 @@ Weights by what Pro Tools users actually spend time on. **Breadth** = the featur
 | Mixing and routing | 12 % | 85 % | **60 %** | 35–50 | Faders, pan, sends, busses, aux, masters, VCAs, folders, 10 inserts, PDC, solo modes, I/O Setup. Missing: sidechain inputs, hardware-channel I/O mapping, bus/AFL/PFL paths verified, HEAT; bugs #59, #103 |
 | Automation | 7 % | 80 % | **55 %** | 20–30 | Lanes for volume/pan/mute/sends/plugin params, trim, Write/Touch/Latch, glide/thin/coalesce. Missing: surround-pan and object automation, Touch/Latch prime and preview modes, automation on control surfaces; bug #104 |
 | Built-in plugins and AudioSuite | 8 % | 40 % | **35 %** | 80–120 | 26 processors + 2 instruments covering every AudioSuite category; Pro Tools bundles roughly three times as many plugins plus virtual instruments. No fidelity comparison, generic parameter UIs (#139). See [plugin-parity.md](plugin-parity.md) |
-| Third-party plugin hosting | 8 % | 70 % | **45 %** | 40–60 | CLAP, VST3, AU: audio, params, latency, notes, state, presets, off-thread lifecycle, CLAP floating GUIs, VST3 editors on macOS. Missing: AU editors, VST3 editors on Windows/Linux, sidechain buses, ARA, out-of-process sandboxing, macOS library-validation entitlement (#153, #149). AAX cannot be hosted (Avid SDK licence, PACE signing) |
+| Third-party plugin hosting | 8 % | 70 % | **45 %** | 40–60 | CLAP, VST3, AU: audio, params, latency, notes, state, presets, off-thread lifecycle, CLAP floating GUIs, VST3 editors on macOS. Missing: AU editors, VST3 editors on Windows/Linux, sidechain buses, ARA, out-of-process sandboxing. AAX cannot be hosted (Avid SDK licence, PACE signing) |
 | MIDI and instruments | 8 % | 70 % | **30 %** | 50–80 | Piano roll, event list, step input, quantize/transpose, real-time properties, SMF import/export. Missing: **any MIDI device input/output** (no keyboard recording, no external synths, no MIDI clock/MTC out), MIDI learn, instrument depth (Sampler PR #108 open), bug #98 |
 | Score and notation | 2 % | 60 % | **35 %** | 20–30 | Grand-staff Score Editor, MusicXML export, printable SVG. Missing: notation editing depth (tuplets, articulations, lyrics, parts layout) |
 | Elastic Audio, TCE, Beat Detective, pitch | 5 % | 70 % | **35 %** | 40–60 | Pitch-preserving warp on Elastic tracks, TCE, conform to tempo, Beat Detective and Identify Beat, audio-to-MIDI. Missing: per-algorithm choice (polyphonic/rhythmic/monophonic/varispeed/X-Form), warp markers UI depth, Elastic Pitch, quality vs Pro Tools unmeasured |
@@ -207,8 +207,8 @@ platform:
 
 Editing, mixing with plugins, bouncing, and saving and reopening pass (with known bugs).
 
-**Distance to alpha: ~5 points of readiness and ~110–180 agent-hours** (G-01, G-02, G-03, part
-of G-06, and the #153 entitlement). **Distance to beta: ~35 points and ~350–570 agent-hours**
+**Distance to alpha: ~5 points of readiness and ~105–180 agent-hours** (G-01, G-02, G-03, part
+of G-06). **Distance to beta: ~35 points and ~350–570 agent-hours**
 (beta also needs ~75 % ready). The beta plan is in [`roadmap.md`](roadmap.md).
 
 ## Effort and calibration
