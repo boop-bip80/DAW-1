@@ -1710,7 +1710,8 @@ mod save_tests {
         let mut r = Engine::default();
         assert_eq!(
             open_session(&mut r, &path("B/Moved.scraft")).unwrap(),
-            vec![dir.join("A").join("Audio Files/Audio 1_02.wav").display().to_string()]
+            // Joined a component at a time: the engine reports the platform's own separators.
+            vec![dir.join("A").join("Audio Files").join("Audio 1_02.wav").display().to_string()]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
