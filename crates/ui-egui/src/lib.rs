@@ -16,6 +16,7 @@ pub mod fonts;
 pub mod icons;
 pub mod import;
 pub mod menus;
+pub mod meters;
 pub mod midi_editor;
 pub mod mix_window;
 pub mod ops_windows;
@@ -127,6 +128,8 @@ pub struct UiState {
     pub window_size: [f32; 2],
     pub window_maximized: bool,
     pub ui_scale: f32,
+    /// Meter peak hold, clip indication and release (`ui.meters`).
+    pub meters: meters::MeterPrefs,
 }
 
 impl Default for UiState {
@@ -187,6 +190,7 @@ impl Default for UiState {
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
+            meters: meters::MeterPrefs::default(),
         }
     }
 }
@@ -222,8 +226,13 @@ pub struct DragSource(pub u64);
 pub struct MeterDisplay {
     pub level: [f32; 2],
     pub hold: [f32; 2],
-    pub hold_age: f32,
+    /// Seconds since each side's hold was last raised.
+    pub hold_age: [f32; 2],
     pub clip: bool,
+    /// Seconds since the signal last clipped (for timed clip indication).
+    pub clip_age: f32,
+    /// The highest sample peak since the meter was last reset (the numeric peak readout).
+    pub max_peak: f32,
     pub gr: f32,
     /// [`soundcraft_mix::PluginFailures::count`] as last seen.
     pub plugin_failures: u32,
@@ -1178,7 +1187,7 @@ impl SoundApp {
             let snap = &self.meter_snapshot;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
-                feed_meter(d, m.peak, m.gain_reduction_db, dt);
+                meters::feed(d, &meters::Reading::of(m), dt, &self.ui.meters);
                 if m.plugin_failures.count != d.plugin_failures {
                     d.plugin_failures = m.plugin_failures.count;
                     if let Some(msg) = failed_plugin_status(self.engine.session(), *id, m.plugin_failures.last) {
@@ -1186,8 +1195,7 @@ impl SoundApp {
                     }
                 }
             }
-            let main = snap.main.peak;
-            feed_meter(&mut self.main_meter, main, 0.0, dt);
+            meters::feed(&mut self.main_meter, &meters::Reading::of(&snap.main), dt, &self.ui.meters);
             if ended {
                 self.stop_play();
             }
@@ -1206,10 +1214,11 @@ impl SoundApp {
             }
         }
         if !self.meters_live() {
+            let silence = meters::Reading::default();
             for d in self.meters.values_mut() {
-                feed_meter(d, [0.0, 0.0], 0.0, dt);
+                meters::feed(d, &silence, dt, &self.ui.meters);
             }
-            feed_meter(&mut self.main_meter, [0.0, 0.0], 0.0, dt);
+            meters::feed(&mut self.main_meter, &silence, dt, &self.ui.meters);
         }
     }
 
@@ -1370,33 +1379,6 @@ impl SoundApp {
             "status": self.ui.status,
         })
     }
-}
-
-fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
-    // Instant attack, ~26 dB/s release, 2 s peak hold.
-    let fall = 10f32.powf(-26.0 * dt / 20.0);
-    for c in 0..2 {
-        let v = peak.get(c).copied().unwrap_or(0.0);
-        let lvl = d.level.get(c).copied().unwrap_or(0.0);
-        let nv = if v >= lvl { v } else { (lvl * fall).max(v) };
-        if let Some(x) = d.level.get_mut(c) {
-            *x = if nv < 1e-5 { 0.0 } else { nv };
-        }
-        if v >= d.hold.get(c).copied().unwrap_or(0.0) {
-            if let Some(h) = d.hold.get_mut(c) {
-                *h = v;
-            }
-            d.hold_age = 0.0;
-        }
-        if v >= 1.0 {
-            d.clip = true;
-        }
-    }
-    d.hold_age += dt;
-    if d.hold_age > 2.0 {
-        d.hold = d.level;
-    }
-    d.gr = if gr > d.gr { gr } else { d.gr * fall };
 }
 
 /// The status line naming the plugin in `slot` (an insert index or
