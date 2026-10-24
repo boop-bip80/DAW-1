@@ -81,7 +81,7 @@ impl CommandSpec {
         CommandInfo {
             id: self.id.into(),
             label: self.label.into(),
-            menu: self.menu.iter().map(|s| s.to_string()).collect(),
+            menu: self.menu.iter().map(ToString::to_string).collect(),
             shortcut: self.shortcut.map(str::to_string),
             params: self.params.into(),
             enabled: en.is_ok(),

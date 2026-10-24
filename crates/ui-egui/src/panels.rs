@@ -371,6 +371,29 @@ fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
     app.ui.show_big_counter = open;
 }
 
+fn memory_location_row(app: &mut SoundApp, ui: &mut Ui, n: u32, name: &str, loc: &str, len: &str, kind: &str) {
+    if ui.button(n.to_string()).on_hover_text("Recall").clicked() {
+        let _ = app.run("markers.recall", json!({"number": n}));
+    }
+    let key = egui::Id::new(("mem_name", n));
+    let mut edit: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| name.to_string());
+    let r = ui.add(egui::TextEdit::singleline(&mut edit).desired_width(140.0));
+    if r.changed() {
+        ui.ctx().memory_mut(|m| m.data.insert_temp(key, edit.clone()));
+    }
+    if r.lost_focus() && edit != name {
+        let _ = app.run("markers.edit", json!({"number": n, "rename": edit}));
+        ui.ctx().memory_mut(|m| m.data.remove::<String>(key));
+    }
+    ui.label(egui::RichText::new(loc).font(mono(11.0)));
+    ui.label(egui::RichText::new(len).font(mono(11.0)));
+    ui.label(kind);
+    if ui.small_button("✕").on_hover_text("Delete").clicked() {
+        let _ = app.run("markers.delete", json!({"number": n}));
+    }
+    ui.end_row();
+}
+
 pub(crate) fn memory_locations(app: &mut SoundApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         if ui.button("+ Marker").clicked() {
@@ -402,27 +425,8 @@ pub(crate) fn memory_locations(app: &mut SoundApp, ui: &mut Ui) {
                 ui.label(egui::RichText::new(h).strong());
             }
             ui.end_row();
-            for (n, name, loc, len, kind) in rows {
-                if ui.button(n.to_string()).on_hover_text("Recall").clicked() {
-                    let _ = app.run("markers.recall", json!({"number": n}));
-                }
-                let key = egui::Id::new(("mem_name", n));
-                let mut edit: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| name.clone());
-                let r = ui.add(egui::TextEdit::singleline(&mut edit).desired_width(140.0));
-                if r.changed() {
-                    ui.ctx().memory_mut(|m| m.data.insert_temp(key, edit.clone()));
-                }
-                if r.lost_focus() && edit != name {
-                    let _ = app.run("markers.edit", json!({"number": n, "rename": edit}));
-                    ui.ctx().memory_mut(|m| m.data.remove::<String>(key));
-                }
-                ui.label(egui::RichText::new(loc).font(mono(11.0)));
-                ui.label(egui::RichText::new(len).font(mono(11.0)));
-                ui.label(kind);
-                if ui.small_button("✕").on_hover_text("Delete").clicked() {
-                    let _ = app.run("markers.delete", json!({"number": n}));
-                }
-                ui.end_row();
+            for (n, name, loc, len, kind) in &rows {
+                memory_location_row(app, ui, *n, name, loc, len, kind);
             }
         });
     });
@@ -669,7 +673,7 @@ fn preset_menu(
         return;
     };
     let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .map(|rd| rd.flatten().filter_map(|e| e.path().file_stem().and_then(|x| x.to_str()).map(str::to_string)).collect())
+        .map(|rd| rd.flatten().filter_map(|e| e.path().file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_string)).collect())
         .unwrap_or_default();
     names.sort();
     for n in &names {
