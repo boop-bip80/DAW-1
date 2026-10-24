@@ -810,6 +810,10 @@
 	Score Setup	Impostazioni partitura
 	Score Setup...	Impostazioni partitura...
 	Scroll Timeline	Scorri timeline
+	Scroll Into View	Scorri fino a rendere visibile
+	Dither (TPDF)	Dither (TPDF)
+	Adds ±1 LSB triangular dither when writing 16- or 24-bit files. Leave it off when the master chain already dithers.	Aggiunge un dither triangolare di ±1 LSB scrivendo file a 16 o 24 bit. Lascialo disattivato se la catena master applica già il dither.
+	Record (F12 or Cmd+Space)	Registra (F12 o Cmd+Space)
 	Scroll to Track...	Scorri alla traccia...
 	Scrubber	Scrubber
 	S-Curve	S-Curva

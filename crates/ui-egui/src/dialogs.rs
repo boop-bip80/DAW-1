@@ -12,7 +12,7 @@ use soundcraft_time::Samples;
 pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
     NewSession { name: String, sample_rate: u32, demo: bool },
-    Bounce { path: String, format: String, bit_depth: String, normalize: bool },
+    Bounce { path: String, format: String, bit_depth: String, normalize: bool, dither: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
@@ -113,7 +113,13 @@ impl Dialogs {
                     .and_then(|p| std::path::Path::new(p).parent())
                     .filter(|d| !d.as_os_str().is_empty())
                     .map_or(home.clone(), |d| d.display().to_string());
-                Dialog::Bounce { path: format!("{dir}/{name} Bounce.wav"), format: "wav".into(), bit_depth: "24".into(), normalize: false }
+                Dialog::Bounce {
+                    path: format!("{dir}/{name} Bounce.wav"),
+                    format: "wav".into(),
+                    bit_depth: "24".into(),
+                    normalize: false,
+                    dither: false,
+                }
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
@@ -325,6 +331,7 @@ fn default_dir() -> String {
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     audiosuite_window(app, ctx);
     crate::bounce::show(app, ctx);
+    crate::import::show(app, ctx);
     let Some(mut d) = app.dialogs.open.take() else { return };
     let mut keep = true;
     let mut action: Option<(String, Value)> = None;
@@ -387,8 +394,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                                 ui.selectable_value(timebase, "samples".to_string(), crate::i18n::t("Samples"));
                                 ui.selectable_value(timebase, "ticks".to_string(), crate::i18n::t("Ticks"));
                             });
+                    });
+                    ui.horizontal(|ui| {
                         ui.label(crate::i18n::t("Name:"));
-                        ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
+                        ui.add(egui::TextEdit::singleline(name).desired_width(240.0));
                     });
                     if buttons(ui, "Create", enter) {
                         action =
@@ -413,7 +422,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ));
                     }
                 }
-                Dialog::Bounce { path, format, bit_depth, normalize } => {
+                Dialog::Bounce { path, format, bit_depth, normalize, dither } => {
                     ui.horizontal(|ui| {
                         ui.label(crate::i18n::t("File"));
                         ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
@@ -443,6 +452,12 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         });
                     });
                     crate::widgets::checkbox(ui, normalize, crate::i18n::t("Normalize to -0.1 dBFS"));
+                    // 32-bit float keeps every sample as it is: there is nothing to dither.
+                    ui.add_enabled_ui(bit_depth.as_str() != "32f", |ui| {
+                        crate::widgets::checkbox(ui, dither, crate::i18n::t("Dither (TPDF)")).on_hover_text(crate::i18n::t(
+                            "Adds ±1 LSB triangular dither when writing 16- or 24-bit files. Leave it off when the master chain already dithers.",
+                        ));
+                    });
                     ui.label(
                         egui::RichText::new(crate::i18n::t("Bounces the edit selection, or the whole session when nothing is selected."))
                             .small()
@@ -452,7 +467,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         let p = std::path::Path::new(path.as_str()).with_extension(if format == "aiff" { "aif" } else { format.as_str() });
                         crate::bounce::start(
                             app,
-                            &json!({"path": p.to_string_lossy(), "format": format, "bit_depth": bit_depth, "normalize": normalize}),
+                            &json!({"path": p.to_string_lossy(), "format": format, "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"}),
                         );
                         keep = false;
                     }
@@ -694,18 +709,23 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let saving = action.as_ref().is_some_and(|(cmd, _)| cmd.starts_with("session.save"));
     if let Some((cmd, params)) = action {
         keep = false;
-        match run_then(app, &cmd, params) {
-            Ok(v) if cmd == "file.export_clips" => {
-                app.ui.status = format!("Exported {} clip(s) to {}", v["written"], v["dir"].as_str().unwrap_or_default());
-            }
-            Ok(v) if cmd == "file.import_aaf" => {
-                let warnings: Vec<&str> = v["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
-                if !warnings.is_empty() {
-                    app.ui.status = warnings.join("\n");
+        if cmd == "file.import_audio" {
+            // Decoded in the background so a long file doesn't freeze the app (#597).
+            crate::import::start(app, params);
+        } else {
+            match run_then(app, &cmd, params) {
+                Ok(v) if cmd == "file.export_clips" => {
+                    app.ui.status = format!("Exported {} clip(s) to {}", v["written"], v["dir"].as_str().unwrap_or_default());
                 }
+                Ok(v) if cmd == "file.import_aaf" => {
+                    let warnings: Vec<&str> = v["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()).collect();
+                    if !warnings.is_empty() {
+                        app.ui.status = warnings.join("\n");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => app.ui.status = e,
             }
-            Ok(_) => {}
-            Err(e) => app.ui.status = e,
         }
     }
     if saving
