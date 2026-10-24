@@ -371,15 +371,7 @@ fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
     app.ui.show_big_counter = open;
 }
 
-fn memory_location_row(
-    app: &mut SoundApp,
-    ui: &mut Ui,
-    n: u32,
-    name: &str,
-    loc: &str,
-    len: &str,
-    kind: &str,
-) {
+fn memory_location_row(app: &mut SoundApp, ui: &mut Ui, n: u32, name: &str, loc: &str, len: &str, kind: &str) {
     if ui.button(n.to_string()).on_hover_text("Recall").clicked() {
         let _ = app.run("markers.recall", json!({"number": n}));
     }

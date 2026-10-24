@@ -37,10 +37,7 @@ fn check_audio_clip(
         add("missing_source", "Source metadata is missing. Reimport the audio and replace this clip.");
     }
     let Some(audio) = audio else {
-        add(
-            "unavailable_audio",
-            "Audio is not loaded; this clip will be silent. Restore the media and reopen the session, or reimport it.",
-        );
+        add("unavailable_audio", "Audio is not loaded; this clip will be silent. Restore the media and reopen the session, or reimport it.");
         return;
     };
     if audio.buffer.sample_rate != ctx.session_sample_rate {
@@ -51,10 +48,7 @@ fn check_audio_clip(
         return;
     }
     if audio.buffer.channels.iter().any(|channel| channel.len() != audio.frames()) {
-        add(
-            "uneven_channels",
-            "Loaded audio channels have different lengths. Reimport a valid audio file; bounds below use the shortest channel.",
-        );
+        add("uneven_channels", "Loaded audio channels have different lengths. Reimport a valid audio file; bounds below use the shortest channel.");
     }
     if !clip.stretch.is_finite() || clip.stretch <= 0.0 || clip.length <= 0 {
         add("invalid_clip", "Clip length or stretch is invalid. Replace this clip.");
@@ -79,12 +73,7 @@ fn report(e: &mut Engine, _: &Value) -> Result<Value> {
     for track in &s.tracks {
         for (index, playlist) in track.playlists.iter().enumerate() {
             let active = index == track.active_playlist;
-            let ctx = ClipContext {
-                track,
-                playlist,
-                active,
-                session_sample_rate: s.sample_rate.hz(),
-            };
+            let ctx = ClipContext { track, playlist, active, session_sample_rate: s.sample_rate.hz() };
             for clip in &playlist.clips {
                 let ClipContent::Audio { source, offset } = clip.content else { continue };
                 clips += 1;

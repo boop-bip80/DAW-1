@@ -58,15 +58,7 @@ fn edit_mode_tooltip(m: EditMode, locked: bool, cmd: &str, fkey: &str) -> String
     }
 }
 
-fn draw_mode_cell(
-    p: &egui::Painter,
-    cell: Rect,
-    resp: &egui::Response,
-    t: &Tokens,
-    m: EditMode,
-    state: &ModeCellState,
-    label: &str,
-) {
+fn draw_mode_cell(p: &egui::Painter, cell: Rect, resp: &egui::Response, t: &Tokens, m: EditMode, state: &ModeCellState, label: &str) {
     let on = state.cur == m || (m == EditMode::Grid && state.cur == EditMode::GridRelative);
     key(p, cell, resp, if on { t.mode_on } else { t.mode_off });
     let fg = if on { t.mode_on_text } else { t.mode_off_text };
@@ -84,11 +76,7 @@ fn draw_mode_cell(
 fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let ed = &app.engine.session().edit;
-    let state = ModeCellState {
-        cur: ed.edit_mode,
-        snap: ed.flag(SNAP_TO_GRID),
-        locked: ed.flag(SHUFFLE_LOCK),
-    };
+    let state = ModeCellState { cur: ed.edit_mode, snap: ed.flag(SNAP_TO_GRID), locked: ed.flag(SHUFFLE_LOCK) };
     let cmd = crate::shortcuts::shortcut_label("Cmd", ui.ctx().os() == egui::os::OperatingSystem::Mac);
     let modes = [
         (EditMode::Shuffle, 0, 0, "SHUFFLE", "F1"),

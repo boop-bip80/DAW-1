@@ -30,13 +30,7 @@ fn video_status_text(app: &SoundApp, pic: Option<&(MovieKey, Result<String, Stri
     }
 }
 
-fn draw_video_surface(
-    app: &SoundApp,
-    painter: &egui::Painter,
-    img: Rect,
-    pic: Option<&(MovieKey, Result<String, String>, f64, f64)>,
-    on: bool,
-) {
+fn draw_video_surface(app: &SoundApp, painter: &egui::Painter, img: Rect, pic: Option<&(MovieKey, Result<String, String>, f64, f64)>, on: bool) {
     let msg = if !on {
         Some("Video Track Offline".to_string())
     } else {
