@@ -8,6 +8,7 @@ use soundcraft_ui_egui::{Services, SoundApp, theme::Tokens, toolbar};
 /// What the toolbar painted: its panel, the group backgrounds, anything wide and thin (a scroll bar) and everything
 /// else it holds (the groups and what is not in one, such as the output meter).
 struct Painted {
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "read by the macOS-only fit test"))]
     panel: Rect,
     groups: Vec<Rect>,
     bars: Vec<Rect>,
