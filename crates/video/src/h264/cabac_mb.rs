@@ -244,7 +244,7 @@ impl SliceDecoder<'_> {
         while prefix < 9 && c.decode_decision(base + (prefix + 2).min(6)) == 1 {
             prefix += 1;
         }
-        let mut val = prefix as i32;
+        let mut val = prefix;
         if prefix >= 9 {
             // EG3 suffix
             let mut k = 3;

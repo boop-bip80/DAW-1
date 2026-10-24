@@ -86,7 +86,7 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
 
 /// Mix-view menu paths, allocated once. Rebuilding them on every menu draw leaked a copy per frame.
 fn mix_view_aliases() -> &'static [(&'static str, &'static str)] {
-    static ALIASES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    static ALIASES: std::sync::OnceLock<Vec<(&str, &str)>> = std::sync::OnceLock::new();
     ALIASES.get_or_init(|| {
         [
             "Inserts A-E",
@@ -633,7 +633,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             match sec {
                 "all" => {
                     app.ui.mix_views =
-                        ["inserts_ae", "inserts_fj", "sends_ae", "sends_fj", "io", "comments", "color"].iter().map(|s| s.to_string()).collect()
+                        ["inserts_ae", "inserts_fj", "sends_ae", "sends_fj", "io", "comments", "color"].iter().map(ToString::to_string).collect()
                 }
                 "minimal" => app.ui.mix_views.clear(),
                 "" => return Some(Err("`section` required".into())),
