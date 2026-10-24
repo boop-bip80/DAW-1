@@ -11,6 +11,9 @@ mod clip_gain_fader;
 mod clip_menu;
 mod command_reachability;
 mod commands_filter;
+/// The synthetic CLAP plugin (built and installed once per run), shared by the tests that host it.
+#[path = "../../../clap-host/tests/common/mod.rs"]
+mod common;
 mod docking_workflows;
 mod edit_menu;
 mod edit_modes;

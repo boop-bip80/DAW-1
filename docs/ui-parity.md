@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (Scroll Into View in the track name menu) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-24 · **Change:** minor (a click on an insert opens the plugin's own editor; open plugin slots are lit; editors that can't open here are greyed out with the reason) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -52,6 +52,8 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
 | Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
 | A plugin opens when it's inserted | ✅ | #486; a hosted plugin's own editor, else its plugin window |
+| A click on an insert opens the plugin | ✅ | A hosted plugin's own editor, else its parameter window: for built-in plugins, without an audio engine, and for editors that can't open here (Audio Units, not hosted yet; embedded-only CLAP editors outside Windows; VST3 editors outside macOS and Windows), whose Open Plugin Editor is greyed out with the reason as its hint. An editor that fails to open says why on the status line. Clicking again raises an open VST3 editor, or an embedded CLAP one on Windows; a floating CLAP editor is shown again, and the plugin decides whether it comes forward. A hosted insert's right-click menu has Edit Parameters… (when the plugin is installed) and Open/Close Plugin Editor; a hosted instrument's has Open/Close Plugin Editor. `window.plugin` does the same |
+| Open plugin slots are lit | ✅ | An insert or instrument slot whose editor or parameter window is open has a light face, as in Pro Tools; Mix window and Edit window Inserts columns |
 | Command palette (Search) | ✅ | Over every command |
 
 ## Look and meters
@@ -69,6 +71,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | A click on an insert or instrument slot opens a hosted plugin's own editor, as DAWs do; a hosted insert's parameter window moves to its menu (Edit Parameters…); slots with an open window are lit; `window.plugin`; editors that can't open here are greyed out with the reason |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |

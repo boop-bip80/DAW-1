@@ -529,27 +529,15 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                         ui.menu_button("Presets ▾", |ui| preset_menu(app, ui, tid, slot, info, &ins));
                     }
-                    if soundcraft_mix::is_third_party(&ins.plugin) {
-                        let open = app.player.as_ref().is_some_and(|p| p.editor_open(tid, slot));
-                        let available = app.player.as_ref().is_some_and(|p| p.has_editor(tid, slot));
-                        let label = if open { "Close Plugin Editor" } else { "Open Plugin Editor" };
-                        let resp = ui.add_enabled(available, egui::Button::new(label));
-                        let resp =
-                            if available { resp } else { resp.on_disabled_hover_text("This plugin has no editor of its own, or it is not loaded") };
-                        if resp.clicked()
-                            && let Some(p) = &app.player
-                        {
-                            if open {
-                                p.close_editor(tid, slot);
-                            } else if let Err(e) = p.open_editor(tid, slot) {
-                                app.ui.status = format!("{}: {e}", info.name);
-                            }
-                        }
-                    }
+                    crate::mix_window::editor_toggle(app, ui, tid, slot);
                 });
                 if instrument && soundcraft_mix::is_third_party(&ins.plugin) {
                     // A hosted instrument keeps its sounds and settings in its own editor.
-                    ui.label(egui::RichText::new("Load and edit sounds in the plugin's own editor.").color(Tokens::current().text_dim));
+                    let hint = match app.editor_state(tid, slot, &ins.plugin) {
+                        Ok(_) => "Load and edit sounds in the plugin's own editor.".to_string(),
+                        Err(why) => format!("This instrument keeps its sounds in its own editor, which SoundCraft can't open here: {why}."),
+                    };
+                    ui.label(egui::RichText::new(hint).color(Tokens::current().text_dim));
                     return;
                 }
                 if instrument && ins.plugin == crate::sampler_window::SAMPLER {

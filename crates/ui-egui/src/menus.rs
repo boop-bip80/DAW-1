@@ -27,6 +27,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.close", "Close Window", "Window > Close Window", Some("Cmd+W")),
     ("window.hide_floating", "Hide All Floating Windows", "Window > Hide All Floating Windows", Some("Cmd+Ctrl+W")),
     ("window.midi_editor", "MIDI Editor", "Window > MIDI Editor", None),
+    ("window.plugin", "Open Plugin", "", None),
     ("window.universe", "Universe", "View > Other Displays > Universe", Some("Alt+7")),
     ("window.video", "Video", "Window > Video", Some("Cmd+9")),
     ("window.video_universe", "Video Universe", "Window > Video Universe", None),
@@ -626,9 +627,16 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.show_audio_health = false;
             app.ui.show_automation = false;
             app.ui.plugin_windows.clear();
+            if id == "window.hide_floating"
+                && let Some(p) = &app.player
+            {
+                // Hosted plugins' own editors float too (as plugin windows do in Pro Tools).
+                p.close_editors();
+            }
             app.ui.audiosuite = None;
             json!({})
         }
+        "window.plugin" => return Some(plugin_window(app, p)),
         "view.mix_section" => {
             let sec = p.get("section").and_then(Value::as_str).unwrap_or("");
             match sec {
@@ -702,6 +710,63 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         _ => return None,
     };
     Some(Ok(r))
+}
+
+/// `window.plugin {track, slot, view?, value?}`: opens an occupied insert or instrument slot the
+/// way a click on it does (no `view`), or one of its windows: `"editor"` (the hosted plugin's own
+/// editor, else an error) or `"parameters"` (SoundCraft's parameter window). A missing `value`
+/// opens, like a click; `value: false` closes the named window, or both, and succeeds whatever
+/// is open (an empty slot included). `slot` is 0-9, a letter a-j, or `"instrument"`. Replies
+/// `{track, slot, view, value}`: the view that opened, or the one closed (null for both).
+fn plugin_window(app: &mut SoundApp, p: &Value) -> Result<Value, String> {
+    const CMD: &str = "window.plugin";
+    let track = soundcraft_engine::cmd::track_param(&app.engine, CMD, p, "track").map_err(|e| e.to_string())?;
+    let track = track.ok_or_else(|| format!("{CMD}: `track` required"))?;
+    let slot = plugin_slot_param(p).ok_or_else(|| format!("{CMD}: `slot` must be 0-9, a letter a-j, or \"instrument\""))?;
+    let view = match p.get("view") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some("editor") => Some(crate::SlotView::Editor),
+            Some("parameters") => Some(crate::SlotView::Parameters),
+            _ => return Err(format!("{CMD}: `view` must be \"editor\" or \"parameters\"")),
+        },
+    };
+    let open = match p.get("value") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(format!("{CMD}: `value` must be true or false")),
+    };
+    let slot_json = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
+    if !open {
+        app.close_slot(track, slot, view);
+        return Ok(json!({"track": track.0, "slot": slot_json, "view": view.map(crate::SlotView::id), "value": false}));
+    }
+    let plugin = app.slot_plugin(track, slot).ok_or_else(|| format!("{CMD}: that slot is empty"))?;
+    let opened = match view {
+        None => app.open_slot(track, slot, &plugin)?,
+        Some(crate::SlotView::Editor) => app.open_editor(track, slot, &plugin).map(|()| crate::SlotView::Editor)?,
+        Some(crate::SlotView::Parameters) => app.open_parameters(track, slot, &plugin).map(|()| crate::SlotView::Parameters)?,
+    };
+    Ok(json!({"track": track.0, "slot": slot_json, "view": opened.id(), "value": true}))
+}
+
+/// A plugin slot: an insert (0-9 or a-j) or `"instrument"` ([`soundcraft_mix::INSTRUMENT_SLOT`]).
+fn plugin_slot_param(p: &Value) -> Option<usize> {
+    let v = p.get("slot")?;
+    let n = match v.as_u64() {
+        Some(n) => usize::try_from(n).ok()?,
+        None => {
+            let s = v.as_str()?.trim().to_ascii_lowercase();
+            if s == "instrument" {
+                return Some(soundcraft_mix::INSTRUMENT_SLOT);
+            }
+            match s.as_bytes() {
+                [c @ b'a'..=b'z'] => usize::from(c - b'a'),
+                _ => s.parse().ok()?,
+            }
+        }
+    };
+    (n < soundcraft_model::INSERT_SLOTS).then_some(n)
 }
 
 /// Parity including UI-layer commands.

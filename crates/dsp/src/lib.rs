@@ -268,6 +268,12 @@ pub trait PluginEditor: Send {
     /// Closes the editor window.
     fn close(&mut self);
     fn is_open(&self) -> bool;
+    /// Why this editor can't open on this platform (e.g. a CLAP plugin that offers only an
+    /// embedded editor where SoundCraft hosts none), found without opening anything; `None` when
+    /// it can, or can't tell before trying. Main thread only.
+    fn unavailable(&self) -> Option<String> {
+        None
+    }
     /// Call every UI frame while open: services the plugin's GUI requests, notices a window the
     /// user closed, and returns parameter edits made in the editor as `(param id, value)` in
     /// SoundCraft units (ids and ranges of [`PluginInfo::params`]).

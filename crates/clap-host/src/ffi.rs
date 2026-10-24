@@ -279,7 +279,16 @@ impl Bundle {
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
-            inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false, window: None }),
+            inner: Mutex::new(GuiInner {
+                plugin,
+                gui,
+                state: inst.state_ext,
+                alive: true,
+                created: false,
+                visible: false,
+                window: None,
+                unavailable: None,
+            }),
             host: Arc::clone(&inst.state),
         });
         Ok(inst)
@@ -729,6 +738,22 @@ pub(crate) fn on_main_thread() -> bool {
     true
 }
 
+const EMBEDDED_ONLY: &str = "this plugin offers only an embedded editor, which SoundCraft hosts on Windows only";
+
+/// Why an editor can't open, from what `clap.gui` said: whether this platform has a window API
+/// SoundCraft knows, whether the plugin offers a floating or an embedded editor for it, and
+/// whether SoundCraft hosts embedded editors here. `None`: it can open. (The same order as
+/// [`GuiLink::open`]: floating first, then embedded.)
+fn editor_verdict(api_known: bool, floating: bool, embedded: bool, embed_ok: bool) -> Option<&'static str> {
+    if !api_known {
+        Some("plugin editors are not supported on this platform")
+    } else if floating || (embedded && embed_ok) {
+        None
+    } else {
+        Some(EMBEDDED_ONLY)
+    }
+}
+
 /// The windowing API of this platform.
 fn window_api() -> Option<&'static CStr> {
     if cfg!(target_os = "macos") {
@@ -752,6 +777,8 @@ struct GuiInner {
     visible: bool,
     /// The host window of an embedded editor (`None` for floating editors).
     window: Option<hostwin::HostWindow>,
+    /// Why the editor can't open on this platform (`Some(None)`: it can), asked once.
+    unavailable: Option<Option<String>>,
 }
 
 /// The link between an instance and its editor and state handles. The instance may process on
@@ -776,6 +803,7 @@ impl Default for GuiLink {
                 created: false,
                 visible: false,
                 window: None,
+                unavailable: None,
             }),
             host: Arc::new(HostState::default()),
         }
@@ -805,6 +833,35 @@ impl GuiLink {
         (g.alive).then(|| unsafe { g.gui.as_ref() }.copied()).flatten()
     }
 
+    /// Why the editor can't open on this platform, asked of `clap.gui` without creating it (once,
+    /// then cached): it offers only an embedded editor where SoundCraft hosts none, or no window
+    /// API SoundCraft has. `None` when it can open, or when this isn't the main thread (where
+    /// the plugin can't be asked; [`GuiLink::open`] then reports what goes wrong).
+    pub fn unavailable(&self) -> Option<String> {
+        if !on_main_thread() {
+            return None;
+        }
+        let mut g = self.lock();
+        if let Some(known) = &g.unavailable {
+            return known.clone();
+        }
+        let vt = GuiLink::vt(&g)?;
+        let why = match (window_api(), vt.is_api_supported) {
+            (None, _) => editor_verdict(false, false, false, hostwin::SUPPORTED).map(str::to_string),
+            (Some(_), None) => Some("incomplete clap.gui extension".to_string()),
+            (Some(api), Some(supported)) => {
+                // SAFETY: live plugin (`vt` is only given while `alive`); `api` is a static
+                // NUL-terminated string; main thread (checked). Asking creates no GUI.
+                let floating = unsafe { supported(g.plugin, api.as_ptr(), true) };
+                // SAFETY: as above.
+                let embedded = unsafe { supported(g.plugin, api.as_ptr(), false) };
+                editor_verdict(true, floating, embedded, hostwin::SUPPORTED).map(str::to_string)
+            }
+        };
+        g.unavailable = Some(why.clone());
+        why
+    }
+
     /// Opens (creates and shows) the plugin's floating editor window.
     pub fn open(&self, title: &str) -> Result<(), String> {
         if !on_main_thread() {
@@ -831,7 +888,7 @@ impl GuiLink {
             if hostwin::SUPPORTED && unsafe { supported(g.plugin, api.as_ptr(), false) } {
                 return self.open_embedded(&mut g, vt, api, title);
             }
-            return Err("this plugin offers only an embedded editor, which SoundCraft hosts on Windows only".into());
+            return Err(EMBEDDED_ONLY.into());
         }
         self.host.gui_closed.store(false, Ordering::Relaxed);
         self.host.gui_destroyed.store(false, Ordering::Relaxed);
@@ -1642,6 +1699,14 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_editor_opens_where_its_window_kind_is_hosted() {
+        assert_eq!(editor_verdict(false, true, true, true), Some("plugin editors are not supported on this platform"));
+        assert_eq!(editor_verdict(true, true, false, false), None, "floating opens everywhere");
+        assert_eq!(editor_verdict(true, false, true, true), None, "embedded, where SoundCraft hosts it (Windows)");
+        assert_eq!(editor_verdict(true, false, true, false), Some(EMBEDDED_ONLY), "embedded elsewhere");
+    }
 
     #[test]
     fn the_transport_reaches_clap_in_fixed_point() {

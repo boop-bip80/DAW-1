@@ -489,6 +489,10 @@ impl Vst3Editor {
 }
 
 impl PluginEditor for Vst3Editor {
+    fn unavailable(&self) -> Option<String> {
+        self.link.unavailable()
+    }
+
     fn open(&mut self) -> Result<(), String> {
         // Edits reported before the editor opened (e.g. during setup) are stale.
         let _ = self.host.take_edits();

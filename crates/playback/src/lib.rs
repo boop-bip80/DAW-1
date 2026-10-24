@@ -717,6 +717,20 @@ impl Player {
         self.side().editors.contains_key(&(track, slot))
     }
 
+    /// Why the plugin's own editor can't open on this platform, found without opening it
+    /// (`PluginEditor::unavailable`); `None` when it can, or when the slot has no editor. Main
+    /// thread only.
+    pub fn editor_unavailable(&self, track: TrackId, slot: usize) -> Option<String> {
+        self.side().editors.get(&(track, slot))?.unavailable()
+    }
+
+    /// Gives a slot this editor in place of its instance's own, for tests driving a fake one (an
+    /// editor that can't open here, say). Main thread only.
+    #[doc(hidden)]
+    pub fn set_editor(&self, track: TrackId, slot: usize, editor: Box<dyn PluginEditor>) {
+        self.side().add_editor((track, slot), editor);
+    }
+
     /// Opens the plugin's own editor window. Main thread only.
     pub fn open_editor(&self, track: TrackId, slot: usize) -> Result<(), String> {
         self.side().open_editor((track, slot))
@@ -1420,6 +1434,37 @@ mod tests {
         fn idle(&mut self) -> Vec<(String, f32)> {
             Vec::new()
         }
+    }
+
+    /// An editor that can't open on this platform (a CLAP plugin with only an embedded editor).
+    struct Embedded;
+
+    impl PluginEditor for Embedded {
+        fn open(&mut self) -> Result<(), String> {
+            Err("tried to open".into())
+        }
+        fn close(&mut self) {}
+        fn is_open(&self) -> bool {
+            false
+        }
+        fn unavailable(&self) -> Option<String> {
+            Some("embedded only".into())
+        }
+        fn idle(&mut self) -> Vec<(String, f32)> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn an_editor_says_why_it_cant_open_before_it_is_tried() {
+        let player = Player::new(Arc::new(Session::default()));
+        let (t, slot) = (TrackId(1), 0);
+        assert_eq!(player.editor_unavailable(t, slot), None, "no editor, nothing to say");
+        player.set_editor(t, slot, Box::new(Window));
+        assert_eq!(player.editor_unavailable(t, slot), None);
+        player.set_editor(t, slot, Box::new(Embedded));
+        assert!(player.has_editor(t, slot));
+        assert_eq!(player.editor_unavailable(t, slot).as_deref(), Some("embedded only"));
     }
 
     #[test]

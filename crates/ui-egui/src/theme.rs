@@ -210,6 +210,11 @@ pub struct Tokens {
     pub slot_face: [Color32; 2],
     pub slot_bypassed: [Color32; 2],
     pub slot_mark: Color32,
+    /// A used slot whose plugin window (its own editor or the parameter window) is open: a lit
+    /// face, the name on it, and a rim around it (transparent: none).
+    pub slot_open: [Color32; 2],
+    pub slot_open_text: Color32,
+    pub slot_open_edge: Color32,
 }
 
 impl Tokens {
@@ -296,6 +301,9 @@ impl Tokens {
         slot_face: [Color32::from_rgb(92, 92, 92), Color32::from_rgb(75, 75, 75)],
         slot_bypassed: [Color32::from_rgb(66, 96, 146), Color32::from_rgb(50, 76, 120)],
         slot_mark: Color32::from_rgb(159, 159, 159),
+        slot_open: [Color32::from_rgb(226, 226, 226), Color32::from_rgb(196, 196, 196)],
+        slot_open_text: Color32::from_rgb(16, 16, 16),
+        slot_open_edge: Color32::TRANSPARENT,
     };
 
     pub const LIGHT: Tokens = Tokens {
@@ -381,6 +389,9 @@ impl Tokens {
         slot_face: [Color32::from_rgb(244, 245, 247), Color32::from_rgb(214, 216, 220)],
         slot_bypassed: [Color32::from_rgb(190, 210, 240), Color32::from_rgb(160, 186, 228)],
         slot_mark: Color32::from_rgb(92, 95, 102),
+        slot_open: [Color32::from_rgb(255, 255, 255), Color32::from_rgb(255, 255, 255)],
+        slot_open_text: Color32::from_rgb(0, 0, 0),
+        slot_open_edge: Color32::from_rgb(38, 41, 48),
     };
 
     pub fn current() -> Tokens {
