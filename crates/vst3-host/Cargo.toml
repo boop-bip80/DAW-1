@@ -20,7 +20,7 @@ libloading = "0.9"
 # The macOS editor host window (an NSWindow whose content view the plugin's IPlugView attaches to).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSNotification", "NSObject", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"] }
 
 # The Windows editor host window (a top-level HWND the plugin view's child window lives in).
