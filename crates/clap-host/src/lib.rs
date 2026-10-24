@@ -22,8 +22,10 @@
 //! floating window ([`Plugin::open_editor`], or [`Plugin::editor`] for a handle usable on the main
 //! thread while the instance processes on the audio thread). Plugins that offer only an embedded
 //! editor get a host window of SoundCraft's on Windows (resized on `request_resize`, closed by
-//! its title bar); elsewhere they are not hosted yet, and SoundCraft's generic parameter editor
-//! still works for them.
+//! its title bar; when the plugin `can_resize` the window gets a sizing border, and user resizes
+//! are shaped by `adjust_size` and applied with `set_size`, the window going back to the last
+//! size when the plugin refuses one); elsewhere they are not hosted yet, and SoundCraft's
+//! generic parameter editor still works for them.
 //! Parameter changes made in the plugin's GUI arrive as output events while the plugin processes
 //! and are reported by the editor's `idle`.
 
