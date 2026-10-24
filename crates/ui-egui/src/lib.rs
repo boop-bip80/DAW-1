@@ -14,6 +14,7 @@ pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
 pub mod icons;
+pub mod import;
 pub mod menus;
 pub mod midi_editor;
 pub mod mix_window;
@@ -132,7 +133,7 @@ impl Default for UiState {
     fn default() -> Self {
         UiState {
             recent_sessions: Vec::new(),
-            docking: docking::Workspace::default(),
+            docking: docking::edit_default(),
             mix_docking: docking::mix_default(),
             window: MainWindow::Edit,
             show_tracks_list: true,
@@ -339,6 +340,8 @@ pub struct SoundApp {
     pub video: video_track::VideoPool,
     /// The Bounce Mix in progress, rendered a slice per frame.
     pub bounce: Option<soundcraft_engine::io::Bounce>,
+    /// Audio files importing in the background (issue #597).
+    pub imports: import::Imports,
     /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
@@ -440,6 +443,7 @@ impl SoundApp {
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
             bounce: None,
+            imports: import::Imports::default(),
             #[cfg(test)]
             _palette_lock: theme::lock_test_palette(),
         }
@@ -458,13 +462,17 @@ impl SoundApp {
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
-        if id.starts_with("session.save") || id.starts_with("file.bounce") {
+        if id.starts_with("session.save") || id.starts_with("file.bounce") || id == "track.save_preset" {
             // Third-party plugins keep state the session can't see: store it first.
             self.capture_plugin_states();
         }
         let replacing = matches!(id, "session.new" | "session.open" | "session.close" | "session.revert");
         match self.engine.execute(id, &params) {
             Ok(v) => {
+                if replacing {
+                    // Note indices and gestures belong to the old session's clips.
+                    self.midi = midi_editor::MidiEditorState::default();
+                }
                 if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
                     self.release_autosave(false);
                 }
@@ -1234,6 +1242,7 @@ impl SoundApp {
         self.note_recent_session();
         self.apply_editor_edits();
         bounce::step(self, ctx);
+        import::step(self, ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             if matches!(self.gesture, Some(Gesture::Fader { .. })) {
                 self.gesture = None;
@@ -1444,6 +1453,17 @@ mod tests {
         assert!(msg.starts_with("Gain on Vox put out invalid audio"), "{msg}");
         assert_eq!(super::failed_plugin_status(&s, t, 0), None);
         assert_eq!(super::failed_plugin_status(&s, t, soundcraft_mix::INSTRUMENT_SLOT), None);
+    }
+
+    #[test]
+    fn replacing_the_session_drops_the_midi_note_selection() {
+        for command in ["session.new", "session.close"] {
+            let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+            app.midi.selected = vec![0, 1];
+            app.midi.clip = Some(soundcraft_model::ClipId(1));
+            app.run(command, json!({})).unwrap();
+            assert!(app.midi.selected.is_empty() && app.midi.clip.is_none(), "{command}");
+        }
     }
 
     #[test]

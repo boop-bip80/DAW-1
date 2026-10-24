@@ -492,7 +492,7 @@ fn put_block(f: &[f32; 64], plane: &mut [u16], stride: usize, x0: usize, y0: usi
     if xn == 8 && (y0 + 7) * step + parity < rows {
         for yy in 0..8 {
             let o = ((y0 + yy) * step + parity) * stride + x0;
-            let (Some(row), Some(src)) = (plane.get_mut(o..).and_then(|p| p.first_chunk_mut::<8>()), f.as_chunks::<8>().0.get(yy)) else {
+            let (Some(row), Some(src)) = (plane.get_mut(o..).and_then(<[_]>::first_chunk_mut::<8>), f.as_chunks::<8>().0.get(yy)) else {
                 return;
             };
             for x in 0..8 {

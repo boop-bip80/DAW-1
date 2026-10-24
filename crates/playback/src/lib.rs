@@ -364,7 +364,7 @@ impl AudioState {
                 let a = ch.and_then(|v| v.get(i0)).copied().unwrap_or(0.0);
                 // `pending` is BLOCK long; only `pending_len` frames are valid. Hold the last one at the edge.
                 let b = if i0 + 1 < self.pending_len { ch.and_then(|v| v.get(i0 + 1)).copied().unwrap_or(a) } else { a };
-                a + (b - a) * fr
+                a * (1.0 - fr) + b * fr
             };
             if channels < nch {
                 // Fold surround to stereo first; a mono device averages the two sides.
@@ -382,23 +382,25 @@ impl AudioState {
                 }
                 for (c, o) in frame.iter_mut().enumerate() {
                     *o = match c {
-                        0 if channels == 1 => {
-                            let mono = (0.5 * l + 0.5 * r).clamp(-1.0, 1.0);
-                            if mono.is_finite() { mono } else { 0.0 }
-                        }
-                        0 => l.clamp(-1.0, 1.0),
-                        1 => r.clamp(-1.0, 1.0),
+                        0 if channels == 1 => out_sample(0.5 * l + 0.5 * r),
+                        0 => out_sample(l),
+                        1 => out_sample(r),
                         _ => 0.0,
                     };
                 }
             } else {
                 for (c, o) in frame.iter_mut().enumerate() {
-                    *o = if c < nch.max(1) && sounding { sample(c).clamp(-1.0, 1.0) } else { 0.0 };
+                    *o = if c < nch.max(1) && sounding { out_sample(sample(c)) } else { 0.0 };
                 }
             }
             self.read += step;
         }
     }
+}
+
+/// Clamp to the device range, mapping NaN and infinities to silence.
+fn out_sample(v: f32) -> f32 {
+    if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
 }
 
 /// UI-thread bookkeeping of the third-party instances the audio thread holds.
@@ -1301,6 +1303,18 @@ mod tests {
         let mut out = [0.5; 128];
         st.fill(&mut out, 1);
         assert!(out.iter().all(|x| *x == 0.0), "overflow in the stereo fold-down must not send NaN to a mono device");
+    }
+
+    #[test]
+    fn interpolation_overflow_between_huge_samples_never_reaches_the_device() {
+        use soundcraft_model::ChannelFormat;
+        let alternating: Vec<f32> = (0..512).map(|i| if i % 2 == 0 { -3.4e38 } else { 3.4e38 }).collect();
+        for (format, nch, device) in [(ChannelFormat::Stereo, 2, 2), (ChannelFormat::Stereo, 2, 8), (ChannelFormat::Mono, 1, 1)] {
+            let mut st = audio_output_state(format, vec![alternating.clone(); nch]);
+            let mut out = vec![0.5; 64 * device];
+            st.fill(&mut out, device);
+            assert!(out.iter().all(|x| x.is_finite() && (-1.0..=1.0).contains(x)), "{format:?} on {device} channels: {out:?}");
+        }
     }
 
     #[test]

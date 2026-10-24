@@ -3,6 +3,7 @@
 mod bounce;
 mod clap_e2e;
 mod clip_selection_span;
+mod commit_multichannel;
 mod consolidate_selection;
 mod crossfade_move;
 mod crossfade_select;
@@ -18,4 +19,6 @@ mod mix_required_params;
 mod random_edits;
 mod recording;
 mod session_transport;
+mod split_into_mono;
+mod track_name_collisions;
 mod trim_to_selection;
