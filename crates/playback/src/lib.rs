@@ -267,6 +267,10 @@ impl AudioState {
                         let _ = self.garbage.send(old.drain_plugins());
                     }
                     self.mix.adopt(instances);
+                    let automated = plays_automation(&s);
+                    if automated && !self.automated {
+                        self.rebase_pending();
+                    }
                     // The main format changed (a document edit, not steady state): resize.
                     let nch = main_channels(&s);
                     if self.pending.len() != nch {
@@ -275,7 +279,7 @@ impl AudioState {
                         self.read = 0.0;
                     }
                     self.fold = fold_gains(&s);
-                    self.automated = plays_automation(&s);
+                    self.automated = automated;
                     let old = std::mem::replace(&mut self.session, s);
                     if let Some(tx) = &self.old_sessions {
                         let _ = tx.try_send(old);
@@ -319,6 +323,21 @@ impl AudioState {
         if !g.is_empty() {
             let _ = self.garbage.send(g);
         }
+    }
+
+    /// Drops the frames rendered but not yet heard and moves the render position back to the
+    /// first of them, so the next block renders from the audible position: nothing is skipped or
+    /// played twice. A session that gains automation calls it, so its 512-frame blocks start now
+    /// rather than after up to a whole long block rendered without the automation.
+    fn rebase_pending(&mut self) {
+        let heard = (self.read.max(0.0).floor() as usize).min(self.pending_len);
+        if self.playing {
+            let ahead = i64::try_from(self.pending_len - heard).unwrap_or(0);
+            self.pos = self.pos.saturating_sub(ahead).max(0);
+            self.shared.position.store(self.pos, Ordering::Relaxed);
+        }
+        self.read -= heard as f64;
+        self.pending_len = 0;
     }
 
     /// Render the next block at the session rate into `pending`.
@@ -1384,6 +1403,43 @@ mod tests {
             assert_eq!(*seen.lock().unwrap(), want, "block {block}, callback {callback}, automation {automated}");
             assert!(out.iter().any(|x| x.abs() > 0.1), "block {block}, callback {callback}: it sounds");
         }
+    }
+
+    #[test]
+    fn gaining_automation_drops_the_long_block_not_yet_heard() {
+        use soundcraft_model::ChannelFormat;
+        // A ramp tells which session frame each output frame came from.
+        let ramp: Vec<f32> = (0..8192).map(|i| i as f32 / 8192.0).collect();
+        let st = audio_output_state(ChannelFormat::Stereo, vec![ramp.clone(), ramp.clone()]);
+        let (tx, rx) = channel();
+        let mut st = AudioState::with_block(rx, Arc::clone(&st.shared), Arc::clone(&st.session), 48_000.0, channel().0, 4096);
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        st.drain();
+        // One long block rendered, 1000 of its frames heard so far.
+        st.render_next(4096);
+        assert_eq!((st.pos, st.pending_len), (4096, 4096));
+        st.read = 1000.0;
+        let mut session = (*st.session).clone();
+        let track = session.tracks[0].id;
+        let mut lane = soundcraft_model::AutomationLane::new(soundcraft_model::AutoParam::Volume);
+        lane.set_point(0, 0.0);
+        session.track_mut(track).unwrap().automation.push(lane);
+        tx.send(Cmd::Session(Arc::new(session), Vec::new())).unwrap();
+        let mut out = vec![0.0f32; 2 * 600];
+        st.fill(&mut out, 2);
+        // The rest of the long block was dropped and rendered again in 512-frame blocks from the
+        // audible position: frame 1000 is next, nothing skipped or repeated.
+        assert_eq!(st.pos, 1000 + 2 * 512, "two fresh 512-frame blocks");
+        assert_eq!(st.pending_len, 512);
+        for (k, f) in out.chunks(2).enumerate() {
+            let want = ramp[1000 + k];
+            assert!((f[0] - want).abs() < 1e-6 && (f[1] - want).abs() < 1e-6, "frame {k}: {f:?}, want {want}");
+        }
+        // A session that already had automation keeps what is pending.
+        let (len, pos) = (st.pending_len, st.pos);
+        tx.send(Cmd::Session(Arc::clone(&st.session), Vec::new())).unwrap();
+        st.drain();
+        assert_eq!((st.pending_len, st.pos), (len, pos));
     }
 
     #[test]
