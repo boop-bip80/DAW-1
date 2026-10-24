@@ -375,7 +375,8 @@ impl FadeEditor {
             FadeTarget::Crossfade { later } => {
                 let (track, b) = s.find_clip(later)?;
                 let a = crate::edit_window::crossfade_partner(s.track(track)?, b).filter(|a| a.end() <= b.end())?;
-                if same(b.fade_in, input) && same(a.fade_out, output) {
+                // Another earlier clip since the dialog opened: its fade-out is not the one the dialog shows.
+                if self.a != Some(a.id) || (same(b.fade_in, input) && same(a.fade_out, output)) {
                     return None;
                 }
                 let mut params = json!({"clip": later.0, "side": "crossfade", "in_shape": name(input), "out_shape": name(output)});
@@ -784,6 +785,23 @@ mod tests {
         // The engine does not treat such a pair as a crossfade, and neither does the dialog (as when it opens).
         if let Some(c) = s.find_clip_mut(a) {
             c.length = 5000;
+        }
+        assert_eq!(ed.command(&s), None);
+    }
+
+    #[test]
+    fn a_crossfade_command_does_nothing_once_another_clip_leads_into_the_later_one() {
+        let (mut s, a, b) = crossfade_session();
+        let mut ed = FadeEditor::for_target(&s, FadeTarget::Crossfade { later: b }).unwrap();
+        ed.now.input.shape = Shape::SCurve;
+        ed.now = ed.now.linked();
+        assert!(ed.command(&s).is_some());
+        // A gives way to C, over the same stretch: the engine would bend C's fade-out, which the dialog never showed.
+        let c = s.new_clip_id();
+        if let Some(pl) = s.tracks.first_mut().and_then(|t| t.playlist_mut()) {
+            for clip in pl.clips.iter_mut().filter(|clip| clip.id == a) {
+                clip.id = c;
+            }
         }
         assert_eq!(ed.command(&s), None);
     }
