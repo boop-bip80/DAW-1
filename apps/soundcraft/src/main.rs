@@ -35,6 +35,7 @@ fn set_title(ctx: &egui::Context, title: String) {
 }
 
 impl eframe::App for App {
+    /// Per-frame host work: native menu dispatch and sync, then SoundCraft's `logic`.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // What the realtime audio thread logged is written here, off that thread.
         if let Some(logger) = self.1 {

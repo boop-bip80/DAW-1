@@ -305,7 +305,8 @@ fn default_dir() -> String {
     }
 }
 
-/// Show the open dialog, if any.
+/// Show the open dialog, if any. Titles and buttons are translated at display time; the
+/// `Dialog` payload keeps the English source strings so a language switch can't corrupt values.
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     audiosuite_window(app, ctx);
     crate::bounce::show(app, ctx);
@@ -737,6 +738,7 @@ fn tempo_change_action(at: Samples, bpm: f64) -> (String, Value) {
     ("event.tempo".into(), json!({"bpm": bpm, "at": at}))
 }
 
+/// The AudioSuite process window: one slider per plugin parameter, a hint line, and Render.
 fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
     let Some(process) = app.ui.audiosuite.clone() else { return };
     let mut open = true;
