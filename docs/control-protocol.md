@@ -96,9 +96,9 @@ clip lights latch (infinite) until cleared. `ui.meters.reset {"track": id or nam
 meter's peak hold, clip light and peak readout (`{"main": true}` for the output meters, nothing
 for every meter; `{"track": "main"}` also works unless a track has that name), the same as clicking a meter (Alt-click: all); Track › Clear All Clip Indicators
 (`track.clear_clip_indicators`, Alt+C) clears only the clip lights. Right-click a meter for the
-options. The meters show the highest peak of every audio block since the UI last polled them
-(60 times a second while the Mix window is in front, 20 otherwise); a surround strip's clip light
-and peak readout watch all its channels.
+meter type and the options. The meters show the highest reading of every audio block since the
+UI last polled them (60 times a second while the Mix window is in front, 20 otherwise); a
+surround strip's clip light and peak readout watch all its channels.
 `options.pre_fader_metering` meters tracks after their inserts and before fader and VCA, in
 step with delay compensation (master faders always meter what they send out). The Mute button
 leaves pre-fader meters reading; mute automation silences them, as it does pre-fader sends.
@@ -106,6 +106,10 @@ Aux inputs' pre-fader tap is not delay-compensated (as for their pre-fader sends
 latency an aux's pre-fader meter can run slightly ahead. Turning the option on sizes every
 strip's pre-fader buffer and delay line in the audio callback that receives the change (a
 document edit, like adding tracks), not in steady state.
+`options.meter_type {"type":"sample_peak|true_peak|rms|vu|k12|k14|k20"}` (saved with the
+session; without `type`, the next one) picks what the track and main meters measure, and
+resets every meter's holds, clip lights and readouts. It has no menu item (Pro Tools picks the
+type on the meter); offline renders (bounces, stems) don't meter at all.
 
 `view.scroll_into_view {"track":"Bass"}` (a track id or name; without it, the first selected
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as

@@ -3,6 +3,7 @@
 use craft_ui::buttons::{ButtonVisuals, IconButton, IconButtonStyle};
 
 use crate::icons;
+use crate::meters::Scale;
 use crate::theme::{Tokens, bold, regular};
 use egui::{Align2, Color32, CornerRadius, Mesh, Painter, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
@@ -222,30 +223,32 @@ fn meter_bar(r: Rect) -> Rect {
     Rect::from_min_max(pos2(r.min.x + 1.0, r.min.y + 5.0), pos2(r.max.x - 1.0, r.max.y - 1.0))
 }
 
-/// The marks that fit on `bar`, at least 9 pt apart from the top down, with their heights.
-fn meter_marks(bar: Rect) -> impl Iterator<Item = (f32, f32)> {
+/// The marks of `scale` that fit on `bar`, at least 9 pt apart from the top down, with their
+/// heights.
+fn meter_marks(bar: Rect, scale: &Scale) -> impl Iterator<Item = (f32, f32)> + '_ {
     let mut last = f32::NEG_INFINITY;
-    crate::meters::SCALE_MARKS.into_iter().filter_map(move |db| {
-        let y = bar.max.y - bar.height() * meter_pos(db);
+    scale.marks.iter().filter_map(move |&mark| {
+        let y = bar.max.y - bar.height() * scale.mark_pos(mark);
         (y - last >= 9.0).then(|| {
             last = y;
-            (db, y)
+            (mark, y)
         })
     })
 }
 
-/// Vertical peak meter as Pro Tools draws it: a clip light above a bar that lights green, yellow
-/// and red over dark tints of those zones, ruled at the scale's marks. Values are linear peaks.
-pub fn meter(ui: &Ui, r: Rect, level: f32, hold: f32, clip: bool) {
+/// Vertical meter as Pro Tools draws it: a clip light above a bar that lights green, yellow and
+/// red over dark tints of those zones, ruled at the scale's marks. Values are linear readings,
+/// placed on `scale` (the meter type's).
+pub fn meter(ui: &Ui, r: Rect, level: f32, hold: f32, clip: bool, scale: &Scale) {
     let t = Tokens::current();
     let p = ui.painter();
     p.rect_filled(Rect::from_min_max(r.min, pos2(r.max.x, r.min.y + 3.0)), 1.0, if clip { t.meter_red } else { t.meter_clip_off });
     p.rect_filled(Rect::from_min_max(pos2(r.min.x, r.min.y + 4.0), r.max), 0.0, t.meter_bg);
     let bar = meter_bar(r);
     let y = |pos: f32| bar.max.y - bar.height() * pos;
-    let (amber, red) = (meter_pos(crate::meters::YELLOW_FROM_DB), meter_pos(crate::meters::RED_FROM_DB));
+    let (amber, red) = scale.zones();
     let zones = [(0.0, amber, t.meter_green), (amber, red, t.meter_yellow), (red, 1.0, t.meter_red)];
-    let lit = level_pos(level);
+    let lit = scale.level_pos(level);
     let unlit = if t.meter_bg.intensity() > 0.5 { 0.08 } else { 0.18 };
     let mut mesh = Mesh::default();
     for (lo, hi, color) in zones {
@@ -254,46 +257,24 @@ pub fn meter(ui: &Ui, r: Rect, level: f32, hold: f32, clip: bool) {
         quad(&mut mesh, Rect::from_x_y_ranges(bar.x_range(), y(hi)..=y(top)), [color.gamma_multiply(unlit); 4]);
     }
     p.add(mesh);
-    for (_, at) in meter_marks(bar).skip(1) {
+    for (_, at) in meter_marks(bar, scale).skip(1) {
         p.hline(bar.x_range(), p.round_to_pixel_center(at), Stroke::new(1.0, Color32::from_black_alpha(90)));
     }
     // The hold line marks a peak above the bar (none when holds are off and it follows the bar).
-    let held = level_pos(hold);
+    let held = scale.level_pos(hold);
     if held > 0.01 && held > lit + 0.002 {
         let color = zones.iter().find(|z| held <= z.1).map_or(t.meter_red, |z| z.2);
         p.rect_filled(Rect::from_x_y_ranges(bar.x_range(), y(held) - 1.0..=y(held) + 1.0), 0.0, color);
     }
 }
 
-/// The dB scale of a [`meter`] drawn in `r`, its numbers ending at `x`.
-pub fn meter_scale(p: &Painter, r: Rect, x: f32) {
+/// The scale of a [`meter`] drawn in `r`, its numbers ending at `x`.
+pub fn meter_scale(p: &Painter, r: Rect, x: f32, scale: &Scale) {
     let t = Tokens::current();
-    for (db, y) in meter_marks(meter_bar(r)) {
-        p.text(pos2(x - 3.0, y), Align2::RIGHT_CENTER, format!("{}", db.abs()), regular(8.0), t.text_dim);
+    for (mark, y) in meter_marks(meter_bar(r), scale) {
+        p.text(pos2(x - 3.0, y), Align2::RIGHT_CENTER, Scale::mark_label(mark), regular(8.0), t.text_dim);
         p.hline(x - 2.0..=x, y, Stroke::new(1.0, t.text_dim.gamma_multiply(0.7)));
     }
-}
-
-/// A linear peak → 0..1 meter position.
-pub fn level_pos(v: f32) -> f32 {
-    meter_pos(if v.is_nan() || v <= 1e-6 { crate::meters::SCALE_FLOOR_DB } else { 20.0 * v.log10() })
-}
-
-/// dB → 0..1 meter position: piecewise linear in dB between [`crate::meters::SCALE_KNEES`], from
-/// [`crate::meters::SCALE_FLOOR_DB`] (0) to 0 dB (1), like hardware meters.
-pub fn meter_pos(db: f32) -> f32 {
-    use crate::meters::{SCALE_FLOOR_DB, SCALE_KNEES};
-    if db.is_nan() || db <= SCALE_FLOOR_DB {
-        return 0.0;
-    }
-    let (mut lo_db, mut lo_pos) = (SCALE_FLOOR_DB, 0.0);
-    for (hi_db, hi_pos) in SCALE_KNEES {
-        if db < hi_db {
-            return lo_pos + (db - lo_db) / (hi_db - lo_db) * (hi_pos - lo_pos);
-        }
-        (lo_db, lo_pos) = (hi_db, hi_pos);
-    }
-    1.0
 }
 
 /// Clip gain fader taper: the top three quarters span -36..+36 dB evenly, the rest compresses to -144.
@@ -475,7 +456,7 @@ pub fn surround_panner(ui: &mut Ui, size: f32, speakers: &[PannerSpeaker], puck:
 }
 
 /// A bank of thin vertical peak meters, one per channel, labelled underneath (rotated text).
-pub fn multi_meter(ui: &Ui, r: Rect, levels: &[f32], labels: &[String], clip: bool) {
+pub fn multi_meter(ui: &Ui, r: Rect, levels: &[f32], labels: &[String], clip: bool, scale: &Scale) {
     let n = levels.len().max(1);
     let label_h = 16.0;
     let mr = Rect::from_min_max(r.min, pos2(r.max.x, r.max.y - label_h));
@@ -484,7 +465,7 @@ pub fn multi_meter(ui: &Ui, r: Rect, levels: &[f32], labels: &[String], clip: bo
     for (i, lv) in levels.iter().enumerate() {
         let x = mr.min.x + i as f32 * (w + gap);
         let br = Rect::from_min_size(pos2(x, mr.min.y), vec2(w, mr.height()));
-        meter(ui, br, *lv, *lv, clip);
+        meter(ui, br, *lv, *lv, clip, scale);
         if let Some(l) = labels.get(i) {
             let galley = ui.painter().layout_no_wrap(l.clone(), regular(7.0), Tokens::current().text_dim);
             let gw = galley.size().x;

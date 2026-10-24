@@ -3,7 +3,7 @@
 use crate::dialogs::Dialog;
 use crate::spot::Spot;
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
-use crate::widgets::{groove, level_pos, meter_pos, raised_key, shade};
+use crate::widgets::{groove, raised_key, shade};
 use crate::{Gesture, SoundApp, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
@@ -1255,7 +1255,7 @@ fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, sele
     }
     let md = app.meters.get(&id).copied().unwrap_or_default();
     let mr = Rect::from_min_max(pos2(head.max.x - 8.0, head.min.y + 1.0), pos2(head.max.x, head.max.y - 1.5));
-    header_meter(ui, mr, &md, track.channels() >= 2);
+    header_meter(ui, mr, &md, track.channels() >= 2, &crate::meters::Scale::of_session(app.engine.session()));
     crate::meters::interact(app, ui, mr, crate::meters::MeterTarget::Track(id));
 }
 
@@ -1330,7 +1330,7 @@ fn header_toggle(ui: &Ui, r: Rect, track: TrackId, key: HeaderKey, lit: bool, im
 }
 
 /// The header's level meter: black-rimmed bars, dim where unlit, with a clip light on top.
-fn header_meter(ui: &Ui, r: Rect, md: &crate::MeterDisplay, stereo: bool) {
+fn header_meter(ui: &Ui, r: Rect, md: &crate::MeterDisplay, stereo: bool, scale: &crate::meters::Scale) {
     let t = Tokens::current();
     let p = ui.painter();
     p.rect_filled(r, 0.0, Color32::BLACK);
@@ -1340,18 +1340,18 @@ fn header_meter(ui: &Ui, r: Rect, md: &crate::MeterDisplay, stereo: bool) {
     let body = inner.with_min_y(clip.max.y + 1.0);
     let n = if stereo { 2 } else { 1 };
     let w = (body.width() - (n - 1) as f32) / n as f32;
-    let (amber, red) = (meter_pos(crate::meters::YELLOW_FROM_DB), meter_pos(crate::meters::RED_FROM_DB));
+    let (amber, red) = scale.zones();
     for ch in 0..n {
         let bar = Rect::from_min_size(pos2(body.min.x + ch as f32 * (w + 1.0), body.min.y), vec2(w, body.height()));
         let y = |f: f32| bar.max.y - bar.height() * f;
-        let lv = level_pos(md.level[ch]);
+        let lv = scale.level_pos(md.level[ch]);
         for (lo, hi, col) in [(0.0, amber, t.meter_green), (amber, red, t.meter_yellow), (red, 1.0, t.meter_red)] {
             p.rect_filled(Rect::from_x_y_ranges(bar.x_range(), y(hi)..=y(lo)), 0.0, col.gamma_multiply(0.18));
             if lv > lo {
                 p.rect_filled(Rect::from_x_y_ranges(bar.x_range(), y(lv.min(hi))..=y(lo)), 0.0, col);
             }
         }
-        let hv = level_pos(md.hold[ch]);
+        let hv = scale.level_pos(md.hold[ch]);
         if hv > 0.01 && hv > lv + 0.002 {
             p.hline(bar.x_range(), y(hv), Stroke::new(1.0, if hv > red { t.meter_red } else { t.meter_yellow }));
         }

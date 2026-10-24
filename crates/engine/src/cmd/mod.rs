@@ -19,6 +19,7 @@ mod event_more;
 mod file;
 mod health;
 mod instrument;
+mod metering;
 mod midi;
 mod mix;
 mod more_util;
@@ -136,6 +137,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(event::specs());
         v.extend(mix::specs());
         v.extend(options::specs());
+        v.extend(metering::specs());
         v.extend(transport::specs());
         v.extend(tab::specs());
         v.extend(query::specs());

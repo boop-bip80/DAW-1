@@ -1298,6 +1298,24 @@ mod tests {
     }
 
     #[test]
+    fn a_meter_type_change_between_polls_drops_the_old_types_readings() {
+        let (shared, mut st, tx, t) = spike_session(100);
+        let mut out = vec![0.0f32; 2 * 512];
+        st.fill(&mut out, 2);
+        // Then, before the UI takes anything, the type becomes VU.
+        let mut vu = (*st.session).clone();
+        vu.edit.meter_type = "vu".into();
+        tx.send(Cmd::Session(Arc::new(vu), Vec::new())).unwrap();
+        st.fill(&mut out, 2);
+        let mut ui = MeterSnapshot::default();
+        take_meter_snapshot(&mut shared.meters.lock().unwrap(), &mut ui);
+        let m = &ui.tracks[&t];
+        assert_eq!(m.kind, soundcraft_dsp::meter::MeterKind::Vu);
+        assert!(m.level[0] < 0.2, "the sample-peak spike is not read as VU: {m:?}");
+        assert!(m.peak[0] > 0.85, "but the peak still counts for the clip light: {m:?}");
+    }
+
+    #[test]
     fn a_spike_rendered_while_the_ui_holds_the_meters_arrives_later() {
         let (shared, mut st, _tx, t) = spike_session(100);
         let mut out = vec![0.0f32; 2 * 512];

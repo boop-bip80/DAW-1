@@ -91,10 +91,11 @@ fn panner_speakers(fmt: ChannelFormat) -> Vec<PannerSpeaker> {
 
 /// Ballistic per-channel meter levels for multichannel strips, kept in egui memory (same release
 /// as the other meters).
-fn channel_levels(ui: &Ui, key: (&str, u64), peaks: &[f32], n: usize, release: crate::meters::Release) -> Vec<f32> {
+fn channel_levels(ui: &Ui, key: (&str, u64), peaks: &[f32], n: usize, release: crate::meters::Release, peak_type: bool) -> Vec<f32> {
     let id = egui::Id::new(key);
     let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
-    let fall = release.factor(dt);
+    // Averaging meter types carry their own ballistics from the audio thread.
+    let fall = if peak_type { release.factor(dt) } else { 0.0 };
     let mut lv: Vec<f32> = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     lv.resize(n, 0.0);
     for (i, l) in lv.iter_mut().enumerate() {
@@ -428,24 +429,25 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     let md = app.meters.get(&id).copied().unwrap_or_default();
     let slot = fader_slot(fr);
     let mr = Rect::from_min_max(pos2(fr.max.x + 4.0, slot.min.y - 5.0), pos2(x0 + inner_w - 2.0, slot.max.y + if wide_meter { 17.0 } else { 1.0 }));
+    let scale = crate::meters::Scale::of_session(app.engine.session());
     if !narrow && !wide_meter {
-        meter_scale(ui.painter(), mr, mr.min.x - 1.0);
+        meter_scale(ui.painter(), mr, mr.min.x - 1.0, &scale);
     }
     let strip_fmt = if track.kind == TrackKind::Master { app.engine.session().main_format() } else { track.format };
     let all_chans = strip_fmt.channels().min(soundcraft_mix::MAX_CHANNELS);
     let chans = if track.kind == TrackKind::Master { 2 } else { track.channels().min(2) };
     if all_chans > 2 {
         // One bar per channel, labelled (L R C LFE …).
-        let peaks = snap.and_then(|s| s.tracks.get(&id)).map(|m| m.peaks.as_slice()).unwrap_or(&[]);
-        let lv = channel_levels(ui, ("mc_meter", id.0), peaks, all_chans, app.ui.meters.release);
+        let levels = snap.and_then(|s| s.tracks.get(&id)).filter(|m| m.kind == scale.kind).map(|m| m.levels.as_slice()).unwrap_or(&[]);
+        let lv = channel_levels(ui, ("mc_meter", id.0), levels, all_chans, app.ui.meters.release, scale.kind.is_peak());
         let labels: Vec<String> = (0..all_chans).map(|c| strip_fmt.channel_label(c)).collect();
-        multi_meter(ui, mr, &lv, &labels, md.clip);
+        multi_meter(ui, mr, &lv, &labels, md.clip, &scale);
     } else if chans >= 2 {
         let mw = mr.width() / 2.0 - 1.0;
-        meter(ui, Rect::from_min_size(mr.min, vec2(mw, mr.height())), md.level[0], md.hold[0], md.clip);
-        meter(ui, Rect::from_min_size(pos2(mr.min.x + mw + 2.0, mr.min.y), vec2(mw, mr.height())), md.level[1], md.hold[1], md.clip);
+        meter(ui, Rect::from_min_size(mr.min, vec2(mw, mr.height())), md.level[0], md.hold[0], md.clip, &scale);
+        meter(ui, Rect::from_min_size(pos2(mr.min.x + mw + 2.0, mr.min.y), vec2(mw, mr.height())), md.level[1], md.hold[1], md.clip, &scale);
     } else {
-        meter(ui, mr, md.level[0], md.hold[0], md.clip);
+        meter(ui, mr, md.level[0], md.hold[0], md.clip, &scale);
     }
     crate::meters::interact(app, ui, mr, crate::meters::MeterTarget::Track(id));
     if md.gr > 0.1 {

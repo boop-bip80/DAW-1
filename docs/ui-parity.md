@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (meter peak hold, clip indication, release and peak readout) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (meter types) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -60,7 +60,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 |---|---|---|
 | Dark theme close to Pro Tools' | ✅ | Light theme (#32) and live system appearance (#85) beyond Pro Tools |
 | Interface scaling | 🟡 | Slider in PR #147 |
-| Meter types and ballistics (peak, RMS, VU, K-scales, gain reduction) | 🟡 | Sample peak with every block's peak kept between UI frames; peak hold (default 3 s) and clip indication (default Infinite, latching as before) None / 3 s / Infinite, three release rates (`ui.meters`, right-click a meter); click a meter to reset it (Alt-click: all); highest-peak readout beside the volume; Options › Pre-Fader Metering meters tracks before their faders. Meter type choice and GR meters partial |
+| Meter types and ballistics (peak, RMS, VU, K-scales, gain reduction) | 🟡 | Meter types Sample Peak, True Peak (4× oversampled, dBTP), RMS, VU and K-12/14/20, each with its own scale (`options.meter_type`, right-click a meter to pick; not metered in offline renders); Options › Pre-Fader Metering meters tracks after the inserts, before the fader. Every block's reading is kept between UI polls; peak hold (default 3 s) and clip indication (default Infinite, latching as before) None / 3 s / Infinite, three release rates (`ui.meters`); click a meter to reset it (Alt-click: all); highest-peak readout beside the volume; clip lights watch every channel. Missing: Pro Tools' other types (Linear, BBC, Nordic, DIN, VENUE…), separate track and master meter types, gain reduction meter types |
 | Clip indicators, track colours, waveform views (peak/power/rectified/outlines) | ✅ | |
 | Fader resolution, fine adjust, numeric entry | 🟡 | |
 | macOS system menu bar | ✅ | #10 |
@@ -69,6 +69,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Meter types: true peak, RMS, VU and K-12/14/20 with their scales (right-click a meter). Readiness estimate unchanged |
 | 2026-10-24 | minor | Meters: peak hold and clip indication options (None / 3 s / Infinite), release rates, click-to-reset, highest-peak readout. Readiness estimate unchanged |
 | 2026-10-24 | minor | Options › Pre-Fader Metering now meters tracks before their faders (the option was stored but did nothing). Readiness estimate unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |

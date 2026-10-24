@@ -490,6 +490,10 @@ impl SoundApp {
                     // Re-selecting a scrolling mode resumes the playhead follow.
                     self.edit_layout.follow_hold = false;
                 }
+                if id == "options.meter_type" {
+                    // Holds and peak readouts of the old type mean nothing on the new scale.
+                    self.meters.values_mut().chain([&mut self.main_meter]).for_each(meters::reset);
+                }
                 if id == "track.clear_clip_indicators" {
                     self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| m.clip = false);
                 }
@@ -1185,9 +1189,10 @@ impl SoundApp {
                 self.last_meter_poll = now;
             }
             let snap = &self.meter_snapshot;
+            let kind = meters::Scale::of_session(self.engine.session()).kind;
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
-                meters::feed(d, &meters::Reading::of(m), dt, &self.ui.meters);
+                meters::feed(d, &meters::Reading::of(m, kind), dt, &self.ui.meters);
                 if m.plugin_failures.count != d.plugin_failures {
                     d.plugin_failures = m.plugin_failures.count;
                     if let Some(msg) = failed_plugin_status(self.engine.session(), *id, m.plugin_failures.last) {
@@ -1195,7 +1200,7 @@ impl SoundApp {
                     }
                 }
             }
-            meters::feed(&mut self.main_meter, &meters::Reading::of(&snap.main), dt, &self.ui.meters);
+            meters::feed(&mut self.main_meter, &meters::Reading::of(&snap.main, kind), dt, &self.ui.meters);
             if ended {
                 self.stop_play();
             }

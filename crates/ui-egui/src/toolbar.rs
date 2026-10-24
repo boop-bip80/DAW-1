@@ -444,10 +444,11 @@ fn tempo_value(app: &mut SoundApp, ui: &mut Ui, right: f32, y: f32, bpm: f64) {
 fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(26.0, 64.0), Sense::hover());
     let m = app.main_meter;
+    let sc = crate::meters::Scale::of_session(app.engine.session());
     let w = (r.width() - 6.0) / 2.0;
     for c in 0..2 {
         let rr = Rect::from_min_size(pos2(r.min.x + 2.0 + c as f32 * (w + 2.0), r.min.y), vec2(w, r.height()));
-        crate::widgets::meter(ui, rr, m.level[c], m.hold[c], m.clip);
+        crate::widgets::meter(ui, rr, m.level[c], m.hold[c], m.clip, &sc);
     }
     crate::meters::interact(app, ui, r, crate::meters::MeterTarget::Main);
 }
