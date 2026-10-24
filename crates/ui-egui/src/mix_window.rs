@@ -64,6 +64,42 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
     });
 }
 
+/// The tracks an Alt+Shift fader move on `id` applies to, as Alt+Shift applies a change to the
+/// selected channel strips in Pro Tools: the selected tracks that have a strip here, when `id` is one.
+fn selected_strips(s: &soundcraft_model::Session, id: TrackId) -> Vec<TrackId> {
+    let selected = &s.edit.selected_tracks;
+    if !selected.contains(&id) {
+        return Vec::new();
+    }
+    s.tracks.iter().filter(|t| selected.contains(&t.id) && !t.hidden && t.kind != TrackKind::Video).map(|t| t.id).collect()
+}
+
+/// Where each selected strip goes while the dragged one (`lead`) is at `db`: its distance from the
+/// lead when the drag began (`starts`), clamped to the fader's travel. Measured from the start and
+/// not frame to frame, so a strip held at +12 dB or -inf gets its distance back when the lead
+/// returns, as grouped faders do in Pro Tools. A strip whose volume follows an earlier one through
+/// an active mix group is left out: `mix.volume` moves it with that group already.
+fn follow_from(s: &soundcraft_model::Session, starts: &[(TrackId, f32)], lead: TrackId, db: f32) -> Vec<(TrackId, f32)> {
+    let lead_start = starts.iter().find(|(t, _)| *t == lead).map_or(db, |(_, v)| *v);
+    let delta = db - lead_start;
+    let mut grouped: Vec<TrackId> = Vec::new();
+    let mut out = Vec::new();
+    let lead_first = starts.iter().filter(|(t, _)| *t == lead).chain(starts.iter().filter(|(t, _)| *t != lead));
+    for (t, start) in lead_first {
+        if grouped.contains(t) {
+            continue;
+        }
+        for g in &s.groups {
+            if g.active && g.mix && g.members.contains(t) && g.attributes.iter().any(|a| a == "volume") {
+                grouped.extend(g.members.iter().filter(|m| *m != t));
+            }
+        }
+        let v = if *t == lead { db } else { (start + delta).clamp(-144.0, 12.0) };
+        out.push((*t, v));
+    }
+    out
+}
+
 /// Format of the destination a track's output feeds (the main mix, a bus, or stereo).
 fn output_format(app: &SoundApp, track: &Track) -> ChannelFormat {
     let s = app.engine.session();
@@ -419,9 +455,36 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     let fh = (r.max.y - bottom_h - y).max(120.0);
     let wide_meter = (if track.kind == TrackKind::Master { app.engine.session().main_format() } else { track.format }).channels() > 2;
     let fr = Rect::from_min_size(pos2(x0, y), vec2(inner_w * if wide_meter { 0.45 } else { 0.6 }, fh));
-    if let Some(db) = fader(ui, fr, track.mixer.volume_db, ui.id().with(("fader", id.0))) {
+    ui.interact(fr, ui.id().with(("fader-label", id.0)), Sense::hover())
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, format!("{} volume", track.name)));
+    let fader_id = ui.id().with(("fader", id.0));
+    // Where each selected strip stood when an Alt+Shift drag of this fader began.
+    let starts_id = fader_id.with("starts");
+    let dragging = ui.ctx().is_being_dragged(fader_id);
+    if let Some(db) = fader(ui, fr, track.mixer.volume_db, fader_id) {
         app.gesture = Some(crate::Gesture::Fader { track: id, start_db: track.mixer.volume_db });
-        let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": db}), &format!("fader:{}", id.0));
+        let mods = ui.input(|i| i.modifiers);
+        let together = if mods.alt && mods.shift { selected_strips(&session, id) } else { Vec::new() };
+        let key = format!("fader:{}", id.0);
+        if together.len() < 2 {
+            ui.data_mut(|d| d.remove::<Vec<(TrackId, f32)>>(starts_id));
+            let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": db}), &key);
+        } else if dragging {
+            let starts = ui.data_mut(|d| {
+                d.get_temp_mut_or_insert_with(starts_id, || {
+                    together.iter().map(|t| (*t, session.track(*t).map_or(0.0, |tr| tr.mixer.volume_db))).collect::<Vec<_>>()
+                })
+                .clone()
+            });
+            for (t, v) in follow_from(&session, &starts, id, db) {
+                let _ = app.engine.execute_merged("mix.volume", &json!({"track": t.0, "db": v}), &key);
+            }
+        } else {
+            let ids: Vec<u64> = together.iter().map(|t| t.0).collect();
+            let _ = app.engine.execute_merged("mix.volume", &json!({"tracks": ids, "db": db}), &key);
+        }
+    } else if !dragging {
+        ui.data_mut(|d| d.remove::<Vec<(TrackId, f32)>>(starts_id));
     }
     let md = app.meters.get(&id).copied().unwrap_or_default();
     let slot = fader_slot(fr);
