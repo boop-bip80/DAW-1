@@ -99,6 +99,13 @@ for every meter; `{"track": "main"}` also works unless a track has that name), t
 options. The meters show the highest peak of every audio block since the UI last polled them
 (60 times a second while the Mix window is in front, 20 otherwise); a surround strip's clip light
 and peak readout watch all its channels.
+`options.pre_fader_metering` meters tracks after their inserts and before fader and VCA, in
+step with delay compensation (master faders always meter what they send out). The Mute button
+leaves pre-fader meters reading; mute automation silences them, as it does pre-fader sends.
+Aux inputs' pre-fader tap is not delay-compensated (as for their pre-fader sends), so with plugin
+latency an aux's pre-fader meter can run slightly ahead. Turning the option on sizes every
+strip's pre-fader buffer and delay line in the audio callback that receives the change (a
+document edit, like adding tracks), not in steady state.
 
 `view.scroll_into_view {"track":"Bass"}` (a track id or name; without it, the first selected
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as
