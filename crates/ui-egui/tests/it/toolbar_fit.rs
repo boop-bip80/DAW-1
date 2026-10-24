@@ -70,6 +70,10 @@ fn paint(width: f32) -> Painted {
     painted
 }
 
+/// The window of #704 is a Mac's, and the toolbar is drawn there in the Mac's UI font (Helvetica Neue). Other systems
+/// draw it in their own, wider on Linux (DejaVu Sans), where it may scroll at this width: the narrow-window test covers
+/// that on every system.
+#[cfg(target_os = "macos")]
 #[test]
 fn every_section_fits_a_1470_point_window_without_a_scroll_bar() {
     let p = paint(1470.0);
