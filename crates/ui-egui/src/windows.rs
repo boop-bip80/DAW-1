@@ -543,7 +543,14 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             ui.label(format!("{sr} Hz{note}"));
             ui.end_row();
         });
-        ui.label(egui::RichText::new("The mix runs in 512-sample blocks; the buffer size sets the device's own latency.").small().color(t.text_dim));
+        let blocks = app.player.as_ref().map_or(512, |pl| pl.block);
+        ui.label(
+            egui::RichText::new(format!(
+                "The mix renders each callback in blocks of up to {blocks} samples (512 while automation plays); the buffer size sets the device's latency."
+            ))
+            .small()
+            .color(t.text_dim),
+        );
         let mut dc = app.engine.session().edit.delay_compensation;
         if crate::widgets::checkbox(ui, &mut dc, "Delay compensation").changed() {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
@@ -596,7 +603,7 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
         app.apply_audio_config(cfg)?;
     }
     let device = app.player.as_ref().map(|pl| {
-        json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})
+        json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "block": pl.block, "silent": pl.silent})
     });
     let mut out = json!({"config": app.ui.audio, "device": device});
     if p.get("list").and_then(Value::as_bool).unwrap_or(false) {

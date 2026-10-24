@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (bounces of a bus fed by an aux compensate its latency (#246); previously minor: audio device, rate and buffer choice; ASIO feature) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (playback mixes in blocks of the device buffer, up to 8192; previously trivial: bounces of a bus fed by an aux compensate its latency (#246); previously minor: audio device, rate and buffer choice; ASIO feature) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 A DAW is judged by how it drives audio interfaces, MIDI gear, control surfaces and sync. This is
 SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal) and the absence of
@@ -18,7 +18,7 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 | Driver API | Core Audio / ASIO | 🟡 Core Audio via cpal | 🟡 WASAPI shared via cpal; ASIO with the opt-in `asio` build feature (verified with an SSL 2+) | 🟡 ALSA/Pulse via cpal; no JACK | 🟡 cpal (ALSA layer) | 🟡 Web Audio |
 | Choose playback device | ✅ Playback Engine | 🟡 Setup › Playback Engine (not yet verified on macOS) | ✅ Setup › Playback Engine (WASAPI, ASIO) | 🟡 (not yet verified) | 🟡 (not yet verified) | ❌ |
 | Choose input device | ✅ | 🟡 Setup › Playback Engine (not yet verified on macOS) | ✅ (WASAPI, ASIO) | 🟡 (not yet verified) | ❌ no recording | ❌ |
-| Buffer size (32–2048) | ✅ | 🟡 device buffer when the driver allows it (not yet verified); mix in 512-sample blocks | 🟡 device buffer 16–8192 (verified 128 on ASIO, 256 on WASAPI); mix in 512-sample blocks | 🟡 (not yet verified) | 🟡 | ❌ |
+| Buffer size (32–2048) | ✅ | 🟡 device buffer when the driver allows it (not yet verified); mix in blocks of the device buffer (512–8192; 512 while automation plays) | 🟡 device buffer 16–8192 (verified 128 on ASIO, 256 on WASAPI); mix in blocks of the device buffer on ASIO (512–8192; 512 while automation plays); WASAPI shared calls back at its own period (about 10 ms) whatever the buffer | 🟡 (not yet verified) | 🟡 | ❌ |
 | Duplex stream on one clock | ✅ | ❌ separate input/output streams | ❌ | ❌ | ❌ | ❌ |
 | Hardware I/O mapping (I/O Setup to physical channels) | ✅ | 🟡 multichannel output in order; no per-channel map | 🟡 | 🟡 | 🟡 | ❌ |
 | Low-latency monitoring | ✅ | ❌ (`options.low_latency_monitoring` is a stored flag) | ❌ | ❌ | ❌ | ❌ |
@@ -72,6 +72,7 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Playback renders each device callback in one block of up to 8192 frames (was split into 512-sample blocks), and plugins are prepared for that size; sessions with automation keep 512-sample blocks; a buffer change reopens the stream and prepares them anew |
 | 2026-10-13 | trivial | bounces of a bus fed by an aux compensate its latency (#246) |
 | 2026-10-12 | minor | Audio device settings: system, output, input, sample rate and buffer size; opt-in ASIO |
 | 2026-10-10 | major | Created: audit of audio interface, MIDI, control-surface, sync and performance support against Pro Tools 2026.4.1 |

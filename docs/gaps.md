@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** trivial (G-04: Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** minor (G-01: playback blocks follow the device buffer; automation still per block; previously trivial: G-04: Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -49,9 +49,10 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 - **Missing:** routing to physical channels (I/O Setup), one duplex stream on one clock (input and
   output are still separate cpal streams), latency reporting and record-offset compensation, ASIO
   in official builds (owner decision: Steinberg's SDK is proprietary or GPLv3), JACK, and
-  verification on macOS and Linux. The mix still runs in fixed 512-sample blocks.
+  verification on macOS and Linux. Playback blocks follow the device buffer (up to 8192 samples), but
+  automation is read once per block, so sessions with automation keep 512-sample blocks.
   `setup.playback_engine` still stores `device`/`buffer_size` in the session, unused.
-- **Evidence:** code above; Playback Engine window says "Mix block size: 512 samples"; issue #42
+- **Evidence:** code above; the Playback Engine window shows the block size; issue #42
   (no input device selection, forced monitoring feedback with virtual routing).
 - **Impact:** blocks tracking with any multichannel interface; latency makes overdubs hard.
 - **Estimate:** ≈ 25–40 h (device enumeration and selection, buffer size, duplex stream with one
@@ -221,6 +222,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | G-01: playback blocks follow the device buffer; automation still per block |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
