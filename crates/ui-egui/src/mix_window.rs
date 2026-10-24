@@ -497,9 +497,10 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     ui.painter().line_segment([pos2(r.max.x, r.min.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, t.border));
 }
 
-/// An instrument track's INSTRUMENT row: click opens a hosted instrument's plugin window,
-/// right-click (or click, when none is set) picks another instrument. A built-in's parameters
-/// open from that menu. Dropping an audio file on it loads the sampler.
+/// An instrument track's INSTRUMENT row: click opens a hosted instrument (its own editor, else
+/// its parameter window), right-click (or click, when none is set) picks another
+/// instrument. A built-in's parameters open from that menu. Dropping an
+/// audio file on it loads the sampler.
 pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
     let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
@@ -512,8 +513,12 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
     }
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-    if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
+    if resp.clicked()
+        && hosted
+        && let Some(i) = ins
+    {
+        let plugin = i.plugin.clone();
+        let _ = app.open_slot(id, slot, &plugin);
     }
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
@@ -608,11 +613,13 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
             used_slot(ui.painter(), r, faces, Mark::Dot, name, color, None);
         }
     }
-    if resp.clicked() && ins.is_some() {
+    if resp.clicked()
+        && let Some(i) = &ins
+    {
         if ui.input(|i| i.modifiers.command) {
             let _ = app.run("mix.insert_bypass", json!({"track": id.0, "slot": slot}));
-        } else if !app.ui.plugin_windows.contains(&(id, slot)) {
-            app.ui.plugin_windows.push((id, slot));
+        } else {
+            let _ = app.open_slot(id, slot, &i.plugin);
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
@@ -634,6 +641,16 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         return;
     }
     if occupied {
+        // A hosted plugin opens in its own editor on click; its parameter window (when the plugin
+        // is installed, so its parameters are known) and the editor toggle stay here.
+        let hosted = app.slot_plugin(id, slot).filter(|p| soundcraft_mix::is_third_party(p));
+        if let Some(plugin) = hosted {
+            if plugin_info(&plugin).is_some() && ui.button("Edit Parameters…").clicked() {
+                let _ = app.open_parameters(id, slot, &plugin);
+                ui.close();
+            }
+            editor_toggle(app, ui, id, slot);
+        }
         if ui.button("Bypass").clicked() {
             run_pick(app, ui, "mix.insert_bypass", json!({"track": id.0, "slot": slot}));
         }
@@ -677,27 +694,15 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
+        // A hosted instrument keeps its sounds and settings in its own editor: its parameter
+        // window has nothing to edit, so only a built-in offers one here.
         if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
-            if !app.ui.plugin_windows.contains(&(id, slot)) {
-                app.ui.plugin_windows.push((id, slot));
+            if let Some(i) = &current {
+                let _ = app.open_parameters(id, slot, &i.plugin);
             }
             ui.close();
         }
-        if let Some(p) = &app.player
-            && p.has_editor(id, slot)
-        {
-            if p.editor_open(id, slot) {
-                if ui.button("Close Plugin Editor").clicked() {
-                    p.close_editor(id, slot);
-                    ui.close();
-                }
-            } else if ui.button("Open Plugin Editor").clicked() {
-                if let Err(e) = p.open_editor(id, slot) {
-                    app.ui.status = format!("{}: {e}", info.name);
-                }
-                ui.close();
-            }
-        }
+        editor_toggle(app, ui, id, slot);
         ui.separator();
     }
     let mut picked = None;
@@ -713,6 +718,21 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     }
     if let Some(plugin) = picked {
         run_pick(app, ui, "mix.instrument", json!({"track": id.0, "plugin": plugin}));
+    }
+}
+
+/// Open/Close Plugin Editor for a hosted plugin whose instance has an editor.
+pub(crate) fn editor_toggle(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize) {
+    let Some(open) = app.player.as_ref().filter(|p| p.has_editor(id, slot)).map(|p| p.editor_open(id, slot)) else { return };
+    if ui.button(if open { "Close Plugin Editor" } else { "Open Plugin Editor" }).clicked() {
+        if open {
+            if let Some(p) = &app.player {
+                p.close_editor(id, slot);
+            }
+        } else if let Some(plugin) = app.slot_plugin(id, slot) {
+            let _ = app.open_editor(id, slot, &plugin);
+        }
+        ui.close();
     }
 }
 

@@ -107,3 +107,84 @@ fn the_edit_windows_inserts_column_opens_it_too() {
     let id = vox_id(&h);
     assert_eq!(h.state().ui.plugin_windows, vec![(id, 0)]);
 }
+
+/// A filled slot of `plugin` on Vox's insert A, set straight into the session.
+fn vox_with(plugin: &str) -> soundcraft_engine::Engine {
+    let mut engine = vox();
+    engine.session_mut().tracks[0].mixer.inserts[0] = Some(soundcraft_model::Insert::new(plugin));
+    engine
+}
+
+#[test]
+fn clicking_a_built_in_insert_opens_its_parameter_window() {
+    let (_, plugin, _) = two_effects();
+    let mut h = harness(vox_with(plugin.id), MainWindow::Mix);
+    h.get_by_label("Insert A").click();
+    h.run_steps(3);
+    let id = vox_id(&h);
+    assert_eq!(h.state().ui.plugin_windows, vec![(id, 0)]);
+}
+
+/// The synthetic CLAP effect, installed so its parameters are known.
+fn hosted() -> &'static str {
+    crate::common::fixture_dir();
+    "clap:org.soundcraft.test.gain"
+}
+
+/// With no audio engine nothing is hosted, so a click on a hosted insert can't open the plugin's
+/// own editor: it opens the parameter window instead, through the slot itself.
+#[test]
+fn clicking_a_hosted_insert_without_an_audio_engine_opens_its_parameter_window() {
+    let mut h = harness(vox_with(hosted()), MainWindow::Mix);
+    h.get_by_label("Insert A").click();
+    h.run_steps(3);
+    let id = vox_id(&h);
+    assert_eq!(h.state().ui.plugin_windows, vec![(id, 0)]);
+}
+
+/// An insert's right-click menu, on its own.
+fn menu(engine: soundcraft_engine::Engine) -> (Harness<'static, SoundApp>, TrackId) {
+    let id = engine.session().tracks[0].id;
+    let app = SoundApp::new(engine, None, Services::default());
+    let mut h = Harness::builder()
+        .with_size(vec2(400.0, 600.0))
+        .build_ui_state(move |ui, app: &mut SoundApp| soundcraft_ui_egui::mix_window::plugin_menu(app, ui, id, 0, true), app);
+    h.step();
+    (h, id)
+}
+
+#[test]
+fn a_hosted_inserts_menu_edits_its_parameters_when_it_is_installed() {
+    let (mut h, id) = menu(vox_with(hosted()));
+    h.get_by_label("Edit Parameters…").click();
+    h.step();
+    assert_eq!(h.state().ui.plugin_windows, vec![(id, 0)]);
+}
+
+#[test]
+fn a_missing_hosted_plugin_offers_no_parameter_window() {
+    let (h, _) = menu(vox_with("clap:org.soundcraft.test.not.installed"));
+    assert!(h.query_by_label("Edit Parameters…").is_none(), "it would open nothing");
+    assert!(h.query_by_label("Bypass").is_some());
+}
+
+/// A hosted instrument's parameter window has nothing to edit (its sounds live in its own
+/// editor), so its menu doesn't offer one; a built-in's does (`sampler_window.rs`).
+#[test]
+fn a_hosted_instruments_menu_offers_no_parameter_window() {
+    let synth = {
+        crate::common::fixture_dir();
+        "clap:org.soundcraft.test.synth"
+    };
+    let mut engine = soundcraft_engine::Engine::default();
+    engine.execute("track.new", &json!({"name": "Keys", "kind": "instrument"})).unwrap();
+    let keys = engine.session().tracks[0].id;
+    engine.session_mut().tracks[0].instrument = Some(soundcraft_model::Insert::new(synth));
+    let app = SoundApp::new(engine, None, Services::default());
+    let mut h = Harness::builder()
+        .with_size(vec2(400.0, 600.0))
+        .build_ui_state(move |ui, app: &mut SoundApp| soundcraft_ui_egui::mix_window::instrument_menu(app, ui, keys), app);
+    h.step();
+    assert!(h.query_by_label("Fixture Synth").is_some(), "the instrument's name heads the menu");
+    assert!(h.query_by_label("Edit Parameters…").is_none());
+}

@@ -1,8 +1,6 @@
 //! Track presets capture the hosted plugin's current state before writing the model.
 
-#[path = "../../../clap-host/tests/common/mod.rs"]
-mod common;
-
+use crate::common;
 use serde_json::{Value, json};
 use soundcraft_engine::Engine;
 use soundcraft_model::{ChannelFormat, Insert, TrackKind, b64};

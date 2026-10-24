@@ -549,7 +549,13 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                 });
                 if instrument && soundcraft_mix::is_third_party(&ins.plugin) {
                     // A hosted instrument keeps its sounds and settings in its own editor.
-                    ui.label(egui::RichText::new("Load and edit sounds in the plugin's own editor.").color(Tokens::current().text_dim));
+                    let hint = if app.player.as_ref().is_some_and(|p| p.has_editor(tid, slot)) {
+                        "Load and edit sounds in the plugin's own editor."
+                    } else {
+                        "This instrument keeps its sounds in its own editor, which SoundCraft can't open here: \
+                         the plugin isn't loaded (no audio engine), or its editor isn't hosted yet (Audio Units)."
+                    };
+                    ui.label(egui::RichText::new(hint).color(Tokens::current().text_dim));
                     return;
                 }
                 if instrument && ins.plugin == crate::sampler_window::SAMPLER {
