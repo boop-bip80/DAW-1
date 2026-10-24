@@ -3,7 +3,7 @@
 
 use egui::{Key, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 use soundcraft_model::TrackId;
 use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
@@ -290,4 +290,78 @@ fn a_slot_with_its_window_open_is_drawn_lit() {
 fn soundcraft_mix_plugin_name(engine: &soundcraft_engine::Engine) -> &'static str {
     let keys = engine.session().track_by_name("Keys").unwrap();
     soundcraft_ui_egui::mix_window::plugin_info(&keys.instrument.as_ref().unwrap().plugin).unwrap().short_name
+}
+
+/// An editor that exists but can't open on this platform (as a CLAP plugin with only an embedded
+/// editor outside Windows); counts the attempts to open it anyway.
+struct EmbeddedOnly(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+const EMBEDDED_ONLY: &str = "this plugin offers only an embedded editor, which SoundCraft hosts on Windows only";
+
+impl soundcraft_dsp::PluginEditor for EmbeddedOnly {
+    fn open(&mut self) -> Result<(), String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err("tried to open".into())
+    }
+    fn close(&mut self) {}
+    fn is_open(&self) -> bool {
+        false
+    }
+    fn unavailable(&self) -> Option<String> {
+        Some(EMBEDDED_ONLY.into())
+    }
+    fn idle(&mut self) -> Vec<(String, f32)> {
+        Vec::new()
+    }
+}
+
+/// An editor known not to open here isn't tried: a click on the slot opens the parameter window
+/// with no error, and its Open Plugin Editor is greyed out, saying why.
+#[test]
+fn an_editor_that_cant_open_here_is_greyed_out_and_a_click_opens_the_parameters() {
+    let engine = vox_with(hosted());
+    let id = engine.session().tracks[0].id;
+    let player = soundcraft_playback::Player::new(engine.session_arc());
+    let tries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    player.set_editor(id, 0, Box::new(EmbeddedOnly(std::sync::Arc::clone(&tries))));
+    let mut app = SoundApp::new(engine, Some(player), Services::default());
+    app.ui.window = MainWindow::Mix;
+    let mut h = Harness::builder().with_size(vec2(1400.0, 1000.0)).build_ui_state(
+        |ui, app: &mut SoundApp| {
+            app.logic(&ui.ctx().clone());
+            app.ui(ui);
+        },
+        app,
+    );
+    h.run_steps(4);
+    h.get_by_label("Insert A").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.plugin_windows, vec![(id, 0)]);
+    assert_eq!(h.state().ui.status, "", "no error for an editor known not to open");
+    let button = h.get_by_label("Open Plugin Editor");
+    assert!(button.accesskit_node().is_disabled());
+    button.hover();
+    h.run_steps(40);
+    assert!(
+        h.query_by_label("This plugin offers only an embedded editor, which SoundCraft hosts on Windows only").is_some(),
+        "the reason is its hint"
+    );
+    let e = h.state_mut().run("window.plugin", json!({"track": id.0, "slot": 0, "view": "editor"})).unwrap_err();
+    assert!(e.ends_with(EMBEDDED_ONLY), "{e}");
+    assert_eq!(tries.load(std::sync::atomic::Ordering::Relaxed), 0, "never tried");
+}
+
+/// SoundCraft hosts no Audio Unit editors yet: the slot menu says so on a greyed-out entry, and
+/// `window.plugin` refuses the editor with that reason.
+#[test]
+fn an_audio_units_editor_is_greyed_out_with_the_reason() {
+    // A component no Mac has, so nothing is loaded.
+    let (mut h, id) = menu(vox_with("au:aufx:zzzz:Zzzz"));
+    let entry = h.get_by_label("Open Plugin Editor");
+    assert!(entry.accesskit_node().is_disabled());
+    entry.hover();
+    h.run_steps(40);
+    assert!(h.query_by_label("SoundCraft can't host Audio Unit editors yet (#501)").is_some());
+    let e = h.state_mut().run("window.plugin", json!({"track": id.0, "slot": 0, "view": "editor"})).unwrap_err();
+    assert!(e.ends_with("SoundCraft can't host Audio Unit editors yet (#501)"), "{e}");
 }

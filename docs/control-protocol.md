@@ -98,8 +98,9 @@ instrument (`"slot":"instrument"`) as a click on it does: a hosted plugin's own 
 SoundCraft's parameter window. Without `value` (or with `"value":true`) it opens; it replies
 `{"track":…,"slot":…,"view":"editor"|"parameters","value":true}`, naming what opened.
 `"view":"editor"` opens only the plugin's own editor and fails, with the reason on the status
-line, when there is none here: a built-in plugin, an Audio Unit, no audio engine, an embedded
-CLAP editor outside Windows, or a VST3 editor outside macOS and Windows. `"view":"parameters"`
+line, when there is none here: a built-in plugin, an Audio Unit, no audio engine, an embedded-only
+CLAP editor outside Windows, or a VST3 editor outside macOS and Windows. Without `view` (a
+click), each of these opens the parameter window instead, without an error. `"view":"parameters"`
 opens only the parameter window and fails for a plugin that isn't installed. `"value":false`
 closes the named view, or both without `view`, and replies `{…,"view":<that view or
 null>,"value":false}`; closing succeeds whatever is open, also on an empty slot. A `value` that

@@ -338,6 +338,10 @@ impl PluginEditor for ClapEditor {
         self.link.is_open()
     }
 
+    fn unavailable(&self) -> Option<String> {
+        self.link.unavailable()
+    }
+
     fn idle(&mut self) -> Vec<(String, f32)> {
         let raw = self.link.idle();
         let mut out: Vec<(String, f32)> = Vec::new();

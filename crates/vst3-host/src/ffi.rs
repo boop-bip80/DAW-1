@@ -1802,6 +1802,8 @@ struct EditorInner {
     window: Option<window::HostWindow>,
 }
 
+const NOT_HOSTED: &str = "VST3 editors are not hosted on this platform yet";
+
 /// The link between an instance and its editor and state handles. The instance may process on
 /// the audio thread while the editor (the edit controller's `IPlugView`) is driven and the state
 /// read from the main thread, which is VST3's own threading model (controller, views and
@@ -1849,12 +1851,18 @@ impl EditorLink {
         Ok((w as u32, h as u32))
     }
 
+    /// Why the editor can't open on this platform, known without opening it: SoundCraft hosts
+    /// VST3 editors on macOS and Windows only.
+    pub fn unavailable(&self) -> Option<String> {
+        window::PLATFORM_TYPE.is_none().then(|| NOT_HOSTED.to_string())
+    }
+
     /// Opens (or raises) the editor in a host window. Main thread only.
     pub fn open(&self, title: &str) -> Result<(), String> {
         if !window::on_main_thread() {
             return Err("plugin editors must be opened on the main thread".into());
         }
-        let platform = window::PLATFORM_TYPE.ok_or_else(|| "VST3 editors are not hosted on this platform yet".to_string())?;
+        let platform = window::PLATFORM_TYPE.ok_or_else(|| NOT_HOSTED.to_string())?;
         let mut g = self.lock();
         if let Some(w) = &g.window {
             if w.is_visible() {

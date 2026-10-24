@@ -70,6 +70,9 @@ impl SlotView {
     }
 }
 
+/// Audio Unit instances have no editor handle yet (Cocoa `AUCocoaUIBase` views aren't hosted).
+pub(crate) const AU_EDITOR_UNAVAILABLE: &str = "SoundCraft can't host Audio Unit editors yet (#501)";
+
 /// UI state (serde, so agents can read and set it).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -712,15 +715,19 @@ impl SoundApp {
     }
 
     /// Opens an occupied insert or instrument slot as DAWs do (`window.plugin` without a `view`): a
-    /// hosted plugin's own editor, else (a built-in plugin, no audio engine, a plugin without an
-    /// editor such as an Audio Unit, or an editor that can't open here: an embedded CLAP editor
-    /// outside Windows, a VST3 editor outside macOS and Windows) SoundCraft's parameter window.
-    /// Opening an editor that is open already raises it (VST3, and embedded CLAP editors on
-    /// Windows) or shows it again (a floating CLAP editor, which the plugin may or may not bring
-    /// forward). Returns what opened; when neither can, the editor's reason, which says more.
+    /// hosted plugin's own editor, else SoundCraft's parameter window: for a built-in plugin, no
+    /// audio engine, and an editor known not to open here ([`SoundApp::editor_unavailable`]: an
+    /// Audio Unit, an embedded-only CLAP editor outside Windows, a VST3 editor outside macOS and
+    /// Windows), straight away and without an error. Opening an editor that is open already
+    /// raises it (VST3, and embedded CLAP editors on Windows) or shows it again (a floating CLAP
+    /// editor, which the plugin may or may not bring forward). Returns what opened; when an
+    /// editor fails to open and the parameter window can't either, the editor's reason.
     pub(crate) fn open_slot(&mut self, track: TrackId, slot: usize, plugin: &str) -> Result<SlotView, String> {
         let mut editor_failed = None;
-        if soundcraft_mix::is_third_party(plugin) && self.player.as_ref().is_some_and(|p| p.has_editor(track, slot)) {
+        if soundcraft_mix::is_third_party(plugin)
+            && self.player.as_ref().is_some_and(|p| p.has_editor(track, slot))
+            && self.editor_unavailable(track, slot, plugin).is_none()
+        {
             match self.open_editor(track, slot, plugin) {
                 Ok(()) => return Ok(SlotView::Editor),
                 Err(e) => editor_failed = Some(e),
@@ -739,13 +746,42 @@ impl SoundApp {
     /// Opens a hosted plugin's own editor (`window.plugin {"view":"editor"}`). A failure goes to the
     /// status line as "{plugin name}: {reason}".
     pub(crate) fn open_editor(&mut self, track: TrackId, slot: usize, plugin: &str) -> Result<(), String> {
-        let opened = match &self.player {
-            _ if !soundcraft_mix::is_third_party(plugin) => Err("a built-in plugin has no editor of its own".to_string()),
-            None => Err("no audio engine, so the plugin is not loaded".to_string()),
-            Some(p) if !p.has_editor(track, slot) => Err("this plugin has no editor of its own, or it is not loaded".to_string()),
-            Some(p) => p.open_editor(track, slot),
+        let opened = if !soundcraft_mix::is_third_party(plugin) {
+            Err("a built-in plugin has no editor of its own".to_string())
+        } else if let Some(why) = self.editor_unavailable(track, slot, plugin) {
+            Err(why)
+        } else {
+            match &self.player {
+                None => Err("no audio engine, so the plugin is not loaded".to_string()),
+                Some(p) if !p.has_editor(track, slot) => Err("this plugin has no editor of its own, or it is not loaded".to_string()),
+                Some(p) => p.open_editor(track, slot),
+            }
         };
         opened.map_err(|e| self.slot_error(plugin, &e))
+    }
+
+    /// Why a slot's own editor can't open here, known without trying: SoundCraft doesn't host Audio
+    /// Unit editors yet, or the editor says so ([`soundcraft_playback::Player::editor_unavailable`]).
+    pub(crate) fn editor_unavailable(&self, track: TrackId, slot: usize, plugin: &str) -> Option<String> {
+        // Audio Unit instances have no editor handle to ask; this goes once #501 gives them one.
+        if plugin.starts_with(soundcraft_au_host::ID_PREFIX) {
+            return Some(AU_EDITOR_UNAVAILABLE.to_string());
+        }
+        self.player.as_ref()?.editor_unavailable(track, slot)
+    }
+
+    /// Whether a hosted slot's own editor is open, or why it can't open: one known not to open here
+    /// ([`SoundApp::editor_unavailable`]), no audio engine, or none at all (a plugin without one,
+    /// or an instance that didn't load). The reasons are those of `window.plugin {"view":"editor"}`.
+    pub(crate) fn editor_state(&self, track: TrackId, slot: usize, plugin: &str) -> Result<bool, String> {
+        if let Some(why) = self.editor_unavailable(track, slot, plugin) {
+            return Err(why);
+        }
+        match &self.player {
+            None => Err("no audio engine, so the plugin is not loaded".to_string()),
+            Some(p) if p.has_editor(track, slot) => Ok(p.editor_open(track, slot)),
+            Some(_) => Err("this plugin has no editor of its own, or it is not loaded".to_string()),
+        }
     }
 
     /// Shows SoundCraft's parameter window for a slot (generic controls, presets, bypass). A

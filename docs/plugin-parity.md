@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-23 · **Change:** minor (Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (an editor that can't open here shows a greyed-out Open Plugin Editor with the reason, and a click on its slot opens the parameter window; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -44,9 +44,9 @@ User report #152: a saved instrument level does not reach the bounce.
 | Notes / MIDI to instruments | ✅ | ✅ | But no live MIDI input (G-02) |
 | State saved in sessions, presets | ✅ | ✅ | |
 | Create/destroy off the audio thread | ✅ | ✅ | |
-| Editors: CLAP | — | 🟡 floating windows; embedded editors on Windows | Embedded on macOS/Linux missing |
-| Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
-| Editors: AU | — | ❌ | Cocoa view hosting missing |
+| Editors: CLAP | — | 🟡 floating windows; embedded editors on Windows | Embedded on macOS/Linux missing: such an editor's Open Plugin Editor is greyed out with the reason, found without opening it |
+| Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing (greyed out there, with the reason) |
+| Editors: AU | — | ❌ | Cocoa view hosting missing (#501); Open Plugin Editor is greyed out with the reason |
 | Multiple editor pages | ✅ | 🟡 | #6 |
 | macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
@@ -58,6 +58,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Editors that can't open here (embedded-only CLAP outside Windows, VST3 outside macOS and Windows, Audio Units): Open Plugin Editor greyed out with the reason; a click on the slot opens the parameter window without an error |
 | 2026-10-23 | trivial | Modulation: Ring Modulator (`ring_mod`), also used by the AudioSuite Modulation menu |
 | 2026-10-13 | minor | VST3 host: IMessage and IAttributeList for plugins whose halves talk through messages (Line 6 Helix Stadium Native verified) |
 | 2026-10-13 | trivial | Sampler ping-pong loop phase (#463) |

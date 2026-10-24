@@ -680,7 +680,9 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
                 let _ = app.run("window.plugin", json!({"track": id.0, "slot": slot, "view": "parameters"}));
                 ui.close();
             }
-            editor_toggle(app, ui, id, slot);
+            if editor_toggle(app, ui, id, slot) {
+                ui.close();
+            }
         }
         if ui.button("Bypass").clicked() {
             run_pick(app, ui, "mix.insert_bypass", json!({"track": id.0, "slot": slot}));
@@ -731,7 +733,9 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             let _ = app.run("window.plugin", json!({"track": id.0, "slot": "instrument", "view": "parameters"}));
             ui.close();
         }
-        editor_toggle(app, ui, id, slot);
+        if editor_toggle(app, ui, id, slot) {
+            ui.close();
+        }
         ui.separator();
     }
     let mut picked = None;
@@ -750,14 +754,30 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     }
 }
 
-/// Open/Close Plugin Editor for a hosted plugin whose instance has an editor (`window.plugin`).
-pub(crate) fn editor_toggle(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize) {
-    let Some(open) = app.player.as_ref().filter(|p| p.has_editor(id, slot)).map(|p| p.editor_open(id, slot)) else { return };
-    if ui.button(if open { "Close Plugin Editor" } else { "Open Plugin Editor" }).clicked() {
-        let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
-        let _ = app.run("window.plugin", json!({"track": id.0, "slot": slot, "view": "editor", "value": !open}));
-        ui.close();
+/// Open/Close Plugin Editor for a hosted plugin (`window.plugin`), in its slot menu and its
+/// parameter window: greyed out, with the reason as its hint, when the editor can't open.
+/// Returns whether it was clicked.
+pub(crate) fn editor_toggle(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize) -> bool {
+    let Some(plugin) = app.slot_plugin(id, slot).filter(|p| soundcraft_mix::is_third_party(p)) else { return false };
+    let state = app.editor_state(id, slot, &plugin);
+    let open = state == Ok(true);
+    let resp = ui.add_enabled(state.is_ok(), egui::Button::new(if open { "Close Plugin Editor" } else { "Open Plugin Editor" }));
+    let resp = match &state {
+        Err(why) => resp.on_disabled_hover_text(capitalized(why)),
+        Ok(_) => resp,
+    };
+    if !resp.clicked() {
+        return false;
     }
+    let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
+    let _ = app.run("window.plugin", json!({"track": id.0, "slot": slot, "view": "editor", "value": !open}));
+    true
+}
+
+/// `s` with its first letter in upper case, for a reason shown on its own.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Inserts the plugin picked in an insert's menu and, as DAWs do, opens it once the audio engine has
