@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (embedded CLAP editors on macOS; previously minor: resizable plugin editor windows; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (Audio Unit editor views; previously minor: embedded CLAP editors on macOS; previously minor: resizable plugin editor windows; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -46,7 +46,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Create/destroy off the audio thread | ✅ | ✅ | |
 | Editors: CLAP | — | 🟡 floating windows; embedded editors on macOS (Cocoa parent view in a SoundCraft window; fixture-tested with a real window, not yet run with a commercial plugin) and Windows (unit-tested, not yet run on Windows), resizable when the plugin `can_resize`: `adjust_size`/`set_size` | Embedded on Linux (X11) missing |
 | Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor); resizable views (`canResize`) get a resizable window, user resizes negotiated through `checkSizeConstraint`/`onSize` (fixture-tested; not yet resized by hand with a commercial plugin) | Linux views missing; content scaling (`IPlugViewContentScaleSupport`) missing |
-| Editors: AU | — | ❌ | Cocoa view hosting missing |
+| Editors: AU | — | 🟡 macOS: the unit's own Cocoa view (`kAudioUnitProperty_CocoaUI`), else CoreAudioKit's generic view, in a SoundCraft window that follows the view's size; view edits reported through an `AUEventListener`, changes made in SoundCraft's own editor shown without echo (tested with Apple's built-in units and by hand with a third-party unit). Units show an empty host name in unbundled builds (they read the process bundle) | AUv3 extensions (asynchronous instantiation) are not listed, so not hosted; synchronous AUv3s get no `AUViewController` (generic view unless their bridge offers a Cocoa view); automation applied with `AudioUnitSetParameter` notifies no listener, so a view shows it only if it polls the unit |
 | Multiple editor pages | ✅ | 🟡 | #6 |
 | macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
 | Sidechain / key input | ✅ | ❌ | All three hosts |
@@ -58,6 +58,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Editors: Audio Unit editor views (own Cocoa view or the generic view) with parameter sync (#501) |
 | 2026-10-24 | minor | Editors: embedded-only CLAP editors open in a SoundCraft window on macOS (#485), resizable like the Windows ones |
 | 2026-10-24 | minor | Editors: resizable VST3 editor windows (macOS, Windows) and embedded CLAP editor windows (Windows) follow the plugin's size constraints (fixture- and unit-tested) |
 | 2026-10-23 | trivial | Modulation: Ring Modulator (`ring_mod`), also used by the AudioSuite Modulation menu |
