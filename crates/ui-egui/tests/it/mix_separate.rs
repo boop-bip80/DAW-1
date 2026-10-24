@@ -1,6 +1,6 @@
 //! Window › Mix in Separate Window: Edit stays in the main window, and closing the Mix window
-//! brings Mix back into it. It is an item of the Window menu, and keys typed into either window
-//! act there.
+//! brings Mix back into it. Keys typed into either window act there, and the Mix window reopens
+//! where it was left.
 use egui::{Key, Modifiers, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
@@ -230,4 +230,92 @@ fn a_mix_window_drawn_inside_the_main_one_handles_its_keys_once() {
     }
     frame(&mut app, key_press(Key::Num1, Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE }));
     assert!(app.ui.show_transport, "Cmd+1 toggled Transport once, not on and off again");
+}
+
+#[test]
+fn the_mix_window_reopens_where_it_was_left() {
+    reopens_where_it_was_left(1.0);
+    reopens_where_it_was_left(1.5);
+}
+
+fn reopens_where_it_was_left(zoom: f32) {
+    let w = TwoWindows::new();
+    w.ctx.set_zoom_factor(zoom);
+    let mut app = separate_app();
+    assert_eq!(app.ui.mix_window_pos, None);
+    *w.mix_info.borrow_mut() = egui::ViewportInfo {
+        outer_rect: Some(egui::Rect::from_min_size(egui::pos2(1800.0, 120.0), vec2(900.0, 640.0))),
+        inner_rect: Some(egui::Rect::from_min_size(egui::pos2(1800.0, 148.0), vec2(900.0, 612.0))),
+        monitor_size: Some(vec2(1920.0, 1080.0)),
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    // Saved in logical pixels: points × zoom.
+    assert_eq!(app.ui.mix_window_pos, Some([1800.0 * zoom, 120.0 * zoom]));
+    assert_eq!(app.ui.mix_window_size, [900.0 * zoom, 612.0 * zoom]);
+    assert!(!w.mix_commands.borrow().iter().any(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))), "an on-screen window stays put");
+
+    // Saved with the preferences, restored at the next launch.
+    let ui: soundcraft_ui_egui::UiState = serde_json::from_value(serde_json::to_value(&app.ui).unwrap()).unwrap();
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.ui = ui;
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    let builder = w.mix_builder.borrow().clone().unwrap();
+    assert_eq!(builder.position, Some(egui::pos2(1800.0, 120.0)));
+    assert_eq!(builder.inner_size, Some(vec2(900.0, 612.0)));
+}
+
+#[test]
+fn a_mix_window_on_a_display_that_is_gone_moves_next_to_the_main_window() {
+    let w = TwoWindows::new();
+    let mut app = separate_app();
+    app.ui.mix_window_pos = Some([5000.0, 300.0]);
+    // The system puts the window where it was, but on no monitor.
+    *w.mix_info.borrow_mut() = egui::ViewportInfo {
+        outer_rect: Some(egui::Rect::from_min_size(egui::pos2(5000.0, 300.0), vec2(900.0, 640.0))),
+        inner_rect: Some(egui::Rect::from_min_size(egui::pos2(5000.0, 328.0), vec2(900.0, 612.0))),
+        monitor_size: None,
+        ..Default::default()
+    };
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    let moves: Vec<_> = w.mix_commands.borrow().iter().filter(|c| matches!(c, egui::ViewportCommand::OuterPosition(_))).cloned().collect();
+    assert_eq!(moves, [egui::ViewportCommand::OuterPosition(egui::pos2(148.0, 128.0))]);
+}
+
+#[test]
+fn nonsense_mix_window_placements_fall_back_to_the_defaults() {
+    assert_eq!(mix_window::sane_placement(Some([10.0, 20.0]), [900.0, 600.0]), (Some([10.0, 20.0]), [900.0, 600.0]));
+    assert_eq!(mix_window::sane_placement(Some([f32::NAN, 0.0]), [f32::INFINITY, 600.0]), (None, mix_window::DEFAULT_SIZE));
+    assert_eq!(mix_window::sane_placement(Some([1e9, 0.0]), [10.0, -5.0]), (None, mix_window::DEFAULT_SIZE));
+    assert_eq!(mix_window::sane_placement(None, [1e9, 1e9]), (None, [16_384.0, 16_384.0]));
+    // Preferences from before the Mix window was remembered.
+    let ui: soundcraft_ui_egui::UiState = serde_json::from_value(json!({"mix_separate": true})).unwrap();
+    assert_eq!((ui.mix_window_pos, ui.mix_window_size), (None, mix_window::DEFAULT_SIZE));
+}
+
+#[test]
+fn saved_numbers_too_big_for_the_preferences_get_their_defaults() {
+    // JSON reads 1e39 into an f32 as infinity, which would be written back as `null` and make
+    // the whole preferences file unreadable.
+    let saved =
+        json!({"mix_window_pos": [1e39, 0], "mix_window_size": [1e39, 600], "track_tint": 1e39, "window_size": [1e39, 1e39], "ui_scale": -1e39});
+    let ui: soundcraft_ui_egui::UiState = serde_json::from_value(saved.clone()).unwrap();
+    assert_eq!((ui.mix_window_pos, ui.mix_window_size), (None, mix_window::DEFAULT_SIZE));
+    assert_eq!((ui.track_tint, ui.window_size, ui.ui_scale), (0.5, [1600.0, 1000.0], 1.0));
+    let again: soundcraft_ui_egui::UiState = serde_json::from_value(serde_json::to_value(&ui).unwrap()).unwrap();
+    assert_eq!(again.mix_window_size, mix_window::DEFAULT_SIZE, "the preferences round-trip");
+
+    // The control channel's ui.set goes through the same reading.
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    app.run("ui.set", saved).unwrap();
+    assert_eq!((app.ui.mix_window_pos, app.ui.mix_window_size, app.ui.track_tint), (None, mix_window::DEFAULT_SIZE, 0.5));
+    app.run("ui.set", json!({"track_tint": 2.0, "mix_window_pos": [-32000, -32000]})).unwrap();
+    assert_eq!((app.ui.track_tint, app.ui.mix_window_pos), (1.0, None), "out of range: clamped, or the minimized-window sentinel dropped");
+    app.run("ui.set", json!({"show_transport": true})).expect("later ui.set calls still round-trip");
 }

@@ -19,24 +19,58 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 
+/// The separate Mix window's size when nothing sensible was saved (logical pixels).
+pub const DEFAULT_SIZE: [f32; 2] = [1100.0, 720.0];
+const MIN_SIZE: [f32; 2] = [480.0, 320.0];
+
 /// The separate Mix window's viewport.
 pub fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("soundcraft.mix")
 }
 
+/// Where the separate Mix window opened (points). It is handed to egui unchanged on every frame:
+/// a builder that changed would move the window back to it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Placement {
+    pos: Option<egui::Pos2>,
+    size: egui::Vec2,
+    min_size: egui::Vec2,
+    /// Frames drawn in the native window since it opened.
+    passes: u32,
+}
+
+/// A saved Mix window position and size, or the defaults where the preferences hold nonsense
+/// (NaN, negative or tiny sizes, positions far off any desktop such as Windows' -32000 for a
+/// minimized window). Logical pixels.
+pub fn sane_placement(pos: Option<[f32; 2]>, [w, h]: [f32; 2]) -> (Option<[f32; 2]>, [f32; 2]) {
+    let size = if w.is_finite() && h.is_finite() && w >= MIN_SIZE[0] && h >= MIN_SIZE[1] { [w.min(16_384.0), h.min(16_384.0)] } else { DEFAULT_SIZE };
+    (pos.filter(|p| p.iter().all(|v| v.is_finite() && v.abs() <= 16_384.0)), size)
+}
+
 /// The Mix window in its own native window (Window › Mix in Separate Window), so Edit and Mix can
 /// be seen at once, e.g. one per monitor. Closing that window brings Mix back into the main one.
-/// Keyboard shortcuts typed into it are handled here, with the Mix window as their context.
-/// Backends without multiple windows show it as a floating egui window instead, whose keys the
-/// main window already handles.
+/// It reopens where it was last left. Keyboard shortcuts typed into it are handled here, with the
+/// Mix window as their context. Backends without multiple windows show it as a floating egui
+/// window instead, whose keys the main window already handles.
 pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let title = format!("{}  —  Mix", app.engine.session().name);
-    let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
+    let zoom = ctx.zoom_factor();
+    let placement = *app.mix_placement.get_or_insert_with(|| {
+        let (pos, [w, h]) = sane_placement(app.ui.mix_window_pos, app.ui.mix_window_size);
+        let min_size = egui::vec2(MIN_SIZE[0], MIN_SIZE[1]) / zoom;
+        Placement { pos: pos.map(|[x, y]| egui::pos2(x, y) / zoom), size: egui::vec2(w, h) / zoom, min_size, passes: 0 }
+    });
+    let mut builder = egui::ViewportBuilder::default().with_title(title).with_inner_size(placement.size).with_min_inner_size(placement.min_size);
+    if let Some(pos) = placement.pos {
+        builder = builder.with_position(pos);
+    }
+    let main_rect = ctx.input(|i| i.viewport().outer_rect);
     ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
         ui.set_style(ui.ctx().global_style());
         let ctx = ui.ctx().clone();
         if class == egui::ViewportClass::Immediate {
             app.mix_focused = ctx.input(|i| i.focused);
+            track_placement(app, &ctx, main_rect);
             crate::shortcuts::handle_in(app, &ctx, crate::MainWindow::Mix);
         } else {
             app.mix_focused = false;
@@ -51,6 +85,44 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     });
 }
 
+/// Remembers the native Mix window's position and size for the preferences, and on its second
+/// frame (when the system has placed it) fixes a placement that no longer fits: a window on no
+/// monitor (a saved position on a display that is gone) moves next to the main window, and one
+/// bigger than its monitor is maximized.
+fn track_placement(app: &mut SoundApp, ctx: &egui::Context, main_rect: Option<egui::Rect>) {
+    let Some(placement) = app.mix_placement.as_mut() else { return };
+    placement.passes = placement.passes.saturating_add(1);
+    let (outer, inner, monitor, minimized, maximized, fullscreen) = ctx.input(|i| {
+        let v = i.viewport();
+        (v.outer_rect, v.inner_rect, v.monitor_size, v.minimized.unwrap_or(false), v.maximized.unwrap_or(false), v.fullscreen.unwrap_or(false))
+    });
+    if placement.passes == 2 {
+        if outer.is_some() && monitor.is_none() {
+            let to = main_rect.map_or(egui::pos2(48.0, 48.0), |r| r.min + egui::vec2(48.0, 48.0));
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(to));
+            return;
+        }
+        if inner.zip(monitor).is_some_and(|(r, m)| (r.size() - m).max_elem() > 0.0) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            return;
+        }
+    }
+    // A minimized, maximized or full-screen window keeps the placement it had before.
+    if minimized || maximized || fullscreen {
+        return;
+    }
+    // Logical pixels (points × zoom). Restored, they are read at the scale the new window starts
+    // with: with monitors at different scales (Windows, X11) a window saved on the other monitor
+    // reopens somewhat offset.
+    let zoom = ctx.zoom_factor();
+    if let Some(r) = outer {
+        app.ui.mix_window_pos = Some((r.min.to_vec2() * zoom).round().into());
+    }
+    if let Some(r) = inner {
+        app.ui.mix_window_size = (r.size() * zoom).round().into();
+    }
+}
+
 /// The separate Mix window was closed: Mix goes back into the main window.
 pub fn separate_closed(app: &mut SoundApp) {
     app.ui.mix_separate = false;
@@ -58,9 +130,11 @@ pub fn separate_closed(app: &mut SoundApp) {
     separate_hidden(app);
 }
 
-/// The separate Mix window is not on screen: it no longer has the keys.
+/// The separate Mix window is not on screen: it no longer has the keys, and opens afresh from the
+/// saved placement next time.
 pub(crate) fn separate_hidden(app: &mut SoundApp) {
     app.mix_focused = false;
+    app.mix_placement = None;
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
