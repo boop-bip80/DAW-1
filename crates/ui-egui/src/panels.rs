@@ -1,7 +1,7 @@
 //! Side panels (Tracks, Groups, Clips) and floating windows.
 
-use crate::SoundApp;
 use crate::theme::{Tokens, bold, mono, regular, rgb};
+use crate::{Host, SoundApp};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{ClipId, SourceId};
@@ -309,10 +309,16 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
 pub fn floating(app: &mut SoundApp, ctx: &egui::Context) {
     transport_window(app, ctx);
     big_counter(app, ctx);
-    plugin_windows(app, ctx);
-    crate::mix_window::send_window(app, ctx);
+    plugin_windows(app, ctx, Host::Main);
+    crate::mix_window::send_window(app, ctx, Host::Main);
     about(app, ctx);
     session_info(app, ctx);
+}
+
+/// The floating windows asked for from the separate Mix window, drawn in it (see `SoundApp::host_of`).
+pub(crate) fn floating_in_mix(app: &mut SoundApp, ctx: &egui::Context) {
+    plugin_windows(app, ctx, Host::Mix);
+    crate::mix_window::send_window(app, ctx, Host::Mix);
 }
 
 fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
@@ -498,9 +504,10 @@ pub(crate) fn undo_history(app: &mut SoundApp, ui: &mut Ui) {
     });
 }
 
-fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
-    let wins = app.ui.plugin_windows.clone();
-    let mut keep = Vec::new();
+/// The plugin windows that live in `host`, the window this pass draws.
+fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context, host: Host) {
+    let wins: Vec<_> = app.ui.plugin_windows.iter().copied().filter(|w| app.plugin_window_host(*w) == host).collect();
+    let mut closed = Vec::new();
     for (tid, slot) in wins {
         // The instrument slot (an instrument track's instrument) or an insert slot.
         let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
@@ -508,9 +515,13 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
             let ins = if instrument { t.instrument.clone() } else { t.mixer.inserts.get(slot).cloned().flatten() };
             ins.map(|i| (t.name.clone(), i))
         }) else {
+            closed.push((tid, slot));
             continue;
         };
-        let Some(info) = crate::mix_window::plugin_info(&ins.plugin) else { continue };
+        let Some(info) = crate::mix_window::plugin_info(&ins.plugin) else {
+            closed.push((tid, slot));
+            continue;
+        };
         let place = if instrument { "instrument".to_string() } else { char::from(b'a'.saturating_add(slot as u8)).to_string() };
         let mut open = true;
         let shown = egui::Window::new(format!("{tname} · {place} · {}", info.name))
@@ -621,11 +632,12 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
         {
             crate::sampler_window::drop_target(app, ctx, w.response.rect, tid);
         }
-        if open {
-            keep.push((tid, slot));
+        if !open {
+            closed.push((tid, slot));
         }
     }
-    app.ui.plugin_windows = keep;
+    app.ui.plugin_windows.retain(|w| !closed.contains(w));
+    app.ui.mix_plugin_windows.retain(|w| !closed.contains(w) && app.ui.plugin_windows.contains(w));
 }
 
 fn eq_curve(ui: &mut Ui, id: &str, ins: &soundcraft_model::Insert) {

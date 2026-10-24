@@ -3,8 +3,8 @@
 //! an instrument track. Markers and every other control go through `mix.instrument_param`, so
 //! they undo and script like any edit.
 
-use crate::SoundApp;
 use crate::theme::{Tokens, mono, regular};
+use crate::{Host, SoundApp};
 use egui::{Align2, Color32, CursorIcon, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
 use soundcraft_model::{Insert, TrackId};
@@ -50,10 +50,10 @@ fn param(ins: &Insert, id: &str) -> f32 {
     ins.params.get(id).copied().unwrap_or(default)
 }
 
-/// Remembers `r` as a place where a dropped audio file loads into track `t`'s sampler, and
-/// outlines it while files are dragged over it.
+/// Remembers `r` (in the window `ctx` draws) as a place where a dropped audio file loads into
+/// track `t`'s sampler, and outlines it while files are dragged over it.
 pub fn drop_target(app: &mut SoundApp, ctx: &egui::Context, r: Rect, t: TrackId) {
-    app.sample_drop_targets.push((r, t));
+    app.sample_drop_targets.push((ctx.viewport_id(), r, t));
     let over = ctx.input(|i| !i.raw.hovered_files.is_empty() && i.pointer.latest_pos().is_some_and(|p| r.contains(p)));
     if over {
         ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(("sample_drop", t.0)))).rect_stroke(
@@ -72,6 +72,8 @@ pub fn drop_target(app: &mut SoundApp, ctx: &egui::Context, r: Rect, t: TrackId)
 pub struct SampleRead {
     pub track: TrackId,
     pub file: egui::DroppedFileHandle,
+    /// The window it was dropped on, where the Sampler window opens.
+    host: Host,
 }
 
 impl SampleRead {
@@ -82,16 +84,26 @@ impl SampleRead {
 }
 
 impl SoundApp {
-    /// Takes this frame's dropped files: audio dropped on an instrument track or a Sampler window
+    /// Takes this frame's files dropped on the main window (`ctx`), and those the separate Mix
+    /// window was handed since: audio dropped on an instrument track or a Sampler window
     /// loads into that track's sampler (the sampler becomes its instrument). A file with a full
     /// path loads straight away; one without (the browser) waits in [`SoundApp::take_sample_reads`]
     /// for the shell to read. Everything else is returned for the shell to open or import.
     pub fn take_dropped_files(&mut self, ctx: &egui::Context) -> Vec<egui::DroppedFileHandle> {
+        let mut rest = self.claim_dropped_samples(ctx);
+        rest.append(&mut self.mix_drops);
+        rest
+    }
+
+    /// Loads audio dropped on a sampler target of the window `ctx` draws (only its own targets:
+    /// each window's drops come with its own pointer) and returns the other files.
+    pub(crate) fn claim_dropped_samples(&mut self, ctx: &egui::Context) -> Vec<egui::DroppedFileHandle> {
         let (files, pos) = ctx.input(|i| (i.raw.dropped_files.clone(), i.pointer.latest_pos()));
         if files.is_empty() {
             return files;
         }
-        let Some(track) = self.drop_track(pos) else { return files };
+        let host = SoundApp::host_of(ctx);
+        let Some(track) = self.drop_track(ctx.viewport_id(), host, pos) else { return files };
         let mut rest = Vec::new();
         let mut claimed = false;
         for f in files {
@@ -103,23 +115,25 @@ impl SoundApp {
             if f.path().is_absolute() {
                 let path = f.path().to_string_lossy().into_owned();
                 let r = self.run("mix.sampler_load", json!({"track": track.0, "path": path}));
-                self.sample_loaded(track, &path, r);
+                self.sample_loaded(track, host, &path, r);
             } else {
-                self.sample_reads.push(SampleRead { track, file: f });
+                self.sample_reads.push(SampleRead { track, file: f, host });
             }
         }
         rest
     }
 
-    /// The track a drop at `pos` loads into. Without a position (some platforms report none
-    /// during a drag), a single open Sampler window takes it.
-    fn drop_track(&self, pos: Option<egui::Pos2>) -> Option<TrackId> {
+    /// The track a drop at `pos` in `viewport` (the window `host`) loads into. Without a position
+    /// (some platforms report none during a drag), a single Sampler window open in it takes it.
+    fn drop_track(&self, viewport: egui::ViewportId, host: Host, pos: Option<egui::Pos2>) -> Option<TrackId> {
         if let Some(p) = pos {
-            return self.sample_drop_targets.iter().rev().find(|(r, _)| r.contains(p)).map(|(_, t)| *t);
+            return self.sample_drop_targets.iter().rev().find(|(v, r, _)| *v == viewport && r.contains(p)).map(|(.., t)| *t);
         }
         let s = self.engine.session();
-        let mut open = self.ui.plugin_windows.iter().filter(|(t, slot)| {
-            *slot == soundcraft_mix::INSTRUMENT_SLOT && s.track(*t).and_then(|x| x.instrument.as_ref()).is_some_and(|i| i.plugin == SAMPLER)
+        let mut open = self.ui.plugin_windows.iter().filter(|&&(t, slot)| {
+            slot == soundcraft_mix::INSTRUMENT_SLOT
+                && self.plugin_window_host((t, slot)) == host
+                && s.track(t).and_then(|x| x.instrument.as_ref()).is_some_and(|i| i.plugin == SAMPLER)
         });
         match (open.next(), open.next()) {
             (Some((t, _)), None) => Some(*t),
@@ -137,15 +151,15 @@ impl SoundApp {
     pub fn load_sample_bytes(&mut self, read: &SampleRead, bytes: Result<Vec<u8>, String>) {
         let name = read.name();
         let r = bytes.and_then(|b| soundcraft_engine::io::load_sampler_bytes(&mut self.engine, read.track, &name, &b).map_err(|e| e.to_string()));
-        self.sample_loaded(read.track, &name, r);
+        self.sample_loaded(read.track, read.host, &name, r);
     }
 
-    fn sample_loaded(&mut self, track: TrackId, what: &str, r: Result<serde_json::Value, String>) {
+    /// Shows the outcome of a sample load; loaded, the Sampler window opens in `host`, the window
+    /// the file was dropped on (one already open elsewhere moves there).
+    fn sample_loaded(&mut self, track: TrackId, host: Host, what: &str, r: Result<serde_json::Value, String>) {
         match r {
             Ok(v) => {
-                if !self.ui.plugin_windows.contains(&(track, soundcraft_mix::INSTRUMENT_SLOT)) {
-                    self.ui.plugin_windows.push((track, soundcraft_mix::INSTRUMENT_SLOT));
-                }
+                self.open_plugin_window(track, soundcraft_mix::INSTRUMENT_SLOT, host);
                 let name = v.get("name").and_then(|n| n.as_str()).unwrap_or(what);
                 self.ui.status = format!("{name} loaded into the sampler");
             }

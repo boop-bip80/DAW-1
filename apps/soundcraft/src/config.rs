@@ -116,6 +116,7 @@ pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Resu
     docking::validate_mix(&ui.mix_docking)?;
     let mut saved = ui.clone();
     saved.plugin_windows.clear();
+    saved.mix_plugin_windows.clear();
     saved.status.clear();
     let bytes = serde_json::to_vec_pretty(&saved).map_err(|error| error.to_string())?;
     if bytes.len() as u64 > MAX_UI_BYTES {
@@ -142,6 +143,21 @@ pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Resu
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn open_plugin_windows_are_not_saved_with_the_preferences() {
+        // They name the session's tracks, which the next session doesn't have.
+        let directory = std::env::temp_dir().join(format!("soundcraft-plugin-window-prefs-{}", std::process::id()));
+        let path = directory.join("ui.json");
+        let _ = std::fs::remove_dir_all(&directory);
+        let ui: soundcraft_ui_egui::UiState =
+            serde_json::from_value(serde_json::json!({"plugin_windows": [[7, 0]], "mix_plugin_windows": [[7, 0]]})).unwrap();
+        assert_eq!(ui.mix_plugin_windows.len(), 1);
+        save_ui(&path, &ui).unwrap();
+        let saved = load_ui(&path).unwrap().unwrap();
+        assert!(saved.plugin_windows.is_empty() && saved.mix_plugin_windows.is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn native_file_reload_preserves_edit_mix_and_hidden_floating_panels() {

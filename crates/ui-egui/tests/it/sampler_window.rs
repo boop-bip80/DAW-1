@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug)]
-struct Dropped {
-    path: PathBuf,
-    bytes: Vec<u8>,
+pub(crate) struct Dropped {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl DroppedFile for Dropped {
@@ -25,7 +25,7 @@ impl DroppedFile for Dropped {
     }
 }
 
-fn wav(secs: f32) -> Vec<u8> {
+pub(crate) fn wav(secs: f32) -> Vec<u8> {
     let n = (48_000.0 * secs) as usize;
     let one: Vec<f32> = (0..n).map(|i| 0.4 * (std::f32::consts::TAU * 220.0 * i as f32 / 48_000.0).sin()).collect();
     let buf = AudioBuffer { sample_rate: 48_000, channels: vec![one; 2] };
@@ -66,7 +66,7 @@ fn instrument(h: &Harness<'_, SoundApp>, t: TrackId) -> soundcraft_model::Insert
 
 /// Drops `file` with the pointer at the centre of the Keys sampler window.
 fn drop_on_window(h: &mut Harness<'_, SoundApp>, keys: TrackId, file: Dropped) {
-    let r = h.state().sample_drop_targets.iter().rev().find(|(_, t)| *t == keys).map(|(r, _)| *r).expect("the sampler window is a drop target");
+    let r = h.state().sample_drop_targets.iter().rev().find(|(.., t)| *t == keys).map(|(_, r, _)| *r).expect("the sampler window is a drop target");
     h.state_mut().synthetic.push(Event::PointerMoved(r.center()));
     for _ in 0..3 {
         step(h);
