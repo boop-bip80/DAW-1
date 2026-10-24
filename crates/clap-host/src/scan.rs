@@ -96,18 +96,20 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     })
 }
 
-/// True when `path` is `root` or lies inside it, as written or with links resolved on both sides,
-/// case ignored only where file systems usually ignore it (macOS, Windows). A link inside `root`
-/// (plugins are often symlinked in from a build folder) counts as inside, as it does for a full
-/// scan, which follows links too. Unlike [`is_under`], which blocklists use and which may match
-/// more than it should, this decides what may be loaded, so `/work/PLUGINS` is not inside
-/// `/work/plugins` on Linux.
+/// True when `path` is `root` or lies inside it, as written or with links resolved on both sides.
+/// A link inside `root` (plugins are often symlinked in from a build folder) counts as inside, as
+/// it does for a full scan, which follows links too. Unlike [`is_under`], which blocklists use and
+/// which may match more than it should, this decides what may be loaded, so case is ignored only
+/// on Windows: on macOS and Linux names compare exactly, and `/work/PLUGINS` is not inside
+/// `/work/plugins` (a case-sensitive macOS volume may hold both). A path spelled in another case
+/// on a case-insensitive volume still matches through the resolved comparison, since resolving
+/// links yields the names the file system actually stores.
 pub fn is_inside(path: &Path, root: &Path) -> bool {
     inside(path, root, false) || inside(path, root, true)
 }
 
 fn inside(path: &Path, root: &Path, resolve: bool) -> bool {
-    let fold = cfg!(any(target_os = "macos", windows));
+    let fold = cfg!(windows);
     let parts = |p: &Path| -> Vec<String> {
         let p = if resolve { resolved(p).unwrap_or_else(|| p.to_path_buf()) } else { p.to_path_buf() };
         p.components()
@@ -362,10 +364,25 @@ mod tests {
         assert!(is_inside(&d.join("plugins/vendor/Dev.clap"), &d.join("plugins")), "a linked-in bundle");
         assert!(!is_inside(&d.join("build/Dev.clap"), &d.join("plugins")), "but not its target by itself");
         assert!(!is_inside(&d.join("plugin"), &d.join("plugins")));
-        if !cfg!(target_os = "macos") {
-            assert!(!is_inside(&d.join("PLUGINS"), &d.join("plugins")), "case matters where the file system says so");
-        }
+        // `PLUGINS` is its own folder on a case-sensitive volume and an alias of `plugins` on a
+        // case-insensitive one; only the second is inside.
+        let same = |a: &Path, b: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let (a, b) = (std::fs::metadata(a).unwrap(), std::fs::metadata(b).unwrap());
+            (a.dev(), a.ino()) == (b.dev(), b.ino())
+        };
+        assert_eq!(is_inside(&d.join("PLUGINS"), &d.join("plugins")), same(&d.join("PLUGINS"), &d.join("plugins")));
+        assert_eq!(is_inside(&d.join("PLUGINS/vendor"), &d.join("plugins")), d.join("PLUGINS/vendor").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn loading_admission_ignores_case_only_on_windows() {
+        // Paths that don't exist compare as written.
+        let root = abs("/no-such-root/plugins");
+        assert!(is_inside(&abs("/no-such-root/plugins/vendor/Foo.clap"), &root));
+        assert_eq!(is_inside(&abs("/no-such-root/PLUGINS/vendor/Foo.clap"), &root), cfg!(windows));
+        assert_eq!(is_inside(&abs("/No-Such-Root/plugins"), &root), cfg!(windows));
     }
 
     #[test]
