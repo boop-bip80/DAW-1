@@ -15,6 +15,9 @@ fn main() {
     } else {
         assert!(p.editor_size().is_err());
     }
+    // A resizable view: user resizes of the host window are negotiated with the view.
+    assert_eq!(p.editor_resize(640, 480), Ok(Some((640, 480))), "a size the view accepts stands");
+    assert_eq!(p.editor_resize(50, 2000), Ok(Some((200, 900))), "checkSizeConstraint clamps the request");
     let mut ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
     assert!(!ed.is_open());
     assert_eq!(ed.idle().len(), 1, "the fixture's setup edit");

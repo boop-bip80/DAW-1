@@ -334,4 +334,5 @@ fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     // The synth's controller has no view.
     let synth = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Synth")).unwrap();
     assert!(synth.editor_size().is_err());
+    assert!(synth.editor_resize(640, 480).is_err());
 }

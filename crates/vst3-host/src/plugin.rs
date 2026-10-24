@@ -149,6 +149,16 @@ impl Vst3Plugin {
         self.inst.editor().ok_or_else(|| "this plugin has no edit controller".to_string())?.probe()
     }
 
+    /// How the editor would take a user resize of its window to `w`×`h`, without opening it:
+    /// `None` when it can't be resized (`IPlugView::canResize`), else the size it constrains the
+    /// request to (`checkSizeConstraint`), as the host window negotiates it. For diagnostics and
+    /// tests; real plugins expect this on the main thread. The view is not attached, so a plugin
+    /// that only knows its constraints once attached may accept any size here.
+    #[doc(hidden)]
+    pub fn editor_resize(&self, w: u32, h: u32) -> Result<Option<(u32, u32)>, String> {
+        self.inst.editor().ok_or_else(|| "this plugin has no edit controller".to_string())?.probe_resize(w, h)
+    }
+
     /// Re-reads every parameter value from the controller (after a state load) and drops
     /// changes still queued from before it.
     fn refresh_values(&mut self) {
