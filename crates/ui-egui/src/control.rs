@@ -9,7 +9,8 @@
 //! - `ui.click {x,y,button?,count?,mods?}`, `ui.move {x,y}`, `ui.drag {x,y,to_x,to_y,steps?}`
 //! - `ui.scroll {x,y,dx?,dy?,unit?,steps?,mods?}` (trackpad swipe or wheel), `ui.zoom {x,y,factor,steps?}` (pinch)
 //! - `ui.key {key, cmd?, shift?, alt?, ctrl?}`, `ui.text {text}`
-//! - `ui.screenshot {path?}` (PNG; base64 when no path), `ui.set {...UiState fields}`
+//! - `ui.screenshot {path?}` (PNG; base64 when no path), `ui.set {...UiState fields}`,
+//!   `ui.language {language?}`
 //! - `app.quit`
 
 use crate::SoundApp;
@@ -151,6 +152,10 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
             }
         }
         "ui.set" => match app.run("ui.set", p.clone()) {
+            Ok(v) => ok(v),
+            Err(e) => err(e),
+        },
+        "ui.language" => match app.run("ui.language", p.clone()) {
             Ok(v) => ok(v),
             Err(e) => err(e),
         },
