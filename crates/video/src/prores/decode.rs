@@ -200,7 +200,7 @@ pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> 
         let mut ac = alpha.as_mut().map(|a| a.chunks_mut(band_h * width));
         while let (Some(y), Some(cb), Some(cr)) = (yc.next(), cbc.next(), crc.next()) {
             let rows = y.len() / width;
-            let a = ac.as_mut().and_then(|it| it.next());
+            let a = ac.as_mut().and_then(Iterator::next);
             bands.push(Band { y, cb, cr, a, rows });
         }
     }
