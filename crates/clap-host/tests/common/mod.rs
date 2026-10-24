@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// How many plugins the fixture library exports (`tests/fixture/src/lib.rs`, `factory_count`).
+pub const FIXTURE_PLUGINS: usize = 6;
+
 /// Builds the fixture once and returns a folder containing `Fixture.clap`.
 pub fn fixture_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -40,7 +43,7 @@ pub fn fixture_dir() -> &'static Path {
             std::fs::create_dir_all(dir.join("vendor")).unwrap();
             std::fs::copy(&built, dir.join("vendor/Fixture.clap")).unwrap();
         }
-        assert_eq!(soundcraft_clap_host::add_search_dir(&dir), 5);
+        assert_eq!(soundcraft_clap_host::add_search_dir(&dir), FIXTURE_PLUGINS);
         dir
     })
 }

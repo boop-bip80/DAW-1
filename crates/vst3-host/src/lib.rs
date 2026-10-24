@@ -27,7 +27,15 @@
 //! Plugin editors (`IPlugView`): on macOS the view is attached to the content `NSView` of a host
 //! `NSWindow` (titled and closable, floating above the app, resized on `IPlugFrame::resizeView`);
 //! on Windows it is attached to a host `HWND` owned by the app's window (no taskbar button,
-//! closing it hides it until the link tears it down).
+//! closing it hides it until the link tears it down). When the view `canResize`, the window gets
+//! a resize handle: user resizes are constrained live by `checkSizeConstraint` (the window
+//! delegate's `windowWillResize:toSize:` / `WM_SIZING`) and applied with `onSize` once the window
+//! has its new size (`windowDidResize:` / `WM_SIZE`); the zoom button zooms to a constrained
+//! size. Window notifications caused by the host's own resizes (a plugin's `resizeView`, or
+//! snapping the window to a constrained size) are not negotiated again, and like Steinberg's
+//! editorhost, `resizeView` is accepted only from the attached view and refused (`kResultFalse`)
+//! while another one is in progress, so neither side can make resizes recurse. Content scaling
+//! (`IPlugViewContentScaleSupport`) is not hosted yet.
 //! [`Plugin::open_editor`] opens it directly; [`Plugin::editor`] returns a handle usable on the
 //! main thread while the instance processes on the audio thread (VST3's own threading model:
 //! the controller and its views live on the UI thread). Parameter edits made in the editor
