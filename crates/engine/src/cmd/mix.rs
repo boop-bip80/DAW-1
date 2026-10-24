@@ -42,7 +42,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({}))
         }),
-        cmd!("mix.record_arm", "Record Enable", [], Some("Shift+R"), "{tracks?, value?: bool}", has_selection, |e, p| toggle(
+        cmd!(noundo "mix.record_arm", "Record Enable", [], Some("Shift+R"), "{tracks?, value?: bool}", has_selection, |e, p| toggle_runtime(
             e,
             p,
             "mix.record_arm",
@@ -51,7 +51,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }),
             |tr| tr.mixer.record_arm
         )),
-        cmd!("mix.input_monitor", "Input Monitoring", [], Some("Shift+I"), "{tracks?, value?: bool}", has_selection, |e, p| toggle(
+        cmd!(noundo "mix.input_monitor", "Input Monitoring", [], Some("Shift+I"), "{tracks?, value?: bool}", has_selection, |e, p| toggle_runtime(
             e,
             p,
             "mix.input_monitor",
@@ -211,6 +211,22 @@ fn set_grouped(s: &mut Session, t: TrackId, attr: &str, f: impl Fn(&mut soundcra
 fn toggle(e: &mut Engine, p: &Value, cmd: &str, set: fn(&mut Session, TrackId, bool), get: fn(&soundcraft_model::Track) -> bool) -> Result<Value> {
     let tracks = tracks_required(e, cmd, p)?;
     let s = e.session_mut();
+    let v = p.get("value").and_then(Value::as_bool).unwrap_or_else(|| !tracks.iter().all(|t| s.track(*t).is_some_and(get)));
+    for t in &tracks {
+        set(s, *t, v);
+    }
+    Ok(json!({"value": v}))
+}
+
+fn toggle_runtime(
+    e: &mut Engine,
+    p: &Value,
+    cmd: &str,
+    set: fn(&mut Session, TrackId, bool),
+    get: fn(&soundcraft_model::Track) -> bool,
+) -> Result<Value> {
+    let tracks = tracks_required(e, cmd, p)?;
+    let s = e.runtime_session_mut();
     let v = p.get("value").and_then(Value::as_bool).unwrap_or_else(|| !tracks.iter().all(|t| s.track(*t).is_some_and(get)));
     for t in &tracks {
         set(s, *t, v);
@@ -949,6 +965,52 @@ mod tests {
         e.execute("mix.volume", &json!({"tracks": [6], "db": 0.0})).unwrap();
         e.execute("track.group", &json!({"tracks": [3, 6]})).unwrap();
         e
+    }
+
+    #[test]
+    fn live_input_states_are_transient_and_survive_document_history() {
+        let mut e = Engine::default();
+        e.execute("track.new", &json!({})).unwrap();
+        let track = e.session().tracks[0].id;
+        e.mark_clean();
+        let history = e.undo_history();
+
+        e.execute("mix.record_arm", &json!({"tracks": [track.0], "value": true})).unwrap();
+        e.execute("track.set_record_to_input_only", &json!({})).unwrap();
+        let mixer = &e.session().track(track).unwrap().mixer;
+        assert!(mixer.record_arm && mixer.input_monitor);
+        assert!(!e.is_dirty(), "live input state is not a document change");
+        assert_eq!(e.undo_history(), history, "live input state has no Undo entry");
+
+        // A later document edit captures a full Session snapshot. Undoing or redoing it must not
+        // resurrect the live state that happened to be present when that snapshot was taken.
+        e.execute("mix.volume", &json!({"tracks": [track.0], "db": -6.0})).unwrap();
+        e.execute("mix.record_arm", &json!({"tracks": [track.0], "value": false})).unwrap();
+        e.execute("mix.input_monitor", &json!({"tracks": [track.0], "value": false})).unwrap();
+        assert!(e.is_dirty());
+
+        assert!(e.undo());
+        let mixer = &e.session().track(track).unwrap().mixer;
+        assert!(!mixer.record_arm && !mixer.input_monitor);
+        assert!(!e.is_dirty(), "undo returned to the saved document");
+
+        assert!(e.redo());
+        let mixer = &e.session().track(track).unwrap().mixer;
+        assert!(!mixer.record_arm && !mixer.input_monitor);
+        assert!(e.is_dirty());
+
+        // Live states that are enabled after another document edit survive both directions too.
+        e.execute("mix.volume", &json!({"tracks": [track.0], "db": -12.0})).unwrap();
+        e.execute("mix.record_arm", &json!({"tracks": [track.0], "value": true})).unwrap();
+        e.execute("mix.input_monitor", &json!({"tracks": [track.0], "value": true})).unwrap();
+
+        assert!(e.undo());
+        let mixer = &e.session().track(track).unwrap().mixer;
+        assert!(mixer.record_arm && mixer.input_monitor);
+
+        assert!(e.redo());
+        let mixer = &e.session().track(track).unwrap().mixer;
+        assert!(mixer.record_arm && mixer.input_monitor);
     }
 
     fn volumes(e: &Engine) -> Vec<f32> {

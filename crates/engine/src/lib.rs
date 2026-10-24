@@ -187,6 +187,13 @@ impl Engine {
         Arc::make_mut(&mut self.doc)
     }
 
+    /// Mutable access for live state that redraws and reaches playback but is not part of the
+    /// saved document. Callers must also keep the fields out of serialization and Undo/Redo.
+    pub(crate) fn runtime_session_mut(&mut self) -> &mut Session {
+        self.revision = self.revision.wrapping_add(1);
+        Arc::make_mut(&mut self.doc)
+    }
+
     /// Like `session_mut`, for `edit.zoom` only and without bumping `revision`.
     pub fn zoom_mut(&mut self) -> &mut ZoomState {
         self.dirty = true;
@@ -246,6 +253,7 @@ impl Engine {
         let Some(h) = self.undo.pop() else { return false };
         let cur = std::mem::replace(&mut self.doc, h.doc);
         self.keep_edit_mode(&cur);
+        self.keep_runtime_track_states(&cur);
         self.redo.push(HistoryEntry { label: h.label, doc: cur });
         self.revision = self.revision.wrapping_add(1);
         self.dirty = true;
@@ -256,6 +264,7 @@ impl Engine {
         let Some(h) = self.redo.pop() else { return false };
         let cur = std::mem::replace(&mut self.doc, h.doc);
         self.keep_edit_mode(&cur);
+        self.keep_runtime_track_states(&cur);
         self.undo.push(HistoryEntry { label: h.label, doc: cur });
         self.revision = self.revision.wrapping_add(1);
         self.dirty = true;
@@ -273,6 +282,17 @@ impl Engine {
             for f in flags {
                 ed.set_flag(f, from.edit.flag(f));
             }
+        }
+    }
+
+    /// Undo and Redo must not restore live input states captured in document snapshots. A track
+    /// absent from the current document comes back safe rather than inheriting a historical arm.
+    fn keep_runtime_track_states(&mut self, from: &Session) {
+        for track in &mut Arc::make_mut(&mut self.doc).tracks {
+            let (record_arm, input_monitor) =
+                from.track(track.id).map_or((false, false), |current| (current.mixer.record_arm, current.mixer.input_monitor));
+            track.mixer.record_arm = record_arm;
+            track.mixer.input_monitor = input_monitor;
         }
     }
 
@@ -431,7 +451,7 @@ impl Engine {
     }
 }
 
-/// Equal apart from what changes without editing: the selection, the playhead and the zoom.
+/// Equal apart from what changes without editing: the selection, playhead, zoom and live input states.
 fn same_document(saved: &Session, doc: &Session) -> bool {
     let mut doc = doc.clone();
     let (from, to) = (&saved.edit, &mut doc.edit);
@@ -441,6 +461,12 @@ fn same_document(saved: &Session, doc: &Session) -> bool {
     to.selected_clips.clone_from(&from.selected_clips);
     to.playhead = from.playhead;
     to.zoom = from.zoom;
+    for track in &mut doc.tracks {
+        if let Some(saved_track) = saved.track(track.id) {
+            track.mixer.record_arm = saved_track.mixer.record_arm;
+            track.mixer.input_monitor = saved_track.mixer.input_monitor;
+        }
+    }
     *saved == doc
 }
 
