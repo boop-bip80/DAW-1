@@ -47,6 +47,15 @@ const PROP_PARAMETER_VALUE_STRINGS: u32 = 16;
 const PROP_TAIL_TIME: u32 = 20;
 const PROP_SET_RENDER_CALLBACK: u32 = 23;
 const PROP_HOST_CALLBACKS: u32 = 27;
+const PROP_AUDIO_CHANNEL_LAYOUT: u32 = 19;
+
+/// `kAudioUnitErr_InvalidProperty`, `kAudioUnitErr_PropertyNotWritable`: the unit doesn't take a
+/// channel layout (fine: it then assumes one from the channel count).
+const ERR_INVALID_PROPERTY: OSStatus = -10879;
+const ERR_PROPERTY_NOT_WRITABLE: OSStatus = -10865;
+
+const CHANNEL_LAYOUT_TAG_MONO: u32 = (100 << 16) | 1;
+const CHANNEL_LAYOUT_TAG_STEREO: u32 = (101 << 16) | 2;
 
 const SCOPE_GLOBAL: u32 = 0;
 const SCOPE_INPUT: u32 = 1;
@@ -145,6 +154,35 @@ struct AudioBufferList {
 struct AudioBufferListHeader {
     number_buffers: u32,
     first: AudioBuffer,
+}
+
+/// `AudioChannelDescription`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AudioChannelDescription {
+    label: u32,
+    flags: u32,
+    coordinates: [f32; 3],
+}
+
+/// `AudioChannelLayout` with its (unused) first channel description: a layout given by tag.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AudioChannelLayout {
+    tag: u32,
+    bitmap: u32,
+    number_descriptions: u32,
+    descriptions: [AudioChannelDescription; 1],
+}
+
+/// The layout tag for a bus of `channels` channels, when SoundCraft knows what they are: mono and
+/// stereo. Wider buses get none (the strip's speaker arrangement isn't known here).
+fn channel_layout_tag(channels: usize) -> Option<u32> {
+    match channels {
+        1 => Some(CHANNEL_LAYOUT_TAG_MONO),
+        2 => Some(CHANNEL_LAYOUT_TAG_STEREO),
+        _ => None,
+    }
 }
 
 type BeatAndTempoProc = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64) -> OSStatus;
@@ -661,6 +699,10 @@ impl Instance {
                 last = if o != 0 { o } else { i };
                 continue;
             }
+            self.set_channel_layout(SCOPE_OUTPUT, ch);
+            if self.has_input {
+                self.set_channel_layout(SCOPE_INPUT, ch);
+            }
             // SAFETY: the unit is live and uninitialized.
             let st = unsafe { AudioUnitInitialize(self.unit) };
             if st == 0 {
@@ -682,6 +724,34 @@ impl Instance {
         input.frames = 0;
         self.max_frames = mf;
         Ok(ch)
+    }
+
+    /// Tells the unit what the `channels` channels of a bus are (mono, stereo), so it doesn't
+    /// have to guess (some show the layout in their view). Units that take no layout refuse it,
+    /// which is fine; other refusals are only logged.
+    fn set_channel_layout(&self, scope: u32, channels: usize) {
+        let Some(tag) = channel_layout_tag(channels) else { return };
+        let layout = AudioChannelLayout { tag, ..Default::default() };
+        // A layout given by tag has no channel descriptions: only the header is passed.
+        let size = std::mem::offset_of!(AudioChannelLayout, descriptions) as u32;
+        // SAFETY: `layout` is a live `AudioChannelLayout` of at least `size` bytes, the
+        // property's type; the unit copies it.
+        let st = unsafe { AudioUnitSetProperty(self.unit, PROP_AUDIO_CHANNEL_LAYOUT, scope, 0, (&layout as *const AudioChannelLayout).cast(), size) };
+        if st != 0 && st != ERR_INVALID_PROPERTY && st != ERR_PROPERTY_NOT_WRITABLE {
+            log::debug!("au: channel layout {tag:#x} refused on scope {scope} ({st})");
+        }
+    }
+
+    /// The bus's channel layout tag as the unit reports it (`None` when it has none).
+    #[cfg(test)]
+    fn channel_layout(&self, scope: u32) -> Option<u32> {
+        let mut layout = AudioChannelLayout::default();
+        let mut size = std::mem::size_of::<AudioChannelLayout>() as u32;
+        // SAFETY: `layout` has room for `size` bytes (a tag layout, or one description).
+        let st = unsafe {
+            AudioUnitGetProperty(self.unit, PROP_AUDIO_CHANNEL_LAYOUT, scope, 0, (&mut layout as *mut AudioChannelLayout).cast(), &mut size)
+        };
+        (st == 0).then_some(layout.tag)
     }
 
     pub fn is_ready(&self) -> bool {
@@ -1019,5 +1089,33 @@ mod tests {
         assert_eq!(std::mem::offset_of!(AudioUnitParameterInfo, cf_name_string), 72);
         assert_eq!(std::mem::offset_of!(AudioUnitParameterInfo, flags), 96);
         assert_eq!(std::mem::size_of::<AudioUnitParameterInfo>(), 104);
+        assert_eq!(std::mem::size_of::<AudioChannelDescription>(), 20);
+        assert_eq!(std::mem::offset_of!(AudioChannelLayout, descriptions), 12);
+        assert_eq!(std::mem::size_of::<AudioChannelLayout>(), 32);
+    }
+
+    #[test]
+    fn mono_and_stereo_buses_get_a_layout_tag() {
+        assert_eq!(channel_layout_tag(1), Some(0x0064_0001), "kAudioChannelLayoutTag_Mono");
+        assert_eq!(channel_layout_tag(2), Some(0x0065_0002), "kAudioChannelLayoutTag_Stereo");
+        assert_eq!(channel_layout_tag(0), None);
+        assert_eq!(channel_layout_tag(6), None, "the strip's speaker arrangement isn't known here");
+    }
+
+    /// Apple's units take the layout or refuse the property; either way they initialize. The
+    /// delay refuses it; the matrix reverb takes it on its output and reports it back.
+    #[test]
+    fn apple_units_configure_with_a_channel_layout() {
+        let unit = |sub: &[u8; 4]| Instance::new(u32::from_be_bytes(*b"aufx"), u32::from_be_bytes(*sub), u32::from_be_bytes(*b"appl"), true).ok();
+        if let Some(mut delay) = unit(b"dely") {
+            assert_eq!(delay.configure(48_000.0, 512, 2), Ok(2), "a refused layout is not an error");
+            assert_eq!(delay.channel_layout(SCOPE_OUTPUT), None);
+        }
+        if let Some(mut reverb) = unit(b"mrev") {
+            assert_eq!(reverb.configure(48_000.0, 512, 2), Ok(2));
+            assert_eq!(reverb.channel_layout(SCOPE_OUTPUT), Some(CHANNEL_LAYOUT_TAG_STEREO));
+            let ch = reverb.configure(48_000.0, 512, 1).expect("reconfigures");
+            assert_eq!(reverb.channel_layout(SCOPE_OUTPUT), channel_layout_tag(ch), "follows the format ({ch} ch)");
+        }
     }
 }
