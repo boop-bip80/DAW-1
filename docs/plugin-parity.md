@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (resizable plugin editor windows; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** trivial (plugin editors stay open while the app is inactive or minimized; previously minor: resizable plugin editor windows; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -58,6 +58,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Editors: VST3 (macOS, Windows) and embedded CLAP (Windows) editors no longer close when SoundCraft is deactivated or minimized; only the user closing the window closes them |
 | 2026-10-24 | minor | Editors: resizable VST3 editor windows (macOS, Windows) and embedded CLAP editor windows (Windows) follow the plugin's size constraints (fixture- and unit-tested) |
 | 2026-10-23 | trivial | Modulation: Ring Modulator (`ring_mod`), also used by the AudioSuite Modulation menu |
 | 2026-10-13 | minor | VST3 host: IMessage and IAttributeList for plugins whose halves talk through messages (Line 6 Helix Stadium Native verified) |
