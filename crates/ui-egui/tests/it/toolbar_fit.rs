@@ -5,11 +5,13 @@ use egui::{Rect, Shape, pos2, vec2};
 use egui_kittest::Harness;
 use soundcraft_ui_egui::{Services, SoundApp, theme::Tokens, toolbar};
 
-/// What the toolbar painted: its panel, the group backgrounds and anything wide and thin (a scroll bar).
+/// What the toolbar painted: its panel, the group backgrounds, anything wide and thin (a scroll bar) and everything
+/// else it holds (the groups and what is not in one, such as the output meter).
 struct Painted {
     panel: Rect,
     groups: Vec<Rect>,
     bars: Vec<Rect>,
+    content: Vec<Rect>,
     right: f32,
 }
 
@@ -41,7 +43,7 @@ fn paint(width: f32) -> Painted {
             _ => None,
         })
         .expect("the toolbar panel is painted");
-    let mut painted = Painted { panel, groups: vec![], bars: vec![], right: 0.0 };
+    let mut painted = Painted { panel, groups: vec![], bars: vec![], content: vec![], right: 0.0 };
     for s in &output.shapes {
         let r = s.shape.visual_bounding_rect();
         // Skip shapes outside the toolbar and the panel itself, but keep a full-width scroll bar track.
@@ -53,10 +55,14 @@ fn paint(width: f32) -> Painted {
         if !full_width {
             painted.right = painted.right.max(r.max.x);
         }
+        let is_bar = r.height() < 16.0 && r.width() > panel.width() / 2.0;
+        if !full_width && !is_bar {
+            painted.content.push(r);
+        }
         if let Shape::Rect(rs) = &s.shape {
             if rs.fill == t.toolbar_group || rs.fill == t.counter_bg {
                 painted.groups.push(r);
-            } else if r.height() < 16.0 && r.width() > panel.width() / 2.0 {
+            } else if is_bar {
                 painted.bars.push(r);
             }
         }
@@ -77,8 +83,8 @@ fn a_scroll_bar_in_a_narrow_window_does_not_cover_the_controls() {
     let p = paint(1280.0);
     assert!(!p.bars.is_empty(), "the toolbar no longer overflows at 1280 pt: this test needs a narrower window");
     for bar in &p.bars {
-        for g in &p.groups {
-            assert!(!g.shrink(0.5).intersects(*bar), "scroll bar {bar:?} covers the group {g:?}");
+        for c in &p.content {
+            assert!(!c.shrink(0.5).intersects(*bar), "scroll bar {bar:?} covers the content {c:?}");
         }
     }
 }
