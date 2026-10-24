@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** trivial (G-04: Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (G-05: Audio Unit editor views; previously trivial: G-05: embedded CLAP editors on macOS; previously trivial: G-04: Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -113,10 +113,10 @@ launch #142; Linux #45, #107.
 ### G-05. Plugin hosting on macOS
 
 - **Missing:** the `com.apple.security.cs.disable-library-validation` entitlement in the signed
-  build, so hardened runtime refuses third-party VST3 bundles (#153, #149). AU editor views
-  (`crates/au-host/src/lib.rs` header: "Not hosted yet: Audio Unit editor views"). Embedded CLAP
-  GUIs; VST3 editors on Windows/Linux.
-- **Estimate:** ≈ 15–25 h (entitlement ≈ 1 h; AU Cocoa views and VST3 HWND/X11 views most of it).
+  build, so hardened runtime refuses third-party VST3 bundles (#153, #149). AUv3 extensions
+  that require asynchronous instantiation (not listed). VST3 and CLAP editors on Linux (X11).
+- **Estimate:** ≈ 10–20 h (entitlement ≈ 1 h; asynchronous AUv3 instantiation and X11 views most
+  of it).
 
 ### G-06. Memory-bound media
 
@@ -221,6 +221,8 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | G-05: Audio Unit editor views are hosted (#501); AUv3 asynchronous instantiation and Linux editor views remain |
+| 2026-10-24 | trivial | G-05: embedded CLAP editors are hosted on macOS (#485); VST3 editors already open on Windows |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
