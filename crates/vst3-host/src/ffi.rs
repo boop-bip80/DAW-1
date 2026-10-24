@@ -2318,6 +2318,13 @@ mod window {
     use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::ffi::{c_char, c_void};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The delegate's state: the sizer, and whether the user closed the window.
+    struct Ivars {
+        sizer: Arc<ViewSizer>,
+        closed: Arc<AtomicBool>,
+    }
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and `ResizeDelegate` implements no
@@ -2327,7 +2334,7 @@ mod window {
         // instead of panicking.
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[ivars = Arc<ViewSizer>]
+        #[ivars = Ivars]
         struct ResizeDelegate;
 
         // SAFETY: NSObjectProtocol has no safety requirements.
@@ -2340,7 +2347,7 @@ mod window {
             fn window_will_resize(&self, sender: &NSWindow, frame_size: NSSize) -> NSSize {
                 // Our own reference: the sizer stays alive even if the plugin closes the editor
                 // from a nested event loop during this call.
-                let sizer = self.ivars().clone();
+                let sizer = self.ivars().sizer.clone();
                 constrained_frame(&sizer, sender, NSRect::new(NSPoint::new(0.0, 0.0), frame_size)).size
             }
 
@@ -2348,7 +2355,7 @@ mod window {
             /// (screen) frame, keeping the window's top edge.
             #[unsafe(method(windowWillUseStandardFrame:defaultFrame:))]
             fn window_standard_frame(&self, window: &NSWindow, default_frame: NSRect) -> NSRect {
-                let sizer = self.ivars().clone();
+                let sizer = self.ivars().sizer.clone();
                 let mut frame = constrained_frame(&sizer, window, default_frame);
                 frame.origin.y = default_frame.origin.y + default_frame.size.height - frame.size.height;
                 frame
@@ -2358,11 +2365,20 @@ mod window {
             /// view. Resizes the host applies itself are ignored by the sizer.
             #[unsafe(method(windowDidResize:))]
             fn window_did_resize(&self, notification: &NSNotification) {
-                let sizer = self.ivars().clone();
+                let sizer = self.ivars().sizer.clone();
                 let Some(window) = notification.object().and_then(|o| o.downcast::<NSWindow>().ok()) else { return };
                 let Some(view) = window.contentView() else { return };
                 let size = view.frame().size;
                 sizer.user_resized(size.width, size.height, |w, h| window.setContentSize(NSSize::new(w, h)));
+            }
+
+            /// The user closed the window (the host's own `close` clears the delegate first).
+            /// Tracked here rather than read from `isVisible`, which is also false while the app
+            /// is inactive and AppKit has hidden the window (`hidesOnDeactivate`): switching to
+            /// another app must not close the editors.
+            #[unsafe(method(windowWillClose:))]
+            fn window_will_close(&self, _notification: &NSNotification) {
+                self.ivars().closed.store(true, Ordering::Relaxed);
             }
         }
     );
@@ -2381,8 +2397,8 @@ mod window {
     }
 
     impl ResizeDelegate {
-        fn new(mtm: MainThreadMarker, sizer: Arc<ViewSizer>) -> Retained<ResizeDelegate> {
-            let this = ResizeDelegate::alloc(mtm).set_ivars(sizer);
+        fn new(mtm: MainThreadMarker, sizer: Arc<ViewSizer>, closed: Arc<AtomicBool>) -> Retained<ResizeDelegate> {
+            let this = ResizeDelegate::alloc(mtm).set_ivars(Ivars { sizer, closed });
             // SAFETY: `init` of NSObject on a freshly allocated instance whose ivars are set.
             unsafe { msg_send![super(this), init] }
         }
@@ -2400,6 +2416,8 @@ mod window {
         window: *mut NSWindow,
         /// The window's delegate (one retain; the window only keeps a weak reference), or null.
         delegate: *mut ResizeDelegate,
+        /// Set by the delegate when the user closes the window.
+        closed: Arc<AtomicBool>,
     }
 
     // SAFETY: the pointers are only dereferenced on the main thread (every method checks
@@ -2434,7 +2452,7 @@ mod window {
             window.setExcludedFromWindowsMenu(true);
             window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
             window.center();
-            Ok(HostWindow { window: Retained::into_raw(window), delegate: std::ptr::null_mut() })
+            Ok(HostWindow { window: Retained::into_raw(window), delegate: std::ptr::null_mut(), closed: Arc::new(AtomicBool::new(false)) })
         }
 
         /// Routes the window's resizes through `sizer` (an `NSWindowDelegate`). Once per window.
@@ -2443,7 +2461,7 @@ mod window {
             if !self.delegate.is_null() {
                 return;
             }
-            let delegate = ResizeDelegate::new(mtm, sizer.clone());
+            let delegate = ResizeDelegate::new(mtm, sizer.clone(), self.closed.clone());
             w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             self.delegate = Retained::into_raw(delegate);
         }
@@ -2484,8 +2502,10 @@ mod window {
             }
         }
 
+        /// The window is open: not closed by the user, even while AppKit hides it because the
+        /// app is inactive. (Before the delegate is set, the window's own visibility.)
         pub fn is_visible(&self) -> bool {
-            self.get().is_some_and(|w| w.isVisible())
+            self.get().is_some_and(|w| if self.delegate.is_null() { w.isVisible() } else { !self.closed.load(Ordering::Relaxed) })
         }
 
         pub fn close(self) {
