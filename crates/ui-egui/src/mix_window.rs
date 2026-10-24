@@ -19,19 +19,33 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
     crate::docking::show(app, ui, crate::MainWindow::Mix);
 }
 
+/// The separate Mix window's viewport.
+pub fn viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("soundcraft.mix")
+}
+
 /// The Mix window in its own native window (Window › Mix in Separate Window), so Edit and Mix can
 /// be seen at once, e.g. one per monitor. Closing that window brings Mix back into the main one.
-/// Backends without multiple windows show it as a floating egui window instead.
+/// Keyboard shortcuts typed into it are handled here, with the Mix window as their context.
+/// Backends without multiple windows show it as a floating egui window instead, whose keys the
+/// main window already handles.
 pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let title = format!("{}  —  Mix", app.engine.session().name);
     let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
-    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("soundcraft.mix"), builder, |ui, _class| {
+    ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
         ui.set_style(ui.ctx().global_style());
+        let ctx = ui.ctx().clone();
+        if class == egui::ViewportClass::Immediate {
+            app.mix_focused = ctx.input(|i| i.focused);
+            crate::shortcuts::handle_in(app, &ctx, crate::MainWindow::Mix);
+        } else {
+            app.mix_focused = false;
+        }
         if std::mem::take(&mut app.focus_mix) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         show(app, ui);
-        if ui.ctx().input(|i| i.viewport().close_requested()) {
+        if ctx.input(|i| i.viewport().close_requested()) {
             separate_closed(app);
         }
     });
@@ -41,6 +55,12 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
 pub fn separate_closed(app: &mut SoundApp) {
     app.ui.mix_separate = false;
     app.ui.window = crate::MainWindow::Mix;
+    separate_hidden(app);
+}
+
+/// The separate Mix window is not on screen: it no longer has the keys.
+pub(crate) fn separate_hidden(app: &mut SoundApp) {
+    app.mix_focused = false;
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {

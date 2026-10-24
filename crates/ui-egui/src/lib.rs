@@ -297,6 +297,10 @@ pub struct SoundApp {
     pub palette: palette::PaletteState,
     /// Bring the separate Mix window to the front on the next frame.
     pub(crate) focus_mix: bool,
+    /// Bring the main (Edit) window to the front on the next frame.
+    pub(crate) focus_edit: bool,
+    /// The separate Mix window has keyboard focus (as of its last frame).
+    pub(crate) mix_focused: bool,
     /// Scroll Into View: the track each window brings to its top (Edit) or left (Mix) when it
     /// next draws, so a window not on screen catches up when it is shown.
     pub(crate) edit_scroll_into_view: Option<TrackId>,
@@ -414,6 +418,8 @@ impl SoundApp {
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
             focus_mix: false,
+            focus_edit: false,
+            mix_focused: false,
             edit_scroll_into_view: None,
             mix_scroll_into_view: None,
             synthetic: Vec::new(),
@@ -1322,18 +1328,26 @@ impl SoundApp {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());
         }
+        // The main window has the keys, so the Mix window no longer does (it learns that only on its next pass).
+        if ctx.input(|i| i.focused) {
+            self.mix_focused = false;
+        }
         shortcuts::handle(self, &ctx);
         self.sample_drop_targets.clear();
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }
-        // With the Mix window in its own native window, the main window keeps Edit.
-        match if self.ui.mix_separate { MainWindow::Edit } else { self.ui.window } {
+        match self.main_window_shows() {
             MainWindow::Edit => edit_window::show(self, ui),
             MainWindow::Mix => mix_window::show(self, ui),
         }
         if self.ui.mix_separate {
             mix_window::show_separate(self, &ctx);
+        } else {
+            mix_window::separate_hidden(self);
+        }
+        if std::mem::take(&mut self.focus_edit) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
         panels::floating(self, &ctx);
         windows::show(self, &ctx);
@@ -1353,6 +1367,11 @@ impl SoundApp {
         } else if !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
             ctx.request_repaint();
         }
+    }
+
+    /// What the main window shows: with the Mix window in its own native window, it keeps Edit.
+    pub fn main_window_shows(&self) -> MainWindow {
+        if self.ui.mix_separate { MainWindow::Edit } else { self.ui.window }
     }
 
     /// UI state as JSON (control channel `ui.inspect`).

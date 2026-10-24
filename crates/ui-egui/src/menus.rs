@@ -531,16 +531,19 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "window.edit" => {
             app.ui.window = MainWindow::Edit;
+            app.focus_edit = app.ui.mix_separate;
             json!({"window": "edit"})
         }
         "window.toggle_mix_edit" => {
             if app.ui.mix_separate {
-                // Both are on screen: bring the Mix window forward instead.
-                app.focus_mix = true;
+                // Both are on screen: bring the other one forward instead (Edit from the Mix window).
+                app.focus_edit = app.mix_focused;
+                app.focus_mix = !app.mix_focused;
+                json!({"window": if app.mix_focused { MainWindow::Edit } else { MainWindow::Mix }})
             } else {
                 app.ui.window = if app.ui.window == MainWindow::Edit { MainWindow::Mix } else { MainWindow::Edit };
+                json!({"window": app.ui.window})
             }
-            json!({"window": app.ui.window})
         }
         "window.transport" => toggle(&mut app.ui.show_transport),
         "window.big_counter" => toggle(&mut app.ui.show_big_counter),

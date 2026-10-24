@@ -54,7 +54,17 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
     mac && m.command && m.ctrl
 }
 
+/// The main window's keys (see [`handle_in`]).
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
+    let shown = app.main_window_shows();
+    handle_in(app, ctx, shown);
+}
+
+/// Shortcuts typed into the window whose pass `ctx` is in, which shows `window`. Each native
+/// window gets only its own key presses, so a press is handled once, by the window that has the
+/// keyboard focus; Edit-only keys (nudge, Grid/Nudge value, Commands Keyboard Focus) act only
+/// there when that window shows Edit.
+pub fn handle_in(app: &mut SoundApp, ctx: &egui::Context, window: MainWindow) {
     // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
     if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
@@ -72,7 +82,7 @@ pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
     // Cmd and Ctrl are separate keys only on macOS (asked at runtime so the web build in a Mac browser agrees).
     let mac = ctx.os() == egui::os::OperatingSystem::Mac;
     for (key, mods) in events {
-        if fixed(app, key, mods, mac) {
+        if fixed(app, key, mods, mac, window) {
             continue;
         }
         if let Some(id) = command_for(key, mods, mac) {
@@ -98,7 +108,7 @@ fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {
 }
 
 /// Keys with context-dependent meaning. Returns true when handled.
-fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
+fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool, window: MainWindow) -> bool {
     let plain = !m.command && !m.alt && !m.ctrl && !m.shift;
     match key {
         Key::Space if !m.command && !m.alt => {
@@ -123,7 +133,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
             true
         }
         // Shift+=/- step the Grid value and Alt+Shift+=/- the Nudge value; macOS sends Alt+Shift+= as =, not +.
-        Key::Plus | Key::Equals | Key::Minus if m.shift && !m.command && !m.ctrl && app.ui.window == MainWindow::Edit => {
+        Key::Plus | Key::Equals | Key::Minus if m.shift && !m.command && !m.ctrl && window == MainWindow::Edit => {
             let step = if key == Key::Minus { -1 } else { 1 };
             let _ = app.run(if m.alt { "view.nudge" } else { "view.grid" }, json!({"step": step}));
             true
@@ -165,7 +175,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         // `=` is what a bare press of the unlabeled +/- key reports (it has no shift held, so it
         // can never be `Key::Plus`); `Key::Plus` is kept for a keyboard that does send it (e.g. a
         // numpad +). `!m.alt` leaves Alt+= to `window.event_list`'s registered shortcut.
-        Key::Plus | Key::Equals | Key::Minus if !m.command && !m.alt && app.ui.window == MainWindow::Edit => {
+        Key::Plus | Key::Equals | Key::Minus if !m.command && !m.alt && window == MainWindow::Edit => {
             let dir = if key == Key::Minus { -1 } else { 1 };
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true
@@ -213,7 +223,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         k if !m.command
             && !m.alt
             && !m.ctrl
-            && app.ui.window == MainWindow::Edit
+            && window == MainWindow::Edit
             && app.engine.session().edit.keyboard_focus == "commands"
             && commands_focus(app, k, m.shift) =>
         {
