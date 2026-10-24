@@ -3,8 +3,9 @@
 //! `cmd::clap::plugin_info`.
 use super::{CommandSpec, always};
 
+use super::plugin_scan::{self, Rescan};
 use crate::cmd;
-use serde_json::{Value, json};
+use serde_json::json;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
@@ -12,13 +13,13 @@ pub fn specs() -> Vec<CommandSpec> {
         "List VST3 Plugins",
         [],
         None,
-        "{rescan?: bool} → [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}]",
+        "{rescan?: true (everything) | [bundle or folder path] (only those, and lists only them)} → [{id: \"vst3:<class id hex>\", class_id, name, vendor, version, sdk_version, sub_categories, category, is_instrument, path}]",
         always,
         |_, p| {
-            let list = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) {
-                soundcraft_vst3_host::rescan()
-            } else {
-                soundcraft_vst3_host::scan()
+            let list = match plugin_scan::rescan_param("engine.vst3_plugins", p, soundcraft_vst3_host::in_search_path)? {
+                Rescan::No => soundcraft_vst3_host::scan(),
+                Rescan::All => soundcraft_vst3_host::rescan(),
+                Rescan::Paths(targets) => soundcraft_vst3_host::rescan_paths(&targets),
             };
             Ok(json!(list))
         }
