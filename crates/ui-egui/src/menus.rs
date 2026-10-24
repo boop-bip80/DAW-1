@@ -66,6 +66,9 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.rtp", "MIDI Real-Time Properties", "", None),
     ("window.playback_engine", "Playback Engine", "", None),
     ("ui.audio_device", "Audio Device", "", None),
+    ("window.metering", "Metering", "", None),
+    ("ui.peak_hold", "Peak Hold", "", None),
+    ("ui.clip_indication", "Clip Indication", "", None),
     ("window.io_setup", "I/O Setup", "", None),
     ("window.shortcuts", "Keyboard Shortcuts", "", None),
     ("view.mix_section", "Mix Window View", "", None),
@@ -437,6 +440,7 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Setup > Hardware...", "window.playback_engine"),
     ("Setup > Playback Engine...", "window.playback_engine"),
     ("Setup > I/O...", "window.io_setup"),
+    ("Setup > Metering...", "window.metering"),
     ("Setup > Keyboard Shortcuts...", "window.shortcuts"),
     ("Setup > Session", "setup.session"),
     ("Event > Beat Detective", "window.beat_detective"),
@@ -667,6 +671,18 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "ui.bounce_dialog" => {
             return Some(Err("ui.bounce_dialog opens a dialog from the menu only; call file.bounce_mix with a path".into()));
+        }
+        "window.metering" => toggle(&mut app.ui.show_metering),
+        "ui.peak_hold" | "ui.clip_indication" => {
+            let setting = if id == "ui.peak_hold" { &mut app.ui.peak_hold } else { &mut app.ui.clip_indication };
+            let Some(mode) = p.get("mode").and_then(Value::as_str) else {
+                return Some(Ok(json!({"mode": setting.id()})));
+            };
+            let Some(mode) = crate::MeterHold::parse(mode) else {
+                return Some(Err(format!("unknown mode `{mode}` (three_seconds, infinite or none)")));
+            };
+            *setting = mode;
+            json!({"mode": mode.id()})
         }
         "ui.theme" => {
             let Some(mode) = p.get("mode").and_then(Value::as_str) else {

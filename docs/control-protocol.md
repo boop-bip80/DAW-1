@@ -89,6 +89,12 @@ a portal answer it uses Dark. Manual Light and Dark stay fixed when the OS appea
 An offscreen render without `--system-theme` supplies no OS appearance and therefore resolves
 System to Dark, or on Linux to the desktop's portal setting when one is available.
 
+`ui.peak_hold {"mode":"three_seconds"|"infinite"|"none"}` sets how long meters show their last
+peak, and `ui.clip_indication` takes the same modes for the clip lights; without `mode`, each
+returns the current setting. The defaults are `three_seconds` and `infinite`. Both are saved with
+the UI preferences, and Setup › Metering… (`window.metering`) shows them.
+`track.clear_clip_indicators` clears every clip light and held peak.
+
 `view.scroll_into_view {"track":"Bass"}` (a track id or name; without it, the first selected
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as
 Scroll Into View in the track name menu. A window not on screen catches up when it is next shown.

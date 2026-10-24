@@ -21,6 +21,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     midi_keyboard(app, ctx);
     workspace(app, ctx);
     configurations(app, ctx);
+    metering(app, ctx);
     playback_engine(app, ctx);
     io_setup(app, ctx);
     shortcuts_window(app, ctx);
@@ -408,6 +409,34 @@ fn configurations(app: &mut SoundApp, ctx: &egui::Context) {
         }
     });
     app.ui.show_configurations = open;
+}
+
+/// Metering preferences: how long meters show their last peak (Peak Hold) and their last clip
+/// (Clip Indication).
+fn metering(app: &mut SoundApp, ctx: &egui::Context) {
+    let mut open = app.ui.show_metering;
+    let mut chosen = None;
+    win(ctx, &mut open, "Metering", vec2(280.0, 140.0), |ui| {
+        egui::Grid::new("metering").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
+            for (cmd, label, value) in
+                [("ui.peak_hold", "Peak Hold", app.ui.peak_hold), ("ui.clip_indication", "Clip Indication", app.ui.clip_indication)]
+            {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    for mode in crate::MeterHold::ALL {
+                        if ui.radio(value == mode, mode.label()).clicked() {
+                            chosen = Some((cmd, mode));
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    });
+    if let Some((cmd, mode)) = chosen {
+        let _ = app.run(cmd, json!({"mode": mode.id()}));
+    }
+    app.ui.show_metering = open;
 }
 
 /// The audio systems as last enumerated (enumerating probes devices: done when the window opens

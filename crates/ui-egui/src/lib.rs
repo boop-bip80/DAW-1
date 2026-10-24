@@ -81,6 +81,12 @@ pub struct UiState {
     pub edit_views: Vec<String>,
     /// How strongly Edit window tracks take on their colour, 0..1 (0: only the colour strip).
     pub track_tint: f32,
+    /// How long meters show their last peak (`ui.peak_hold`) and their last clip
+    /// (`ui.clip_indication`).
+    pub peak_hold: MeterHold,
+    pub clip_indication: MeterHold,
+    /// The Metering window, which sets both (`window.metering`).
+    pub show_metering: bool,
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
     /// The send in the Send window (track, slot).
@@ -151,6 +157,9 @@ impl Default for UiState {
             mix_views: vec!["inserts_ae".into(), "sends_ae".into(), "io".into(), "color".into()],
             edit_views: vec!["color".into()],
             track_tint: 0.5,
+            peak_hold: MeterHold::ThreeSeconds,
+            clip_indication: MeterHold::Infinite,
+            show_metering: false,
             plugin_windows: Vec::new(),
             send_window: None,
             audiosuite: None,
@@ -217,13 +226,57 @@ pub fn fit_window_to_screen(ctx: &egui::Context) {
 #[derive(Debug, Clone, Copy)]
 pub struct DragSource(pub u64);
 
+/// How long a meter shows its last peak or its last clip: three seconds, until it is cleared
+/// (Track › Clear All Clip Indicators), or not at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeterHold {
+    #[default]
+    ThreeSeconds,
+    Infinite,
+    #[serde(rename = "none")]
+    Off,
+}
+
+impl MeterHold {
+    pub const ALL: [Self; 3] = [Self::ThreeSeconds, Self::Infinite, Self::Off];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ThreeSeconds => "3 Seconds",
+            Self::Infinite => "Infinite",
+            Self::Off => "None",
+        }
+    }
+
+    /// The id used in `ui.peak_hold {"mode": …}`, `ui.clip_indication {"mode": …}` and in the
+    /// saved UI prefs.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::ThreeSeconds => "three_seconds",
+            Self::Infinite => "infinite",
+            Self::Off => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.id().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// Seconds a [`MeterHold::ThreeSeconds`] meter keeps its peak or clip.
+const METER_HOLD_SECS: f64 = 3.0;
+
 /// Ballistic meter display state per strip.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MeterDisplay {
     pub level: [f32; 2],
     pub hold: [f32; 2],
-    pub hold_age: f32,
+    /// Frame time (egui seconds) when each channel's `hold` was last reached.
+    pub hold_at: [f64; 2],
     pub clip: bool,
+    /// Frame time (egui seconds) when the meter last clipped.
+    pub clip_at: f64,
     pub gr: f32,
     /// [`soundcraft_mix::PluginFailures::count`] as last seen.
     pub plugin_failures: u32,
@@ -481,7 +534,10 @@ impl SoundApp {
                     self.edit_layout.follow_hold = false;
                 }
                 if id == "track.clear_clip_indicators" {
-                    self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| m.clip = false);
+                    self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| {
+                        m.clip = false;
+                        m.hold = m.level;
+                    });
                 }
                 Ok(v)
             }
@@ -1175,9 +1231,10 @@ impl SoundApp {
                 self.last_meter_poll = now;
             }
             let snap = &self.meter_snapshot;
+            let holds = (self.ui.peak_hold, self.ui.clip_indication);
             for (id, m) in &snap.tracks {
                 let d = self.meters.entry(*id).or_default();
-                feed_meter(d, m.peak, m.gain_reduction_db, dt);
+                feed_meter(d, m.peak, m.gain_reduction_db, dt, now, holds);
                 if m.plugin_failures.count != d.plugin_failures {
                     d.plugin_failures = m.plugin_failures.count;
                     if let Some(msg) = failed_plugin_status(self.engine.session(), *id, m.plugin_failures.last) {
@@ -1186,7 +1243,7 @@ impl SoundApp {
                 }
             }
             let main = snap.main.peak;
-            feed_meter(&mut self.main_meter, main, 0.0, dt);
+            feed_meter(&mut self.main_meter, main, 0.0, dt, now, holds);
             if ended {
                 self.stop_play();
             }
@@ -1205,10 +1262,12 @@ impl SoundApp {
             }
         }
         if !self.meters_live() {
+            let holds = (self.ui.peak_hold, self.ui.clip_indication);
+            let now = self.last_frame.unwrap_or_default();
             for d in self.meters.values_mut() {
-                feed_meter(d, [0.0, 0.0], 0.0, dt);
+                feed_meter(d, [0.0, 0.0], 0.0, dt, now, holds);
             }
-            feed_meter(&mut self.main_meter, [0.0, 0.0], 0.0, dt);
+            feed_meter(&mut self.main_meter, [0.0, 0.0], 0.0, dt, now, holds);
         }
     }
 
@@ -1371,9 +1430,12 @@ impl SoundApp {
     }
 }
 
-fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
-    // Instant attack, ~26 dB/s release, 2 s peak hold.
+/// Instant attack and ~26 dB/s release over `dt`; `holds` is the (Peak Hold, Clip Indication)
+/// setting, timed against `now`, the frame time in egui seconds.
+fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32, now: f64, holds: (MeterHold, MeterHold)) {
+    let (peak_hold, clip_indication) = holds;
     let fall = 10f32.powf(-26.0 * dt / 20.0);
+    let mut clipped = false;
     for c in 0..2 {
         let v = peak.get(c).copied().unwrap_or(0.0);
         let lvl = d.level.get(c).copied().unwrap_or(0.0);
@@ -1381,19 +1443,35 @@ fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32) {
         if let Some(x) = d.level.get_mut(c) {
             *x = if nv < 1e-5 { 0.0 } else { nv };
         }
-        if v >= d.hold.get(c).copied().unwrap_or(0.0) {
+        if v > 0.0 && v >= d.hold.get(c).copied().unwrap_or(0.0) {
             if let Some(h) = d.hold.get_mut(c) {
                 *h = v;
             }
-            d.hold_age = 0.0;
+            if let Some(t) = d.hold_at.get_mut(c) {
+                *t = now;
+            }
         }
         if v >= 1.0 {
-            d.clip = true;
+            clipped = true;
+        }
+        let hold_over = match peak_hold {
+            MeterHold::ThreeSeconds => now - d.hold_at.get(c).copied().unwrap_or(now) > METER_HOLD_SECS,
+            MeterHold::Infinite => false,
+            MeterHold::Off => true,
+        };
+        if hold_over && let (Some(h), Some(l)) = (d.hold.get_mut(c), d.level.get(c)) {
+            *h = *l;
         }
     }
-    d.hold_age += dt;
-    if d.hold_age > 2.0 {
-        d.hold = d.level;
+    if clipped {
+        d.clip = true;
+        d.clip_at = now;
+    } else {
+        d.clip &= match clip_indication {
+            MeterHold::ThreeSeconds => now - d.clip_at <= METER_HOLD_SECS,
+            MeterHold::Infinite => true,
+            MeterHold::Off => false,
+        };
     }
     d.gr = if gr > d.gr { gr } else { d.gr * fall };
 }
@@ -1409,7 +1487,7 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Services, SoundApp, automation_step_due};
+    use super::{MeterDisplay, MeterHold, Services, SoundApp, automation_step_due, feed_meter};
     use serde_json::json;
     use soundcraft_model::TrackId;
 
@@ -1570,8 +1648,95 @@ mod tests {
         let kick = app.engine.session().track_by_name("Kick").unwrap().id;
         app.meters.entry(kick).or_default().clip = true;
         app.main_meter.clip = true;
+        app.meters.entry(kick).or_default().hold = [0.8, 0.7];
+        app.main_meter.hold = [0.9, 0.9];
         app.run("track.clear_clip_indicators", json!({})).unwrap();
         assert!(!app.meters[&kick].clip && !app.main_meter.clip);
+        assert_eq!((app.meters[&kick].hold, app.main_meter.hold), ([0.0, 0.0], [0.0, 0.0]), "held peaks clear with the clips");
+    }
+
+    /// Feeds `peak` once, then silence for `secs` in 0.1 s steps; returns (held peak, clip lit).
+    fn after_peak(peak: f32, secs: f32, holds: (MeterHold, MeterHold)) -> (f32, bool) {
+        let mut d = MeterDisplay::default();
+        feed_meter(&mut d, [peak, peak], 0.0, 0.1, 0.0, holds);
+        for i in 1..=(secs * 10.0).round() as usize {
+            feed_meter(&mut d, [0.0, 0.0], 0.0, 0.1, i as f64 / 10.0, holds);
+        }
+        (d.hold[0], d.clip)
+    }
+
+    #[test]
+    fn three_second_holds_follow_the_clock_on_slow_idle_frames() {
+        // After playback stops, idle frames come about once a second, each frame's step is capped
+        // at 0.25 s, and a meter is fed twice per frame.
+        let holds = (MeterHold::ThreeSeconds, MeterHold::ThreeSeconds);
+        let mut d = MeterDisplay::default();
+        feed_meter(&mut d, [1.0, 1.0], 0.0, 0.25, 10.0, holds);
+        for now in [11.0, 12.0, 12.9] {
+            feed_meter(&mut d, [0.0, 0.0], 0.0, 0.25, now, holds);
+            feed_meter(&mut d, [0.0, 0.0], 0.0, 0.25, now, holds);
+        }
+        assert!(d.clip && d.hold[0] == 1.0, "still held 2.9 s after the clip");
+        feed_meter(&mut d, [0.0, 0.0], 0.0, 0.25, 13.1, holds);
+        assert!(!d.clip && d.hold[0] < 1.0, "let go 3.1 s after the clip");
+    }
+
+    #[test]
+    fn peak_hold_keeps_the_peak_for_three_seconds_until_cleared_or_not_at_all() {
+        use MeterHold::{Infinite, Off, ThreeSeconds};
+        assert_eq!(after_peak(0.5, 2.5, (ThreeSeconds, Off)).0, 0.5, "3 Seconds still holds at 2.5 s");
+        assert!(after_peak(0.5, 3.5, (ThreeSeconds, Off)).0 < 0.01, "3 Seconds lets go after 3 s");
+        assert_eq!(after_peak(0.5, 60.0, (Infinite, Off)).0, 0.5, "Infinite holds until cleared");
+        assert!(after_peak(0.5, 0.1, (Off, Off)).0 < 0.5, "None follows the level");
+    }
+
+    #[test]
+    fn a_silent_channel_does_not_keep_the_other_channels_peak_held() {
+        let holds = (MeterHold::ThreeSeconds, MeterHold::Off);
+        let mut d = MeterDisplay::default();
+        feed_meter(&mut d, [0.5, 0.0], 0.0, 0.1, 0.0, holds);
+        for i in 1..=25 {
+            feed_meter(&mut d, [0.0, 0.0], 0.0, 0.1, f64::from(i) / 10.0, holds);
+        }
+        assert_eq!(d.hold[0], 0.5, "still held at 2.5 s");
+        for i in 26..=35 {
+            feed_meter(&mut d, [0.0, 0.0], 0.0, 0.1, f64::from(i) / 10.0, holds);
+        }
+        assert!(d.hold[0] < 0.01, "let go after 3 s although the right channel stayed silent");
+        let mut d = MeterDisplay::default();
+        feed_meter(&mut d, [0.5, 0.3], 0.0, 0.1, 0.0, holds);
+        for i in 1..=35 {
+            feed_meter(&mut d, [0.0, 0.3], 0.0, 0.1, f64::from(i) / 10.0, holds);
+        }
+        assert!(d.hold[0] < 0.01, "a steady right channel does not keep the left peak held");
+        assert_eq!(d.hold[1], 0.3, "the steady channel keeps its own peak");
+    }
+
+    #[test]
+    fn clip_indication_stays_lit_for_three_seconds_until_cleared_or_not_at_all() {
+        use MeterHold::{Infinite, Off, ThreeSeconds};
+        assert!(after_peak(1.0, 2.5, (Off, ThreeSeconds)).1, "3 Seconds still lit at 2.5 s");
+        assert!(!after_peak(1.0, 3.5, (Off, ThreeSeconds)).1, "3 Seconds goes out after 3 s");
+        assert!(after_peak(1.0, 60.0, (Off, Infinite)).1, "Infinite stays lit until cleared");
+        assert!(!after_peak(1.0, 0.1, (Off, Off)).1, "None goes out on the next update");
+        assert!(!after_peak(0.99, 0.0, (Off, Infinite)).1, "below full scale is not a clip");
+    }
+
+    #[test]
+    fn peak_hold_and_clip_indication_are_ui_commands_kept_with_the_preferences() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        assert_eq!(app.run("ui.peak_hold", json!({})), Ok(json!({"mode": "three_seconds"})));
+        assert_eq!(app.run("ui.clip_indication", json!({})), Ok(json!({"mode": "infinite"})));
+        assert_eq!(app.run("ui.peak_hold", json!({"mode": "infinite"})), Ok(json!({"mode": "infinite"})));
+        assert_eq!(app.run("ui.clip_indication", json!({"mode": "none"})), Ok(json!({"mode": "none"})));
+        assert!(app.run("ui.peak_hold", json!({"mode": "forever"})).is_err());
+        assert_eq!((app.ui.peak_hold, app.ui.clip_indication), (MeterHold::Infinite, MeterHold::Off));
+        let saved = serde_json::to_value(&app.ui).unwrap();
+        assert_eq!((&saved["peak_hold"], &saved["clip_indication"]), (&json!("infinite"), &json!("none")));
+        let back: super::UiState = serde_json::from_value(saved).unwrap();
+        assert_eq!((back.peak_hold, back.clip_indication), (MeterHold::Infinite, MeterHold::Off));
+        assert_eq!(app.run("window.metering", json!({})), Ok(json!({"value": true})));
+        assert_eq!(crate::menus::command_for_path("Setup > Metering...", &[]).as_deref(), Some("window.metering"));
     }
 
     #[test]
