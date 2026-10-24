@@ -121,6 +121,8 @@ pub struct UiState {
     pub configurations: Vec<(String, Value)>,
     /// Appearance (`ui.theme`): dark by default, light or follow the system on request.
     pub theme: theme::ThemeMode,
+    /// Interface language (`ui.language`): a BCP 47 id ("en", "zh-Hans"), English until changed.
+    pub language: String,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
     /// the desktop app last saw them; it restores them at launch.
     pub window_size: [f32; 2],
@@ -183,6 +185,7 @@ impl Default for UiState {
             workspace_dir: String::new(),
             configurations: Vec::new(),
             theme: theme::ThemeMode::Dark,
+            language: "en".into(),
             window_size: [1600.0, 1000.0],
             window_maximized: false,
             ui_scale: 1.0,
@@ -1224,6 +1227,9 @@ impl SoundApp {
             theme::apply(ctx, light);
             self.theme_applied = Some(light);
         }
+        // The catalog reads the global, so follow the state even when it was patched
+        // (`ui.set`, a restored ui.json) rather than set through `ui.language`.
+        soundcraft_l10n::set_current(soundcraft_l10n::Language::parse(&self.ui.language).unwrap_or_default());
         let now = ctx.input(|i| i.time);
         let dt = self.last_frame.replace(now).map_or(1.0 / 60.0, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
