@@ -222,13 +222,24 @@ impl View {
     ];
 }
 
+/// Where the clips of a [`FadeSpot`] lie (the second only for a crossfade): the dialog's graph is laid out from them.
+type SpotClips = (Range, Option<Range>);
+
+fn spot_clips(s: &Session, spot: FadeSpot) -> Option<SpotClips> {
+    let at = |c| s.find_clip(c).map(|(_, c)| c.range());
+    match spot {
+        FadeSpot::In(c) | FadeSpot::Out(c) => Some((at(c)?, None)),
+        FadeSpot::Cross(a, b) => Some((at(a)?, Some(at(b)?))),
+    }
+}
+
 /// The state of one open dialog.
 #[derive(Debug, Clone)]
 pub struct FadeEditor {
     target: FadeTarget,
     /// Set when the dialog came from an edit selection with no fade there yet: OK makes the fade over this range, if the
-    /// selection still covers exactly this one fade.
-    selection: Option<(TrackId, Range, FadeSpot)>,
+    /// selection still covers exactly this one fade and its clips lie where they did.
+    selection: Option<(TrackId, Range, FadeSpot, SpotClips)>,
     /// The clips behind the graph: the outgoing one (A, top lane) and the incoming one (B, bottom lane),
     /// and the stretch of timeline the graph spans.
     pub(crate) a: Option<soundcraft_model::ClipId>,
@@ -295,7 +306,7 @@ impl FadeEditor {
             FadeSpot::Cross(a, b) => (FadeTarget::Crossfade { later: b }, range, (Some(a), Some(b))),
         };
         let mut editor = FadeEditor::new(target, span, clips, Settings::FACTORY);
-        editor.selection = Some((track, range, spot));
+        editor.selection = Some((track, range, spot, spot_clips(s, spot)?));
         Some(editor)
     }
 
@@ -347,10 +358,10 @@ impl FadeEditor {
         let (kind, now) = (self.kind(), self.now);
         let (input, output) = (now.input.fade(), now.output.fade());
         let name = |f: Fade| f.shape.label();
-        if let Some((track, range, spot)) = self.selection {
-            // The dialog does not hold the Edit window: if the clips moved since it opened, the range no longer makes
-            // this one fade, and what it would make instead is not what the dialog shows.
-            if fade_spots(s, track, range) != [spot] {
+        if let Some((track, range, spot, clips)) = self.selection {
+            // The dialog does not hold the Edit window: if the clips moved since it opened, the range may no longer make
+            // this one fade, or make it at another place or length, and what it would make is not what the dialog shows.
+            if fade_spots(s, track, range) != [spot] || spot_clips(s, spot) != Some(clips) {
                 return None;
             }
             let mut params = json!({"tracks": [track.0], "start": range.start, "end": range.end});
@@ -702,7 +713,7 @@ mod tests {
         ed.recall(Kind::In, bent_linear);
         assert_eq!(ed.now.input.bend, 0.4);
         // Over a selection it is not: a bent Linear comes back as Standard with Equal Gain, a preset curve unbent.
-        ed.selection = Some((TrackId(1), Range::new(0, 100), FadeSpot::In(b)));
+        ed.selection = Some((TrackId(1), Range::new(0, 100), FadeSpot::In(b), (Range::new(1000, 3000), None)));
         ed.recall(Kind::In, bent_linear);
         assert_eq!(ed.now.input, Side { shape: Shape::Standard, slope: Slope::EqualGain, bend: 0.0 });
         ed.recall(Kind::In, slot(Shape::Preset(FadeShape::Exponential), Slope::EqualPower, -0.3));

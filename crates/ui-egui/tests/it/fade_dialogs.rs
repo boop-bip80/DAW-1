@@ -593,6 +593,21 @@ fn create_over_a_selection_makes_nothing_if_the_clips_moved_while_the_dialog_was
 }
 
 #[test]
+fn create_over_a_selection_makes_nothing_if_its_clip_was_trimmed_while_the_dialog_was_open() {
+    let (mut r, [a, _, _]) = selection_rig();
+    select(&mut r, 0, 1000);
+    open_create(&mut r);
+    assert_eq!(r.app().dialogs.open_name(), Some("fade_in"));
+    // Still the one fade-in of the same clip, but half as long as the graph the dialog opened on.
+    r.h.state_mut().engine.session_mut().find_clip_mut(a).unwrap().trim_start_to(500);
+    r.frames(2);
+    let (before, steps) = (r.app().engine.session().clone(), r.steps());
+    r.ok();
+    assert!(r.app().dialogs.open.is_none());
+    assert_eq!((r.app().engine.session(), r.steps()), (&before, steps), "the fade would not have been the one shown");
+}
+
+#[test]
 fn create_over_two_boundaries_or_nothing_keeps_the_simple_dialog() {
     let (mut r, _) = selection_rig();
     // Over both boundaries: not one fade.
