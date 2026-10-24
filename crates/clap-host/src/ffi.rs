@@ -40,7 +40,7 @@ use soundcraft_dsp::Transport;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// Most plugins one factory may report (hostile-input cap).
@@ -279,7 +279,16 @@ impl Bundle {
         inst.state_ext = inst.extension::<clap_plugin_state>(CLAP_EXT_STATE);
         let gui = inst.extension::<clap_plugin_gui>(CLAP_EXT_GUI);
         inst.gui = Arc::new(GuiLink {
-            inner: Mutex::new(GuiInner { plugin, gui, state: inst.state_ext, alive: true, created: false, visible: false, window: None }),
+            inner: Mutex::new(GuiInner {
+                plugin,
+                gui,
+                state: inst.state_ext,
+                alive: true,
+                created: false,
+                visible: false,
+                window: None,
+                sizer: None,
+            }),
             host: Arc::clone(&inst.state),
         });
         Ok(inst)
@@ -742,6 +751,197 @@ fn window_api() -> Option<&'static CStr> {
     }
 }
 
+/// Negotiates user resizes of an embedded editor's host window with the plugin (CLAP: when
+/// `can_resize`, the host asks `adjust_size`, sizes the window to the answer, then `set_size`).
+///
+/// Shared by the editor link and the host window's procedure. Everything runs on the main thread;
+/// the lock only guards against the instance clearing the plugin from another thread while a
+/// resize calls into it. Loops are cut by `applying`: while the host applies a size (a plugin's
+/// `request_resize`, or a user resize being constrained and handed to `set_size`), the window
+/// notifications that this causes are ignored rather than negotiated again.
+pub(crate) struct GuiSizer {
+    target: Mutex<Option<SizeTarget>>,
+    /// The thread inside a call into the plugin under `target`'s lock (see `with_target`).
+    holder: Mutex<Option<std::thread::ThreadId>>,
+    /// A target change requested re-entrantly by the holder thread, applied when its call returns.
+    pending: Mutex<Option<Option<SizeTarget>>>,
+    /// The plugin said `can_resize`: user resizes are negotiated (the window has a sizing border).
+    resizable: AtomicBool,
+    /// Nesting depth of resizes being applied by the host.
+    applying: AtomicU32,
+    /// The size last given to the plugin (`width << 32 | height`), to skip repeated `set_size`.
+    last: AtomicU64,
+}
+
+// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
+#[cfg_attr(not(windows), allow(dead_code))]
+/// The plugin and the two `clap.gui` calls a user resize needs.
+#[derive(Clone, Copy)]
+struct SizeTarget {
+    plugin: *const clap_plugin,
+    adjust_size: Option<unsafe extern "C" fn(*const clap_plugin, *mut u32, *mut u32) -> bool>,
+    set_size: Option<unsafe extern "C" fn(*const clap_plugin, u32, u32) -> bool>,
+}
+
+// SAFETY: the plugin pointer is only called through on the main thread (the window procedure),
+// under the sizer's lock, and the editor link clears it under that lock (or, re-entrantly, right
+// after the call holding it) before the GUI goes.
+unsafe impl Send for SizeTarget {}
+
+/// Ends an "applying" section of a [`GuiSizer`] when dropped.
+pub(crate) struct Applying<'a>(&'a AtomicU32);
+
+impl Drop for Applying<'_> {
+    fn drop(&mut self) {
+        // Paired with the increment in `GuiSizer::applying`: never below zero.
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
+#[cfg_attr(not(windows), allow(dead_code))]
+/// A host-window size in whole pixels (non-finite or out-of-range sizes are clamped).
+fn px(v: f64) -> u32 {
+    if v.is_finite() { v.round().clamp(1.0, 16_384.0) as u32 } else { 1 }
+}
+
+// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
+#[cfg_attr(not(windows), allow(dead_code))]
+impl GuiSizer {
+    pub fn new(w: u32, h: u32) -> GuiSizer {
+        let s = GuiSizer {
+            target: Mutex::new(None),
+            holder: Mutex::new(None),
+            pending: Mutex::new(None),
+            resizable: AtomicBool::new(false),
+            applying: AtomicU32::new(0),
+            last: AtomicU64::new(0),
+        };
+        s.set_last(w, h);
+        s
+    }
+
+    fn holder(&self) -> std::sync::MutexGuard<'_, Option<std::thread::ThreadId>> {
+        self.holder.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<Option<SizeTarget>>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `f` on the plugin under the target lock (`None` without one). A target change
+    /// requested from inside `f` on this thread (a plugin pumping a nested event loop that closes
+    /// the editor) is deferred until `f` returns instead of deadlocking on the lock.
+    fn with_target<R>(&self, f: impl FnOnce(&SizeTarget) -> R) -> Option<R> {
+        let mut g = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+        *self.holder() = Some(std::thread::current().id());
+        let out = g.as_ref().map(f);
+        *self.holder() = None;
+        if let Some(t) = self.pending().take() {
+            *g = t;
+        }
+        out
+    }
+
+    /// Hands the plugin over once its GUI is parented and shown (`can_resize` decides whether
+    /// user resizes are negotiated); `None` takes it away again (before the GUI is destroyed).
+    fn set_target(&self, target: Option<SizeTarget>, resizable: bool) {
+        self.resizable.store(resizable && target.is_some(), Ordering::Relaxed);
+        if *self.holder() == Some(std::thread::current().id()) {
+            *self.pending() = Some(target);
+            return;
+        }
+        *self.target.lock().unwrap_or_else(PoisonError::into_inner) = target;
+    }
+
+    pub fn resizable(&self) -> bool {
+        self.resizable.load(Ordering::Relaxed)
+    }
+
+    /// Marks a host-applied resize; window notifications are ignored until the guard drops.
+    pub fn applying(&self) -> Applying<'_> {
+        self.applying.fetch_add(1, Ordering::Relaxed);
+        Applying(&self.applying)
+    }
+
+    fn is_applying(&self) -> bool {
+        self.applying.load(Ordering::Relaxed) > 0
+    }
+
+    fn set_last(&self, w: u32, h: u32) {
+        self.last.store((u64::from(w) << 32) | u64::from(h), Ordering::Relaxed);
+    }
+
+    fn last(&self) -> (u32, u32) {
+        let v = self.last.load(Ordering::Relaxed);
+        ((v >> 32) as u32, v as u32)
+    }
+
+    /// The size the plugin accepts instead of `w`×`h` (`adjust_size`), or `None` when no resize
+    /// should be negotiated (it can't resize, is gone, or a resize is being applied).
+    pub fn constrain(&self, w: f64, h: f64) -> Option<(f64, f64)> {
+        if !self.resizable() || self.is_applying() {
+            return None;
+        }
+        let _guard = self.applying();
+        let (w, h) = self.with_target(|t| adjust(t, px(w), px(h)))?;
+        Some((f64::from(w), f64::from(h)))
+    }
+
+    /// The window's client area was resized to `w`×`h` by the user (or the window manager):
+    /// settles on the plugin's adjusted size, makes the window follow it through `set_window`
+    /// when it differs, and tells the plugin with `set_size`. Ignored while the host applies a
+    /// resize itself.
+    pub fn user_resized(&self, w: f64, h: f64, set_window: impl FnOnce(f64, f64)) {
+        if !self.resizable() || self.is_applying() {
+            return;
+        }
+        let _guard = self.applying();
+        self.with_target(|t| {
+            let (w, h) = (px(w), px(h));
+            let (aw, ah) = adjust(t, w, h);
+            let last = self.last();
+            let accepted = last == (aw, ah)
+                || match t.set_size {
+                    // SAFETY: live plugin with a created, parented GUI (the editor link takes the
+                    // target away before destroying it, deferred to here when that happens inside
+                    // this call); main thread.
+                    Some(f) => unsafe { f(t.plugin, aw, ah) },
+                    None => false,
+                };
+            if accepted {
+                self.set_last(aw, ah);
+                if (aw, ah) != (w, h) {
+                    set_window(f64::from(aw), f64::from(ah));
+                }
+            } else {
+                // The plugin refused the size: the window goes back to the last one it took.
+                set_window(f64::from(last.0), f64::from(last.1));
+            }
+        });
+    }
+}
+
+// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
+#[cfg_attr(not(windows), allow(dead_code))]
+/// `adjust_size` for a proposed `w`×`h`; the proposal stands when the plugin can't adjust it.
+fn adjust(t: &SizeTarget, w: u32, h: u32) -> (u32, u32) {
+    let Some(f) = t.adjust_size else { return (w, h) };
+    let (mut aw, mut ah) = (w, h);
+    // SAFETY: live plugin with a created GUI (see `user_resized`); both out-pointers are locals.
+    if unsafe { f(t.plugin, &mut aw, &mut ah) } && aw > 0 && ah > 0 { (aw.min(16_384), ah.min(16_384)) } else { (w, h) }
+}
+
+/// The window rect while the user drags `edge` (a Windows `WMSZ_*` value): moves only the dragged
+/// edges so the outer size becomes `w`×`h`. Pure, so it's testable on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sizing_rect(edge: usize, (left, top, right, bottom): (i32, i32, i32, i32), (w, h): (i32, i32)) -> (i32, i32, i32, i32) {
+    // WMSZ_LEFT = 1, WMSZ_TOP = 3, WMSZ_TOPLEFT = 4, WMSZ_TOPRIGHT = 5, WMSZ_BOTTOMLEFT = 7.
+    let (l, r) = if matches!(edge, 1 | 4 | 7) { (right.saturating_sub(w), right) } else { (left, left.saturating_add(w)) };
+    let (t, b) = if matches!(edge, 3..=5) { (bottom.saturating_sub(h), bottom) } else { (top, top.saturating_add(h)) };
+    (l, t, r, b)
+}
+
 struct GuiInner {
     plugin: *const clap_plugin,
     gui: *const clap_plugin_gui,
@@ -752,6 +952,8 @@ struct GuiInner {
     visible: bool,
     /// The host window of an embedded editor (`None` for floating editors).
     window: Option<hostwin::HostWindow>,
+    /// Negotiates user resizes of `window` (`None` for floating editors).
+    sizer: Option<Arc<GuiSizer>>,
 }
 
 /// The link between an instance and its editor and state handles. The instance may process on
@@ -776,6 +978,7 @@ impl Default for GuiLink {
                 created: false,
                 visible: false,
                 window: None,
+                sizer: None,
             }),
             host: Arc::new(HostState::default()),
         }
@@ -911,14 +1114,30 @@ impl GuiLink {
             GuiLink::destroy(g);
             return Err("the plugin could not show its editor".into());
         }
-        if let Some(win) = &g.window {
+        // The window follows `can_resize`: a sizing border, with user resizes negotiated through
+        // `adjust_size` and `set_size`.
+        // SAFETY: live plugin with a created, parented GUI; main thread.
+        let resizable = vt.can_resize.is_some_and(|f| unsafe { f(g.plugin) });
+        let sizer = Arc::new(GuiSizer::new(w, h));
+        sizer.set_target(Some(SizeTarget { plugin: g.plugin, adjust_size: vt.adjust_size, set_size: vt.set_size }), resizable);
+        if let Some(win) = &mut g.window {
+            win.set_sizer(&sizer);
+            // The frame change of the new sizing border is not a user resize: the window gives
+            // the client area back to the plugin's size, with nothing negotiated meanwhile.
+            let _applying = sizer.applying();
+            win.set_resizable(resizable);
             win.raise();
         }
+        g.sizer = Some(sizer);
         g.visible = true;
         Ok(())
     }
 
     fn destroy(g: &mut GuiInner) {
+        // No more user resizes reach the plugin once its GUI is going.
+        if let Some(s) = g.sizer.take() {
+            s.set_target(None, false);
+        }
         if g.created
             && let Some(f) = GuiLink::vt(g).and_then(|v| v.destroy)
         {
@@ -959,7 +1178,7 @@ impl GuiLink {
 
     pub fn is_open(&self) -> bool {
         let g = self.lock();
-        g.alive && g.created && g.visible && g.window.as_ref().is_none_or(hostwin::HostWindow::is_visible)
+        g.alive && g.created && g.visible && g.window.as_ref().is_none_or(hostwin::HostWindow::is_open)
     }
 
     /// Main-thread housekeeping: runs a requested `on_main_thread`, follows the plugin's
@@ -985,13 +1204,18 @@ impl GuiLink {
                 && let Some(win) = &g.window
             {
                 let (w, h) = ((resize >> 32) as u32, resize as u32);
+                // The window notifications this resize causes are not user resizes.
+                let _applying = g.sizer.as_ref().map(|s| s.applying());
                 hostwin::resize(win.raw(), f64::from(w), f64::from(h));
+                if let Some(s) = &g.sizer {
+                    s.set_last(w, h);
+                }
                 if let Some(f) = GuiLink::vt(&g).and_then(|v| v.set_size) {
                     // SAFETY: live plugin with a created embedded GUI, main thread.
                     unsafe { f(g.plugin, w, h) };
                 }
             }
-            if g.window.as_ref().is_some_and(|w| !w.is_visible()) {
+            if g.window.as_ref().is_some_and(|w| !w.is_open()) {
                 // The user closed the embedded editor's host window: free the editor.
                 GuiLink::destroy(&mut g);
             } else if self.host.gui_closed.swap(false, Ordering::Relaxed) {
@@ -1030,8 +1254,12 @@ impl GuiLink {
             } else {
                 log::warn!("clap: editor still open while its plugin is destroyed off the main thread");
                 g.created = false;
-                // Window calls are main-thread only: leave the host window rather than crash.
+                // Window calls are main-thread only: leave the host window rather than crash, but
+                // cut its resize handling off from the plugin.
                 g.window = None;
+                if let Some(s) = g.sizer.take() {
+                    s.set_target(None, false);
+                }
             }
         }
         g.alive = false;
@@ -1443,15 +1671,18 @@ impl Drop for Instance {
 /// Messages are dispatched by the app's own event loop on the main thread.
 #[cfg(windows)]
 mod hostwin {
+    use super::{GuiSizer, sizing_rect};
     use std::ffi::c_void;
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GetWindowLongPtrW, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
+        GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassExW, SIZE_MINIMIZED, SW_HIDE,
+        SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, WM_CLOSE, WM_NCDESTROY, WM_SIZE, WM_SIZING, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
     };
 
     pub const SUPPORTED: bool = true;
@@ -1467,11 +1698,102 @@ mod hostwin {
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
+    /// What the window procedure shares with its `HostWindow`, kept in the window's user data
+    /// (one `Arc` reference, stored by `new` and released on `WM_NCDESTROY`).
+    #[derive(Default)]
+    struct WindowState {
+        /// Set once by `set_sizer`.
+        sizer: OnceLock<Arc<GuiSizer>>,
+        /// The user closed the window (`WM_CLOSE` only hides it). Tracked instead of reading
+        /// `IsWindowVisible`, which is also false while the owner window is minimized (owned
+        /// windows are hidden with it): that must not close the editor.
+        closed: AtomicBool,
+    }
+
+    /// The window's state from its user data, borrowed for one message.
+    fn window_state(hwnd: HWND) -> Option<Arc<WindowState>> {
+        // SAFETY: `hwnd` is the window the procedure was called for; its user data is 0 or a
+        // pointer from `Arc::into_raw`, kept alive until `WM_NCDESTROY` (the last message).
+        let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState;
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: as above; this message takes a reference of its own, so the state outlives it
+        // even when a plugin destroys the window from a nested event loop meanwhile.
+        unsafe { Arc::increment_strong_count(p) };
+        // SAFETY: balances the increment just made.
+        Some(unsafe { Arc::from_raw(p) })
+    }
+
+    /// The sizer `set_sizer` gave the window, borrowed for one message.
+    fn window_sizer(hwnd: HWND) -> Option<Arc<GuiSizer>> {
+        window_state(hwnd)?.sizer.get().cloned()
+    }
+
+    /// The window's frame (outer minus client size), measured: right at any monitor's DPI, unlike
+    /// `AdjustWindowRectEx` (system DPI). `None` when the window can't be measured.
+    fn frame_size(hwnd: HWND) -> Option<(i32, i32)> {
+        let (mut w, mut c) = (RECT { left: 0, top: 0, right: 0, bottom: 0 }, RECT { left: 0, top: 0, right: 0, bottom: 0 });
+        // SAFETY: a window of this thread (or a stale handle, which fails); both rects are writable.
+        if unsafe { GetWindowRect(hwnd, &mut w) } == 0 || unsafe { GetClientRect(hwnd, &mut c) } == 0 {
+            return None;
+        }
+        let fw = w.right.saturating_sub(w.left).saturating_sub(c.right.saturating_sub(c.left));
+        let fh = w.bottom.saturating_sub(w.top).saturating_sub(c.bottom.saturating_sub(c.top));
+        Some((fw.max(0), fh.max(0)))
+    }
+
+    /// Outer size for a client area of `w`×`h`: measured frame, else `AdjustWindowRectEx`.
+    fn outer_for(hwnd: HWND, w: f64, h: f64) -> (i32, i32) {
+        match frame_size(hwnd) {
+            Some((fw, fh)) => ((w as i32).saturating_add(fw), (h as i32).saturating_add(fh)),
+            None => {
+                // SAFETY: a window of this thread; style values are only read.
+                let (style, ex) = unsafe { (GetWindowLongPtrW(hwnd, GWL_STYLE) as u32, GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32) };
+                outer_size(style, ex, w, h)
+            }
+        }
+    }
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if msg == WM_CLOSE {
-            // SAFETY: `hwnd` is the window this procedure was called for.
-            unsafe { ShowWindow(hwnd, SW_HIDE) };
-            return 0;
+        match msg {
+            WM_CLOSE => {
+                if let Some(s) = window_state(hwnd) {
+                    s.closed.store(true, Ordering::Relaxed);
+                }
+                // SAFETY: `hwnd` is the window this procedure was called for.
+                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                return 0;
+            }
+            // Live user resizes: keep the dragged edges at a size the plugin accepts.
+            WM_SIZING => {
+                // SAFETY: for WM_SIZING, `lparam` points to the window's writable drag rect.
+                if let (Some(s), Some(r), Some((fw, fh))) = (window_sizer(hwnd), unsafe { (lparam as *mut RECT).as_mut() }, frame_size(hwnd)) {
+                    let (w, h) = (r.right.saturating_sub(r.left).saturating_sub(fw), r.bottom.saturating_sub(r.top).saturating_sub(fh));
+                    if let Some((cw, ch)) = s.constrain(f64::from(w.max(1)), f64::from(h.max(1))) {
+                        let (ow, oh) = ((cw as i32).saturating_add(fw), (ch as i32).saturating_add(fh));
+                        (r.left, r.top, r.right, r.bottom) = sizing_rect(wparam, (r.left, r.top, r.right, r.bottom), (ow, oh));
+                        return 1;
+                    }
+                }
+            }
+            // Every completed resize: settle on the adjusted size and tell the plugin.
+            WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
+                if let Some(s) = window_sizer(hwnd) {
+                    let (w, h) = (f64::from((lparam & 0xFFFF) as u16), f64::from(((lparam >> 16) & 0xFFFF) as u16));
+                    s.user_resized(w, h, |cw, ch| resize(hwnd, cw, ch));
+                }
+            }
+            WM_NCDESTROY => {
+                // SAFETY: the window's last message: take the user data back and release the
+                // `Arc` reference `new` stored there; nothing reads it afterwards.
+                let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const WindowState;
+                if !p.is_null() {
+                    // SAFETY: `p` came from `Arc::into_raw` in `new`, released exactly once.
+                    drop(unsafe { Arc::from_raw(p) });
+                }
+            }
+            _ => {}
         }
         // SAFETY: default handling of a message for the window it was sent to.
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -1518,6 +1840,8 @@ mod hostwin {
     /// Owns the window handle; destroyed in `close` (main thread only).
     pub struct HostWindow {
         hwnd: HWND,
+        /// Shared with the window procedure (see `WindowState`).
+        state: Arc<WindowState>,
     }
 
     // SAFETY: the handle is only used on the main thread (every method checks); the struct
@@ -1560,12 +1884,57 @@ mod hostwin {
             if hwnd.is_null() {
                 return Err("cannot create the editor window".into());
             }
-            Ok(HostWindow { hwnd })
+            let state = Arc::new(WindowState::default());
+            let p = Arc::into_raw(state.clone());
+            // SAFETY: our new window of this thread; the pointer stays valid until `WM_NCDESTROY`
+            // releases it.
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, p as _) };
+            // SAFETY: as above; only reads the value back.
+            if unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState != p {
+                // SAFETY: the reference was not stored: take it back, and destroy our window.
+                unsafe {
+                    drop(Arc::from_raw(p));
+                    DestroyWindow(hwnd);
+                }
+                return Err("cannot set up the editor window".into());
+            }
+            // `AdjustWindowRectEx` assumed the system DPI; size the client area by the real frame.
+            resize(hwnd, w, h);
+            Ok(HostWindow { hwnd, state })
         }
 
         /// The window handle (for resizes).
         pub fn raw(&self) -> *mut c_void {
             self.hwnd
+        }
+
+        /// Routes the window's resizes through `sizer` (the window procedure reads it from the
+        /// window's state). Once per window.
+        pub fn set_sizer(&mut self, sizer: &Arc<GuiSizer>) {
+            let _ = self.state.sizer.set(sizer.clone());
+        }
+
+        /// Gives the window a sizing border (the plugin said `can_resize`), or takes it away,
+        /// keeping the client size.
+        pub fn set_resizable(&self, resizable: bool) {
+            let Some(h) = self.live() else { return };
+            // SAFETY: a live window of this thread; the style is only read.
+            if ((unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_THICKFRAME) != 0) == resizable {
+                return;
+            }
+            let mut c = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            // SAFETY: a live window of this thread; `c` is writable.
+            unsafe { GetClientRect(h, &mut c) };
+            // SAFETY: as above; only the sizing-border bit of the style changes.
+            unsafe {
+                let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+                let style = if resizable { style | WS_THICKFRAME } else { style & !WS_THICKFRAME };
+                SetWindowLongPtrW(h, GWL_STYLE, style as _);
+            }
+            // SAFETY: as above; the frame is recomputed for the new style, nothing else changes.
+            unsafe { SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
+            // The new frame took room from the client area: give it back.
+            resize(h, f64::from(c.right), f64::from(c.bottom));
         }
 
         /// The `HWND` the plugin creates its child window in.
@@ -1575,6 +1944,8 @@ mod hostwin {
 
         pub fn raise(&self) {
             if let Some(h) = self.live() {
+                // Shown again, it is open again.
+                self.state.closed.store(false, Ordering::Relaxed);
                 // SAFETY: a live window of this thread.
                 unsafe {
                     ShowWindow(h, SW_SHOW);
@@ -1583,9 +1954,10 @@ mod hostwin {
             }
         }
 
-        pub fn is_visible(&self) -> bool {
-            // SAFETY: a live window of this thread.
-            self.live().is_some_and(|h| unsafe { IsWindowVisible(h) } != 0)
+        /// The window exists and the user has not closed it (it may be hidden with its
+        /// minimized owner).
+        pub fn is_open(&self) -> bool {
+            self.live().is_some() && !self.state.closed.load(Ordering::Relaxed)
         }
 
         pub fn close(self) {
@@ -1602,10 +1974,8 @@ mod hostwin {
         if !on_main_thread() || window.is_null() || unsafe { IsWindow(window) } == 0 {
             return;
         }
-        // SAFETY: a live window of this thread; style values are read, not changed.
-        let (style, ex) = unsafe { (GetWindowLongPtrW(window, GWL_STYLE) as u32, GetWindowLongPtrW(window, GWL_EXSTYLE) as u32) };
-        let (ow, oh) = outer_size(style, ex, w, h);
-        // SAFETY: as above; only the size changes.
+        let (ow, oh) = outer_for(window, w, h);
+        // SAFETY: a live window of this thread; only the size changes.
         unsafe { SetWindowPos(window, std::ptr::null_mut(), 0, 0, ow, oh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
     }
 }
@@ -1626,11 +1996,13 @@ mod hostwin {
         pub fn raw(&self) -> *mut c_void {
             std::ptr::null_mut()
         }
+        pub fn set_sizer(&mut self, _sizer: &std::sync::Arc<super::GuiSizer>) {}
+        pub fn set_resizable(&self, _resizable: bool) {}
         pub fn parent(&self) -> *mut c_void {
             std::ptr::null_mut()
         }
         pub fn raise(&self) {}
-        pub fn is_visible(&self) -> bool {
+        pub fn is_open(&self) -> bool {
             false
         }
         pub fn close(self) {}
@@ -1642,6 +2014,139 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: an editor window hidden (as with its minimized owner) stays open; only the user's
+    /// close (`WM_CLOSE`) closes it, and raising it opens it again.
+    #[cfg(windows)]
+    #[test]
+    fn host_window_is_closed_only_by_the_user() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SW_HIDE, SendMessageW, ShowWindow, WM_CLOSE};
+        // Host windows live on the thread named "main" (the app's UI thread).
+        let t = std::thread::Builder::new().name("main".into()).spawn(|| {
+            let w = hostwin::HostWindow::new("Editor", 200.0, 100.0).expect("window");
+            let h = w.raw();
+            assert!(w.is_open());
+            // SAFETY: our live window, on its own thread.
+            unsafe { ShowWindow(h, SW_HIDE) };
+            assert!(w.is_open(), "hidden is not closed");
+            // SAFETY: as above; the window procedure runs before this returns.
+            unsafe { SendMessageW(h, WM_CLOSE, 0, 0) };
+            assert!(!w.is_open(), "closed by the user");
+            w.raise();
+            assert!(w.is_open(), "raised: open again");
+            w.close();
+            // SAFETY: `IsWindow` accepts any value.
+            assert_eq!(unsafe { IsWindow(h) }, 0, "closed: destroyed");
+        });
+        assert!(t.expect("spawn").join().is_ok());
+    }
+
+    /// `set_size` calls of the fake plugin below (one test uses it).
+    static SET_SIZES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+    /// When set, the fake `set_size` calls back into the sizer, the way a plugin resizing its
+    /// parent from `set_size` makes the window notify the host again.
+    static NESTED: Mutex<Option<Arc<GuiSizer>>> = Mutex::new(None);
+    /// When set, the fake `set_size` closes the editor from inside the call (takes the target
+    /// away), the way a plugin pumping a nested event loop can.
+    static CLOSE_INSIDE: Mutex<Option<Arc<GuiSizer>>> = Mutex::new(None);
+    /// The fake `set_size` refuses every size.
+    static REFUSE: AtomicBool = AtomicBool::new(false);
+
+    /// Accepts 200..=800 × 100..=600.
+    unsafe extern "C" fn fake_adjust(_p: *const clap_plugin, w: *mut u32, h: *mut u32) -> bool {
+        // SAFETY: the sizer passes valid out-pointers.
+        unsafe {
+            *w = (*w).clamp(200, 800);
+            *h = (*h).clamp(100, 600);
+        }
+        true
+    }
+
+    unsafe extern "C" fn fake_set_size(_p: *const clap_plugin, w: u32, h: u32) -> bool {
+        SET_SIZES.lock().unwrap().push((w, h));
+        if let Some(s) = NESTED.lock().unwrap().clone() {
+            s.user_resized(999.0, 999.0, |_, _| panic!("a nested notification is not negotiated"));
+        }
+        if let Some(s) = CLOSE_INSIDE.lock().unwrap().take() {
+            s.set_target(None, false);
+        }
+        !REFUSE.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn user_resizes_are_negotiated_with_the_plugin_without_loops() {
+        let target = SizeTarget { plugin: std::ptr::null(), adjust_size: Some(fake_adjust), set_size: Some(fake_set_size) };
+        let sizes = || SET_SIZES.lock().unwrap().clone();
+        let sizer = Arc::new(GuiSizer::new(320, 240));
+        // `can_resize` false: nothing is negotiated.
+        sizer.set_target(Some(target), false);
+        assert_eq!(sizer.constrain(500.0, 400.0), None);
+        sizer.user_resized(500.0, 400.0, |_, _| panic!("not resizable"));
+        assert!(sizes().is_empty());
+
+        sizer.set_target(Some(target), true);
+        assert_eq!(sizer.constrain(50.0, 5000.0), Some((200.0, 600.0)), "adjust_size shapes the drag");
+        let mut set = None;
+        sizer.user_resized(1000.0, 50.0, |w, h| set = Some((w, h)));
+        assert_eq!(set, Some((800.0, 100.0)), "the window follows the adjusted size");
+        assert_eq!(sizes(), vec![(800, 100)]);
+        sizer.user_resized(640.0, 480.0, |_, _| panic!("accepted as is"));
+        sizer.user_resized(640.0, 480.0, |_, _| panic!("accepted as is"));
+        assert_eq!(sizes(), vec![(800, 100), (640, 480)], "the same size is not repeated");
+
+        // A plugin `request_resize` being applied: its window notifications are ignored.
+        {
+            let _applying = sizer.applying();
+            assert_eq!(sizer.constrain(300.0, 300.0), None);
+            sizer.user_resized(300.0, 300.0, |_, _| panic!("ignored while applying"));
+            sizer.set_last(300, 300);
+        }
+        sizer.user_resized(300.0, 300.0, |_, _| panic!("accepted as is"));
+        assert_eq!(sizes().len(), 2);
+
+        // A plugin that resizes its parent from `set_size` doesn't start a loop (or deadlock).
+        *NESTED.lock().unwrap() = Some(sizer.clone());
+        sizer.user_resized(400.0, 400.0, |_, _| panic!("accepted as is"));
+        *NESTED.lock().unwrap() = None;
+        assert_eq!(sizes(), vec![(800, 100), (640, 480), (400, 400)]);
+
+        // A plugin that refuses the size: the window goes back to the last accepted one.
+        REFUSE.store(true, Ordering::Relaxed);
+        let mut set = None;
+        sizer.user_resized(500.0, 500.0, |w, h| set = Some((w, h)));
+        REFUSE.store(false, Ordering::Relaxed);
+        assert_eq!(set, Some((400.0, 400.0)));
+        assert_eq!(sizer.last(), (400, 400));
+        SET_SIZES.lock().unwrap().pop();
+
+        // Closing the editor from inside `set_size` neither deadlocks nor leaves the plugin
+        // reachable: the removal is applied when the call returns.
+        *CLOSE_INSIDE.lock().unwrap() = Some(sizer.clone());
+        sizer.user_resized(450.0, 450.0, |_, _| panic!("accepted as is"));
+        assert!(!sizer.resizable());
+        assert!(sizer.target.lock().unwrap().is_none());
+        sizer.set_target(Some(target), true);
+
+        // A plugin without `adjust_size` gets the user's size as is.
+        sizer.set_target(Some(SizeTarget { adjust_size: None, ..target }), true);
+        assert_eq!(sizer.constrain(5000.0, 10.0), Some((5000.0, 10.0)));
+
+        // Once the GUI goes, nothing reaches the plugin any more.
+        sizer.set_target(None, true);
+        assert!(!sizer.resizable());
+        sizer.user_resized(500.0, 500.0, |_, _| panic!("no plugin"));
+        assert_eq!(sizes().len(), 4);
+    }
+
+    #[test]
+    fn sizing_moves_only_the_dragged_edges() {
+        let r = (100, 100, 500, 400);
+        assert_eq!(sizing_rect(8, r, (300, 200)), (100, 100, 400, 300), "bottom-right");
+        assert_eq!(sizing_rect(4, r, (300, 200)), (200, 200, 500, 400), "top-left");
+        assert_eq!(sizing_rect(5, r, (300, 200)), (100, 200, 400, 400), "top-right");
+        assert_eq!(sizing_rect(7, r, (300, 200)), (200, 100, 500, 300), "bottom-left");
+        assert_eq!(sizing_rect(2, (i32::MAX - 1, 0, i32::MAX, 10), (100, 10)), (i32::MAX - 1, 0, i32::MAX, 10), "saturates");
+    }
 
     #[test]
     fn the_transport_reaches_clap_in_fixed_point() {

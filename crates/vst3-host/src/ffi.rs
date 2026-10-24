@@ -1763,6 +1763,8 @@ fn split_state(data: &[u8]) -> Option<(&[u8], &[u8])> {
 pub(crate) struct PlugFrame {
     /// The host window (an `NSWindow*` on macOS), not owned; null when there is none.
     window: std::sync::atomic::AtomicPtr<c_void>,
+    /// Shared with the host window's resize handling (delegate / window procedure).
+    sizer: Arc<ViewSizer>,
 }
 
 impl Class for PlugFrame {
@@ -1771,11 +1773,21 @@ impl Class for PlugFrame {
 
 impl IPlugFrameTrait for PlugFrame {
     unsafe fn resizeView(&self, view: *mut sb::IPlugView, new_size: *mut sb::ViewRect) -> sb::tresult {
+        // Like Steinberg's editorhost: only the attached view may resize the window, and not
+        // again from inside its own resize (a view that re-requests a size from `onSize` would
+        // otherwise recurse until the stack overflows).
+        if view.is_null() || view != self.sizer.attached() {
+            return sb::kInvalidArgument;
+        }
         // SAFETY: in-pointer from the plugin (or null, handled).
         let Some(r) = (unsafe { new_size.as_mut() }) else { return sb::kInvalidArgument };
+        let Some(_resizing) = self.sizer.plugin_resize() else { return sb::kResultFalse };
         let (w, h) = rect_size(r);
+        // The window notifications this resize causes are not user resizes: don't negotiate them.
+        let _guard = self.sizer.applying();
         window::resize(self.window.load(Ordering::Relaxed), w, h);
-        // SAFETY: the plugin passes its own live view (or null, handled).
+        self.sizer.set_last(w, h);
+        // SAFETY: the plugin passes its own live view (checked against the attached one above).
         if let Some(v) = unsafe { vst3::ComRef::from_raw(view) } {
             // SAFETY: valid view; `r` is the plugin's own writable rect.
             unsafe { v.onSize(r) };
@@ -1789,6 +1801,220 @@ fn rect_size(r: &sb::ViewRect) -> (f64, f64) {
     let w = r.right.saturating_sub(r.left).clamp(1, 16_384);
     let h = r.bottom.saturating_sub(r.top).clamp(1, 16_384);
     (f64::from(w), f64::from(h))
+}
+
+/// A view rect of `w`×`h` at the origin (non-finite or out-of-range sizes are clamped).
+fn size_rect(w: f64, h: f64) -> sb::ViewRect {
+    let px = |v: f64| if v.is_finite() { v.round().clamp(1.0, 16_384.0) as i32 } else { 1 };
+    sb::ViewRect { left: 0, top: 0, right: px(w), bottom: px(h) }
+}
+
+type ViewSlot = Option<ComPtr<sb::IPlugView>>;
+
+/// Negotiates user resizes of a host window with its plugin view (VST3: the host asks
+/// `checkSizeConstraint`, sizes the window to the answer, then calls `onSize`).
+///
+/// Shared by the plug frame (plugin-initiated `resizeView`) and the platform window's resize
+/// handling (an `NSWindowDelegate` on macOS, the window procedure on Windows). Everything runs on
+/// the main thread; the view lock only guards against the instance clearing the view from another
+/// thread while a resize calls into it. Loops are cut in two places: while the host applies a
+/// size (a plugin `resizeView`, or a user resize being constrained and handed to `onSize`), the
+/// window notifications this causes are ignored rather than negotiated again (`applying`), and a
+/// `resizeView` from inside another one is refused (`plugin_resizing`).
+pub(crate) struct ViewSizer {
+    view: Mutex<ViewSlot>,
+    /// The thread inside a call into the view under `view`'s lock (see `with_view`).
+    holder: Mutex<Option<std::thread::ThreadId>>,
+    /// A view change requested re-entrantly by the holder thread, applied when its call returns.
+    pending: Mutex<Option<ViewSlot>>,
+    /// The attached view (identity only, never dereferenced): the one allowed to `resizeView`.
+    attached: std::sync::atomic::AtomicPtr<sb::IPlugView>,
+    /// The view said `canResize`: user resizes are negotiated (the window has a resize handle).
+    resizable: AtomicBool,
+    /// Nesting depth of resizes being applied by the host.
+    applying: AtomicU32,
+    /// A plugin `resizeView` is in progress.
+    plugin_resizing: AtomicBool,
+    /// The size last given to the view (`width << 32 | height`), to skip repeated `onSize`.
+    last: AtomicU64,
+}
+
+/// Ends an "applying" section of a [`ViewSizer`] when dropped.
+pub(crate) struct Applying<'a>(&'a AtomicU32);
+
+impl Drop for Applying<'_> {
+    fn drop(&mut self) {
+        // Paired with the increment in `ViewSizer::applying`: never below zero.
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Ends a plugin `resizeView` of a [`ViewSizer`] when dropped.
+pub(crate) struct PluginResize<'a>(&'a AtomicBool);
+
+impl Drop for PluginResize<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl ViewSizer {
+    pub fn new(w: f64, h: f64) -> ViewSizer {
+        let s = ViewSizer {
+            view: Mutex::new(None),
+            holder: Mutex::new(None),
+            pending: Mutex::new(None),
+            attached: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            resizable: AtomicBool::new(false),
+            applying: AtomicU32::new(0),
+            plugin_resizing: AtomicBool::new(false),
+            last: AtomicU64::new(0),
+        };
+        s.set_last(w, h);
+        s
+    }
+
+    fn holder(&self) -> std::sync::MutexGuard<'_, Option<std::thread::ThreadId>> {
+        self.holder.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Option<ViewSlot>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `f` on the view under its lock (`None` without a view). A view change requested from
+    /// inside `f` on this thread (a plugin pumping a nested event loop that closes the editor) is
+    /// deferred until `f` returns instead of deadlocking on the lock.
+    fn with_view<R>(&self, f: impl FnOnce(&ComPtr<sb::IPlugView>) -> R) -> Option<R> {
+        let mut g = self.view.lock().unwrap_or_else(PoisonError::into_inner);
+        *self.holder() = Some(std::thread::current().id());
+        let out = g.as_ref().map(f);
+        *self.holder() = None;
+        if let Some(v) = self.pending().take() {
+            *g = v;
+        }
+        out
+    }
+
+    /// Replaces the view, or defers that when this thread is inside `with_view` (see there).
+    /// Returns the previous view when it was replaced right away.
+    fn replace_view(&self, view: ViewSlot) -> ViewSlot {
+        self.attached.store(view.as_ref().map_or(std::ptr::null_mut(), |v| v.as_ptr()), Ordering::Relaxed);
+        if *self.holder() == Some(std::thread::current().id()) {
+            *self.pending() = Some(view);
+            return None;
+        }
+        let mut g = self.view.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *g, view)
+    }
+
+    /// Names the view about to be attached: from now on it may `resizeView` (plugins often do
+    /// from `attached`), before it is handed over with [`ViewSizer::set_view`].
+    pub fn expect_view(&self, view: &ComPtr<sb::IPlugView>) {
+        self.attached.store(view.as_ptr(), Ordering::Relaxed);
+    }
+
+    fn attached(&self) -> *mut sb::IPlugView {
+        self.attached.load(Ordering::Relaxed)
+    }
+
+    /// Hands the attached view over (or takes it away again: `None`).
+    pub fn set_view(&self, view: ViewSlot, resizable: bool) {
+        self.resizable.store(resizable && view.is_some(), Ordering::Relaxed);
+        drop(self.replace_view(view));
+    }
+
+    /// Takes the view away (stops negotiating) and hands its reference to the caller (`None`
+    /// when the removal had to be deferred, see `with_view`).
+    pub fn take_view(&self) -> ViewSlot {
+        self.resizable.store(false, Ordering::Relaxed);
+        self.replace_view(None)
+    }
+
+    pub fn resizable(&self) -> bool {
+        self.resizable.load(Ordering::Relaxed)
+    }
+
+    /// Marks a host-applied resize; window notifications are ignored until the guard drops.
+    pub fn applying(&self) -> Applying<'_> {
+        self.applying.fetch_add(1, Ordering::Relaxed);
+        Applying(&self.applying)
+    }
+
+    fn is_applying(&self) -> bool {
+        self.applying.load(Ordering::Relaxed) > 0
+    }
+
+    /// Starts a plugin `resizeView`; `None` while one is already in progress.
+    fn plugin_resize(&self) -> Option<PluginResize<'_>> {
+        (!self.plugin_resizing.swap(true, Ordering::Relaxed)).then_some(PluginResize(&self.plugin_resizing))
+    }
+
+    fn set_last(&self, w: f64, h: f64) {
+        let r = size_rect(w, h);
+        self.last.store((u64::from(r.right as u32) << 32) | u64::from(r.bottom as u32), Ordering::Relaxed);
+    }
+
+    fn last(&self) -> (f64, f64) {
+        let v = self.last.load(Ordering::Relaxed);
+        (f64::from((v >> 32) as u32), f64::from(v as u32))
+    }
+
+    /// The size the view accepts instead of `w`×`h` (`checkSizeConstraint`), or `None` when no
+    /// resize should be negotiated (the view can't resize, is gone, or a resize is being applied).
+    pub fn constrain(&self, w: f64, h: f64) -> Option<(f64, f64)> {
+        if !self.resizable() || self.is_applying() {
+            return None;
+        }
+        let _guard = self.applying();
+        self.with_view(|view| constrain_view(view, w, h))
+    }
+
+    /// The window's content was resized to `w`×`h` by the user (or the window manager): settles
+    /// on the view's constrained size, makes the window follow it through `set_window` when it
+    /// differs, and tells the view with `onSize`. Ignored while the host applies a resize itself.
+    // Called by the macOS and Windows host windows only (and the tests).
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    pub fn user_resized(&self, w: f64, h: f64, set_window: impl FnOnce(f64, f64)) {
+        if !self.resizable() || self.is_applying() {
+            return;
+        }
+        let _guard = self.applying();
+        self.with_view(|view| {
+            let (cw, ch) = constrain_view(view, w, h);
+            let want = size_rect(w, h);
+            let mut r = size_rect(cw, ch);
+            if (r.right, r.bottom) != (want.right, want.bottom) {
+                set_window(cw, ch);
+            }
+            if self.last() != (cw, ch) {
+                self.set_last(cw, ch);
+                // SAFETY: valid, attached view (the editor link takes it away before `removed`,
+                // deferred to here when that happens inside this call); main thread; `r` is a
+                // writable local rect.
+                unsafe { view.onSize(&mut r) };
+            }
+        });
+    }
+}
+
+/// `checkSizeConstraint` for a proposed `w`×`h`: the plugin adjusts the rect in place to a size it
+/// supports. A plugin that doesn't implement it leaves the rect alone (the proposal stands).
+fn constrain_view(view: &ComPtr<sb::IPlugView>, w: f64, h: f64) -> (f64, f64) {
+    let mut r = size_rect(w, h);
+    // SAFETY: valid view; `r` is a writable local rect.
+    unsafe { view.checkSizeConstraint(&mut r) };
+    rect_size(&r)
+}
+
+/// The window rect while the user drags `edge` (a Windows `WMSZ_*` value): moves only the dragged
+/// edges so the outer size becomes `w`×`h`. Pure, so it's testable on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sizing_rect(edge: usize, (left, top, right, bottom): (i32, i32, i32, i32), (w, h): (i32, i32)) -> (i32, i32, i32, i32) {
+    // WMSZ_LEFT = 1, WMSZ_TOP = 3, WMSZ_TOPLEFT = 4, WMSZ_TOPRIGHT = 5, WMSZ_BOTTOMLEFT = 7.
+    let (l, r) = if matches!(edge, 1 | 4 | 7) { (right.saturating_sub(w), right) } else { (left, left.saturating_add(w)) };
+    let (t, b) = if matches!(edge, 3..=5) { (bottom.saturating_sub(h), bottom) } else { (top, top.saturating_add(h)) };
+    (l, t, r, b)
 }
 
 #[derive(Default)]
@@ -1849,6 +2075,23 @@ impl EditorLink {
         Ok((w as u32, h as u32))
     }
 
+    /// Creates the view and asks it how it would take a user resize to `w`×`h`, without
+    /// attaching it: `None` when it can't resize (`canResize`), else the size `checkSizeConstraint`
+    /// settles on. The same negotiation the host window runs, except that `canResize` and
+    /// `checkSizeConstraint` are asked before `attached` (the window asks once attached), which
+    /// some plugins answer differently. For diagnostics and tests.
+    pub fn probe_resize(&self, w: u32, h: u32) -> Result<Option<(u32, u32)>, String> {
+        let g = self.lock();
+        let view = EditorLink::create_view(&g)?;
+        // SAFETY: valid view.
+        let resizable = unsafe { view.canResize() } == sb::kResultTrue;
+        let sizer = ViewSizer::new(f64::from(w), f64::from(h));
+        sizer.set_view(Some(view), resizable);
+        let out = sizer.constrain(f64::from(w), f64::from(h)).map(|(a, b)| (a as u32, b as u32));
+        sizer.set_view(None, false);
+        Ok(out)
+    }
+
     /// Opens (or raises) the editor in a host window. Main thread only.
     pub fn open(&self, title: &str) -> Result<(), String> {
         if !window::on_main_thread() {
@@ -1857,7 +2100,7 @@ impl EditorLink {
         let platform = window::PLATFORM_TYPE.ok_or_else(|| "VST3 editors are not hosted on this platform yet".to_string())?;
         let mut g = self.lock();
         if let Some(w) = &g.window {
-            if w.is_visible() {
+            if w.is_open() {
                 w.raise();
                 return Ok(());
             }
@@ -1873,13 +2116,16 @@ impl EditorLink {
         // SAFETY: valid view; `r` is writable. On failure the default size stays.
         unsafe { view.getSize(&mut r) };
         let (w, h) = rect_size(&r);
-        let win = window::HostWindow::new(title, w, h)?;
-        let frame = ComWrapper::new(PlugFrame { window: std::sync::atomic::AtomicPtr::new(win.raw()) });
+        let mut win = window::HostWindow::new(title, w, h)?;
+        let sizer = Arc::new(ViewSizer::new(w, h));
+        win.set_sizer(&sizer);
+        let frame = ComWrapper::new(PlugFrame { window: std::sync::atomic::AtomicPtr::new(win.raw()), sizer: sizer.clone() });
         if let Some(f) = frame.as_com_ref::<sb::IPlugFrame>() {
             // SAFETY: valid view; the frame outlives the view's attachment (kept in `g.frame`
             // and detached in `teardown`).
             unsafe { view.setFrame(f.as_ptr()) };
         }
+        sizer.expect_view(&view);
         // SAFETY: valid view; the parent is the live content view of `win`, of the type named.
         if !ok(unsafe { view.attached(win.parent(), platform) }) {
             // SAFETY: valid view; detach our frame again.
@@ -1887,6 +2133,13 @@ impl EditorLink {
             win.close();
             return Err("the editor could not attach to its window".into());
         }
+        // Asked once attached: some plugins only know whether their editor resizes by then.
+        // SAFETY: valid, attached view.
+        let resizable = unsafe { view.canResize() } == sb::kResultTrue;
+        // The resize border first: the frame change it causes is not a user resize (the sizer
+        // negotiates only once it has the view).
+        win.set_resizable(resizable);
+        sizer.set_view(Some(view.clone()), resizable);
         win.raise();
         g.view = Some(view);
         g.frame = Some(frame);
@@ -1895,6 +2148,10 @@ impl EditorLink {
     }
 
     fn teardown(g: &mut EditorInner) {
+        // No more user resizes reach the view once it is being removed.
+        if let Some(f) = &g.frame {
+            f.sizer.set_view(None, false);
+        }
         if let Some(view) = g.view.take() {
             // SAFETY: valid, attached view; main thread (callers check). `removed` before the
             // window goes, and the frame is detached before it is released.
@@ -1954,7 +2211,7 @@ impl EditorLink {
     pub fn is_open(&self) -> bool {
         let g = self.lock();
         match &g.window {
-            Some(w) if window::on_main_thread() => w.is_visible(),
+            Some(w) if window::on_main_thread() => w.is_open(),
             Some(_) => true,
             None => false,
         }
@@ -1966,7 +2223,7 @@ impl EditorLink {
             return;
         }
         let mut g = self.lock();
-        if g.window.as_ref().is_some_and(|w| !w.is_visible()) {
+        if g.window.as_ref().is_some_and(|w| !w.is_open()) {
             EditorLink::teardown(&mut g);
         }
     }
@@ -2033,9 +2290,11 @@ impl EditorLink {
                     std::mem::forget(v);
                     leaked = true;
                 }
-                // `HostWindow` has no destructor: dropping it leaks its retain on purpose.
+                // `HostWindow` has no destructor: dropping it leaks its retain on purpose. The
+                // leaked window keeps its resize handling, so cut it off from the view first.
                 g.window = None;
                 if let Some(f) = g.frame.take() {
+                    std::mem::forget(f.sizer.take_view());
                     std::mem::forget(f);
                 }
             }
@@ -2049,11 +2308,101 @@ impl EditorLink {
 /// The platform host window for plugin views.
 #[cfg(target_os = "macos")]
 mod window {
+    use super::ViewSizer;
     use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask};
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2::runtime::ProtocolObject;
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use std::ffi::{c_char, c_void};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The delegate's state: the sizer, and whether the user closed the window.
+    struct Ivars {
+        sizer: Arc<ViewSizer>,
+        closed: Arc<AtomicBool>,
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and `ResizeDelegate` implements no
+        // `Drop` (its ivars, two `Arc`s, are dropped by objc2 when the object is deallocated).
+        // No `#[name]`: objc2 then generates a crate- and version-specific name and reuses an
+        // already registered class of that name (e.g. a second copy of this crate in the process)
+        // instead of panicking.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = Ivars]
+        struct ResizeDelegate;
+
+        // SAFETY: NSObjectProtocol has no safety requirements.
+        unsafe impl NSObjectProtocol for ResizeDelegate {}
+
+        // SAFETY: the methods below match the NSWindowDelegate selectors' signatures.
+        unsafe impl NSWindowDelegate for ResizeDelegate {
+            /// Live user resizes: the window only ever takes a size the view accepts.
+            #[unsafe(method(windowWillResize:toSize:))]
+            fn window_will_resize(&self, sender: &NSWindow, frame_size: NSSize) -> NSSize {
+                // Our own reference: the sizer stays alive even if the plugin closes the editor
+                // from a nested event loop during this call.
+                let sizer = self.ivars().sizer.clone();
+                constrained_frame(&sizer, sender, NSRect::new(NSPoint::new(0.0, 0.0), frame_size)).size
+            }
+
+            /// The zoom button: zoom to the largest size the view accepts within the default
+            /// (screen) frame, keeping the window's top edge.
+            #[unsafe(method(windowWillUseStandardFrame:defaultFrame:))]
+            fn window_standard_frame(&self, window: &NSWindow, default_frame: NSRect) -> NSRect {
+                let sizer = self.ivars().sizer.clone();
+                let mut frame = constrained_frame(&sizer, window, default_frame);
+                frame.origin.y = default_frame.origin.y + default_frame.size.height - frame.size.height;
+                frame
+            }
+
+            /// Every completed resize (drags, zoom): settles on a constrained size and tells the
+            /// view. Resizes the host applies itself are ignored by the sizer.
+            #[unsafe(method(windowDidResize:))]
+            fn window_did_resize(&self, notification: &NSNotification) {
+                let sizer = self.ivars().sizer.clone();
+                let Some(window) = notification.object().and_then(|o| o.downcast::<NSWindow>().ok()) else { return };
+                let Some(view) = window.contentView() else { return };
+                let size = view.frame().size;
+                sizer.user_resized(size.width, size.height, |w, h| window.setContentSize(NSSize::new(w, h)));
+            }
+
+            /// The user closed the window (the host's own `close` clears the delegate first).
+            /// Tracked here rather than read from `isVisible`, which is also false while the app
+            /// is inactive and AppKit has hidden the window (`hidesOnDeactivate`): switching to
+            /// another app must not close the editors.
+            #[unsafe(method(windowWillClose:))]
+            fn window_will_close(&self, _notification: &NSNotification) {
+                self.ivars().closed.store(true, Ordering::Relaxed);
+            }
+        }
+    );
+
+    /// `frame` with its content size constrained by the view (unchanged when nothing is
+    /// negotiated); the origin stays.
+    fn constrained_frame(sizer: &ViewSizer, window: &NSWindow, frame: NSRect) -> NSRect {
+        let content = window.contentRectForFrameRect(frame);
+        match sizer.constrain(content.size.width, content.size.height) {
+            Some((w, h)) => {
+                let size = window.frameRectForContentRect(NSRect::new(content.origin, NSSize::new(w, h))).size;
+                NSRect::new(frame.origin, size)
+            }
+            None => frame,
+        }
+    }
+
+    impl ResizeDelegate {
+        fn new(mtm: MainThreadMarker, sizer: Arc<ViewSizer>, closed: Arc<AtomicBool>) -> Retained<ResizeDelegate> {
+            let this = ResizeDelegate::alloc(mtm).set_ivars(Ivars { sizer, closed });
+            // SAFETY: `init` of NSObject on a freshly allocated instance whose ivars are set.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeNSView);
 
@@ -2065,10 +2414,14 @@ mod window {
     /// the plugin view's parent. Holds one retain of the window; main thread only.
     pub struct HostWindow {
         window: *mut NSWindow,
+        /// The window's delegate (one retain; the window only keeps a weak reference), or null.
+        delegate: *mut ResizeDelegate,
+        /// Set by the delegate when the user closes the window.
+        closed: Arc<AtomicBool>,
     }
 
-    // SAFETY: the pointer is only dereferenced on the main thread (every method checks
-    // `MainThreadMarker`); the struct merely carries the retain between threads' locks.
+    // SAFETY: the pointers are only dereferenced on the main thread (every method checks
+    // `MainThreadMarker`); the struct merely carries the retains between threads' locks.
     unsafe impl Send for HostWindow {}
 
     impl HostWindow {
@@ -2099,7 +2452,38 @@ mod window {
             window.setExcludedFromWindowsMenu(true);
             window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
             window.center();
-            Ok(HostWindow { window: Retained::into_raw(window) })
+            Ok(HostWindow { window: Retained::into_raw(window), delegate: std::ptr::null_mut(), closed: Arc::new(AtomicBool::new(false)) })
+        }
+
+        /// Routes the window's resizes through `sizer` (an `NSWindowDelegate`). Once per window.
+        pub fn set_sizer(&mut self, sizer: &Arc<ViewSizer>) {
+            let (Some(mtm), Some(w)) = (MainThreadMarker::new(), self.get()) else { return };
+            if !self.delegate.is_null() {
+                return;
+            }
+            let delegate = ResizeDelegate::new(mtm, sizer.clone(), self.closed.clone());
+            w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            self.delegate = Retained::into_raw(delegate);
+        }
+
+        /// Gives the window a resize handle (the view said `canResize`), or takes it away.
+        pub fn set_resizable(&self, resizable: bool) {
+            let Some(w) = self.get() else { return };
+            let style = w.styleMask();
+            let style = if resizable { style | NSWindowStyleMask::Resizable } else { style & !NSWindowStyleMask::Resizable };
+            if style == w.styleMask() {
+                return;
+            }
+            let size = w.contentView().map(|v| v.frame().size);
+            w.setStyleMask(style);
+            // A resizable window gets a zoom button; keep it out of full screen (the editor is a
+            // transient panel, and the sizer would fight a full-screen size the view refuses).
+            if resizable {
+                w.setCollectionBehavior(w.collectionBehavior() | NSWindowCollectionBehavior::FullScreenNone);
+            }
+            if let Some(size) = size {
+                w.setContentSize(size);
+            }
         }
 
         /// The raw window pointer (for the plug frame's resizes).
@@ -2118,18 +2502,28 @@ mod window {
             }
         }
 
-        pub fn is_visible(&self) -> bool {
-            self.get().is_some_and(|w| w.isVisible())
+        /// The window exists and the user has not closed it (AppKit may have hidden it while the
+        /// app is inactive). Before the delegate is set, the window's own visibility.
+        pub fn is_open(&self) -> bool {
+            self.get().is_some_and(|w| if self.delegate.is_null() { w.isVisible() } else { !self.closed.load(Ordering::Relaxed) })
         }
 
         pub fn close(self) {
             if let Some(w) = self.get() {
+                w.setDelegate(None);
                 w.orderOut(None);
                 w.close();
             }
             if MainThreadMarker::new().is_some() {
                 // SAFETY: balances the retain taken in `new`; nothing uses the pointer after this.
                 drop(unsafe { Retained::from_raw(self.window) });
+                // SAFETY: null, or balances the retain taken in `set_sizer`; the window no longer
+                // refers to it (delegate cleared above).
+                if let Some(d) = unsafe { Retained::from_raw(self.delegate) } {
+                    // Released when the event loop's autorelease pool drains, not now: `close` may
+                    // run inside one of the delegate's own methods (a plugin pumping a nested loop).
+                    let _ = Retained::autorelease_ptr(d);
+                }
             }
         }
     }
@@ -2152,15 +2546,18 @@ mod window {
 /// the window. Messages are dispatched by the app's own event loop on the main thread.
 #[cfg(windows)]
 mod window {
+    use super::{ViewSizer, sizing_rect};
     use std::ffi::{c_char, c_void};
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GetWindowLongPtrW, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU,
+        GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassExW, SIZE_MINIMIZED, SW_HIDE,
+        SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, WM_CLOSE, WM_NCDESTROY, WM_SIZE, WM_SIZING, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
     };
 
     pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeHWND);
@@ -2176,11 +2573,102 @@ mod window {
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
+    /// What the window procedure shares with its `HostWindow`, kept in the window's user data
+    /// (one `Arc` reference, stored by `new` and released on `WM_NCDESTROY`).
+    #[derive(Default)]
+    struct WindowState {
+        /// Set once by `set_sizer`.
+        sizer: OnceLock<Arc<ViewSizer>>,
+        /// The user closed the window (`WM_CLOSE` only hides it). Tracked instead of reading
+        /// `IsWindowVisible`, which is also false while the owner window is minimized (owned
+        /// windows are hidden with it): that must not close the editor.
+        closed: AtomicBool,
+    }
+
+    /// The window's state from its user data, borrowed for one message.
+    fn window_state(hwnd: HWND) -> Option<Arc<WindowState>> {
+        // SAFETY: `hwnd` is the window the procedure was called for; its user data is 0 or a
+        // pointer from `Arc::into_raw`, kept alive until `WM_NCDESTROY` (the last message).
+        let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState;
+        if p.is_null() {
+            return None;
+        }
+        // SAFETY: as above; this message takes a reference of its own, so the state outlives it
+        // even when a plugin destroys the window from a nested event loop meanwhile.
+        unsafe { Arc::increment_strong_count(p) };
+        // SAFETY: balances the increment just made.
+        Some(unsafe { Arc::from_raw(p) })
+    }
+
+    /// The sizer `set_sizer` gave the window, borrowed for one message.
+    fn window_sizer(hwnd: HWND) -> Option<Arc<ViewSizer>> {
+        window_state(hwnd)?.sizer.get().cloned()
+    }
+
+    /// The window's frame (outer minus client size), measured: right at any monitor's DPI, unlike
+    /// `AdjustWindowRectEx` (system DPI). `None` when the window can't be measured.
+    fn frame_size(hwnd: HWND) -> Option<(i32, i32)> {
+        let (mut w, mut c) = (RECT { left: 0, top: 0, right: 0, bottom: 0 }, RECT { left: 0, top: 0, right: 0, bottom: 0 });
+        // SAFETY: a window of this thread (or a stale handle, which fails); both rects are writable.
+        if unsafe { GetWindowRect(hwnd, &mut w) } == 0 || unsafe { GetClientRect(hwnd, &mut c) } == 0 {
+            return None;
+        }
+        let fw = w.right.saturating_sub(w.left).saturating_sub(c.right.saturating_sub(c.left));
+        let fh = w.bottom.saturating_sub(w.top).saturating_sub(c.bottom.saturating_sub(c.top));
+        Some((fw.max(0), fh.max(0)))
+    }
+
+    /// Outer size for a client area of `w`×`h`: measured frame, else `AdjustWindowRectEx`.
+    fn outer_for(hwnd: HWND, w: f64, h: f64) -> (i32, i32) {
+        match frame_size(hwnd) {
+            Some((fw, fh)) => ((w as i32).saturating_add(fw), (h as i32).saturating_add(fh)),
+            None => {
+                // SAFETY: a window of this thread; style values are only read.
+                let (style, ex) = unsafe { (GetWindowLongPtrW(hwnd, GWL_STYLE) as u32, GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32) };
+                outer_size(style, ex, w, h)
+            }
+        }
+    }
+
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if msg == WM_CLOSE {
-            // SAFETY: `hwnd` is the window this procedure was called for.
-            unsafe { ShowWindow(hwnd, SW_HIDE) };
-            return 0;
+        match msg {
+            WM_CLOSE => {
+                if let Some(s) = window_state(hwnd) {
+                    s.closed.store(true, Ordering::Relaxed);
+                }
+                // SAFETY: `hwnd` is the window this procedure was called for.
+                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                return 0;
+            }
+            // Live user resizes: keep the dragged edges at a size the view accepts.
+            WM_SIZING => {
+                // SAFETY: for WM_SIZING, `lparam` points to the window's writable drag rect.
+                if let (Some(s), Some(r), Some((fw, fh))) = (window_sizer(hwnd), unsafe { (lparam as *mut RECT).as_mut() }, frame_size(hwnd)) {
+                    let (w, h) = (r.right.saturating_sub(r.left).saturating_sub(fw), r.bottom.saturating_sub(r.top).saturating_sub(fh));
+                    if let Some((cw, ch)) = s.constrain(f64::from(w.max(1)), f64::from(h.max(1))) {
+                        let (ow, oh) = ((cw as i32).saturating_add(fw), (ch as i32).saturating_add(fh));
+                        (r.left, r.top, r.right, r.bottom) = sizing_rect(wparam, (r.left, r.top, r.right, r.bottom), (ow, oh));
+                        return 1;
+                    }
+                }
+            }
+            // Every completed resize: settle on the constrained size and tell the view.
+            WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
+                if let Some(s) = window_sizer(hwnd) {
+                    let (w, h) = (f64::from((lparam & 0xFFFF) as u16), f64::from(((lparam >> 16) & 0xFFFF) as u16));
+                    s.user_resized(w, h, |cw, ch| resize(hwnd, cw, ch));
+                }
+            }
+            WM_NCDESTROY => {
+                // SAFETY: the window's last message: take the user data back and release the
+                // `Arc` reference `new` stored there; nothing reads it afterwards.
+                let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const WindowState;
+                if !p.is_null() {
+                    // SAFETY: `p` came from `Arc::into_raw` in `new`, released exactly once.
+                    drop(unsafe { Arc::from_raw(p) });
+                }
+            }
+            _ => {}
         }
         // SAFETY: default handling of a message for the window it was sent to.
         unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -2227,6 +2715,8 @@ mod window {
     /// Owns the window handle; destroyed in `close` (main thread only).
     pub struct HostWindow {
         hwnd: HWND,
+        /// Shared with the window procedure (see `WindowState`).
+        state: Arc<WindowState>,
     }
 
     // SAFETY: the handle is only used on the main thread (every method checks); the struct
@@ -2269,12 +2759,57 @@ mod window {
             if hwnd.is_null() {
                 return Err("cannot create the editor window".into());
             }
-            Ok(HostWindow { hwnd })
+            let state = Arc::new(WindowState::default());
+            let p = Arc::into_raw(state.clone());
+            // SAFETY: our new window of this thread; the pointer stays valid until `WM_NCDESTROY`
+            // releases it.
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, p as _) };
+            // SAFETY: as above; only reads the value back.
+            if unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState != p {
+                // SAFETY: the reference was not stored: take it back, and destroy our window.
+                unsafe {
+                    drop(Arc::from_raw(p));
+                    DestroyWindow(hwnd);
+                }
+                return Err("cannot set up the editor window".into());
+            }
+            // `AdjustWindowRectEx` assumed the system DPI; size the client area by the real frame.
+            resize(hwnd, w, h);
+            Ok(HostWindow { hwnd, state })
         }
 
         /// The window handle (for the plug frame's resizes).
         pub fn raw(&self) -> *mut c_void {
             self.hwnd
+        }
+
+        /// Routes the window's resizes through `sizer` (the window procedure reads it from the
+        /// window's state). Once per window.
+        pub fn set_sizer(&mut self, sizer: &Arc<ViewSizer>) {
+            let _ = self.state.sizer.set(sizer.clone());
+        }
+
+        /// Gives the window a sizing border (the view said `canResize`), or takes it away,
+        /// keeping the client size.
+        pub fn set_resizable(&self, resizable: bool) {
+            let Some(h) = self.live() else { return };
+            // SAFETY: a live window of this thread; the style is only read.
+            if ((unsafe { GetWindowLongPtrW(h, GWL_STYLE) } as u32 & WS_THICKFRAME) != 0) == resizable {
+                return;
+            }
+            let mut c = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            // SAFETY: a live window of this thread; `c` is writable.
+            unsafe { GetClientRect(h, &mut c) };
+            // SAFETY: as above; only the sizing-border bit of the style changes.
+            unsafe {
+                let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+                let style = if resizable { style | WS_THICKFRAME } else { style & !WS_THICKFRAME };
+                SetWindowLongPtrW(h, GWL_STYLE, style as _);
+            }
+            // SAFETY: as above; the frame is recomputed for the new style, nothing else changes.
+            unsafe { SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED) };
+            // The new frame took room from the client area: give it back.
+            resize(h, f64::from(c.right), f64::from(c.bottom));
         }
 
         /// The `HWND` the plugin view creates its child window in.
@@ -2284,6 +2819,8 @@ mod window {
 
         pub fn raise(&self) {
             if let Some(h) = self.live() {
+                // Shown again, it is open again.
+                self.state.closed.store(false, Ordering::Relaxed);
                 // SAFETY: a live window of this thread.
                 unsafe {
                     ShowWindow(h, SW_SHOW);
@@ -2292,9 +2829,10 @@ mod window {
             }
         }
 
-        pub fn is_visible(&self) -> bool {
-            // SAFETY: a live window of this thread.
-            self.live().is_some_and(|h| unsafe { IsWindowVisible(h) } != 0)
+        /// The window exists and the user has not closed it (it may be hidden with its
+        /// minimized owner).
+        pub fn is_open(&self) -> bool {
+            self.live().is_some() && !self.state.closed.load(Ordering::Relaxed)
         }
 
         pub fn close(self) {
@@ -2311,10 +2849,8 @@ mod window {
         if !on_main_thread() || window.is_null() || unsafe { IsWindow(window) } == 0 {
             return;
         }
-        // SAFETY: a live window of this thread; style values are read, not changed.
-        let (style, ex) = unsafe { (GetWindowLongPtrW(window, GWL_STYLE) as u32, GetWindowLongPtrW(window, GWL_EXSTYLE) as u32) };
-        let (ow, oh) = outer_size(style, ex, w, h);
-        // SAFETY: as above; only the size changes.
+        let (ow, oh) = outer_for(window, w, h);
+        // SAFETY: a live window of this thread; only the size changes.
         unsafe { SetWindowPos(window, std::ptr::null_mut(), 0, 0, ow, oh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
     }
 }
@@ -2339,11 +2875,13 @@ mod window {
         pub fn raw(&self) -> *mut c_void {
             std::ptr::null_mut()
         }
+        pub fn set_sizer(&mut self, _sizer: &std::sync::Arc<super::ViewSizer>) {}
+        pub fn set_resizable(&self, _resizable: bool) {}
         pub fn parent(&self) -> *mut c_void {
             std::ptr::null_mut()
         }
         pub fn raise(&self) {}
-        pub fn is_visible(&self) -> bool {
+        pub fn is_open(&self) -> bool {
             false
         }
         pub fn close(self) {}
@@ -2355,6 +2893,32 @@ mod window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: an editor window hidden (as with its minimized owner) stays open; only the user's
+    /// close (`WM_CLOSE`) closes it, and raising it opens it again.
+    #[cfg(windows)]
+    #[test]
+    fn host_window_is_closed_only_by_the_user() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SW_HIDE, SendMessageW, ShowWindow, WM_CLOSE};
+        // Host windows live on the thread named "main" (the app's UI thread).
+        let t = std::thread::Builder::new().name("main".into()).spawn(|| {
+            let w = window::HostWindow::new("Editor", 200.0, 100.0).expect("window");
+            let h = w.raw();
+            assert!(w.is_open());
+            // SAFETY: our live window, on its own thread.
+            unsafe { ShowWindow(h, SW_HIDE) };
+            assert!(w.is_open(), "hidden is not closed");
+            // SAFETY: as above; the window procedure runs before this returns.
+            unsafe { SendMessageW(h, WM_CLOSE, 0, 0) };
+            assert!(!w.is_open(), "closed by the user");
+            w.raise();
+            assert!(w.is_open(), "raised: open again");
+            w.close();
+            // SAFETY: `IsWindow` accepts any value.
+            assert_eq!(unsafe { IsWindow(h) }, 0, "closed: destroyed");
+        });
+        assert!(t.expect("spawn").join().is_ok());
+    }
     use sv::{IAttributeListTrait as _, IMessageTrait as _};
 
     fn tuid(iid: [u8; 16]) -> sb::TUID {
@@ -2405,6 +2969,199 @@ mod tests {
         assert!(create::<sv::IAttributeList>(&host, sv::IAttributeList::IID).is_some());
         // Anything else is still not provided.
         assert!(create::<sv::IMessage>(&host, sv::IComponentHandler::IID).is_none());
+    }
+
+    /// A plugin view that accepts 200..=800 × 100..=600 and records what the host tells it. With
+    /// `nested`, it calls back into the sizer from `onSize`, the way a plugin calling
+    /// `resizeView` from `onSize` makes the window notify the host again.
+    struct SizedView {
+        sizes: Mutex<Vec<(i32, i32)>>,
+        nested: Mutex<Option<Arc<ViewSizer>>>,
+        /// Closes the editor (takes the view away) from inside `onSize`, once.
+        close_inside: Mutex<Option<Arc<ViewSizer>>>,
+        /// Re-requests its size through this frame from inside `onSize` (as `view`, once per
+        /// `onSize`), recording what the host answered.
+        frame: Mutex<Option<(ComPtr<sb::IPlugFrame>, usize)>>,
+        answers: Mutex<Vec<sb::tresult>>,
+    }
+
+    impl SizedView {
+        fn new() -> SizedView {
+            SizedView {
+                sizes: Mutex::new(Vec::new()),
+                nested: Mutex::new(None),
+                close_inside: Mutex::new(None),
+                frame: Mutex::new(None),
+                answers: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Class for SizedView {
+        type Interfaces = (sb::IPlugView,);
+    }
+
+    impl IPlugViewTrait for SizedView {
+        unsafe fn isPlatformTypeSupported(&self, _t: sb::FIDString) -> sb::tresult {
+            sb::kResultTrue
+        }
+        unsafe fn attached(&self, _p: *mut c_void, _t: sb::FIDString) -> sb::tresult {
+            sb::kResultOk
+        }
+        unsafe fn removed(&self) -> sb::tresult {
+            sb::kResultOk
+        }
+        unsafe fn onWheel(&self, _d: f32) -> sb::tresult {
+            sb::kResultFalse
+        }
+        unsafe fn onKeyDown(&self, _k: sb::char16, _c: i16, _m: i16) -> sb::tresult {
+            sb::kResultFalse
+        }
+        unsafe fn onKeyUp(&self, _k: sb::char16, _c: i16, _m: i16) -> sb::tresult {
+            sb::kResultFalse
+        }
+        unsafe fn getSize(&self, _s: *mut sb::ViewRect) -> sb::tresult {
+            sb::kResultOk
+        }
+        unsafe fn onSize(&self, s: *mut sb::ViewRect) -> sb::tresult {
+            let r = unsafe { &*s };
+            self.sizes.lock().unwrap().push((r.right - r.left, r.bottom - r.top));
+            if let Some(sizer) = self.nested.lock().unwrap().clone() {
+                sizer.user_resized(999.0, 999.0, |_, _| panic!("a nested notification is not negotiated"));
+            }
+            if let Some(sizer) = self.close_inside.lock().unwrap().take() {
+                sizer.set_view(None, false);
+            }
+            let frame = self.frame.lock().unwrap().clone();
+            if let Some((f, me)) = frame {
+                let mut r = sb::ViewRect { left: 0, top: 0, right: 333, bottom: 222 };
+                let answer = unsafe { f.resizeView(me as *mut sb::IPlugView, &mut r) };
+                self.answers.lock().unwrap().push(answer);
+            }
+            sb::kResultOk
+        }
+        unsafe fn onFocus(&self, _s: sb::TBool) -> sb::tresult {
+            sb::kResultOk
+        }
+        unsafe fn setFrame(&self, _f: *mut sb::IPlugFrame) -> sb::tresult {
+            sb::kResultOk
+        }
+        unsafe fn canResize(&self) -> sb::tresult {
+            sb::kResultTrue
+        }
+        unsafe fn checkSizeConstraint(&self, r: *mut sb::ViewRect) -> sb::tresult {
+            let r = unsafe { &mut *r };
+            r.right = r.left + (r.right - r.left).clamp(200, 800);
+            r.bottom = r.top + (r.bottom - r.top).clamp(100, 600);
+            sb::kResultTrue
+        }
+    }
+
+    #[test]
+    fn user_resizes_are_negotiated_with_the_view_without_loops() {
+        let fake = ComWrapper::new(SizedView::new());
+        let view = fake.to_com_ptr::<sb::IPlugView>().unwrap();
+        let sizer = Arc::new(ViewSizer::new(320.0, 240.0));
+        // Not resizable (yet): nothing is negotiated and the view isn't told.
+        sizer.set_view(Some(view.clone()), false);
+        assert_eq!(sizer.constrain(500.0, 400.0), None);
+        sizer.user_resized(500.0, 400.0, |_, _| panic!("not resizable"));
+        assert!(fake.sizes.lock().unwrap().is_empty());
+
+        sizer.set_view(Some(view), true);
+        assert_eq!(sizer.constrain(500.0, 400.0), Some((500.0, 400.0)));
+        assert_eq!(sizer.constrain(50.0, 5000.0), Some((200.0, 600.0)), "checkSizeConstraint adjusts the drag");
+        // A size the view refuses: the window is set back to the constrained size, then `onSize`.
+        let mut set = None;
+        sizer.user_resized(1000.0, 50.0, |w, h| set = Some((w, h)));
+        assert_eq!(set, Some((800.0, 100.0)));
+        assert_eq!(*fake.sizes.lock().unwrap(), vec![(800, 100)]);
+        // An accepted size leaves the window alone; the same size again is not repeated.
+        sizer.user_resized(640.0, 480.0, |_, _| panic!("accepted as is"));
+        sizer.user_resized(640.0, 480.0, |_, _| panic!("accepted as is"));
+        assert_eq!(*fake.sizes.lock().unwrap(), vec![(800, 100), (640, 480)]);
+
+        // Notifications caused by a resize the host applies (a plugin `resizeView`) are ignored…
+        {
+            let _applying = sizer.applying();
+            assert_eq!(sizer.constrain(300.0, 300.0), None);
+            sizer.user_resized(300.0, 300.0, |_, _| panic!("ignored while applying"));
+            sizer.set_last(300.0, 300.0);
+        }
+        assert_eq!(fake.sizes.lock().unwrap().len(), 2);
+        // …and the plugin's new size is remembered: the window notification for it is a no-op.
+        sizer.user_resized(300.0, 300.0, |_, _| panic!("accepted as is"));
+        assert_eq!(fake.sizes.lock().unwrap().len(), 2);
+
+        // A view that resizes itself from `onSize` doesn't start a loop (or deadlock).
+        *fake.nested.lock().unwrap() = Some(sizer.clone());
+        sizer.user_resized(400.0, 400.0, |_, _| panic!("accepted as is"));
+        assert_eq!(fake.sizes.lock().unwrap().last(), Some(&(400, 400)));
+        assert_eq!(fake.sizes.lock().unwrap().len(), 3, "the nested notification was not negotiated");
+        *fake.nested.lock().unwrap() = None;
+
+        // Closing the editor from inside `onSize` (a plugin pumping a nested event loop) neither
+        // deadlocks nor leaves the view reachable: the removal is applied when the call returns.
+        *fake.close_inside.lock().unwrap() = Some(sizer.clone());
+        sizer.user_resized(450.0, 450.0, |_, _| panic!("accepted as is"));
+        assert_eq!(fake.sizes.lock().unwrap().len(), 4);
+        assert!(!sizer.resizable());
+        assert!(sizer.view.lock().unwrap().is_none(), "removed once onSize returned");
+        assert!(sizer.attached().is_null());
+        sizer.set_view(fake.to_com_ptr::<sb::IPlugView>(), true);
+
+        // Once the view is taken away (editor closing), nothing reaches it any more.
+        assert!(sizer.take_view().is_some());
+        assert_eq!(sizer.constrain(500.0, 500.0), None);
+        sizer.user_resized(500.0, 500.0, |_, _| panic!("no view"));
+        assert_eq!(fake.sizes.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn plugin_resizes_come_from_the_attached_view_and_do_not_recurse() {
+        let fake = ComWrapper::new(SizedView::new());
+        let view = fake.to_com_ptr::<sb::IPlugView>().unwrap();
+        let other = ComWrapper::new(SizedView::new());
+        let other = other.to_com_ptr::<sb::IPlugView>().unwrap();
+        let sizer = Arc::new(ViewSizer::new(320.0, 240.0));
+        // No window (null): only the negotiation runs.
+        let frame = ComWrapper::new(PlugFrame { window: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), sizer: sizer.clone() });
+        let f = frame.to_com_ptr::<sb::IPlugFrame>().unwrap();
+        let mut r = sb::ViewRect { left: 0, top: 0, right: 500, bottom: 400 };
+        // SAFETY: calls through our own implementation with valid pointers (or null, handled).
+        unsafe {
+            assert_eq!(f.resizeView(view.as_ptr(), &mut r), sb::kInvalidArgument, "nothing attached yet");
+            sizer.expect_view(&view);
+            assert_eq!(f.resizeView(other.as_ptr(), &mut r), sb::kInvalidArgument, "not the attached view");
+            assert_eq!(f.resizeView(std::ptr::null_mut(), &mut r), sb::kInvalidArgument);
+            assert_eq!(f.resizeView(view.as_ptr(), std::ptr::null_mut()), sb::kInvalidArgument);
+            // The attached view resizes; asking again from inside its `onSize` is refused instead
+            // of recursing.
+            *fake.frame.lock().unwrap() = Some((f.clone(), view.as_ptr() as usize));
+            assert_eq!(f.resizeView(view.as_ptr(), &mut r), sb::kResultOk);
+            assert_eq!(*fake.sizes.lock().unwrap(), vec![(500, 400)]);
+            assert_eq!(*fake.answers.lock().unwrap(), vec![sb::kResultFalse]);
+            assert_eq!(sizer.last(), (500.0, 400.0));
+            *fake.frame.lock().unwrap() = None;
+            // The guard is released: the next request goes through.
+            let mut r = sb::ViewRect { left: 0, top: 0, right: 640, bottom: 480 };
+            assert_eq!(f.resizeView(view.as_ptr(), &mut r), sb::kResultOk);
+            assert_eq!(sizer.last(), (640.0, 480.0));
+            // Detached: refused again.
+            sizer.set_view(None, false);
+            assert_eq!(f.resizeView(view.as_ptr(), &mut r), sb::kInvalidArgument);
+        }
+    }
+
+    #[test]
+    fn sizing_moves_only_the_dragged_edges() {
+        let r = (100, 100, 500, 400);
+        assert_eq!(sizing_rect(8, r, (300, 200)), (100, 100, 400, 300), "bottom-right");
+        assert_eq!(sizing_rect(4, r, (300, 200)), (200, 200, 500, 400), "top-left");
+        assert_eq!(sizing_rect(1, r, (300, 300)), (200, 100, 500, 400), "left (height follows the constraint downwards)");
+        assert_eq!(sizing_rect(5, r, (300, 200)), (100, 200, 400, 400), "top-right");
+        assert_eq!(sizing_rect(7, r, (300, 200)), (200, 100, 500, 300), "bottom-left");
+        assert_eq!(sizing_rect(2, (i32::MAX - 1, 0, i32::MAX, 10), (100, 10)), (i32::MAX - 1, 0, i32::MAX, 10), "saturates");
     }
 
     #[test]

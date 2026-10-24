@@ -6,7 +6,8 @@
 //!   9 hidden, 11 bypass. Starts at gain 0.5 (its state) although the declared default is 1.0.
 //!   Reports 3 samples of latency. State: the component stores the gain (one LE f64), the
 //!   controller the Freq value (one LE f64). Its controller has an editor view (`IPlugView`,
-//!   320×240, no real drawing) supporting NSView/HWND/X11.
+//!   320×240, no real drawing) supporting NSView/HWND/X11, resizable between 200×150 and
+//!   1200×900 (`canResize`, `checkSizeConstraint` clamps into that range).
 //! - "Fixture Synth" (`Instrument|Synth`): a single-component instrument (the component is also
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
@@ -266,10 +267,14 @@ impl IPlugViewTrait for View {
         kResultOk
     }
     unsafe fn canResize(&self) -> tresult {
-        kResultFalse
+        kResultTrue
     }
-    unsafe fn checkSizeConstraint(&self, _r: *mut ViewRect) -> tresult {
-        kResultOk
+    /// Resizable between 200×150 and 1200×900 (a proposal outside is clamped into that range).
+    unsafe fn checkSizeConstraint(&self, r: *mut ViewRect) -> tresult {
+        let Some(r) = (unsafe { r.as_mut() }) else { return kInvalidArgument };
+        r.right = r.left + (r.right - r.left).clamp(200, 1200);
+        r.bottom = r.top + (r.bottom - r.top).clamp(150, 900);
+        kResultTrue
     }
 }
 
