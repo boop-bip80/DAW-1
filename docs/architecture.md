@@ -61,6 +61,13 @@ and recordings are captured in memory until stop.
 `soundcraft-video` holds our own H.264, ProRes and Motion JPEG decoders and the ISO-BMFF demuxer
 for the video track. Hosted plugins (`clap-host`, `vst3-host`, `au-host`) are scanned, created and
 destroyed off the audio thread; only `process` runs on it.
+The desktop app scans CLAP and VST3 bundles out of process: each bundle is loaded by a short-lived
+child of the app's own executable (`--scan-clap-bundle` / `--scan-vst3-bundle <path>`, several at a
+time) that prints its descriptors and exits, so the app itself loads only the plugins a session
+uses. A scan that loaded every installed binary in-process used up most of the process's
+thread-specific data keys (`PTHREAD_KEYS_MAX`), and the next plugin to start a thread aborted
+(Waves). A plugin that crashes or hangs while being scanned is skipped. Without a scanner set
+(the CLI, tests) scans run in-process.
 
 The cpal callbacks mark their thread (`soundcraft_playback::mark_audio_thread`). Code that may run
 there can ask `on_audio_thread()` before doing anything that blocks; the desktop app's logger does,

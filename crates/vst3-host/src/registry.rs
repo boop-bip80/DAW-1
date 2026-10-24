@@ -53,12 +53,17 @@ pub fn load_bundle(path: &Path) -> Result<Vec<Vst3Descriptor>, Vst3Error> {
         .collect())
 }
 
-/// Scans `dirs` (uncached). Unloadable files are logged and skipped; the first plugin with a
-/// given id wins.
+/// Scans `dirs` (uncached), in child processes when a scanner is set. Unloadable files are logged
+/// and skipped; the first plugin with a given id wins.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<Vst3Descriptor> {
+    let bundles = paths::find_bundles(dirs);
+    let results = match crate::isolate::scanner_exe() {
+        Some(exe) => crate::isolate::scan_all(&exe, &bundles),
+        None => bundles.iter().map(|p| load_bundle(p)).collect(),
+    };
     let mut out: Vec<Vst3Descriptor> = Vec::new();
-    for path in paths::find_bundles(dirs) {
-        match load_bundle(&path) {
+    for result in results {
+        match result {
             Ok(ds) => {
                 for d in ds {
                     if !out.iter().any(|o| o.id == d.id) {

@@ -1,9 +1,10 @@
 //! SoundCraft's CLAP plugin host.
 //!
-//! Scans the standard CLAP folders (plus `CLAP_PATH`), loads `.clap` binaries in-process and
-//! exposes each plugin as a [`soundcraft_dsp::Plugin`], so the mix engine treats third-party
-//! plugins exactly like the built-in ones. Plugin ids are `clap:<CLAP plugin id>`; parameter ids
-//! are the CLAP param ids as decimal strings, with their human names in [`PluginInfo::params`].
+//! Scans the standard CLAP folders (plus `CLAP_PATH`; in child processes when [`set_scanner`] is
+//! set), loads `.clap` binaries in-process and exposes each plugin as a
+//! [`soundcraft_dsp::Plugin`], so the mix engine treats third-party plugins exactly like the
+//! built-in ones. Plugin ids are `clap:<CLAP plugin id>`; parameter ids are the CLAP param ids as
+//! decimal strings, with their human names in [`PluginInfo::params`].
 //!
 //! This is SoundCraft's single isolated `unsafe` crate (craftrules never-crash): `unsafe` is
 //! denied crate-wide and allowed only in the private `ffi` module. The public API is safe, returns
@@ -35,10 +36,14 @@ pub mod scan;
 #[allow(unsafe_code)]
 mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
+mod isolate;
+#[cfg(not(target_arch = "wasm32"))]
 mod plugin;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use isolate::SCAN_FLAG;
 #[cfg(not(target_arch = "wasm32"))]
 pub use plugin::ClapPlugin;
 
@@ -54,7 +59,7 @@ pub fn parse_id(id: &str) -> Option<&str> {
 }
 
 /// One plugin found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClapDescriptor {
     /// SoundCraft id: `clap:<plugin_id>`.
     pub id: String,
@@ -162,6 +167,22 @@ pub fn rescan() -> Vec<ClapDescriptor> {
 /// plugins the folder holds.
 pub fn add_search_dir(dir: &Path) -> usize {
     api::add_search_dir(dir)
+}
+
+/// Makes scans load each `.clap` in a child process: `exe` started with [`SCAN_FLAG`] and the
+/// path, which must call [`scan_child_main`] (`None`: scan in this process, the default). The app
+/// sets it so that a scan neither keeps every installed binary loaded nor dies with a plugin that
+/// crashes while loading (see the `isolate` module).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_scanner(exe: Option<PathBuf>) {
+    isolate::set_scanner(exe)
+}
+
+/// The child side of [`set_scanner`]: loads one `.clap` and prints what it holds for the parent.
+/// Returns the process exit code.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_child_main(path: &Path) -> i32 {
+    isolate::child_main(path)
 }
 
 /// Scans the given folders without touching the cache.
