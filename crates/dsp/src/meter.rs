@@ -1,5 +1,7 @@
 //! Level meters: DAW-style peak meter, RMS meter, and an ITU-R BS.1770 loudness meter
-//! (momentary, short-term and gated integrated LUFS plus 4× oversampled true peak).
+//! (momentary, short-term and gated integrated LUFS plus 4× oversampled true peak), and
+//! [`MeterBank`], the realtime per-channel meters of a mixer strip (sample peak, true peak, RMS,
+//! VU and K-System).
 //!
 //! None of the `process` methods allocate.
 
@@ -196,25 +198,7 @@ impl LoudnessMeter {
         let channels = channels.clamp(1, crate::util::MAX_CHANNELS);
         let weights = if channels == 6 { vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41] } else { vec![1.0; channels] };
         let [c1, c2] = k_weighting(sr);
-        // Interpolation filter: windowed sinc at the original Nyquist, split into 4 phases.
-        let mut tp_coefs = [[0.0f32; TP_TAPS]; TP_PHASES];
-        let total = TP_TAPS * TP_PHASES;
-        let center = (total as f64 - 1.0) / 2.0;
-        for i in 0..total {
-            let t = (i as f64 - center) / TP_PHASES as f64;
-            let sinc = if t.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
-            let x = i as f64 / (total as f64 - 1.0);
-            let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * x).cos() + 0.08 * (4.0 * std::f64::consts::PI * x).cos();
-            if let Some(slot) = tp_coefs.get_mut(i % TP_PHASES).and_then(|ph| ph.get_mut(i / TP_PHASES)) {
-                *slot = (sinc * w) as f32;
-            }
-        }
-        for ph in &mut tp_coefs {
-            let s: f32 = ph.iter().sum();
-            if s.abs() > 1e-6 {
-                ph.iter_mut().for_each(|c| *c /= s);
-            }
-        }
+        let tp_coefs = true_peak_coefs();
         Self {
             sr,
             weights,
@@ -380,4 +364,274 @@ impl LoudnessMeter {
     pub fn true_peak_db(&self) -> f32 {
         gain_to_db(self.true_peak)
     }
+}
+
+/// What a channel meter measures (the meter type). Every type also reports the sample peak, which
+/// drives the clip indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MeterKind {
+    /// The highest sample in each block (dBFS).
+    #[default]
+    SamplePeak,
+    /// The highest peak of the 4× oversampled signal, catching inter-sample peaks (dBTP, after
+    /// ITU-R BS.1770-4 Annex 2).
+    TruePeak,
+    /// RMS averaged over [`RMS_WINDOW_MS`] (dBFS; a full-scale sine reads -3 dB).
+    Rms,
+    /// Average-responding VU ballistics (99 % of a step in [`VU_RISE_MS`]); a sine reads its RMS.
+    /// Displayed relative to [`VU_REFERENCE_DBFS`].
+    Vu,
+    /// Bob Katz's K-System: RMS over [`K_WINDOW_MS`], sine-referenced (AES-17, a sine reads its
+    /// peak), shown with 0 at -12, -14 or -20 dBFS.
+    K12,
+    K14,
+    K20,
+}
+
+/// RMS meter integration (time constant of the exponential average).
+pub const RMS_WINDOW_MS: f32 = 300.0;
+/// K-System meter integration.
+pub const K_WINDOW_MS: f32 = 600.0;
+/// VU rise time to 99 % of a steady tone (IEC 60268-17 / ANSI C16.5), as a critically damped
+/// second-order response.
+pub const VU_RISE_MS: f32 = 300.0;
+/// dBFS of a sine that reads 0 VU.
+pub const VU_REFERENCE_DBFS: f32 = -18.0;
+/// AES-17 sine reference: RMS scaled by √2 so a sine reads the same as its peak.
+const AES17_GAIN: f64 = std::f64::consts::SQRT_2;
+/// Average-to-RMS factor for a sine (π / 2√2): an average-responding meter reads a sine's RMS.
+const SINE_AVERAGE_TO_RMS: f64 = std::f64::consts::PI / (2.0 * std::f64::consts::SQRT_2);
+/// The critically damped response reaches 99 % at t ≈ 6.638 τ.
+const CRITICAL_99: f32 = 6.638;
+
+impl MeterKind {
+    pub const ALL: [MeterKind; 7] =
+        [MeterKind::SamplePeak, MeterKind::TruePeak, MeterKind::Rms, MeterKind::Vu, MeterKind::K12, MeterKind::K14, MeterKind::K20];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            MeterKind::SamplePeak => "sample_peak",
+            MeterKind::TruePeak => "true_peak",
+            MeterKind::Rms => "rms",
+            MeterKind::Vu => "vu",
+            MeterKind::K12 => "k12",
+            MeterKind::K14 => "k14",
+            MeterKind::K20 => "k20",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MeterKind::SamplePeak => "Sample Peak",
+            MeterKind::TruePeak => "True Peak",
+            MeterKind::Rms => "RMS",
+            MeterKind::Vu => "VU",
+            MeterKind::K12 => "K-12",
+            MeterKind::K14 => "K-14",
+            MeterKind::K20 => "K-20",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MeterKind> {
+        MeterKind::ALL.into_iter().find(|k| k.id() == s)
+    }
+
+    /// The next type, for cycling through them.
+    pub fn next(self) -> MeterKind {
+        let i = MeterKind::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        MeterKind::ALL.get(i + 1).copied().unwrap_or(MeterKind::SamplePeak)
+    }
+
+    /// Peak types fall back with the display's release; averaging types carry their own
+    /// ballistics and are shown as measured.
+    pub fn is_peak(self) -> bool {
+        matches!(self, MeterKind::SamplePeak | MeterKind::TruePeak)
+    }
+
+    /// The K-System's 0 mark (dBFS), for K types.
+    pub fn k_zero_dbfs(self) -> Option<f32> {
+        match self {
+            MeterKind::K12 => Some(-12.0),
+            MeterKind::K14 => Some(-14.0),
+            MeterKind::K20 => Some(-20.0),
+            _ => None,
+        }
+    }
+}
+
+/// The 4× interpolation filter shared by the true-peak meters: a Blackman-windowed sinc at the
+/// original Nyquist, split into four phases of [`TP_TAPS`] taps, each normalised to unity gain.
+fn true_peak_coefs() -> [[f32; TP_TAPS]; TP_PHASES] {
+    let mut coefs = [[0.0f32; TP_TAPS]; TP_PHASES];
+    let total = TP_TAPS * TP_PHASES;
+    let center = (total as f64 - 1.0) / 2.0;
+    for i in 0..total {
+        let t = (i as f64 - center) / TP_PHASES as f64;
+        let sinc = if t.abs() < 1e-12 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) };
+        let x = i as f64 / (total as f64 - 1.0);
+        let w = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * x).cos() + 0.08 * (4.0 * std::f64::consts::PI * x).cos();
+        if let Some(slot) = coefs.get_mut(i % TP_PHASES).and_then(|ph| ph.get_mut(i / TP_PHASES)) {
+            *slot = (sinc * w) as f32;
+        }
+    }
+    for ph in &mut coefs {
+        let s: f32 = ph.iter().sum();
+        if s.abs() > 1e-6 {
+            ph.iter_mut().for_each(|c| *c /= s);
+        }
+    }
+    coefs
+}
+
+/// One channel's meter state.
+#[derive(Debug, Clone, Default)]
+struct ChannelState {
+    /// True-peak history, written twice so the newest [`TP_TAPS`] samples are always one slice
+    /// (`hist[pos..pos + TP_TAPS]`, newest first): no shifting per sample.
+    hist: [f32; 2 * TP_TAPS],
+    pos: usize,
+    /// Mean square (RMS, K) or the two VU filter stages.
+    ms: f64,
+    vu: [f64; 2],
+}
+
+/// Realtime meters for a strip: per channel, the sample peak of each block plus the reading of
+/// the selected [`MeterKind`]. Only the selected type is computed; true peak costs four
+/// [`TP_TAPS`]-tap dot products per sample and channel. `process` never allocates once the
+/// channel count is stable.
+#[derive(Debug, Clone)]
+pub struct MeterBank {
+    kind: MeterKind,
+    sr: f32,
+    /// The true-peak filter by tap, then phase, so one pass over the history feeds all four
+    /// phases' sums side by side (they vectorise).
+    taps: [[f32; TP_PHASES]; TP_TAPS],
+    rms_k: f64,
+    k_k: f64,
+    vu_k: f64,
+    chans: Vec<ChannelState>,
+}
+
+impl MeterBank {
+    pub fn new(sample_rate: f32) -> Self {
+        let coefs = true_peak_coefs();
+        let mut taps = [[0.0f32; TP_PHASES]; TP_TAPS];
+        for (ph, c) in coefs.iter().enumerate() {
+            for (j, v) in c.iter().enumerate() {
+                if let Some(t) = taps.get_mut(j).and_then(|t| t.get_mut(ph)) {
+                    *t = *v;
+                }
+            }
+        }
+        let mut m = MeterBank { kind: MeterKind::SamplePeak, sr: 0.0, taps, rms_k: 0.0, k_k: 0.0, vu_k: 0.0, chans: Vec::new() };
+        m.set_sample_rate(sample_rate);
+        m
+    }
+
+    pub fn sample_rate(&self) -> f32 {
+        self.sr
+    }
+
+    /// Re-derive the averaging coefficients for another rate (cheap; keeps the channel state).
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        let sr = sane_sr(sample_rate);
+        if sr == self.sr {
+            return;
+        }
+        self.sr = sr;
+        let k = |ms: f32| f64::from(1.0 - crate::util::time_coef(ms, sr));
+        self.rms_k = k(RMS_WINDOW_MS);
+        self.k_k = k(K_WINDOW_MS);
+        self.vu_k = k(VU_RISE_MS / CRITICAL_99);
+    }
+
+    pub fn kind(&self) -> MeterKind {
+        self.kind
+    }
+
+    /// Select the meter type; a change starts every channel afresh.
+    pub fn set_kind(&mut self, kind: MeterKind) {
+        if kind != self.kind {
+            self.kind = kind;
+            self.reset();
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.chans.iter_mut().for_each(|c| *c = ChannelState::default());
+    }
+
+    /// Measure one block: `peaks[c]` gets channel `c`'s sample peak and `levels[c]` its reading
+    /// (linear; for VU the sine RMS, for K types sine-referenced RMS). Channels past either slice
+    /// are skipped; non-finite samples count as silence.
+    pub fn process(&mut self, bufs: &[Vec<f32>], frames: usize, peaks: &mut [f32], levels: &mut [f32]) {
+        if self.chans.len() != bufs.len() {
+            // A format change (a document edit, not steady state).
+            self.chans.resize_with(bufs.len(), ChannelState::default);
+        }
+        let kind = self.kind;
+        for (((st, b), p), l) in self.chans.iter_mut().zip(bufs).zip(peaks.iter_mut()).zip(levels.iter_mut()) {
+            let x = b.get(..frames).unwrap_or(b);
+            let peak = x.iter().fold(0.0f32, |m, v| if v.is_finite() { m.max(v.abs()) } else { m });
+            *p = peak;
+            *l = match kind {
+                MeterKind::SamplePeak => peak,
+                MeterKind::TruePeak => true_peak_block(st, &self.taps, x).max(peak),
+                MeterKind::Rms => mean_square(st, self.rms_k, x).sqrt() as f32,
+                MeterKind::K12 | MeterKind::K14 | MeterKind::K20 => (mean_square(st, self.k_k, x).sqrt() * AES17_GAIN) as f32,
+                MeterKind::Vu => (vu_block(st, self.vu_k, x) * SINE_AVERAGE_TO_RMS) as f32,
+            };
+        }
+    }
+}
+
+fn finite(v: f32) -> f32 {
+    if v.is_finite() { v } else { 0.0 }
+}
+
+fn true_peak_block(st: &mut ChannelState, taps: &[[f32; TP_PHASES]; TP_TAPS], x: &[f32]) -> f32 {
+    let mut peak = 0.0f32;
+    for &v in x {
+        st.pos = if st.pos == 0 { TP_TAPS - 1 } else { st.pos - 1 };
+        let v = finite(v);
+        if let Some(h) = st.hist.get_mut(st.pos) {
+            *h = v;
+        }
+        if let Some(h) = st.hist.get_mut(st.pos + TP_TAPS) {
+            *h = v;
+        }
+        let Some(window) = st.hist.get(st.pos..st.pos + TP_TAPS) else { continue };
+        let mut acc = [0.0f32; TP_PHASES];
+        for (tap, w) in taps.iter().zip(window) {
+            for (a, c) in acc.iter_mut().zip(tap) {
+                *a += c * w;
+            }
+        }
+        peak = acc.iter().fold(peak, |m, y| m.max(y.abs()));
+    }
+    peak
+}
+
+fn mean_square(st: &mut ChannelState, k: f64, x: &[f32]) -> f64 {
+    for &v in x {
+        let v = f64::from(finite(v));
+        st.ms += (v * v - st.ms) * k;
+    }
+    if st.ms < 1e-30 {
+        st.ms = 0.0;
+    }
+    st.ms
+}
+
+fn vu_block(st: &mut ChannelState, k: f64, x: &[f32]) -> f64 {
+    let [mut a, mut b] = st.vu;
+    for &v in x {
+        a += (f64::from(finite(v).abs()) - a) * k;
+        b += (a - b) * k;
+    }
+    if b < 1e-30 {
+        (a, b) = (if a < 1e-30 { 0.0 } else { a }, 0.0);
+    }
+    st.vu = [a, b];
+    b
 }

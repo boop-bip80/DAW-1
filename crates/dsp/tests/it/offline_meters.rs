@@ -298,3 +298,91 @@ fn spectrum_edge_cases() {
     let m = magnitude_db(&[f32::NAN; 64], 64);
     assert!(m.iter().all(|v| v.is_finite()));
 }
+
+/// Runs a [`MeterBank`] of `kind` over `x` in 512-frame blocks; the last block's (peak, level).
+fn bank_reading(kind: soundcraft_dsp::meter::MeterKind, x: &[f32]) -> (f32, f32) {
+    let mut bank = soundcraft_dsp::meter::MeterBank::new(48_000.0);
+    bank.set_kind(kind);
+    let (mut p, mut l) = ([0.0f32], [0.0f32]);
+    for chunk in x.chunks(512) {
+        bank.process(&[chunk.to_vec()], chunk.len(), &mut p, &mut l);
+    }
+    (p[0], l[0])
+}
+
+#[test]
+fn meter_bank_true_peak_catches_inter_sample_peaks() {
+    use soundcraft_dsp::meter::MeterKind;
+    // fs/4 at 45°: every sample lands at ±0.707 while the waveform peaks at 1.0 (+3 dB).
+    let x: Vec<f32> = (0..4800).map(|i| (std::f32::consts::FRAC_PI_2 * i as f32 + std::f32::consts::FRAC_PI_4).sin()).collect();
+    let (sample, tp) = bank_reading(MeterKind::TruePeak, &x);
+    assert!((sample - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3, "{sample}");
+    assert!(gain_to_db(tp).abs() < 0.5, "true peak {} dBTP", gain_to_db(tp));
+    let (_, sp) = bank_reading(MeterKind::SamplePeak, &x);
+    assert_eq!(sp, sample, "sample peak reads the samples");
+}
+
+#[test]
+fn meter_bank_averaging_types_read_a_sine() {
+    use soundcraft_dsp::meter::MeterKind;
+    let x = sine(1000.0, 1.0, 48_000.0, 96_000);
+    let (_, rms) = bank_reading(MeterKind::Rms, &x);
+    assert!((gain_to_db(rms) + 3.01).abs() < 0.2, "RMS {}", gain_to_db(rms));
+    for k in [MeterKind::K12, MeterKind::K14, MeterKind::K20] {
+        let (_, v) = bank_reading(k, &x);
+        assert!(gain_to_db(v).abs() < 0.2, "{k:?}: a sine reads its peak (AES-17), {}", gain_to_db(v));
+    }
+    let (_, vu) = bank_reading(MeterKind::Vu, &x);
+    assert!((gain_to_db(vu) + 3.01).abs() < 0.3, "VU reads the sine's RMS, {}", gain_to_db(vu));
+}
+
+#[test]
+fn meter_bank_vu_rises_in_about_300_ms() {
+    use soundcraft_dsp::meter::MeterKind;
+    let steady = bank_reading(MeterKind::Vu, &sine(1000.0, 0.5, 48_000.0, 96_000)).1;
+    let at = |ms: usize| bank_reading(MeterKind::Vu, &sine(1000.0, 0.5, 48_000.0, 48 * ms)).1 / steady;
+    assert!(at(100) < 0.9, "{}", at(100));
+    assert!(at(300) > 0.97 && at(300) < 1.02, "{}", at(300));
+}
+
+#[test]
+fn meter_bank_survives_hostile_input_and_cycles_types() {
+    use soundcraft_dsp::meter::MeterKind;
+    for k in MeterKind::ALL {
+        let (p, l) = bank_reading(k, &[f32::NAN, f32::INFINITY, 0.5, -0.25]);
+        assert!(p.is_finite() && l.is_finite(), "{k:?}");
+        assert_eq!(MeterKind::parse(k.id()), Some(k));
+    }
+    let mut k = MeterKind::SamplePeak;
+    for _ in 0..MeterKind::ALL.len() {
+        k = k.next();
+    }
+    assert_eq!(k, MeterKind::SamplePeak, "cycling comes back round");
+    // Fewer output slots than channels: the rest are skipped, nothing panics.
+    let mut bank = soundcraft_dsp::meter::MeterBank::new(48_000.0);
+    bank.set_kind(MeterKind::TruePeak);
+    bank.process(&[vec![0.5; 64], vec![0.5; 64]], 512, &mut [0.0], &mut []);
+}
+
+#[test]
+fn meter_bank_true_peak_does_not_depend_on_block_sizes() {
+    use soundcraft_dsp::meter::{MeterBank, MeterKind};
+    // A sweep-ish signal with inter-sample peaks everywhere.
+    let x: Vec<f32> = (0..9000).map(|i| 0.9 * (0.37 * i as f32 + 0.002 * (i * i) as f32 / 9000.0).sin()).collect();
+    let max_over = |block: usize| {
+        let mut bank = MeterBank::new(48_000.0);
+        bank.set_kind(MeterKind::TruePeak);
+        let (mut p, mut l) = ([0.0f32], [0.0f32]);
+        let mut best = 0.0f32;
+        for chunk in x.chunks(block) {
+            bank.process(&[chunk.to_vec()], chunk.len(), &mut p, &mut l);
+            best = best.max(l[0]);
+        }
+        best
+    };
+    let whole = max_over(x.len());
+    assert!(whole > 0.89, "{whole}");
+    for block in [1, 7, 64, 513] {
+        assert!((max_over(block) - whole).abs() < 1e-6, "block {block}: {} vs {whole}", max_over(block));
+    }
+}
