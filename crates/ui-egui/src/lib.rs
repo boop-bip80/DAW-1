@@ -80,6 +80,7 @@ pub struct UiState {
     /// Edit window track-header columns: io, inserts_ae, sends_ae, comments, color.
     pub edit_views: Vec<String>,
     /// How strongly Edit window tracks take on their colour, 0..1 (0: only the colour strip).
+    #[serde(deserialize_with = "saved::track_tint")]
     pub track_tint: f32,
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
@@ -104,6 +105,12 @@ pub struct UiState {
     /// The Mix window lives in its own native window (Window › Mix in Separate Window); the main
     /// window then always shows Edit.
     pub mix_separate: bool,
+    /// The separate Mix window's outer position and inner size (logical pixels) as last seen; it
+    /// reopens there. No position: the system places it.
+    #[serde(deserialize_with = "saved::mix_window_pos")]
+    pub mix_window_pos: Option<[f32; 2]>,
+    #[serde(deserialize_with = "saved::mix_window_size")]
+    pub mix_window_size: [f32; 2],
     pub show_io_setup: bool,
     pub show_shortcuts: bool,
     pub show_clip_effects: bool,
@@ -124,9 +131,49 @@ pub struct UiState {
     pub theme: theme::ThemeMode,
     /// The main window's size (logical points) and maximized state, and the interface scale, as
     /// the desktop app last saw them; it restores them at launch.
+    #[serde(deserialize_with = "saved::window_size")]
     pub window_size: [f32; 2],
     pub window_maximized: bool,
+    #[serde(deserialize_with = "saved::ui_scale")]
     pub ui_scale: f32,
+}
+
+/// Reading saved sizes and scales. JSON reads a number too big for an `f32` (1e39) as infinity,
+/// which serde_json writes back as `null`, and the whole preferences file would no longer load:
+/// such values, and ones out of range, are replaced as they are read (preferences and `ui.set`).
+mod saved {
+    use serde::{Deserialize, Deserializer};
+
+    /// `v` as an `f32`, if it is a finite one.
+    fn finite(v: f64) -> Option<f32> {
+        (v.is_finite() && v.abs() <= f64::from(f32::MAX)).then_some(v as f32)
+    }
+
+    fn pair([x, y]: [f64; 2]) -> Option<[f32; 2]> {
+        Some([finite(x)?, finite(y)?])
+    }
+
+    pub fn track_tint<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+        Ok(finite(f64::deserialize(d)?).map_or(0.5, |v| v.clamp(0.0, 1.0)))
+    }
+
+    pub fn ui_scale<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+        Ok(finite(f64::deserialize(d)?).map_or(1.0, |v| v.clamp(0.75, 1.5)))
+    }
+
+    pub fn window_size<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 2], D::Error> {
+        Ok(pair(<[f64; 2]>::deserialize(d)?).unwrap_or([1600.0, 1000.0]))
+    }
+
+    pub fn mix_window_pos<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[f32; 2]>, D::Error> {
+        let pos = Option::<[f64; 2]>::deserialize(d)?.and_then(pair);
+        Ok(crate::mix_window::sane_placement(pos, crate::mix_window::DEFAULT_SIZE).0)
+    }
+
+    pub fn mix_window_size<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 2], D::Error> {
+        let size = pair(<[f64; 2]>::deserialize(d)?).unwrap_or(crate::mix_window::DEFAULT_SIZE);
+        Ok(crate::mix_window::sane_placement(None, size).1)
+    }
 }
 
 impl Default for UiState {
@@ -168,6 +215,8 @@ impl Default for UiState {
             show_playback_engine: false,
             audio: soundcraft_playback::AudioConfig::default(),
             mix_separate: false,
+            mix_window_pos: None,
+            mix_window_size: mix_window::DEFAULT_SIZE,
             show_io_setup: false,
             show_shortcuts: false,
             show_clip_effects: false,
@@ -297,6 +346,12 @@ pub struct SoundApp {
     pub palette: palette::PaletteState,
     /// Bring the separate Mix window to the front on the next frame.
     pub(crate) focus_mix: bool,
+    /// Bring the main (Edit) window to the front on the next frame.
+    pub(crate) focus_edit: bool,
+    /// The separate Mix window has keyboard focus (as of its last frame).
+    pub(crate) mix_focused: bool,
+    /// Where the separate Mix window opened, while it is open (see `mix_window::show_separate`).
+    pub(crate) mix_placement: Option<mix_window::Placement>,
     /// Scroll Into View: the track each window brings to its top (Edit) or left (Mix) when it
     /// next draws, so a window not on screen catches up when it is shown.
     pub(crate) edit_scroll_into_view: Option<TrackId>,
@@ -414,6 +469,9 @@ impl SoundApp {
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
             focus_mix: false,
+            focus_edit: false,
+            mix_focused: false,
+            mix_placement: None,
             edit_scroll_into_view: None,
             mix_scroll_into_view: None,
             synthetic: Vec::new(),
@@ -1322,18 +1380,26 @@ impl SoundApp {
             self.arrange_request = false;
             ctx.memory_mut(|m| m.reset_areas());
         }
+        // The main window has the keys, so the Mix window no longer does (it learns that only on its next pass).
+        if ctx.input(|i| i.focused) {
+            self.mix_focused = false;
+        }
         shortcuts::handle(self, &ctx);
         self.sample_drop_targets.clear();
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }
-        // With the Mix window in its own native window, the main window keeps Edit.
-        match if self.ui.mix_separate { MainWindow::Edit } else { self.ui.window } {
+        match self.main_window_shows() {
             MainWindow::Edit => edit_window::show(self, ui),
             MainWindow::Mix => mix_window::show(self, ui),
         }
         if self.ui.mix_separate {
             mix_window::show_separate(self, &ctx);
+        } else {
+            mix_window::separate_hidden(self);
+        }
+        if std::mem::take(&mut self.focus_edit) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
         }
         panels::floating(self, &ctx);
         windows::show(self, &ctx);
@@ -1353,6 +1419,11 @@ impl SoundApp {
         } else if !self.pending_shots.is_empty() || !self.synthetic.is_empty() {
             ctx.request_repaint();
         }
+    }
+
+    /// What the main window shows: with the Mix window in its own native window, it keeps Edit.
+    pub fn main_window_shows(&self) -> MainWindow {
+        if self.ui.mix_separate { MainWindow::Edit } else { self.ui.window }
     }
 
     /// UI state as JSON (control channel `ui.inspect`).
