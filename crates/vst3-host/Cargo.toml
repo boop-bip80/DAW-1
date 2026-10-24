@@ -32,6 +32,10 @@ name = "editor_main_thread"
 harness = false
 
 [[test]]
+name = "scan_control"
+harness = false
+
+[[test]]
 name = "module_exit"
 harness = false
 

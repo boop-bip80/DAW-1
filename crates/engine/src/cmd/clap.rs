@@ -2,8 +2,9 @@
 //! commands. Hosting itself lives in `soundcraft-clap-host`.
 use super::{CommandSpec, always};
 
+use super::plugin_scan::{self, Rescan};
 use crate::cmd;
-use serde_json::{Value, json};
+use serde_json::json;
 use soundcraft_dsp::PluginInfo;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -12,13 +13,13 @@ pub fn specs() -> Vec<CommandSpec> {
         "List CLAP Plugins",
         [],
         None,
-        "{rescan?: bool} → [{id: \"clap:…\", plugin_id, name, vendor, version, description, features, category, is_instrument, path}]",
+        "{rescan?: true (everything) | [bundle or folder path] (only those, and lists only them)} → [{id: \"clap:…\", plugin_id, name, vendor, version, description, features, category, is_instrument, path}]",
         always,
         |_, p| {
-            let list = if p.get("rescan").and_then(Value::as_bool).unwrap_or(false) {
-                soundcraft_clap_host::rescan()
-            } else {
-                soundcraft_clap_host::scan()
+            let list = match plugin_scan::rescan_param("engine.clap_plugins", p, soundcraft_clap_host::in_search_path)? {
+                Rescan::No => soundcraft_clap_host::scan(),
+                Rescan::All => soundcraft_clap_host::rescan(),
+                Rescan::Paths(targets) => soundcraft_clap_host::rescan_paths_where(&targets, &|b| crate::file_access::check_read(b).is_ok()),
             };
             Ok(json!(list))
         }

@@ -24,6 +24,36 @@ input opened by arm/monitor commands. An automated UI smoke run must never arm a
 monitoring, or start recording. Control input injects egui events; it does not establish operating-system
 input delivery or screen-reader acceptance. Native screenshots use the presented viewport frame.
 
+## Choosing which plugins load
+
+Scanning loads every CLAP and VST3 binary it finds, and so does creating any one plugin, since that
+starts with a scan. Plugins with copy protection may show licence dialogs while loading. To keep
+an automated run to the plugins it uses:
+
+| Setting | Effect |
+|---|---|
+| `SOUNDCRAFT_PLUGIN_PATHS_ONLY=1` | Scan only `VST3_PATH` and `CLAP_PATH` (path lists), not the standard plugin folders |
+| `SOUNDCRAFT_PLUGIN_BLOCKLIST=…` | A path list of plugins never loaded: absolute paths of bundles or folders (also matched where links lead), or bare bundle names with or without extension (`AutoAlign2.vst3`, `AutoAlign2`); case and `.` segments are ignored, unusable entries are logged and skipped |
+| `engine.plugin_blocklist {set?, add?, remove?}` | Change the blocklist while running (CLAP and VST3 together); blocked plugins leave the lists at once, unblocked ones return with the next rescan |
+| `engine.vst3_plugins {"rescan": [path, …]}` | Reload only those bundles or folders (likewise `engine.clap_plugins`) and list only them. Paths must be absolute and inside the search path (standard folders, `VST3_PATH`/`CLAP_PATH`), so a rescan never loads what a full scan wouldn't; under `--automation-read-root` they, and every bundle found below them, must also lie inside a read root. Before any full scan the plugins found can be inserted without loading anything else, and they win over another bundle with the same id (a rebuilt plugin over the installed one) until a full rescan |
+
+```sh
+SOUNDCRAFT_PLUGIN_PATHS_ONLY=1 VST3_PATH=/Library/Audio/Plug-Ins/VST3/MyVendor \
+  soundcraft-cli run --cmd 'file.import_audio={"path":"in.wav"}' \
+  --cmd 'mix.insert={"track":"in","plugin":"vst3:<class id>"}' --bounce out.wav
+
+# Or name the one bundle; nothing else is loaded:
+soundcraft-cli run --cmd 'engine.vst3_plugins={"rescan":["/Library/Audio/Plug-Ins/VST3/MyVendor/My.vst3"]}' \
+  --cmd 'file.import_audio={"path":"in.wav"}' --cmd 'mix.insert={"track":"in","plugin":"vst3:<class id>"}' --bounce out.wav
+```
+
+Asking for a plugin id that no scan has listed yet runs the full scan, and so does a plain
+`engine.vst3_plugins {}` / `engine.clap_plugins {}` listing.
+
+A binary stays loaded for the life of the process, so testing a rebuilt plugin needs a new
+process (each `soundcraft-cli run` is one). Audio Units are listed by the system without loading
+them and are not affected.
+
 ## Wire format
 
 Newline-delimited JSON over TCP on `127.0.0.1`. One request per line, one reply per line:

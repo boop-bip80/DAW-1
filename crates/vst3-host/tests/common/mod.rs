@@ -5,8 +5,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// Builds the fixture once and returns a folder containing `Fixture.vst3`.
+/// Builds the fixture once, installs it and adds the folder to the host's search path; returns
+/// the folder containing `vendor/Fixture.vst3`.
+#[allow(dead_code)] // Not every test binary that shares this module uses it directly.
 pub fn fixture_dir() -> &'static Path {
+    static DIR: OnceLock<&'static Path> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = install_fixture();
+        assert_eq!(soundcraft_vst3_host::add_search_dir(dir), 2);
+        dir
+    })
+}
+
+/// Builds and installs the fixture once without telling the host about it; returns the folder
+/// containing `vendor/Fixture.vst3`.
+#[allow(dead_code)] // Not every test binary that shares this module uses it directly.
+pub fn install_fixture() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixture/Cargo.toml");
@@ -35,7 +49,6 @@ pub fn fixture_dir() -> &'static Path {
         let bin = dir.join("vendor/Fixture.vst3/Contents").join(folder);
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::copy(&built, bin.join(exe)).unwrap();
-        assert_eq!(soundcraft_vst3_host::add_search_dir(&dir), 2);
         dir
     })
 }

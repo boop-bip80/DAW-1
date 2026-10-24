@@ -1,6 +1,8 @@
 //! SoundCraft's CLAP plugin host.
 //!
-//! Scans the standard CLAP folders (plus `CLAP_PATH`), loads `.clap` binaries in-process and
+//! Scans the standard CLAP folders (plus `CLAP_PATH`; only `CLAP_PATH` when
+//! `SOUNDCRAFT_PLUGIN_PATHS_ONLY` is set, and never what `SOUNDCRAFT_PLUGIN_BLOCKLIST` or
+//! [`set_blocklist`] names), loads `.clap` binaries in-process and
 //! exposes each plugin as a [`soundcraft_dsp::Plugin`], so the mix engine treats third-party
 //! plugins exactly like the built-in ones. Plugin ids are `clap:<CLAP plugin id>`; parameter ids
 //! are the CLAP param ids as decimal strings, with their human names in [`PluginInfo::params`].
@@ -102,6 +104,24 @@ mod api {
     pub fn add_search_dir(dir: &Path) -> usize {
         registry::add_search_dir(dir)
     }
+    pub fn in_search_path(path: &Path) -> bool {
+        registry::in_search_path(path)
+    }
+    pub fn register_search_dir(dir: &Path) {
+        registry::register_search_dir(dir)
+    }
+    pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
+        registry::rescan_paths_where(targets, allow)
+    }
+    pub fn rescan_paths(targets: &[PathBuf]) -> Vec<ClapDescriptor> {
+        registry::rescan_paths(targets)
+    }
+    pub fn set_blocklist(entries: Vec<PathBuf>) {
+        registry::set_blocklist(entries)
+    }
+    pub fn blocklist() -> Vec<PathBuf> {
+        registry::blocklist()
+    }
     pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
         registry::scan_paths(dirs)
     }
@@ -131,6 +151,20 @@ mod api {
     }
     pub fn add_search_dir(_dir: &Path) -> usize {
         0
+    }
+    pub fn in_search_path(_path: &Path) -> bool {
+        false
+    }
+    pub fn register_search_dir(_dir: &Path) {}
+    pub fn rescan_paths_where(_targets: &[PathBuf], _allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
+        Vec::new()
+    }
+    pub fn rescan_paths(_targets: &[PathBuf]) -> Vec<ClapDescriptor> {
+        Vec::new()
+    }
+    pub fn set_blocklist(_entries: Vec<PathBuf>) {}
+    pub fn blocklist() -> Vec<PathBuf> {
+        Vec::new()
     }
     pub fn scan_paths(_dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
         Vec::new()
@@ -164,7 +198,45 @@ pub fn add_search_dir(dir: &Path) -> usize {
     api::add_search_dir(dir)
 }
 
-/// Scans the given folders without touching the cache.
+/// True when `path` lies in a folder a full scan reads (the standard folders, the environment's
+/// and those added here); [`rescan_paths`] accepts only such targets.
+pub fn in_search_path(path: &Path) -> bool {
+    api::in_search_path(path)
+}
+
+/// Adds a folder to the search path without scanning it (unlike [`add_search_dir`]).
+pub fn register_search_dir(dir: &Path) {
+    api::register_search_dir(dir)
+}
+
+/// Rescans only the given absolute bundle or folder paths inside the search path (others are
+/// ignored), forgetting their cached plugins and failures, and returns what they hold now. Nothing
+/// else is loaded, the plugins found can be created at once, and they win over another bundle with
+/// the same id until a full [`rescan`]. A binary loaded earlier stays mapped for the life of the
+/// process, so a rebuilt plugin's new code needs a new process.
+pub fn rescan_paths(targets: &[PathBuf]) -> Vec<ClapDescriptor> {
+    api::rescan_paths(targets)
+}
+
+/// [`rescan_paths`], loading only the bundles `allow` accepts: it is asked about every bundle
+/// found below the targets (a caller confining file access passes its read check, which then
+/// covers bundles reached through linked subfolders too).
+pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
+    api::rescan_paths_where(targets, allow)
+}
+
+/// Replaces the blocklist: plugins and folders that are never loaded (see [`scan::is_blocked`]
+/// for how entries match). It starts as the entries of `SOUNDCRAFT_PLUGIN_BLOCKLIST`.
+pub fn set_blocklist(entries: Vec<PathBuf>) {
+    api::set_blocklist(entries)
+}
+
+/// The current blocklist.
+pub fn blocklist() -> Vec<PathBuf> {
+    api::blocklist()
+}
+
+/// Scans the given folders without touching the cache (blocked bundles are skipped).
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
     api::scan_paths(dirs)
 }

@@ -22,6 +22,19 @@ struct Registry {
     infos: HashMap<String, &'static PluginInfo>,
     /// Ids that failed to instantiate (not retried every UI frame).
     failed: HashSet<String>,
+    /// Plugins and folders never loaded ([`paths::is_blocked`]); read from the environment on
+    /// first use, then replaced by [`set_blocklist`].
+    blocked: Option<Vec<PathBuf>>,
+    /// Plugins found by [`rescan_paths`]: creatable before any full scan without loading anything
+    /// else, and preferred over another bundle with the same id (a rebuilt plugin over the
+    /// installed one) until a full [`rescan`].
+    targeted: Vec<ClapDescriptor>,
+}
+
+impl Registry {
+    fn blocked(&mut self) -> &[PathBuf] {
+        self.blocked.get_or_insert_with(paths::blocklist_from_env)
+    }
 }
 
 fn registry() -> &'static Mutex<Registry> {
@@ -49,11 +62,28 @@ pub fn load_bundle(path: &Path) -> Result<Vec<ClapDescriptor>, ClapError> {
         .collect())
 }
 
-/// Scans `dirs` (uncached). Unloadable files are logged and skipped; the first plugin with a
-/// given id wins.
+/// Scans `dirs` (uncached). Blocked bundles are never loaded; unloadable files are logged and
+/// skipped; the first plugin with a given id wins.
 pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
+    let blocked = registry().lock().unwrap_or_else(PoisonError::into_inner).blocked().to_vec();
+    scan_dirs(dirs, &blocked)
+}
+
+fn scan_dirs(dirs: &[PathBuf], blocked: &[PathBuf]) -> Vec<ClapDescriptor> {
+    scan_dirs_where(dirs, blocked, &|_| true)
+}
+
+fn scan_dirs_where(dirs: &[PathBuf], blocked: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
     let mut out: Vec<ClapDescriptor> = Vec::new();
     for path in paths::find_bundles(dirs) {
+        if paths::is_blocked(&path, blocked) {
+            log::info!("CLAP plugin {} is blocked: not loaded", path.display());
+            continue;
+        }
+        if !allow(&path) {
+            log::warn!("CLAP plugin {} is outside the allowed folders: not loaded", path.display());
+            continue;
+        }
         match load_bundle(&path) {
             Ok(ds) => {
                 for d in ds {
@@ -71,9 +101,11 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
 
 fn ensure_scanned(r: &mut Registry) -> &Vec<ClapDescriptor> {
     if r.scanned.is_none() {
-        let mut dirs = paths::default_search_paths();
-        dirs.extend(r.extra_dirs.iter().cloned());
-        r.scanned = Some(scan_paths(&dirs));
+        let dirs = search_dirs(r);
+        let mut found = scan_dirs(&dirs, r.blocked());
+        let targeted = r.targeted.clone();
+        merge(&mut found, &|_| false, &targeted);
+        r.scanned = Some(found);
     }
     r.scanned.get_or_insert_with(Vec::new)
 }
@@ -91,6 +123,7 @@ pub fn rescan() -> Vec<ClapDescriptor> {
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
     r.scanned = None;
     r.failed.clear();
+    r.targeted.clear();
     ensure_scanned(&mut r).clone()
 }
 
@@ -99,7 +132,7 @@ pub fn add_search_dir(dir: &Path) -> usize {
     if !r.extra_dirs.iter().any(|d| d == dir) {
         r.extra_dirs.push(dir.to_path_buf());
     }
-    let found = scan_paths(&[dir.to_path_buf()]);
+    let found = scan_dirs(&[dir.to_path_buf()], r.blocked());
     let n = found.len();
     let list = r.scanned.get_or_insert_with(Vec::new);
     for d in found {
@@ -108,6 +141,97 @@ pub fn add_search_dir(dir: &Path) -> usize {
         }
     }
     n
+}
+
+/// The folders a full scan reads: the standard ones and the environment's (see
+/// [`paths::default_search_paths`]) and those added with [`add_search_dir`] or
+/// [`register_search_dir`].
+fn search_dirs(r: &Registry) -> Vec<PathBuf> {
+    let mut dirs = paths::default_search_paths();
+    dirs.extend(r.extra_dirs.iter().cloned());
+    dirs
+}
+
+/// True when `path` lies in a folder a full scan reads, so loading it needs no new trust.
+pub fn in_search_path(path: &Path) -> bool {
+    let r = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    search_dirs(&r).iter().any(|d| paths::is_inside(path, d))
+}
+
+/// Adds a folder to the search path without scanning it: the next full scan reads it, and
+/// [`rescan_paths`] may target what it holds.
+pub fn register_search_dir(dir: &Path) {
+    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    if !r.extra_dirs.iter().any(|d| d == dir) {
+        r.extra_dirs.push(dir.to_path_buf());
+    }
+}
+
+/// Rescans only `targets`: absolute bundle or folder paths inside the search path ([`in_search_path`]);
+/// others are ignored, so a rescan never loads a binary a full scan wouldn't. Forgets the targets'
+/// cached plugins and remembered failures, loads them again (unless blocked) and merges the result
+/// into the cache, where it wins over another bundle with the same id. Returns what the targets hold
+/// now. Before any full scan nothing else is loaded, and the plugins found can be created right away.
+/// A binary loaded earlier in this process stays mapped, so a rebuilt plugin's new code needs a new
+/// process; its descriptors are read again either way.
+pub fn rescan_paths(targets: &[PathBuf]) -> Vec<ClapDescriptor> {
+    rescan_paths_where(targets, &|_| true)
+}
+
+/// [`rescan_paths`], loading only the bundles `allow` accepts (checked for every bundle found
+/// below the targets, so a caller confining file access also covers linked subfolders).
+pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
+    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    let roots = search_dirs(&r);
+    let targets: Vec<PathBuf> = targets
+        .iter()
+        .filter(|t| {
+            let ok = t.is_absolute() && paths::entry_problem(t).is_none() && roots.iter().any(|d| paths::is_inside(t, d));
+            if !ok {
+                log::warn!("CLAP rescan: ignoring `{}`: not an absolute bundle or folder path in the search path", t.display());
+            }
+            ok
+        })
+        .cloned()
+        .collect();
+    let under = |p: &Path| targets.iter().any(|t| paths::is_under(p, t));
+    let stale: Vec<String> = r.scanned.iter().flatten().chain(&r.targeted).filter(|d| under(&d.path)).map(|d| d.id.clone()).collect();
+    let blocked = r.blocked().to_vec();
+    let found = scan_dirs_where(&targets, &blocked, allow);
+    for id in stale.iter().chain(found.iter().map(|d| &d.id)) {
+        r.failed.remove(id);
+    }
+    merge(&mut r.targeted, &under, &found);
+    if let Some(list) = r.scanned.as_mut() {
+        merge(list, &under, &found);
+    }
+    found
+}
+
+/// Puts `found` into `list` in place of the plugins under the rescanned targets and of any other
+/// bundle's plugin with the same id.
+fn merge(list: &mut Vec<ClapDescriptor>, under: &dyn Fn(&Path) -> bool, found: &[ClapDescriptor]) {
+    list.retain(|d| !under(&d.path) && !found.iter().any(|f| f.id == d.id));
+    list.extend(found.iter().cloned());
+    list.sort_by_key(|d| d.name.to_lowercase());
+}
+
+/// Replaces the blocklist ([`paths::is_blocked`] entries). Newly blocked plugins leave the cache
+/// at once and can no longer be created (live instances keep running, and the parameter info of
+/// a type already created stays available for them); unblocked ones come back with the next scan
+/// of their folder ([`rescan`] or [`rescan_paths`]).
+pub fn set_blocklist(entries: Vec<PathBuf>) {
+    let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(list) = r.scanned.as_mut() {
+        list.retain(|d| !paths::is_blocked(&d.path, &entries));
+    }
+    r.targeted.retain(|d| !paths::is_blocked(&d.path, &entries));
+    r.blocked = Some(entries);
+}
+
+/// The current blocklist.
+pub fn blocklist() -> Vec<PathBuf> {
+    registry().lock().unwrap_or_else(PoisonError::into_inner).blocked().to_vec()
 }
 
 fn leak(s: String) -> &'static str {
@@ -167,10 +291,22 @@ fn instantiate_raw(id: &str) -> Result<(Instance, &'static PluginInfo), ClapErro
         if r.failed.contains(id) {
             return Err(ClapError::Instantiate(plugin_id.to_string(), "failed before".into()));
         }
-        ensure_scanned(&mut r).iter().find(|d| d.id == id).cloned().ok_or_else(|| ClapError::NotFound(id.to_string()))?
+        let known = r.scanned.iter().flatten().chain(&r.targeted).find(|d| d.id == id).cloned();
+        let desc = match known {
+            Some(d) => d,
+            None => ensure_scanned(&mut r).iter().find(|d| d.id == id).cloned().ok_or_else(|| ClapError::NotFound(id.to_string()))?,
+        };
+        if paths::is_blocked(&desc.path, r.blocked()) {
+            return Err(ClapError::Instantiate(plugin_id.to_string(), "blocked".into()));
+        }
+        desc
     };
     let made = Bundle::load(&desc.path).and_then(|b| b.instantiate(plugin_id));
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
+    // Blocked while it loaded: the new instance is dropped.
+    if paths::is_blocked(&desc.path, r.blocked()) {
+        return Err(ClapError::Instantiate(plugin_id.to_string(), "blocked".into()));
+    }
     match made {
         Ok(inst) => {
             let info = match r.infos.get(id) {

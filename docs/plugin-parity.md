@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-23 · **Change:** minor (Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (plugin blocklist and scoped scans; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -40,6 +40,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | Plugin format | AAX only (Native and DSP) | CLAP, VST3, Audio Units (macOS) | Users' libraries mostly ship VST3/AU too. AAX (#109) needs Avid's SDK licence and PACE signing: owner decision, likely never |
 | VST2, LV2, LADSPA | — | ❌ (#30) | Beyond Pro Tools; VST2 SDK is no longer licensable |
 | Scan, vendor menus, instrument picker | ✅ | ✅ | #23 |
+| Skip plugins at scan (blocklist), rescan chosen plugins | ✅ (Plug-In Manager) | 🟡 `engine.plugin_blocklist`, `SOUNDCRAFT_PLUGIN_BLOCKLIST`, `rescan: [paths]`, `SOUNDCRAFT_PLUGIN_PATHS_ONLY` (CLAP and VST3) | No UI yet and not saved in preferences; the scan is not cached on disk, so every launch loads each unblocked binary again |
 | Audio, parameters, automation, latency (PDC) | ✅ | ✅ | |
 | Notes / MIDI to instruments | ✅ | ✅ | But no live MIDI input (G-02) |
 | State saved in sessions, presets | ✅ | ✅ | |
@@ -58,6 +59,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | CLAP and VST3 hosts: blocklist (never loaded), rescan of chosen bundles or folders, and paths-only scans for test harnesses |
 | 2026-10-23 | trivial | Modulation: Ring Modulator (`ring_mod`), also used by the AudioSuite Modulation menu |
 | 2026-10-13 | minor | VST3 host: IMessage and IAttributeList for plugins whose halves talk through messages (Line 6 Helix Stadium Native verified) |
 | 2026-10-13 | trivial | Sampler ping-pong loop phase (#463) |

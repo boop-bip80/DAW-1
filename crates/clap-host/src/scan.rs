@@ -1,7 +1,7 @@
 //! Finding CLAP plugins on disk (safe, pure `std::fs`) and mapping CLAP features to categories.
 
 use soundcraft_dsp::Category;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Directory recursion limit while scanning (CLAP folders may be nested, never deeply).
 const MAX_DEPTH: usize = 8;
@@ -10,18 +10,139 @@ const MAX_BUNDLES: usize = 4096;
 /// Upper bound on directory entries visited by one scan.
 const MAX_ENTRIES: usize = 100_000;
 
+/// Set (to anything but `0` or empty) to scan only the `CLAP_PATH` / `VST3_PATH` folders and skip
+/// the standard locations: a test harness then loads only the plugins it names.
+pub const PATHS_ONLY_ENV: &str = "SOUNDCRAFT_PLUGIN_PATHS_ONLY";
+/// A path list (like `PATH`) of plugins and folders never loaded; see [`is_blocked`].
+pub const BLOCKLIST_ENV: &str = "SOUNDCRAFT_PLUGIN_BLOCKLIST";
+
 /// The standard CLAP search locations for this OS (existing or not), followed by every entry
-/// of the `CLAP_PATH` environment variable.
+/// of the `CLAP_PATH` environment variable. With [`PATHS_ONLY_ENV`] set, only the `CLAP_PATH` entries.
 pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut v = os_search_paths(
+    let os = os_search_paths(
         std::env::var_os("HOME").map(PathBuf::from),
         std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
     );
-    if let Some(cp) = std::env::var_os("CLAP_PATH") {
-        v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
+    search_paths(os, std::env::var_os("CLAP_PATH").as_deref(), env_flag(PATHS_ONLY_ENV))
+}
+
+/// The standard locations followed by the entries of a path-list variable, or only those entries
+/// when `only_env` is set.
+pub fn search_paths(standard: Vec<PathBuf>, env: Option<&std::ffi::OsStr>, only_env: bool) -> Vec<PathBuf> {
+    let mut v = if only_env { Vec::new() } else { standard };
+    if let Some(cp) = env {
+        v.extend(std::env::split_paths(cp).filter(|p| !p.as_os_str().is_empty()));
     }
     v
+}
+
+/// True when an environment flag is set to anything but empty or `0`.
+pub fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// The entries of [`BLOCKLIST_ENV`] (empty when unset).
+pub fn blocklist_from_env() -> Vec<PathBuf> {
+    let Some(v) = std::env::var_os(BLOCKLIST_ENV) else { return Vec::new() };
+    std::env::split_paths(&v)
+        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| match entry_problem(p) {
+            Some(why) => {
+                log::warn!("{BLOCKLIST_ENV}: ignoring `{}`: {why}", p.display());
+                false
+            }
+            None => true,
+        })
+        .collect()
+}
+
+/// Why a blocklist entry or rescan target can't be used (`None` when it can). An entry is either a
+/// bare bundle name (one plain component) or an absolute path below the root; relative paths
+/// with folders, `..`, and a bare root would match unpredictably or block everything.
+pub fn entry_problem(e: &Path) -> Option<&'static str> {
+    let normal = e.components().filter(|c| matches!(c, Component::Normal(_))).count();
+    if e.components().any(|c| c == Component::ParentDir) {
+        Some("must not contain `..`")
+    } else if !e.is_absolute() && !(normal == 1 && e.components().count() == 1) {
+        Some("must be an absolute path or a bare bundle name")
+    } else if e.is_absolute() && normal == 0 {
+        Some("must name a folder or bundle below the root")
+    } else {
+        None
+    }
+}
+
+/// A path as comparable components: `.` dropped, names lower-cased (plugin folders usually live
+/// on case-insensitive file systems; on case-sensitive ones this can only block more).
+fn folded(p: &Path) -> Vec<String> {
+    p.components().filter(|c| *c != Component::CurDir).map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect()
+}
+
+/// True when `path` is `root` or lies inside it, compared by whole components.
+pub fn is_under(path: &Path, root: &Path) -> bool {
+    let r = folded(root);
+    !r.is_empty() && folded(path).starts_with(&r)
+}
+
+/// `path` with its links resolved, without the `\\?\` prefix Windows adds (so it compares with
+/// the paths people type); `None` when it doesn't exist.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    let r = std::fs::canonicalize(path).ok()?;
+    let text = r.to_string_lossy();
+    Some(match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+        None => text.strip_prefix(r"\\?\").map_or_else(|| r.clone(), PathBuf::from),
+    })
+}
+
+/// True when `path` is `root` or lies inside it, as written or with links resolved on both sides.
+/// A link inside `root` (plugins are often symlinked in from a build folder) counts as inside, as
+/// it does for a full scan, which follows links too. Unlike [`is_under`], which blocklists use and
+/// which may match more than it should, this decides what may be loaded, so case is ignored only
+/// on Windows: on macOS and Linux names compare exactly, and `/work/PLUGINS` is not inside
+/// `/work/plugins` (a case-sensitive macOS volume may hold both). A path spelled in another case
+/// on a case-insensitive volume still matches through the resolved comparison, since resolving
+/// links yields the names the file system actually stores.
+pub fn is_inside(path: &Path, root: &Path) -> bool {
+    inside(path, root, false) || inside(path, root, true)
+}
+
+fn inside(path: &Path, root: &Path, resolve: bool) -> bool {
+    let fold = cfg!(windows);
+    let parts = |p: &Path| -> Vec<String> {
+        let p = if resolve { resolved(p).unwrap_or_else(|| p.to_path_buf()) } else { p.to_path_buf() };
+        p.components()
+            .filter(|c| *c != Component::CurDir)
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                if fold { s.to_lowercase() } else { s.into_owned() }
+            })
+            .collect()
+    };
+    let r = parts(root);
+    !r.is_empty() && parts(path).starts_with(&r)
+}
+
+/// True when a blocklist entry covers the plugin at `path`. An absolute entry blocks that bundle
+/// and everything inside a folder of that name, comparing links resolved on either side as well. A bare name blocks every bundle with that file name, with or without its extension
+/// (`AutoAlign2.vst3` or `AutoAlign2`). Case is ignored; entries with an [`entry_problem`] never match.
+pub fn is_blocked(path: &Path, entries: &[PathBuf]) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    let stem = path.file_stem().map(|n| n.to_string_lossy().to_lowercase());
+    let mut real: Option<Option<PathBuf>> = None;
+    entries.iter().filter(|e| entry_problem(e).is_none()).any(|e| {
+        if e.is_absolute() {
+            if is_under(path, e) {
+                return true;
+            }
+            let Some(p) = real.get_or_insert_with(|| resolved(path)).as_deref() else { return false };
+            is_under(p, e) || resolved(e).is_some_and(|e| is_under(p, &e))
+        } else {
+            let e = e.to_string_lossy().to_lowercase();
+            name.as_deref() == Some(e.as_str()) || stem.as_deref() == Some(e.as_str())
+        }
+    })
 }
 
 /// The OS-specific standard locations, given the relevant environment values.
@@ -195,7 +316,84 @@ mod tests {
         } else {
             assert_eq!(v, vec![PathBuf::from("/home/u/.clap"), PathBuf::from("/usr/lib/clap"), PathBuf::from("/usr/local/lib/clap")]);
         }
-        assert!(default_search_paths().len() >= v.len().saturating_sub(1));
+        if !env_flag(PATHS_ONLY_ENV) {
+            assert!(default_search_paths().len() >= v.len().saturating_sub(1));
+        }
+    }
+
+    /// A test path made absolute on every platform (Windows paths need a drive).
+    fn abs(p: &str) -> PathBuf {
+        if cfg!(windows) && p.starts_with('/') { PathBuf::from(format!("C:{p}")) } else { PathBuf::from(p) }
+    }
+
+    #[test]
+    fn env_paths_extend_or_replace_the_standard_locations() {
+        let std = vec![PathBuf::from("/Library/Audio/Plug-Ins/CLAP")];
+        let env = std::env::join_paths(["/a", "", "/b"]).unwrap();
+        assert_eq!(search_paths(std.clone(), Some(&env), false), vec![PathBuf::from("/Library/Audio/Plug-Ins/CLAP"), "/a".into(), "/b".into()]);
+        assert_eq!(search_paths(std.clone(), Some(&env), true), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert!(search_paths(std, None, true).is_empty(), "paths-only without a path list scans nothing");
+    }
+
+    #[test]
+    fn blocklist_entries_match_names_and_paths() {
+        let p = abs("/Library/Audio/Plug-Ins/CLAP/vendor/Foo.clap");
+        let v = |e: &[&str]| e.iter().map(|e| abs(e)).collect::<Vec<_>>();
+        assert!(is_blocked(&p, &v(&["Foo.clap"])));
+        assert!(is_blocked(&p, &v(&["FOO"])));
+        assert!(!is_blocked(&p, &v(&["Fo"])));
+        assert!(is_blocked(&p, &v(&["/Library/Audio/Plug-Ins/CLAP/vendor"])));
+        assert!(!is_blocked(&p, &v(&["/Library/Audio/Plug-Ins/CLAP/vend"])));
+        assert!(is_blocked(&p, &v(&["/Library/Audio/Plug-Ins/./CLAP/VENDOR/"])), "`.` segments and case don't matter");
+        assert!(!is_blocked(&p, &v(&["/", ".", "vendor/Foo.clap", "/Library/x/../Audio"])), "unusable entries never match");
+        assert!(!is_blocked(&p, &[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loading_admission_is_exact_and_follows_links() {
+        let d = tmp("inside");
+        std::fs::create_dir_all(d.join("plugins/vendor")).unwrap();
+        std::fs::create_dir_all(d.join("PLUGINS")).unwrap();
+        std::os::unix::fs::symlink(d.join("plugins"), d.join("alias")).unwrap();
+        assert!(is_inside(&d.join("plugins/vendor"), &d.join("plugins")));
+        assert!(is_inside(&d.join("alias/vendor"), &d.join("plugins")), "through a link");
+        // A bundle linked into the folder from a build tree elsewhere is inside, as for a full scan.
+        std::fs::create_dir_all(d.join("build/Dev.clap")).unwrap();
+        std::os::unix::fs::symlink(d.join("build/Dev.clap"), d.join("plugins/vendor/Dev.clap")).unwrap();
+        assert!(is_inside(&d.join("plugins/vendor/Dev.clap"), &d.join("plugins")), "a linked-in bundle");
+        assert!(!is_inside(&d.join("build/Dev.clap"), &d.join("plugins")), "but not its target by itself");
+        assert!(!is_inside(&d.join("plugin"), &d.join("plugins")));
+        // `PLUGINS` is its own folder on a case-sensitive volume and an alias of `plugins` on a
+        // case-insensitive one; only the second is inside.
+        let same = |a: &Path, b: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let (a, b) = (std::fs::metadata(a).unwrap(), std::fs::metadata(b).unwrap());
+            (a.dev(), a.ino()) == (b.dev(), b.ino())
+        };
+        assert_eq!(is_inside(&d.join("PLUGINS"), &d.join("plugins")), same(&d.join("PLUGINS"), &d.join("plugins")));
+        assert_eq!(is_inside(&d.join("PLUGINS/vendor"), &d.join("plugins")), d.join("PLUGINS/vendor").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn loading_admission_ignores_case_only_on_windows() {
+        // Paths that don't exist compare as written.
+        let root = abs("/no-such-root/plugins");
+        assert!(is_inside(&abs("/no-such-root/plugins/vendor/Foo.clap"), &root));
+        assert_eq!(is_inside(&abs("/no-such-root/PLUGINS/vendor/Foo.clap"), &root), cfg!(windows));
+        assert_eq!(is_inside(&abs("/No-Such-Root/plugins"), &root), cfg!(windows));
+    }
+
+    #[test]
+    fn entries_are_checked_before_use() {
+        assert_eq!(entry_problem(Path::new("Foo.clap")), None);
+        assert_eq!(entry_problem(&abs("/Library/Audio/Plug-Ins/CLAP")), None);
+        assert!(entry_problem(Path::new("/")).is_some());
+        assert!(entry_problem(Path::new("vendor/Foo.clap")).is_some());
+        assert!(entry_problem(Path::new("/a/../b")).is_some());
+        assert!(is_under(Path::new("/a/b/c.clap"), Path::new("/a/b")));
+        assert!(!is_under(Path::new("/a/bc.clap"), Path::new("/a/b")));
     }
 
     #[test]
