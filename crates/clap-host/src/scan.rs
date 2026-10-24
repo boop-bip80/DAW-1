@@ -96,14 +96,20 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     })
 }
 
-/// True when `path` is `root` or lies inside it as the file system sees them: links resolved on
-/// both sides, case ignored only where file systems usually ignore it (macOS, Windows). Unlike
-/// [`is_under`], which blocklists use and which may match more than it should, this decides what
-/// may be loaded, so `/work/PLUGINS` is not inside `/work/plugins` on Linux.
+/// True when `path` is `root` or lies inside it, as written or with links resolved on both sides,
+/// case ignored only where file systems usually ignore it (macOS, Windows). A link inside `root`
+/// (plugins are often symlinked in from a build folder) counts as inside, as it does for a full
+/// scan, which follows links too. Unlike [`is_under`], which blocklists use and which may match
+/// more than it should, this decides what may be loaded, so `/work/PLUGINS` is not inside
+/// `/work/plugins` on Linux.
 pub fn is_inside(path: &Path, root: &Path) -> bool {
+    inside(path, root, false) || inside(path, root, true)
+}
+
+fn inside(path: &Path, root: &Path, resolve: bool) -> bool {
     let fold = cfg!(any(target_os = "macos", windows));
     let parts = |p: &Path| -> Vec<String> {
-        let p = resolved(p).unwrap_or_else(|| p.to_path_buf());
+        let p = if resolve { resolved(p).unwrap_or_else(|| p.to_path_buf()) } else { p.to_path_buf() };
         p.components()
             .filter(|c| *c != Component::CurDir)
             .map(|c| {
@@ -350,6 +356,11 @@ mod tests {
         std::os::unix::fs::symlink(d.join("plugins"), d.join("alias")).unwrap();
         assert!(is_inside(&d.join("plugins/vendor"), &d.join("plugins")));
         assert!(is_inside(&d.join("alias/vendor"), &d.join("plugins")), "through a link");
+        // A bundle linked into the folder from a build tree elsewhere is inside, as for a full scan.
+        std::fs::create_dir_all(d.join("build/Dev.clap")).unwrap();
+        std::os::unix::fs::symlink(d.join("build/Dev.clap"), d.join("plugins/vendor/Dev.clap")).unwrap();
+        assert!(is_inside(&d.join("plugins/vendor/Dev.clap"), &d.join("plugins")), "a linked-in bundle");
+        assert!(!is_inside(&d.join("build/Dev.clap"), &d.join("plugins")), "but not its target by itself");
         assert!(!is_inside(&d.join("plugin"), &d.join("plugins")));
         if !cfg!(target_os = "macos") {
             assert!(!is_inside(&d.join("PLUGINS"), &d.join("plugins")), "case matters where the file system says so");
