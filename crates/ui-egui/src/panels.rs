@@ -233,74 +233,138 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
         Some(c) => c.rows,
         None => {
             let rows = std::sync::Arc::new(clip_rows(app.engine.session(), &needle));
-            ui.ctx().memory_mut(|m| m.data.insert_temp(rkey, ClipRows { revision, filter: needle, rows: rows.clone() }));
+            ui.ctx().memory_mut(|m| m.data.insert_temp(rkey, ClipRows { revision, filter: needle.clone(), rows: rows.clone() }));
             rows
         }
     };
     let row_h = 17.0;
-    egui::ScrollArea::vertical().id_salt("clips_scroll").auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, shown| {
-        // Only the rows in view: what they show is read now, before any of them acts on the session.
-        let items: Vec<(u64, String, bool, [u8; 3], bool)> = {
-            let s = app.engine.session();
-            rows.get(shown)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|row| match *row {
-                    ClipRow::Source(i) => s.sources.get(i).map(|src| {
-                        (src.id.0, format!("{} ({}ch)", src.name, src.channels), true, [150, 150, 150], s.edit.selected_sources.contains(&src.id))
-                    }),
-                    ClipRow::Clip { track, clip } => {
-                        let tr = s.tracks.get(track)?;
-                        let c = tr.clips().get(clip)?;
-                        Some((c.id.0, c.name.clone(), false, c.color.unwrap_or(tr.color), s.edit.selected_clips.contains(&c.id)))
+    egui::ScrollArea::vertical()
+        .id_salt("clips_scroll")
+        .max_height(if app.engine.session().clip_definitions.is_empty() { ui.available_height() } else { ui.available_height() * 0.6 })
+        .auto_shrink([false, false])
+        .show_rows(ui, row_h, rows.len(), |ui, shown| {
+            // Only the rows in view: what they show is read now, before any of them acts on the session.
+            let items: Vec<(u64, String, bool, [u8; 3], bool)> = {
+                let s = app.engine.session();
+                rows.get(shown)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|row| match *row {
+                        ClipRow::Source(i) => s.sources.get(i).map(|src| {
+                            (src.id.0, format!("{} ({}ch)", src.name, src.channels), true, [150, 150, 150], s.edit.selected_sources.contains(&src.id))
+                        }),
+                        ClipRow::Clip { track, clip } => {
+                            let tr = s.tracks.get(track)?;
+                            let c = tr.clips().get(clip)?;
+                            Some((c.id.0, c.name.clone(), false, c.color.unwrap_or(tr.color), s.edit.selected_clips.contains(&c.id)))
+                        }
+                    })
+                    .collect()
+            };
+            for (id, name, whole, color, selected) in items {
+                let (r, resp) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), row_h), if whole { Sense::click_and_drag() } else { Sense::click() });
+                resp.context_menu(|ui| {
+                    if whole {
+                        if ui.button("Place on New Track").clicked() {
+                            let _ = app.run("clip.place_source", json!({"source": id}));
+                            ui.close();
+                        }
+                        let sel_track = app.engine.session().edit.selected_tracks.first().map(|t| t.0);
+                        if let Some(t) = sel_track
+                            && ui.button("Place on Selected Track").clicked()
+                        {
+                            let _ = app.run("clip.place_source", json!({"source": id, "track": t}));
+                            ui.close();
+                        }
+                        ui.separator();
                     }
-                })
-                .collect()
-        };
-        for (id, name, whole, color, selected) in items {
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), if whole { Sense::click_and_drag() } else { Sense::click() });
-            resp.context_menu(|ui| {
+                    if ui.button("Clear…").clicked() {
+                        let (clips, sources) = if whole { (vec![], vec![SourceId(id)]) } else { (vec![ClipId(id)], vec![]) };
+                        app.dialogs.open_clear(&app.engine, clips, sources);
+                        ui.close();
+                    }
+                });
                 if whole {
+                    // Whole files drag onto tracks.
+                    resp.dnd_set_drag_payload(crate::DragSource(id));
+                    if resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    }
+                }
+                if selected {
+                    ui.painter().rect_filled(r, 0.0, t.row_selected);
+                }
+                ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 4.0), vec2(9.0, 9.0)), 1.0, rgb(color));
+                ui.painter().with_clip_rect(r).text(
+                    pos2(r.min.x + 22.0, r.center().y),
+                    Align2::LEFT_CENTER,
+                    &name,
+                    if whole { bold(11.0) } else { regular(11.0) },
+                    t.text,
+                );
+                if resp.clicked() {
+                    let _ = app.run("edit.select", if whole { json!({"sources": [id]}) } else { json!({"clips": [id]}) });
+                }
+            }
+        });
+    let definitions: Vec<_> = app
+        .engine
+        .session()
+        .clip_definitions
+        .iter()
+        .filter_map(|definition| {
+            let kind = match &definition.template.content {
+                soundcraft_model::ClipContent::Audio { .. } => "Audio",
+                soundcraft_model::ClipContent::Midi { .. } => "MIDI",
+                soundcraft_model::ClipContent::Video { .. } => "Video",
+            };
+            (needle.is_empty() || definition.name.to_lowercase().contains(&needle) || kind.to_lowercase().contains(&needle))
+                .then(|| (definition.id.0, definition.name.clone(), kind, definition.template.color.unwrap_or([150, 150, 150])))
+        })
+        .collect();
+    egui::ScrollArea::vertical().id_salt("reusable_clips_scroll").auto_shrink([false, false]).show(ui, |ui| {
+        if !definitions.is_empty() {
+            panel_header(ui, "REUSABLE");
+        }
+        for (id, name, kind, color) in definitions {
+            ui.push_id(("reusable_clip", id), |ui| {
+                let label = format!("{name} ({kind})");
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label));
+                resp.context_menu(|ui| {
                     if ui.button("Place on New Track").clicked() {
-                        let _ = app.run("clip.place_source", json!({"source": id}));
+                        let _ = app.run("clip.place_definition", json!({"definition": id}));
                         ui.close();
                     }
-                    let sel_track = app.engine.session().edit.selected_tracks.first().map(|t| t.0);
-                    if let Some(t) = sel_track
-                        && ui.button("Place on Selected Track").clicked()
-                    {
-                        let _ = app.run("clip.place_source", json!({"source": id, "track": t}));
-                        ui.close();
+                    let selected = {
+                        let session = app.engine.session();
+                        session.edit.selected_tracks.first().and_then(|id| session.track(*id)).map(|track| (track.id.0, track.kind))
+                    };
+                    if let Some((track, track_kind)) = selected {
+                        let compatible = matches!(
+                            (kind, track_kind),
+                            ("Audio", soundcraft_model::TrackKind::Audio)
+                                | ("MIDI", soundcraft_model::TrackKind::Midi | soundcraft_model::TrackKind::Instrument)
+                                | ("Video", soundcraft_model::TrackKind::Video)
+                        );
+                        if ui.add_enabled(compatible, egui::Button::new("Place on Selected Track")).clicked() {
+                            let _ = app.run("clip.place_definition", json!({"definition": id, "track": track}));
+                            ui.close();
+                        }
                     }
                     ui.separator();
+                    if ui.button("Remove Definition").clicked() {
+                        let _ = app.run("clip.clear_definitions", json!({"definitions": [id]}));
+                        ui.close();
+                    }
+                });
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 0.0, t.row_selected);
                 }
-                if ui.button("Clear…").clicked() {
-                    let (clips, sources) = if whole { (vec![], vec![SourceId(id)]) } else { (vec![ClipId(id)], vec![]) };
-                    app.dialogs.open_clear(&app.engine, clips, sources);
-                    ui.close();
-                }
+                ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 4.0), vec2(9.0, 9.0)), 1.0, rgb(color));
+                ui.painter().with_clip_rect(r).text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.text);
             });
-            if whole {
-                // Whole files drag onto tracks.
-                resp.dnd_set_drag_payload(crate::DragSource(id));
-                if resp.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                }
-            }
-            if selected {
-                ui.painter().rect_filled(r, 0.0, t.row_selected);
-            }
-            ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 4.0), vec2(9.0, 9.0)), 1.0, rgb(color));
-            ui.painter().with_clip_rect(r).text(
-                pos2(r.min.x + 22.0, r.center().y),
-                Align2::LEFT_CENTER,
-                &name,
-                if whole { bold(11.0) } else { regular(11.0) },
-                t.text,
-            );
-            if resp.clicked() {
-                let _ = app.run("edit.select", if whole { json!({"sources": [id]}) } else { json!({"clips": [id]}) });
-            }
         }
     });
 }
