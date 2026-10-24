@@ -1,7 +1,6 @@
 //! `Headless::with_automation_roots` through the real MCP protocol: every file a command reads
 //! stays inside the read root, every file it writes inside the write root.
 // Integration tests: unwrapping and panicking on failure is fine here, unlike in shipped code (AGENTS.md).
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use serde_json::{Value, json};
 use soundcraft_automation::{Headless, mcp::Server};
@@ -58,7 +57,7 @@ fn fixture(name: &str) -> Fixture {
 }
 
 fn server(read: Option<&Path>, write: Option<&Path>) -> Server<Headless> {
-    let roots = AutomationRoots::new(read, write).unwrap();
+    let roots = AutomationRoots::new(read.as_slice(), write.as_slice()).unwrap();
     Server::new(Headless::new(Engine::default()).with_automation_roots(roots))
 }
 
@@ -187,7 +186,7 @@ fn writes(dir: &Path) -> Vec<(&'static str, Value)> {
 }
 
 fn demo_server(read: Option<&Path>, write: Option<&Path>) -> Server<Headless> {
-    let roots = AutomationRoots::new(read, write).unwrap();
+    let roots = AutomationRoots::new(read.as_slice(), write.as_slice()).unwrap();
     Server::new(Headless::new(soundcraft_engine::demo::demo_engine()).with_automation_roots(roots))
 }
 

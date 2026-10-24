@@ -3,7 +3,9 @@
 use crate::prores::bits::Reader;
 use crate::prores::dct::idct8x8;
 use crate::prores::header::{FrameHeader, PictureHeader, row_slice_widths};
-use crate::prores::tables::*;
+use crate::prores::tables::{
+    DC_CB, DC_CTX_INIT, FIRST_DC_CB, LEVEL_CB, LEVEL_CTX_INIT, RUN_CB, RUN_CTX_INIT, SCAN_INTERLACED, SCAN_PROGRESSIVE, qscale,
+};
 use crate::prores::{AlphaType, ChromaFormat, Error, Frame, Interlace, Result};
 
 /// Decoder options.
@@ -198,7 +200,7 @@ pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> 
         let mut ac = alpha.as_mut().map(|a| a.chunks_mut(band_h * width));
         while let (Some(y), Some(cb), Some(cr)) = (yc.next(), cbc.next(), crc.next()) {
             let rows = y.len() / width;
-            let a = ac.as_mut().and_then(|it| it.next());
+            let a = ac.as_mut().and_then(Iterator::next);
             bands.push(Band { y, cb, cr, a, rows });
         }
     }
