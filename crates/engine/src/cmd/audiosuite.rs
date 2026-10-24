@@ -148,7 +148,9 @@ fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: 
         // Each track keeps its generated buffer for the life of the command (and undo holds it), so
         // cap the total samples generated across tracks, not just each one.
         let frames = usize::try_from(r.len()).unwrap_or(0).min(crate::io::render_limit(channels));
-        budget = budget.checked_sub(frames * channels).ok_or_else(|| bad("audiosuite.process", "too much audio to generate in one command"))?;
+        budget = budget
+            .checked_sub(frames.saturating_mul(channels))
+            .ok_or_else(|| bad("audiosuite.process", "too much audio to generate in one command"))?;
     }
     let mut clips = Vec::new();
     for track in tracks {
@@ -299,7 +301,7 @@ mod tests {
             "audiosuite.process",
             &serde_json::json!({"process": "signal_generator", "tracks": [t[0], t[1]], "params": {"freq": 440.0}, "start": 0, "end": len}),
         );
-        let ok = matches!(out, Err(crate::EngineError::BadParams(_, ref m)) if m.contains("too long to generate") || m.contains("too much audio"));
+        let ok = matches!(out, Err(crate::EngineError::BadParams(_, ref m)) if m.contains("too much audio"));
         assert!(ok, "two tracks over budget, but got: {out:?}");
     }
 }
