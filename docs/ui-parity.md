@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (drag across checkboxes, #399; waveforms preview fades during drag; a plugin opens when inserted, #486) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (native audio import loader and cancellation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -48,6 +48,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Transport, Big Counter, Memory Locations, Automation, Video, Universe, Renderer, UI Customization | ✅ present | |
 | Workspace / sound browser with previews | ❌ | G-16 |
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
+| Audio import progress | 🟡 | Native menu/Workspace imports and file drops show filename, file count and one cumulative bar across reading, decoding, conversion and waveform stages. Fill never resets between files; 100% appears after atomic placement succeeds. Cancel/Esc, failure rollback and one-step Undo covered. Browser byte imports remain synchronous; broader Task Manager parity remains |
 | Preferences | 🟡 | Many settings stored, fewer honoured |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
 | Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
@@ -69,6 +70,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Native audio import prepares decoding, rate conversion and waveforms in the background; cumulative progress, cancellation, atomic batch import and one-step Undo; readiness estimates unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |
 | 2026-10-13 | minor | Waveforms and fade curves share temporary envelopes during drag, without rebuilding media or editing the document before release. Readiness estimate unchanged |
