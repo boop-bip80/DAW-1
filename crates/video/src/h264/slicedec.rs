@@ -13,6 +13,10 @@ use crate::h264::slice::{SliceHeader, SliceType};
 use crate::h264::tables::{BLK4_XY, QPC_TABLE, RASTER_TO_BLK4, ZIGZAG4, ZIGZAG8};
 use crate::h264::transform::{self, LevelScale};
 
+fn skip_run_fits(addr: usize, run: usize, total: usize) -> bool {
+    addr < total && run <= total - addr
+}
+
 /// Per-slice data kept with the picture (deblocking, motion field export).
 #[derive(Clone, Debug, Default)]
 pub struct SliceInfo {
@@ -1444,7 +1448,7 @@ impl<'a> SliceDecoder<'a> {
             ensure!(addr < total, "macroblock address {addr} out of range");
             if !intra_slice {
                 let run = r.read_ue()? as usize;
-                ensure!(addr + run <= total, "mb_skip_run out of range");
+                ensure!(skip_run_fits(addr, run, total), "mb_skip_run out of range");
                 for _ in 0..run {
                     self.start_mb(addr);
                     self.decode_skip()?;
@@ -1465,5 +1469,18 @@ impl<'a> SliceDecoder<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_run_fits;
+
+    #[test]
+    fn skip_run_must_fit_remaining_macroblocks_without_overflow() {
+        assert!(skip_run_fits(1, 98, 99));
+        assert!(!skip_run_fits(1, 99, 99));
+        assert!(!skip_run_fits(1, usize::MAX, 99));
+        assert!(!skip_run_fits(99, 0, 99));
     }
 }

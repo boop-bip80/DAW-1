@@ -152,9 +152,11 @@ pub fn copy_range(s: &Session, track: TrackId, range: Range) -> Vec<Clip> {
             let old = part.start;
             part.trim_start_to(isect.start);
             rebase_midi_start(&mut part, old, t);
+            part.fade_in = Fade::default();
         }
         if isect.end < part.end() {
             part.trim_end_to(isect.end);
+            part.fade_out = Fade::default();
         }
         part.start -= range.start;
         out.push(part);
@@ -408,7 +410,8 @@ pub fn trim_end_to(s: &mut Session, track: TrackId, at: Samples) -> usize {
     n
 }
 
-/// Heal separations inside `range`: merge neighbouring audio clips that continue the same file.
+/// Heal separations inside `range`: merge neighbouring audio clips that continue the same file,
+/// either touching (a split) or with an empty gap that matches the gap in the source (a cut).
 pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
     let Some(pl) = s.track_mut(track).and_then(|t| t.playlist_mut()) else { return 0 };
     pl.sort();
@@ -416,13 +419,16 @@ pub fn heal(s: &mut Session, track: TrackId, range: Range) -> usize {
     let mut healed = 0;
     for c in pl.clips.drain(..) {
         if let Some(prev) = out.last_mut() {
-            let contiguous = prev.end() == c.start && c.start >= range.start && c.start <= range.end;
+            let contiguous = c.start >= prev.end() && prev.end() >= range.start && c.start <= range.end;
+            let gap = if contiguous { c.start.saturating_sub(prev.end()) } else { 0 };
             let same = match (&prev.content, &c.content) {
-                (ClipContent::Audio { source: a, offset: oa }, ClipContent::Audio { source: b, offset: ob }) => a == b && oa + prev.length == *ob,
+                (ClipContent::Audio { source: a, offset: oa }, ClipContent::Audio { source: b, offset: ob }) => {
+                    a == b && oa.saturating_add(prev.length).saturating_add(gap) == *ob
+                }
                 _ => false,
             };
             if contiguous && same && (prev.gain_db - c.gain_db).abs() < 1e-6 {
-                prev.length += c.length;
+                prev.length = c.end().saturating_sub(prev.start);
                 prev.fade_out = c.fade_out;
                 healed += 1;
                 continue;
@@ -763,6 +769,54 @@ pub fn crossfade_later<'a>(clips: &'a [Clip], earlier: &Clip) -> Option<&'a Clip
     let mut next: Vec<&Clip> = clips.iter().filter(|c| crossfaded(earlier, c)).collect();
     next.sort_by_key(|c| c.start);
     next.into_iter().find(|c| crossfade_earlier(clips, c).is_some_and(|a| a.id == earlier.id))
+}
+
+/// [`crossfade_earlier`] and [`crossfade_later`] of each clip of a playlist, found for the whole playlist at once, so
+/// that drawing a large session does no scan of the playlist per clip. Sorted by start (the usual case), each clip
+/// walks back only as far as earlier clips still reach its start; unsorted, each lookup scans as those do.
+// ponytail: a long clip laid over many others keeps every walk going back to it, O(clips²) for those; an index of
+// the clips by end would bound it.
+pub fn crossfade_partners<'a>(clips: &'a [Clip]) -> impl Fn(&Clip) -> (Option<&'a Clip>, Option<&'a Clip>) + 'a {
+    let pairs = clips.is_sorted_by_key(|c| c.start).then(|| {
+        // reach[j]: the furthest end of clips[..=j].
+        let reach: Vec<Samples> = clips
+            .iter()
+            .scan(Samples::MIN, |far, c| {
+                *far = (*far).max(c.end());
+                Some(*far)
+            })
+            .collect();
+        let (mut earlier, mut later) = (vec![None; clips.len()], vec![None; clips.len()]);
+        for (i, b) in clips.iter().enumerate() {
+            // Walking back, the first clip that crossfades with `b` is the latest-starting one.
+            let a = (0..i)
+                .rev()
+                .take_while(|&j| reach.get(j).is_some_and(|&r| r > b.start))
+                .find(|&j| clips.get(j).is_some_and(|a| crossfaded(a, b)))
+                .filter(|&j| b.is_audio() && clips.get(j).is_some_and(Clip::is_audio));
+            if let Some(j) = a {
+                if let Some(e) = earlier.get_mut(i) {
+                    *e = Some(j);
+                }
+                // The first clip to have `j` as its earlier one is its later one.
+                if let Some(l) = later.get_mut(j) {
+                    l.get_or_insert(i);
+                }
+            }
+        }
+        (earlier, later)
+    });
+    move |clip| {
+        let from = clips.partition_point(|c| c.start < clip.start);
+        let at = clips.get(from..).unwrap_or_default().iter().take_while(|c| c.start == clip.start).position(|c| c.id == clip.id);
+        match (&pairs, at) {
+            (Some((earlier, later)), Some(k)) => {
+                let partner = |v: &Vec<Option<usize>>| v.get(from + k).copied().flatten().and_then(|j| clips.get(j));
+                (partner(earlier), partner(later))
+            }
+            _ => (crossfade_earlier(clips, clip), crossfade_later(clips, clip)),
+        }
+    }
 }
 
 /// The audio crossfade that leads into `later`: the clip before it that runs into its start and ends
@@ -1310,6 +1364,37 @@ mod tests {
     use super::*;
     use soundcraft_model::{ChannelFormat, Source, SourceId, TrackKind};
 
+    #[test]
+    fn crossfade_partners_match_the_lookups_one_clip_at_a_time() {
+        let audio = |id: u64, start: Samples, len: Samples| Clip::audio(ClipId(id), "a", SourceId(1), 0, start, len);
+        let layouts: Vec<Vec<Clip>> = vec![
+            // A crossfade, a butt joint, a gap.
+            vec![audio(1, 0, 1100), audio(2, 900, 1100), audio(3, 2000, 500), audio(4, 3000, 500)],
+            // A chain of crossfades, and two later clips starting at the same point in the same earlier one.
+            vec![audio(1, 0, 1100), audio(2, 900, 1100), audio(3, 1900, 600), audio(4, 2300, 400), audio(5, 2300, 500)],
+            // A long clip laid over clips that crossfade under it, and a clip laid inside another.
+            vec![audio(1, 0, 10_000), audio(2, 100, 1000), audio(3, 1000, 1000), audio(4, 1200, 200)],
+            // A video clip is no crossfade partner.
+            vec![audio(1, 0, 1100), Clip::video(ClipId(2), "v", SourceId(2), 0, 900, 1100), audio(3, 1800, 500)],
+            // Unsorted: each lookup scans.
+            vec![audio(2, 900, 1100), audio(1, 0, 1100)],
+        ];
+        let spans = |clips: &[Clip]| clips.iter().map(|c| (c.start, c.end())).collect::<Vec<_>>();
+        for clips in &layouts {
+            let partners = crossfade_partners(clips);
+            for c in clips {
+                let want = (crossfade_earlier(clips, c).map(|x| x.id), crossfade_later(clips, c).map(|x| x.id));
+                let (e, l) = partners(c);
+                assert_eq!((e.map(|x| x.id), l.map(|x| x.id)), want, "clip {} of {:?}", c.id.0, spans(clips));
+            }
+        }
+        // Not vacuous: the crossfades are found.
+        let partners = crossfade_partners(&layouts[0]);
+        assert_eq!(partners(&layouts[0][1]).0.map(|x| x.id), Some(ClipId(1)));
+        let partners = crossfade_partners(&layouts[2]);
+        assert_eq!(partners(&layouts[2][1]).1.map(|x| x.id), Some(ClipId(3)));
+    }
+
     fn session_with_clip() -> (Session, TrackId) {
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
@@ -1336,6 +1421,20 @@ mod tests {
     }
 
     #[test]
+    fn copy_range_resets_fades_at_cut_edges() {
+        let (mut s, t) = session_with_clip();
+        if let Some(c) = s.track_mut(t).and_then(|t| t.playlist_mut()).and_then(|p| p.clips.first_mut()) {
+            c.fade_in = Fade { len: 100, shape: FadeShape::Linear, curvature: 0.0 };
+            c.fade_out = Fade { len: 100, shape: FadeShape::Linear, curvature: 0.0 };
+        }
+        let fades = |r: Range| -> Vec<(Samples, Samples)> { copy_range(&s, t, r).iter().map(|c| (c.fade_in.len, c.fade_out.len)).collect() };
+        assert_eq!(fades(Range::new(2000, 3000)), vec![(0, 0)]);
+        assert_eq!(fades(Range::new(0, 3000)), vec![(100, 0)]);
+        assert_eq!(fades(Range::new(2000, 6000)), vec![(0, 100)]);
+        assert_eq!(fades(Range::new(0, 6000)), vec![(100, 100)]);
+    }
+
+    #[test]
     fn separate_splits_and_heal_rejoins() {
         let (mut s, t) = session_with_clip();
         assert_eq!(separate_at(&mut s, t, 3000), 1);
@@ -1343,6 +1442,37 @@ mod tests {
         assert_eq!(separate_at(&mut s, t, 1000), 0);
         assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 1);
         assert_eq!(clips(&s, t), vec![(1000, 4000, 1000)]);
+    }
+
+    #[test]
+    fn heal_rejoins_cut_separation() {
+        let (mut s, t) = session_with_clip();
+        clear_range(&mut s, t, Range::new(2000, 3000), false);
+        assert_eq!(heal(&mut s, t, Range::new(1500, 3500)), 1);
+        assert_eq!(clips(&s, t), vec![(1000, 4000, 1000)]);
+        // A selection that does not span the whole gap leaves it alone.
+        let (mut s, t) = session_with_clip();
+        clear_range(&mut s, t, Range::new(2000, 3000), false);
+        assert_eq!(heal(&mut s, t, Range::new(2500, 3500)), 0);
+        // Shuffled pieces no longer line up with their source and stay apart.
+        let (mut s, t) = session_with_clip();
+        clear_range(&mut s, t, Range::new(2000, 3000), true);
+        assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 0);
+        // Moved apart: the timeline gap no longer matches the source gap.
+        let (mut s, t) = session_with_clip();
+        clear_range(&mut s, t, Range::new(2000, 3000), false);
+        if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
+            pl.clips[1].start = 3500;
+        }
+        assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 0);
+        // Overlapping neighbours whose offsets line up are not a separation.
+        let (mut s, t) = session_with_clip();
+        assert_eq!(separate_at(&mut s, t, 3000), 1);
+        if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
+            pl.clips[1].start = 2500;
+        }
+        assert_eq!(heal(&mut s, t, Range::new(0, 10_000)), 0);
+        assert_eq!(clips(&s, t).len(), 2);
     }
 
     #[test]
