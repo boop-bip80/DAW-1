@@ -1,8 +1,9 @@
 //! SoundCraft's VST3 plugin host.
 //!
-//! Scans the standard VST3 folders (plus `VST3_PATH`), loads `.vst3` bundles in-process and
-//! exposes each "Audio Module Class" as a [`soundcraft_dsp::Plugin`], so the mix engine treats
-//! third-party plugins exactly like the built-in ones. Plugin ids are `vst3:<class id hex>` (32
+//! Scans the standard VST3 folders (plus `VST3_PATH`; in child processes when [`set_scanner`] is
+//! set), loads `.vst3` bundles in-process and exposes each "Audio Module Class" as a
+//! [`soundcraft_dsp::Plugin`], so the mix engine treats third-party plugins exactly like the
+//! built-in ones. Plugin ids are `vst3:<class id hex>` (32
 //! upper-case hex digits of the component's class id); parameter ids are VST3 `ParamID`s as
 //! decimal strings, with titles, units and plain ranges from the edit controller in
 //! [`PluginInfo::params`]. Values are plain (display) values; the host converts to and from the
@@ -47,10 +48,14 @@ pub mod scan;
 #[allow(unsafe_code)]
 mod ffi;
 #[cfg(not(target_arch = "wasm32"))]
+mod isolate;
+#[cfg(not(target_arch = "wasm32"))]
 mod plugin;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use isolate::SCAN_FLAG;
 #[cfg(not(target_arch = "wasm32"))]
 pub use plugin::Vst3Plugin;
 
@@ -78,7 +83,7 @@ pub fn parse_id(id: &str) -> Option<[u8; 16]> {
 }
 
 /// One plugin found by a scan.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vst3Descriptor {
     /// SoundCraft id: `vst3:<class_id>`.
     pub id: String,
@@ -192,6 +197,22 @@ pub fn rescan() -> Vec<Vst3Descriptor> {
 /// plugins the folder holds.
 pub fn add_search_dir(dir: &Path) -> usize {
     api::add_search_dir(dir)
+}
+
+/// Makes scans load each bundle in a child process: `exe` started with [`SCAN_FLAG`] and the
+/// bundle path, which must call [`scan_child_main`] (`None`: scan in this process, the default).
+/// The app sets it so that a scan neither keeps every installed binary loaded nor dies with a
+/// plugin that crashes while loading (see the `isolate` module).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_scanner(exe: Option<PathBuf>) {
+    isolate::set_scanner(exe)
+}
+
+/// The child side of [`set_scanner`]: loads one bundle, prints what it holds for the parent and
+/// runs the module exits. Returns the process exit code.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn scan_child_main(path: &Path) -> i32 {
+    isolate::child_main(path)
 }
 
 /// Scans the given folders without touching the cache.

@@ -205,7 +205,34 @@ fn app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
 
+/// When started as a plugin-scanning child (`<flag> <bundle path>`, see
+/// `soundcraft_vst3_host::set_scanner`), scans that bundle and returns the exit code.
+#[cfg(not(target_arch = "wasm32"))]
+fn plugin_scan_child() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    let (flag, path) = (args.next()?, std::path::PathBuf::from(args.next()?));
+    let scan: fn(&std::path::Path) -> i32 = if flag == soundcraft_vst3_host::SCAN_FLAG {
+        soundcraft_vst3_host::scan_child_main
+    } else if flag == soundcraft_clap_host::SCAN_FLAG {
+        soundcraft_clap_host::scan_child_main
+    } else {
+        return None;
+    };
+    // No Dock icon or menu bar for the child, even if a plugin touches AppKit while loading.
+    #[cfg(target_os = "macos")]
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Prohibited);
+    }
+    Some(scan(&path))
+}
+
 fn main() -> eframe::Result {
+    // A plugin-scanning child opens no log file, settings or window.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(code) = plugin_scan_child() {
+        std::process::exit(code);
+    }
     // First, so every start-up record (and the engine's panic hook, installed with the first
     // Engine) is captured; see `logging`.
     let logger = logging::install();
@@ -245,6 +272,16 @@ fn main() -> eframe::Result {
                 log::warn!("no log file: no settings directory (profile override is empty or platform configuration is unavailable)");
             }
         }
+    }
+
+    // Plugin scans load each bundle in a child process of this executable (see `plugin_scan_child`).
+    #[cfg(not(target_arch = "wasm32"))]
+    match std::env::current_exe() {
+        Ok(exe) => {
+            soundcraft_vst3_host::set_scanner(Some(exe.clone()));
+            soundcraft_clap_host::set_scanner(Some(exe));
+        }
+        Err(e) => log::warn!("plugin scans run in-process: {e}"),
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
