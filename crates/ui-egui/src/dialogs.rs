@@ -107,7 +107,7 @@ impl Dialogs {
             }
             "clip.unloop" => {
                 let clips = soundcraft_engine::cmd::clip_ids_param(e, &json!({}));
-                if clips.is_empty() {
+                if !clips.iter().any(|&c| soundcraft_engine::cmd::is_looped(e.session(), c)) {
                     return false;
                 }
                 Dialog::Unloop { clips }
@@ -869,6 +869,9 @@ mod tests {
         assert!(!d.open_for_command(&e, "clip.unloop"));
         let track = e.session().track_by_name("Snare").unwrap().id;
         let clip = e.session().track(track).unwrap().clips()[0].id;
+        e.execute("edit.select", &json!({"clips": [clip.0]})).unwrap();
+        assert!(!d.open_for_command(&e, "clip.unloop"), "a clip that is not looped opens no dialog");
+        assert!(d.open.is_none());
         e.execute("clip.loop", &json!({"clip": clip.0, "count": 3})).unwrap();
         e.execute("edit.select", &json!({"clips": [clip.0]})).unwrap();
         assert!(d.open_for_command(&e, "clip.unloop"));
