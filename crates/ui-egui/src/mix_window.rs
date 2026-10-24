@@ -68,19 +68,29 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     ctx.show_viewport_immediate(viewport_id(), builder, |ui, class| {
         ui.set_style(ui.ctx().global_style());
         let ctx = ui.ctx().clone();
-        if class == egui::ViewportClass::Immediate {
+        app.mix_native = class == egui::ViewportClass::Immediate;
+        if app.mix_native {
             app.mix_focused = ctx.input(|i| i.focused);
             track_placement(app, &ctx, main_rect);
+            // Files dropped here go to this window's samplers (as it last drew them), the rest to
+            // the shell with the main window's.
+            let rest = app.claim_dropped_samples(&ctx);
+            if !rest.is_empty() {
+                app.mix_drops.extend(rest);
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }
             crate::shortcuts::handle_in(app, &ctx, crate::MainWindow::Mix);
         } else {
             app.mix_focused = false;
         }
+        app.sample_drop_targets.retain(|(v, ..)| *v != viewport_id());
         if std::mem::take(&mut app.focus_mix) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         show(app, ui);
-        if class == egui::ViewportClass::Immediate {
-            // The plugin and Send windows opened from here (embedded, the main window draws them).
+        if app.mix_native {
+            // The plugin and Send windows opened from here. Drawn inside the main window, Mix
+            // leaves them to the main window's pass.
             crate::panels::floating_in_mix(app, &ctx);
         }
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -138,7 +148,9 @@ pub fn separate_closed(app: &mut SoundApp) {
 /// saved placement next time.
 pub(crate) fn separate_hidden(app: &mut SoundApp) {
     app.mix_focused = false;
+    app.mix_native = false;
     app.mix_placement = None;
+    app.sample_drop_targets.retain(|(v, ..)| *v != viewport_id());
 }
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
@@ -1103,7 +1115,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
 /// send's level opens it, moves it to that send, or closes it, and so does Escape.
 /// It is drawn by the window it was opened from (`host`: the pass drawing it).
 pub(crate) fn send_window(app: &mut SoundApp, ctx: &egui::Context, host: crate::Host) {
-    if app.send_window_host(ctx) != host {
+    if app.send_window_host() != host {
         return;
     }
     // egui closes menus and drops text focus on Escape before this runs, so whether this Escape

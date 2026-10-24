@@ -506,7 +506,7 @@ pub(crate) fn undo_history(app: &mut SoundApp, ui: &mut Ui) {
 
 /// The plugin windows that live in `host`, the window this pass draws.
 fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context, host: Host) {
-    let wins: Vec<_> = app.ui.plugin_windows.iter().copied().filter(|w| app.plugin_window_host(ctx, *w) == host).collect();
+    let wins: Vec<_> = app.ui.plugin_windows.iter().copied().filter(|w| app.plugin_window_host(*w) == host).collect();
     let mut closed = Vec::new();
     for (tid, slot) in wins {
         // The instrument slot (an instrument track's instrument) or an insert slot.

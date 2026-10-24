@@ -94,7 +94,8 @@ pub struct UiState {
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
     /// The plugin windows (of `plugin_windows`) opened from the separate Mix window: they are
-    /// drawn there while it is open, in the main window otherwise.
+    /// drawn there while it is open, in the main window otherwise. Like `plugin_windows`, it can
+    /// be read and set (`ui.set`) but is not saved with the preferences.
     pub mix_plugin_windows: Vec<(TrackId, usize)>,
     /// The send in the Send window (track, slot).
     #[serde(skip)]
@@ -367,6 +368,12 @@ pub struct SoundApp {
     pub(crate) focus_edit: bool,
     /// The separate Mix window has keyboard focus (as of its last frame).
     pub(crate) mix_focused: bool,
+    /// The separate Mix window is a native window of its own (as of its last pass), not drawn
+    /// inside the main one.
+    pub(crate) mix_native: bool,
+    /// Files dropped on the separate Mix window that none of its samplers took, handed to the
+    /// shell with the main window's (`SoundApp::take_dropped_files`).
+    pub(crate) mix_drops: Vec<egui::DroppedFileHandle>,
     /// Where the separate Mix window opened, while it is open (see `mix_window::show_separate`).
     pub(crate) mix_placement: Option<mix_window::Placement>,
     /// Scroll Into View: the track each window brings to its top (Edit) or left (Mix) when it
@@ -374,8 +381,9 @@ pub struct SoundApp {
     pub(crate) edit_scroll_into_view: Option<TrackId>,
     pub(crate) mix_scroll_into_view: Option<TrackId>,
     pub synthetic: Vec<egui::Event>,
-    /// Where a dropped audio file loads into a track's sampler (last frame's rects).
-    pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
+    /// Where a dropped audio file loads into a track's sampler: the window (viewport) and rect,
+    /// as each window last drew them.
+    pub sample_drop_targets: Vec<(egui::ViewportId, egui::Rect, TrackId)>,
     sample_reads: Vec<sampler_window::SampleRead>,
     synthetic_grace: u32,
     control_rx: Option<Receiver<ControlRequest>>,
@@ -488,6 +496,8 @@ impl SoundApp {
             focus_mix: false,
             focus_edit: false,
             mix_focused: false,
+            mix_native: false,
+            mix_drops: Vec::new(),
             mix_placement: None,
             edit_scroll_into_view: None,
             mix_scroll_into_view: None,
@@ -792,26 +802,20 @@ impl SoundApp {
         if ctx.viewport_id() == mix_window::viewport_id() { Host::Mix } else { Host::Main }
     }
 
-    /// Where a floating window asked for from no window (a command, a dropped file) opens: the
-    /// window that last had the keys, so the separate Mix window when it did, else the main one.
-    pub(crate) fn command_host(&self) -> Host {
-        if self.ui.mix_separate && self.mix_focused { Host::Mix } else { Host::Main }
-    }
-
     /// Where the floating windows asked for from the separate Mix window are drawn: there while it
     /// is a native window of its own, else (it is off, or embedded) in the main window.
-    pub(crate) fn mix_hosts_floating(&self, ctx: &egui::Context) -> bool {
-        self.ui.mix_separate && !ctx.embed_viewports()
+    pub(crate) fn mix_hosts_floating(&self) -> bool {
+        self.ui.mix_separate && self.mix_native
     }
 
     /// The window the plugin window of `w` (track, slot) is drawn in.
-    pub(crate) fn plugin_window_host(&self, ctx: &egui::Context, w: (TrackId, usize)) -> Host {
-        if self.mix_hosts_floating(ctx) && self.ui.mix_plugin_windows.contains(&w) { Host::Mix } else { Host::Main }
+    pub(crate) fn plugin_window_host(&self, w: (TrackId, usize)) -> Host {
+        if self.mix_hosts_floating() && self.ui.mix_plugin_windows.contains(&w) { Host::Mix } else { Host::Main }
     }
 
     /// The window the Send window is drawn in.
-    pub(crate) fn send_window_host(&self, ctx: &egui::Context) -> Host {
-        if self.mix_hosts_floating(ctx) && self.ui.send_window_in_mix { Host::Mix } else { Host::Main }
+    pub(crate) fn send_window_host(&self) -> Host {
+        if self.mix_hosts_floating() && self.ui.send_window_in_mix { Host::Mix } else { Host::Main }
     }
 
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).
@@ -1440,7 +1444,7 @@ impl SoundApp {
             self.mix_focused = false;
         }
         shortcuts::handle(self, &ctx);
-        self.sample_drop_targets.clear();
+        self.sample_drop_targets.retain(|(v, ..)| *v != egui::ViewportId::ROOT);
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }

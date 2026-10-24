@@ -72,6 +72,10 @@ struct TwoWindows {
     /// The labelled widgets and windows each window drew last (with `ctx.enable_accesskit()`).
     mix_nodes: Rc<RefCell<Vec<(String, egui::Rect)>>>,
     main_nodes: RefCell<Vec<(String, egui::Rect)>>,
+    /// Files dropped on each window in its next pass, and those the app left to the shell.
+    mix_dropped: Rc<RefCell<Vec<egui::DroppedFileHandle>>>,
+    main_dropped: RefCell<Vec<egui::DroppedFileHandle>>,
+    shell_drops: RefCell<Vec<egui::DroppedFileHandle>>,
 }
 
 /// The labels (and values) of the accessibility nodes a pass output, with their bounds.
@@ -102,9 +106,12 @@ impl TwoWindows {
             mix_field_focused: Rc::default(),
             mix_nodes: Rc::default(),
             main_nodes: RefCell::default(),
+            mix_dropped: Rc::default(),
+            main_dropped: RefCell::default(),
+            shell_drops: RefCell::default(),
         };
         let (events, info, focused, builder) = (w.mix_events.clone(), w.mix_info.clone(), w.mix_focused.clone(), w.mix_builder.clone());
-        let (field, nodes) = (w.mix_field_focused.clone(), w.mix_nodes.clone());
+        let (field, nodes, dropped) = (w.mix_field_focused.clone(), w.mix_nodes.clone(), w.mix_dropped.clone());
         egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
             let id = viewport.ids.this;
             *builder.borrow_mut() = Some(viewport.builder.clone());
@@ -112,6 +119,7 @@ impl TwoWindows {
                 viewport_id: id,
                 viewports: std::iter::once((id, info.borrow().clone())).collect(),
                 events: events.take(),
+                dropped_files: dropped.take(),
                 focused: focused.get(),
                 ..Default::default()
             };
@@ -134,11 +142,14 @@ impl TwoWindows {
         let input = egui::RawInput {
             events,
             viewports: std::iter::once((egui::ViewportId::ROOT, root)).collect(),
+            dropped_files: self.main_dropped.take(),
             focused: !self.mix_focused.get(),
             ..Default::default()
         };
         let mut out = self.ctx.run_ui(input, |ui| {
             app.logic(ui.ctx());
+            // As the shell does: the files no sampler took open or import.
+            self.shell_drops.borrow_mut().extend(app.take_dropped_files(ui.ctx()));
             app.ui(ui);
         });
         out.textures_delta.clear();
@@ -176,6 +187,21 @@ impl TwoWindows {
     fn find(&self, in_mix: bool, label: impl Fn(&str) -> bool) -> Option<egui::Pos2> {
         let nodes = if in_mix { self.mix_nodes.borrow().clone() } else { self.main_nodes.borrow().clone() };
         nodes.iter().filter(|(l, _)| label(l)).map(|(_, r)| r.center()).min_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)))
+    }
+
+    /// Drops `file` at `at` in the Mix window (`in_mix`) or the main window.
+    fn drop_file(&self, app: &mut SoundApp, in_mix: bool, at: egui::Pos2, file: egui::DroppedFileHandle) {
+        if in_mix {
+            *self.mix_events.borrow_mut() = vec![egui::Event::PointerMoved(at)];
+            self.frame(app, Vec::new());
+            self.mix_dropped.borrow_mut().push(file);
+            self.frame(app, Vec::new());
+        } else {
+            self.frame(app, vec![egui::Event::PointerMoved(at)]);
+            self.main_dropped.borrow_mut().push(file);
+            self.frame(app, Vec::new());
+        }
+        self.frame(app, Vec::new());
     }
 
     fn type_in_main(&self, app: &mut SoundApp, key: Key, modifiers: Modifiers) -> Vec<egui::ViewportCommand> {
@@ -422,11 +448,19 @@ fn plugin_and_send_windows_open_in_the_window_they_were_asked_from() {
 #[test]
 fn plugin_windows_of_a_mix_window_inside_the_main_one_are_drawn_there() {
     // Backends without native windows: the Mix window and its plugin windows are in the main one.
+    // So without a renderer for native windows, even where egui is not told to embed them.
+    for embed in [true, false] {
+        plugin_windows_drawn_in_the_main_window(embed);
+    }
+}
+
+fn plugin_windows_drawn_in_the_main_window(embed: bool) {
     let mut app = separate_app();
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.ui.plugin_windows = vec![(kick, 0)];
     app.ui.mix_plugin_windows = vec![(kick, 0)];
     let ctx = egui::Context::default();
+    ctx.set_embed_viewports(embed);
     ctx.enable_accesskit();
     let mut nodes = Vec::new();
     for _ in 0..3 {
@@ -437,6 +471,98 @@ fn plugin_windows_of_a_mix_window_inside_the_main_one_are_drawn_there() {
         out.textures_delta.clear();
         nodes = labelled(out.platform_output.accesskit_update);
     }
-    assert!(nodes.iter().any(|(l, _)| l.starts_with("Kick · a · ")), "the plugin window is drawn");
+    assert!(nodes.iter().any(|(l, _)| l.starts_with("Kick · a · ")), "the plugin window is drawn (embed: {embed})");
     assert_eq!(app.ui.plugin_windows, [(kick, 0)], "and stays open");
+}
+
+#[test]
+fn plugin_and_send_windows_come_back_to_the_main_window_when_the_mix_window_is_closed() {
+    let w = TwoWindows::new();
+    w.ctx.enable_accesskit();
+    let mut app = separate_app();
+    let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+    app.ui.plugin_windows = vec![(kick, 0)];
+    app.ui.mix_plugin_windows = vec![(kick, 0)];
+    let sends = app.engine.session().tracks.iter().find(|t| t.mixer.sends.first().is_some_and(Option::is_some)).map(|t| t.id).unwrap();
+    app.ui.send_window = Some((sends, 0));
+    app.ui.send_window_in_mix = true;
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    let plugin = |l: &str| l.starts_with("Kick · a · ");
+    let send = |l: &str| l.contains(" · Send A");
+    assert!(w.find(true, plugin).is_some() && w.find(true, send).is_some(), "both in the Mix window");
+    assert!(w.find(false, plugin).is_none() && w.find(false, send).is_none());
+
+    // The system's close button: Mix comes back into the main window, and so do they.
+    w.mix_info.borrow_mut().events = vec![egui::ViewportEvent::Close];
+    w.frame(&mut app, Vec::new());
+    w.mix_info.borrow_mut().events.clear();
+    assert!(!app.ui.mix_separate && app.ui.window == MainWindow::Mix, "closing the Mix window shows Mix in the main one");
+    for _ in 0..2 {
+        w.frame(&mut app, Vec::new());
+    }
+    assert!(w.find(false, plugin).is_some() && w.find(false, send).is_some(), "both in the main window");
+    assert_eq!((app.ui.plugin_windows.as_slice(), app.ui.send_window), ([(kick, 0)].as_slice(), Some((sends, 0))), "and still open");
+
+    // Turned on again, they go back with it.
+    app.run("window.mix_separate", json!({"value": true})).unwrap();
+    for _ in 0..4 {
+        w.frame(&mut app, Vec::new());
+    }
+    assert!(w.find(true, plugin).is_some() && w.find(true, send).is_some(), "back in the separate Mix window");
+    assert!(w.find(false, plugin).is_none() && w.find(false, send).is_none());
+}
+
+#[test]
+fn a_sample_loads_where_it_was_dropped_and_its_window_opens_there() {
+    use crate::sampler_window::{Dropped, wav};
+    use std::sync::Arc;
+    let w = TwoWindows::new();
+    let mut app = separate_app();
+    let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+    app.run("mix.instrument", json!({"track": keys.0, "plugin": "sampler"})).unwrap();
+    let sampler = (keys, soundcraft_mix::INSTRUMENT_SLOT);
+    app.ui.plugin_windows = vec![sampler];
+    app.ui.mix_plugin_windows = vec![sampler];
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    let target = |app: &SoundApp, v: egui::ViewportId| app.sample_drop_targets.iter().find(|(at, _, t)| *at == v && *t == keys).map(|(_, r, _)| *r);
+    let at = target(&app, mix_window::viewport_id()).expect("the Sampler window in the Mix window is a drop target").center();
+    let file = |name: &str| -> egui::DroppedFileHandle { Arc::new(Dropped { path: name.into(), bytes: wav(0.1) }) };
+
+    // Dropped in the main window where the Mix window's Sampler is: not for that Sampler.
+    let edit_track = app.sample_drop_targets.iter().rev().find(|(v, r, _)| *v == egui::ViewportId::ROOT && r.contains(at)).map(|(.., t)| *t);
+    w.drop_file(&mut app, false, at, file("main.wav"));
+    let reads = app.take_sample_reads();
+    assert_eq!(reads.iter().map(|r| r.track).collect::<Vec<_>>(), Vec::from_iter(edit_track), "only what the main window shows there takes it");
+    assert_eq!(w.shell_drops.take().len(), usize::from(edit_track.is_none()), "else it is the shell's");
+
+    // Dropped on the Sampler window in the Mix window: it loads there.
+    w.drop_file(&mut app, true, at, file("mix.wav"));
+    let reads = app.take_sample_reads();
+    assert_eq!(reads.iter().map(|r| r.track).collect::<Vec<_>>(), [keys]);
+    for r in &reads {
+        app.load_sample_bytes(r, r.file.bytes());
+    }
+    assert!(app.ui.mix_plugin_windows.contains(&sampler), "its window stays in the Mix window");
+
+    // Dropped on Keys' lane in the Edit window while the Mix window last had the keys: the
+    // Sampler window comes to the main window, where the file was dropped.
+    let lane = target(&app, egui::ViewportId::ROOT).expect("Keys' lane in the Edit window is a drop target").center();
+    w.mix_focused.set(true);
+    w.drop_file(&mut app, false, lane, file("lane.wav"));
+    let reads = app.take_sample_reads();
+    assert_eq!(reads.iter().map(|r| r.track).collect::<Vec<_>>(), [keys]);
+    for r in &reads {
+        app.load_sample_bytes(r, r.file.bytes());
+    }
+    assert_eq!(app.ui.plugin_windows, [sampler]);
+    assert!(app.ui.mix_plugin_windows.is_empty(), "the Sampler window moved to the main window");
+
+    // Other files dropped on the Mix window go to the shell, as from the main window.
+    w.drop_file(&mut app, true, at, file("song.scraft"));
+    assert_eq!(w.shell_drops.take().iter().map(|f| f.path().to_string_lossy().into_owned()).collect::<Vec<_>>(), ["song.scraft"]);
+    assert!(app.take_sample_reads().is_empty());
 }
