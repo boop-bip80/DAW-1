@@ -1178,7 +1178,7 @@ impl GuiLink {
 
     pub fn is_open(&self) -> bool {
         let g = self.lock();
-        g.alive && g.created && g.visible && g.window.as_ref().is_none_or(hostwin::HostWindow::is_visible)
+        g.alive && g.created && g.visible && g.window.as_ref().is_none_or(hostwin::HostWindow::is_open)
     }
 
     /// Main-thread housekeeping: runs a requested `on_main_thread`, follows the plugin's
@@ -1215,7 +1215,7 @@ impl GuiLink {
                     unsafe { f(g.plugin, w, h) };
                 }
             }
-            if g.window.as_ref().is_some_and(|w| !w.is_visible()) {
+            if g.window.as_ref().is_some_and(|w| !w.is_open()) {
                 // The user closed the embedded editor's host window: free the editor.
                 GuiLink::destroy(&mut g);
             } else if self.host.gui_closed.swap(false, Ordering::Relaxed) {
@@ -1673,16 +1673,16 @@ impl Drop for Instance {
 mod hostwin {
     use super::{GuiSizer, sizing_rect};
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GWLP_USERDATA, GetClientRect, GetPropW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassExW, RemovePropW,
-        SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW,
-        SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_NCDESTROY, WM_SIZE, WM_SIZING, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
-        WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
+        GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassExW, SIZE_MINIMIZED, SW_HIDE,
+        SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, WM_CLOSE, WM_NCDESTROY, WM_SIZE, WM_SIZING, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN, WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
     };
 
     pub const SUPPORTED: bool = true;
@@ -1696,30 +1696,38 @@ mod hostwin {
         s.encode_utf16().filter(|&c| c != 0).chain(Some(0)).collect()
     }
 
-    /// The window property that marks a window the user closed (`WM_CLOSE` only hides it).
-    /// Tracked instead of reading `IsWindowVisible`, which is also false while the owner window
-    /// is minimized (owned windows are hidden with it): that must not close the editor.
-    fn closed_prop() -> *const u16 {
-        static NAME: OnceLock<Vec<u16>> = OnceLock::new();
-        NAME.get_or_init(|| wide("SoundCraftEditorClosed")).as_ptr()
-    }
-
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
 
-    /// The sizer stored in the window's user data by `set_sizer` (one `Arc` reference, released
-    /// on `WM_NCDESTROY`), borrowed for one message.
-    fn window_sizer(hwnd: HWND) -> Option<Arc<GuiSizer>> {
+    /// What the window procedure shares with its `HostWindow`, kept in the window's user data
+    /// (one `Arc` reference, stored by `new` and released on `WM_NCDESTROY`).
+    #[derive(Default)]
+    struct WindowState {
+        /// Set once by `set_sizer`.
+        sizer: OnceLock<Arc<GuiSizer>>,
+        /// The user closed the window (`WM_CLOSE` only hides it). Tracked instead of reading
+        /// `IsWindowVisible`, which is also false while the owner window is minimized (owned
+        /// windows are hidden with it): that must not close the editor.
+        closed: AtomicBool,
+    }
+
+    /// The window's state from its user data, borrowed for one message.
+    fn window_state(hwnd: HWND) -> Option<Arc<WindowState>> {
         // SAFETY: `hwnd` is the window the procedure was called for; its user data is 0 or a
         // pointer from `Arc::into_raw`, kept alive until `WM_NCDESTROY` (the last message).
-        let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const GuiSizer;
+        let p = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState;
         if p.is_null() {
             return None;
         }
-        // SAFETY: as above; this message takes a reference of its own, so the sizer outlives it
+        // SAFETY: as above; this message takes a reference of its own, so the state outlives it
         // even when a plugin destroys the window from a nested event loop meanwhile.
         unsafe { Arc::increment_strong_count(p) };
         // SAFETY: balances the increment just made.
         Some(unsafe { Arc::from_raw(p) })
+    }
+
+    /// The sizer `set_sizer` gave the window, borrowed for one message.
+    fn window_sizer(hwnd: HWND) -> Option<Arc<GuiSizer>> {
+        window_state(hwnd)?.sizer.get().cloned()
     }
 
     /// The window's frame (outer minus client size), measured: right at any monitor's DPI, unlike
@@ -1750,12 +1758,11 @@ mod hostwin {
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
             WM_CLOSE => {
-                // SAFETY: `hwnd` is the window this procedure was called for; the property name
-                // lives for the process; the property is removed on `WM_NCDESTROY` (or `raise`).
-                unsafe {
-                    SetPropW(hwnd, closed_prop(), 1usize as _);
-                    ShowWindow(hwnd, SW_HIDE);
+                if let Some(s) = window_state(hwnd) {
+                    s.closed.store(true, Ordering::Relaxed);
                 }
+                // SAFETY: `hwnd` is the window this procedure was called for.
+                unsafe { ShowWindow(hwnd, SW_HIDE) };
                 return 0;
             }
             // Live user resizes: keep the dragged edges at a size the plugin accepts.
@@ -1778,13 +1785,11 @@ mod hostwin {
                 }
             }
             WM_NCDESTROY => {
-                // SAFETY: the window's last message; removes the property `WM_CLOSE` may have set.
-                unsafe { RemovePropW(hwnd, closed_prop()) };
                 // SAFETY: the window's last message: take the user data back and release the
-                // `Arc` reference `set_sizer` stored there; nothing reads it afterwards.
-                let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const GuiSizer;
+                // `Arc` reference `new` stored there; nothing reads it afterwards.
+                let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const WindowState;
                 if !p.is_null() {
-                    // SAFETY: `p` came from `Arc::into_raw` in `set_sizer`, released exactly once.
+                    // SAFETY: `p` came from `Arc::into_raw` in `new`, released exactly once.
                     drop(unsafe { Arc::from_raw(p) });
                 }
             }
@@ -1835,6 +1840,8 @@ mod hostwin {
     /// Owns the window handle; destroyed in `close` (main thread only).
     pub struct HostWindow {
         hwnd: HWND,
+        /// Shared with the window procedure (see `WindowState`).
+        state: Arc<WindowState>,
     }
 
     // SAFETY: the handle is only used on the main thread (every method checks); the struct
@@ -1877,9 +1884,23 @@ mod hostwin {
             if hwnd.is_null() {
                 return Err("cannot create the editor window".into());
             }
+            let state = Arc::new(WindowState::default());
+            let p = Arc::into_raw(state.clone());
+            // SAFETY: our new window of this thread; the pointer stays valid until `WM_NCDESTROY`
+            // releases it.
+            unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, p as _) };
+            // SAFETY: as above; only reads the value back.
+            if unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const WindowState != p {
+                // SAFETY: the reference was not stored: take it back, and destroy our window.
+                unsafe {
+                    drop(Arc::from_raw(p));
+                    DestroyWindow(hwnd);
+                }
+                return Err("cannot set up the editor window".into());
+            }
             // `AdjustWindowRectEx` assumed the system DPI; size the client area by the real frame.
             resize(hwnd, w, h);
-            Ok(HostWindow { hwnd })
+            Ok(HostWindow { hwnd, state })
         }
 
         /// The window handle (for resizes).
@@ -1888,16 +1909,9 @@ mod hostwin {
         }
 
         /// Routes the window's resizes through `sizer` (the window procedure reads it from the
-        /// window's user data). Once per window.
+        /// window's state). Once per window.
         pub fn set_sizer(&mut self, sizer: &Arc<GuiSizer>) {
-            let Some(h) = self.live() else { return };
-            if window_sizer(h).is_some() {
-                return;
-            }
-            let p = Arc::into_raw(sizer.clone());
-            // SAFETY: a live window of this thread; the pointer stays valid until `WM_NCDESTROY`
-            // releases it.
-            unsafe { SetWindowLongPtrW(h, GWLP_USERDATA, p as _) };
+            let _ = self.state.sizer.set(sizer.clone());
         }
 
         /// Gives the window a sizing border (the plugin said `can_resize`), or takes it away,
@@ -1930,20 +1944,20 @@ mod hostwin {
 
         pub fn raise(&self) {
             if let Some(h) = self.live() {
-                // SAFETY: a live window of this thread. Shown again, it is open again.
+                // Shown again, it is open again.
+                self.state.closed.store(false, Ordering::Relaxed);
+                // SAFETY: a live window of this thread.
                 unsafe {
-                    RemovePropW(h, closed_prop());
                     ShowWindow(h, SW_SHOW);
                     SetForegroundWindow(h);
                 }
             }
         }
 
-        /// The window is open: not closed by the user, even while hidden with its minimized
-        /// owner.
-        pub fn is_visible(&self) -> bool {
-            // SAFETY: a live window of this thread; the property name lives for the process.
-            self.live().is_some_and(|h| unsafe { GetPropW(h, closed_prop()) }.is_null())
+        /// The window exists and the user has not closed it (it may be hidden with its
+        /// minimized owner).
+        pub fn is_open(&self) -> bool {
+            self.live().is_some() && !self.state.closed.load(Ordering::Relaxed)
         }
 
         pub fn close(self) {
@@ -1988,7 +2002,7 @@ mod hostwin {
             std::ptr::null_mut()
         }
         pub fn raise(&self) {}
-        pub fn is_visible(&self) -> bool {
+        pub fn is_open(&self) -> bool {
             false
         }
         pub fn close(self) {}
@@ -2000,6 +2014,32 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows: an editor window hidden (as with its minimized owner) stays open; only the user's
+    /// close (`WM_CLOSE`) closes it, and raising it opens it again.
+    #[cfg(windows)]
+    #[test]
+    fn host_window_is_closed_only_by_the_user() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SW_HIDE, SendMessageW, ShowWindow, WM_CLOSE};
+        // Host windows live on the thread named "main" (the app's UI thread).
+        let t = std::thread::Builder::new().name("main".into()).spawn(|| {
+            let w = hostwin::HostWindow::new("Editor", 200.0, 100.0).expect("window");
+            let h = w.raw();
+            assert!(w.is_open());
+            // SAFETY: our live window, on its own thread.
+            unsafe { ShowWindow(h, SW_HIDE) };
+            assert!(w.is_open(), "hidden is not closed");
+            // SAFETY: as above; the window procedure runs before this returns.
+            unsafe { SendMessageW(h, WM_CLOSE, 0, 0) };
+            assert!(!w.is_open(), "closed by the user");
+            w.raise();
+            assert!(w.is_open(), "raised: open again");
+            w.close();
+            // SAFETY: `IsWindow` accepts any value.
+            assert_eq!(unsafe { IsWindow(h) }, 0, "closed: destroyed");
+        });
+        assert!(t.expect("spawn").join().is_ok());
+    }
 
     /// `set_size` calls of the fake plugin below (one test uses it).
     static SET_SIZES: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
