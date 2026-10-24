@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
 use soundcraft_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
 use soundcraft_time::{Range, Samples};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,7 +115,7 @@ pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Optio
         buf.sample_rate = sr;
     }
     let id = SourceId(s.alloc());
-    let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).unwrap_or(name).to_string();
+    let stem = Path::new(name).file_stem().and_then(OsStr::to_str).unwrap_or(name).to_string();
     let stored = match path {
         Some(p) => p.to_string(),
         None => unique_audio_rel(s, &stem),
@@ -145,7 +146,7 @@ fn stamp_at_rate(stamp: u64, file_rate: u32, session_rate: u32) -> u64 {
 
 /// Decode and place an audio file. With no target track, a new track of matching width is made.
 pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
-    let ext = Path::new(name).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
+    let ext = Path::new(name).extension().and_then(OsStr::to_str).map(str::to_ascii_lowercase);
     let (info, buf) = soundcraft_audio_io::decode(bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
     let buf = at_rate(buf, e.session().sample_rate.hz(), MAX_IMPORT_SAMPLES)
         .ok_or_else(|| EngineError::Io(format!("{name}: file is too large to import")))?;
@@ -164,7 +165,7 @@ pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option
     let track = match target {
         Some(t) => t,
         None => {
-            let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).unwrap_or("Audio").to_string();
+            let stem = Path::new(name).file_stem().and_then(OsStr::to_str).unwrap_or("Audio").to_string();
             s.add_track(TrackKind::Audio, ChannelFormat::for_channels(channels), Some(&stem))
         }
     };
@@ -188,8 +189,8 @@ pub fn load_sampler_bytes(e: &mut Engine, track: TrackId, name: &str, bytes: &[u
 /// never copied) plus its audio on a new audio track when it has a usable audio stream. Fails
 /// only when the file has neither a readable picture nor audio.
 pub fn import_video_bytes(e: &mut Engine, path: &str, bytes: Vec<u8>, at: Samples) -> Result<Value> {
-    let stem = Path::new(path).file_stem().and_then(|n| n.to_str()).unwrap_or("Video").to_string();
-    let ext = Path::new(path).extension().and_then(|x| x.to_str()).unwrap_or("mp4").to_ascii_lowercase();
+    let stem = Path::new(path).file_stem().and_then(OsStr::to_str).unwrap_or("Video").to_string();
+    let ext = Path::new(path).extension().and_then(OsStr::to_str).unwrap_or("mp4").to_ascii_lowercase();
     let bytes: Arc<[u8]> = bytes.into();
     let movie = soundcraft_video::Movie::open(Arc::clone(&bytes)).map(|m| m.info().clone());
     let audio_name = format!("{stem} audio.{}", if ext == "mov" { "mp4" } else { ext.as_str() });
@@ -210,7 +211,7 @@ pub fn import_video_bytes(e: &mut Engine, path: &str, bytes: Vec<u8>, at: Sample
     let vid = SourceId(s.alloc());
     s.videos.push(soundcraft_model::VideoSource {
         id: vid,
-        name: Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("movie").to_string(),
+        name: Path::new(path).file_name().and_then(OsStr::to_str).unwrap_or("movie").to_string(),
         path: abs,
         width: info.width,
         height: info.height,
@@ -992,7 +993,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         sync_dir(&audio_dir);
     }
     s.folder = Some(dir.clone());
-    if !overwrite && let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
+    if !overwrite && let Some(stem) = p.file_stem().and_then(OsStr::to_str) {
         s.name = stem.to_string();
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
@@ -1052,7 +1053,7 @@ fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Copy the session file about to be replaced to `Backups/<name> backup <n>.<ext>`, keeping the
 /// newest ten.
 fn back_up(file: &Path) {
-    let (Some(dir), Some(stem), Some(ext)) = (file.parent(), file.file_stem().and_then(|x| x.to_str()), file.extension().and_then(|x| x.to_str()))
+    let (Some(dir), Some(stem), Some(ext)) = (file.parent(), file.file_stem().and_then(OsStr::to_str), file.extension().and_then(OsStr::to_str))
     else {
         return;
     };
@@ -1195,7 +1196,7 @@ pub(crate) fn decode_file(files: &mut DecodedFiles, p: &Path, rate: u32) -> std:
         .entry(file_key(p))
         .or_insert_with(|| {
             let bytes = read_file(p).map_err(|_| p.display().to_string())?;
-            decode_source(&bytes, p.extension().and_then(|x| x.to_str()), rate).map_err(|err| format!("{}: {err}", p.display()))
+            decode_source(&bytes, p.extension().and_then(OsStr::to_str), rate).map_err(|err| format!("{}: {err}", p.display()))
         })
         .clone()
 }
@@ -1227,7 +1228,7 @@ pub fn set_deliver(h: DeliverHook) {
 pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
     if cfg!(target_arch = "wasm32") {
         let deliver = DELIVER.get().ok_or_else(|| EngineError::Io("saving files is not available in this build".into()))?;
-        let name = Path::new(path).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("Untitled");
+        let name = Path::new(path).file_name().and_then(OsStr::to_str).filter(|n| !n.is_empty()).unwrap_or("Untitled");
         return deliver(name, bytes).map_err(EngineError::Io);
     }
     crate::file_access::check_write(path).map_err(EngineError::Io)?;
@@ -1272,7 +1273,7 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
 
 /// Save as a bundle named after `path`'s file name, delivered through the host ([`write_file`]).
 fn save_session_bundle(e: &mut Engine, path: &str) -> Result<usize> {
-    let stem = Path::new(path).file_stem().and_then(|x| x.to_str()).filter(|x| !x.is_empty()).map(str::to_string);
+    let stem = Path::new(path).file_stem().and_then(OsStr::to_str).filter(|x| !x.is_empty()).map(str::to_string);
     let mut s = e.session().clone();
     if let Some(stem) = stem {
         s.name = stem;
@@ -1311,7 +1312,7 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
             continue;
         }
         let audio = match files.remove(&src.path) {
-            Some(bytes) => match decode_source(&bytes, Path::new(&src.path).extension().and_then(|x| x.to_str()), s.sample_rate.hz()) {
+            Some(bytes) => match decode_source(&bytes, Path::new(&src.path).extension().and_then(OsStr::to_str), s.sample_rate.hz()) {
                 Ok(audio) => Some(audio),
                 Err(err) => {
                     missing.push(format!("{}: {err}", src.path));
@@ -1330,7 +1331,7 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
     }
     // Movies are referenced by path, never copied into a session: none can be found here.
     missing.extend(s.videos.iter().map(|v| v.path.clone()));
-    let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).filter(|x| !x.is_empty()).unwrap_or("Untitled").to_string();
+    let stem = Path::new(name).file_stem().and_then(OsStr::to_str).filter(|x| !x.is_empty()).unwrap_or("Untitled").to_string();
     e.replace_session(s);
     e.path = Some(format!("{}.{BUNDLE_EXTENSION}", sanitize_name(&stem)));
     for m in &missing {
@@ -1362,7 +1363,7 @@ fn read_bundle(bytes: &[u8]) -> Result<(String, std::collections::HashMap<String
         let mut data = Vec::new();
         // The declared size is hostile too: never read past it.
         f.by_ref().take(size).read_to_end(&mut data).map_err(|err| EngineError::Io(format!("bundle: {rel}: {err}")))?;
-        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(|x| x.to_str()) == Some(soundcraft_model::SESSION_EXTENSION);
+        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(OsStr::to_str) == Some(soundcraft_model::SESSION_EXTENSION);
         if is_session && text.is_none() {
             text = Some(String::from_utf8(data).map_err(|_| EngineError::Io(format!("bundle: {rel} is not text")))?);
         } else {
@@ -1451,7 +1452,7 @@ fn add_recording_in(
             continue;
         }
         let resampled = buf.sample_rate != s.sample_rate.hz();
-        let name = path.file_stem().and_then(|x| x.to_str()).unwrap_or("Take");
+        let name = path.file_stem().and_then(OsStr::to_str).unwrap_or("Take");
         let src = add_source(s, name, buf, Some(&path.to_string_lossy()), FileFormat::Wav);
         let Some(x) = s.sources.last_mut() else { continue };
         x.unsaved = resampled;

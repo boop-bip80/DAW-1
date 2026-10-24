@@ -43,10 +43,43 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         });
 }
 
+struct ModeCellState {
+    cur: EditMode,
+    snap: bool,
+    locked: bool,
+}
+
+fn edit_mode_tooltip(m: EditMode, locked: bool, cmd: &str, fkey: &str) -> String {
+    match m {
+        EditMode::Shuffle if locked => format!("Shuffle is locked ({cmd}-click to unlock)"),
+        EditMode::Shuffle => format!("Shuffle mode ({fkey}); {cmd}-click locks it out"),
+        EditMode::Grid => format!("Grid mode ({fkey}; again for Relative); Shift-click: Snap to Grid in the other modes"),
+        _ => format!("{} mode ({fkey}); Shift-click adds Snap to Grid", if m == EditMode::Slip { "Slip" } else { "Spot" }),
+    }
+}
+
+fn draw_mode_cell(p: &egui::Painter, cell: Rect, resp: &egui::Response, t: &Tokens, m: EditMode, state: &ModeCellState, label: &str) {
+    let on = state.cur == m || (m == EditMode::Grid && state.cur == EditMode::GridRelative);
+    // `on` means `cur == m`, or Grid showing Relative Grid: the active colour is always cur's.
+    key(p, cell, resp, if on { t.edit_mode_on(state.cur) } else { t.mode_off });
+    let fg = if on { t.mode_on_text } else { t.mode_off_text };
+    if m == EditMode::Grid && state.snap {
+        // The Snap to Grid outline wears the Grid colour, so it never reads as the green of Slip.
+        let grid = t.edit_mode_on(if state.cur.is_grid() { state.cur } else { EditMode::Grid });
+        p.rect_stroke(cell, 1.0, Stroke::new(1.5, grid), StrokeKind::Inside);
+    }
+    if m == EditMode::Shuffle && state.locked {
+        icons::draw(p, Rect::from_center_size(cell.center(), vec2(15.0, 15.0)), "lock", fg);
+    } else {
+        let txt = if m == EditMode::Grid && state.cur == EditMode::GridRelative { "REL GRID" } else { label };
+        p.text(cell.center(), Align2::CENTER_CENTER, txt, bold(10.5), fg);
+    }
+}
+
 fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let ed = &app.engine.session().edit;
-    let (cur, snap, locked) = (ed.edit_mode, ed.flag(SNAP_TO_GRID), ed.flag(SHUFFLE_LOCK));
+    let state = ModeCellState { cur: ed.edit_mode, snap: ed.flag(SNAP_TO_GRID), locked: ed.flag(SHUFFLE_LOCK) };
     let cmd = crate::shortcuts::shortcut_label("Cmd", ui.ctx().os() == egui::os::OperatingSystem::Mac);
     let modes = [
         (EditMode::Shuffle, 0, 0, "SHUFFLE", "F1"),
@@ -63,31 +96,13 @@ fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
         for (m, cx, cy, label, fkey) in modes {
             let cell = Rect::from_min_size(pos2(inner.min.x + cw * cx as f32, inner.min.y + ch * cy as f32), vec2(cw, ch)).shrink(1.0);
             let resp = ui.interact(cell, ui.id().with(("mode", label)), Sense::click());
-            let on = cur == m || (m == EditMode::Grid && cur == EditMode::GridRelative);
-            // `on` means `cur == m`, or Grid showing Relative Grid: the active colour is always cur's.
-            key(ui.painter(), cell, &resp, if on { t.edit_mode_on(cur) } else { t.mode_off });
-            let fg = if on { t.mode_on_text } else { t.mode_off_text };
-            if m == EditMode::Grid && snap {
-                // The Snap to Grid outline wears the Grid colour, so it never reads as the green of Slip.
-                let grid = t.edit_mode_on(if cur.is_grid() { cur } else { EditMode::Grid });
-                ui.painter().rect_stroke(cell, 1.0, Stroke::new(1.5, grid), StrokeKind::Inside);
-            }
-            if m == EditMode::Shuffle && locked {
-                icons::draw(ui.painter(), Rect::from_center_size(cell.center(), vec2(15.0, 15.0)), "lock", fg);
-            } else {
-                let txt = if m == EditMode::Grid && cur == EditMode::GridRelative { "REL GRID" } else { label };
-                ui.painter().text(cell.center(), Align2::CENTER_CENTER, txt, bold(10.5), fg);
-            }
+            draw_mode_cell(ui.painter(), cell, &resp, &t, m, &state, label);
+            let on = state.cur == m || (m == EditMode::Grid && state.cur == EditMode::GridRelative);
             resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, label));
             if resp.clicked() {
                 mode_click(app, m, ui.input(|i| i.modifiers));
             }
-            resp.on_hover_text(match m {
-                EditMode::Shuffle if locked => format!("Shuffle is locked ({cmd}-click to unlock)"),
-                EditMode::Shuffle => format!("Shuffle mode ({fkey}); {cmd}-click locks it out"),
-                EditMode::Grid => format!("Grid mode ({fkey}; again for Relative); Shift-click: Snap to Grid in the other modes"),
-                _ => format!("{} mode ({fkey}); Shift-click adds Snap to Grid", if m == EditMode::Slip { "Slip" } else { "Spot" }),
-            });
+            resp.on_hover_text(edit_mode_tooltip(m, state.locked, &cmd, fkey));
         }
     });
 }

@@ -776,7 +776,7 @@ impl SoundApp {
         for d in std::fs::read_dir(dir).ok()?.flatten() {
             for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
                 let p = f.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("scraft")
+                if p.extension().and_then(std::ffi::OsStr::to_str) == Some("scraft")
                     && let Ok(m) = f.metadata().and_then(|m| m.modified())
                     && best.as_ref().is_none_or(|(t, _)| m > *t)
                 {

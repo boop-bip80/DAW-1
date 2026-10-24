@@ -110,7 +110,7 @@ fn info(args: &[String]) -> ExitCode {
         Ok(b) => b,
         Err(e) => return fail(format!("{path}: {e}")),
     };
-    let ext = std::path::Path::new(path).extension().and_then(|x| x.to_str());
+    let ext = std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str);
     match soundcraft_audio_io::probe(&bytes, ext) {
         Ok(i) => {
             outln!("{}", serde_json::to_string_pretty(&json!({"format": i.format, "sample_format": i.sample_format, "sample_rate": i.sample_rate, "channels": i.channels, "frames": i.frames, "seconds": i.duration_secs(), "bwf": i.bwf})).unwrap_or_default());
@@ -134,7 +134,7 @@ fn convert(args: &[String]) -> ExitCode {
         Ok(b) => b,
         Err(e) => return fail(format!("{input}: {e}")),
     };
-    let ext = std::path::Path::new(input).extension().and_then(|x| x.to_str());
+    let ext = std::path::Path::new(input).extension().and_then(std::ffi::OsStr::to_str);
     let (_, mut buf) = match soundcraft_audio_io::decode(&bytes, ext) {
         Ok(x) => x,
         Err(e) => return fail(format!("{input}: {e}")),
@@ -146,7 +146,7 @@ fn convert(args: &[String]) -> ExitCode {
     if args.iter().any(|a| a == "--normalize") {
         soundcraft_dsp::offline::normalize(&mut buf.channels, -0.1, false);
     }
-    let out_ext = std::path::Path::new(output).extension().and_then(|x| x.to_str()).unwrap_or("wav").to_ascii_lowercase();
+    let out_ext = std::path::Path::new(output).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("wav").to_ascii_lowercase();
     let Some(format) = soundcraft_audio_io::encode_format_for(&out_ext) else {
         return fail(format!("{output}: cannot write `.{out_ext}` files (supported: {})", soundcraft_audio_io::ENCODE_EXTENSIONS));
     };
