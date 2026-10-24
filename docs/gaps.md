@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-18 · **Last updated:** 2026-10-18 · **Change:** trivial (G-04: mono device playback fold-down) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (native audio import loader and cancellation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -193,6 +193,8 @@ settings command only. Needs an openly licensed local speech model. ≈ 30–50 
 
 ### G-19. UI feel
 
+**Fixed (2026-10-24):** Native audio imports report reading, decoding, rate conversion and waveform preparation in a modal while a worker does the sample processing. One cumulative bar covers the batch and reaches 100% after atomic placement. Cancel/Esc discards the batch; a failed file leaves the session unchanged; completed batches use one Undo step. Multi-file drops are grouped. Browser byte imports still process synchronously; full Task Manager parity remains outside this change. Estimates unchanged.
+
 See [`ui-parity.md`](ui-parity.md). ≈ 60–100 h.
 
 ### G-20. MIDI and instrument depth
@@ -214,6 +216,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Native audio import prepares decoding, rate conversion and waveforms in the background; cumulative progress, cancellation, atomic batch import and one-step Undo; readiness estimates unchanged |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: master volume automation block boundaries fixed and regression-tested; estimates unchanged |
 | 2026-10-16 | trivial | G-04: failed aux/folder/master inserts excluded from latency compensation after containment; estimates unchanged |
