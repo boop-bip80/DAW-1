@@ -45,8 +45,9 @@ pub fn separate_closed(app: &mut SoundApp) {
 
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
     let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
-    // Per-channel peaks for multichannel meters (read once per frame).
-    let snap = app.player.as_ref().filter(|_| app.meters_live()).map(|p| p.meters());
+    // Per-channel peaks for multichannel meters, from the snapshot `logic` takes from the player
+    // (taking them here too would split each period's peaks between two readers).
+    let snap = (app.player.is_some() && app.meters_live()).then(|| app.meter_snapshot.clone());
     // Taken for this frame only: a strip that isn't drawn (hidden track) must not scroll the Mix
     // whenever it comes back. A request made during this frame (the strip's menu) waits for the next.
     let scroll_to = app.mix_scroll_into_view.take();
@@ -88,17 +89,19 @@ fn panner_speakers(fmt: ChannelFormat) -> Vec<PannerSpeaker> {
         .collect()
 }
 
-/// Ballistic per-channel meter levels for multichannel strips, kept in egui memory.
-fn channel_levels(ui: &Ui, key: (&str, u64), peaks: &[f32], n: usize) -> Vec<f32> {
+/// Ballistic per-channel meter levels for multichannel strips, kept in egui memory (same release
+/// as the other meters).
+fn channel_levels(ui: &Ui, key: (&str, u64), peaks: &[f32], n: usize, release: crate::meters::Release, peak_type: bool) -> Vec<f32> {
     let id = egui::Id::new(key);
     let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
-    let fall = 10f32.powf(-26.0 * dt / 20.0);
+    // Averaging meter types carry their own ballistics from the audio thread.
+    let fall = if peak_type { release.factor(dt) } else { 0.0 };
     let mut lv: Vec<f32> = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     lv.resize(n, 0.0);
     for (i, l) in lv.iter_mut().enumerate() {
         let p = peaks.get(i).copied().filter(|x| x.is_finite()).unwrap_or(0.0);
         *l = if p >= *l { p } else { (*l * fall).max(p) };
-        if *l < 1e-5 {
+        if *l < crate::meters::SILENCE {
             *l = 0.0;
         }
     }
@@ -426,30 +429,44 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     let md = app.meters.get(&id).copied().unwrap_or_default();
     let slot = fader_slot(fr);
     let mr = Rect::from_min_max(pos2(fr.max.x + 4.0, slot.min.y - 5.0), pos2(x0 + inner_w - 2.0, slot.max.y + if wide_meter { 17.0 } else { 1.0 }));
+    let scale = crate::meters::Scale::of_session(app.engine.session());
     if !narrow && !wide_meter {
-        meter_scale(ui.painter(), mr, mr.min.x - 1.0);
+        meter_scale(ui.painter(), mr, mr.min.x - 1.0, &scale);
     }
     let strip_fmt = if track.kind == TrackKind::Master { app.engine.session().main_format() } else { track.format };
     let all_chans = strip_fmt.channels().min(soundcraft_mix::MAX_CHANNELS);
     let chans = if track.kind == TrackKind::Master { 2 } else { track.channels().min(2) };
     if all_chans > 2 {
         // One bar per channel, labelled (L R C LFE …).
-        let peaks = snap.and_then(|s| s.tracks.get(&id)).map(|m| m.peaks.as_slice()).unwrap_or(&[]);
-        let lv = channel_levels(ui, ("mc_meter", id.0), peaks, all_chans);
+        let levels = snap.and_then(|s| s.tracks.get(&id)).filter(|m| m.kind == scale.kind).map(|m| m.levels.as_slice()).unwrap_or(&[]);
+        let lv = channel_levels(ui, ("mc_meter", id.0), levels, all_chans, app.ui.meters.release, scale.kind.is_peak());
         let labels: Vec<String> = (0..all_chans).map(|c| strip_fmt.channel_label(c)).collect();
-        multi_meter(ui, mr, &lv, &labels, md.clip);
+        multi_meter(ui, mr, &lv, &labels, md.clip, &scale);
     } else if chans >= 2 {
         let mw = mr.width() / 2.0 - 1.0;
-        meter(ui, Rect::from_min_size(mr.min, vec2(mw, mr.height())), md.level[0], md.hold[0], md.clip);
-        meter(ui, Rect::from_min_size(pos2(mr.min.x + mw + 2.0, mr.min.y), vec2(mw, mr.height())), md.level[1], md.hold[1], md.clip);
+        meter(ui, Rect::from_min_size(mr.min, vec2(mw, mr.height())), md.level[0], md.hold[0], md.clip, &scale);
+        meter(ui, Rect::from_min_size(pos2(mr.min.x + mw + 2.0, mr.min.y), vec2(mw, mr.height())), md.level[1], md.hold[1], md.clip, &scale);
     } else {
-        meter(ui, mr, md.level[0], md.hold[0], md.clip);
+        meter(ui, mr, md.level[0], md.hold[0], md.clip, &scale);
     }
+    crate::meters::interact(app, ui, mr, crate::meters::MeterTarget::Track(id));
     if md.gr > 0.1 {
         ui.painter().text(pos2(mr.center().x, mr.min.y - 3.0), Align2::CENTER_BOTTOM, format!("-{:.0}", md.gr), regular(8.0), t.meter_yellow);
     }
     // Volume readout and name.
-    let vr = Rect::from_min_size(pos2(x0 + 4.0, r.max.y - bottom_h + 4.0), vec2(inner_w - 8.0, 15.0));
+    let readout = Rect::from_min_size(pos2(x0 + 4.0, r.max.y - bottom_h + 4.0), vec2(inner_w - 8.0, 15.0));
+    let mut vr = readout;
+    if !narrow && !matches!(track.kind, TrackKind::Vca | TrackKind::Folder) {
+        // The highest peak since the meter was reset, beside the volume; click resets it.
+        let (vol, pk) = (vr.with_max_x(vr.center().x - 1.0), vr.with_min_x(vr.center().x + 1.0));
+        vr = vol;
+        inset(ui.painter(), pk, t.counter_bg);
+        let color = if md.max_peak >= crate::meters::CLIP_LEVEL { t.meter_red } else { t.counter_text };
+        ui.painter().with_clip_rect(pk).text(pk.center(), Align2::CENTER_CENTER, crate::meters::peak_text(md.max_peak), regular(9.0), color);
+        if ui.interact(pk, ui.id().with(("peak-value", id.0)), Sense::click()).on_hover_text("Highest peak (dBFS) · click to reset").clicked() {
+            let _ = app.run("ui.meters.reset", json!({"track": id.0}));
+        }
+    }
     inset(ui.painter(), vr, t.counter_bg);
     let (_, entered) = editable_readout(
         ui,
@@ -473,7 +490,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         TrackKind::Folder => "folder",
         TrackKind::Video => "video",
     };
-    ui.painter().text(pos2(vr.center().x, vr.max.y + 9.0), Align2::CENTER_CENTER, kind, regular(9.5), t.text_dim);
+    ui.painter().text(pos2(readout.center().x, readout.max.y + 9.0), Align2::CENTER_CENTER, kind, regular(9.5), t.text_dim);
     let nr = Rect::from_min_size(pos2(x0, r.max.y - 26.0), vec2(inner_w, 18.0));
     ui.painter().rect(
         nr,

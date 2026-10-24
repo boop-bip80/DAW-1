@@ -353,8 +353,10 @@ fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
             if flags.contains("view.transport.output_meters") {
                 let (r, _) = ui.allocate_exact_size(vec2(22.0, 26.0), Sense::hover());
                 let m = app.main_meter;
-                crate::widgets::meter(ui, Rect::from_min_size(r.min, vec2(10.0, 26.0)), m.level[0], m.hold[0], m.clip);
-                crate::widgets::meter(ui, Rect::from_min_size(pos2(r.min.x + 12.0, r.min.y), vec2(10.0, 26.0)), m.level[1], m.hold[1], m.clip);
+                let sc = crate::meters::Scale::of_session(app.engine.session());
+                crate::widgets::meter(ui, Rect::from_min_size(r.min, vec2(10.0, 26.0)), m.level[0], m.hold[0], m.clip, &sc);
+                crate::widgets::meter(ui, Rect::from_min_size(pos2(r.min.x + 12.0, r.min.y), vec2(10.0, 26.0)), m.level[1], m.hold[1], m.clip, &sc);
+                crate::meters::interact(app, ui, r, crate::meters::MeterTarget::Main);
             }
         });
         let s = app.engine.session();

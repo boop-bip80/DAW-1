@@ -50,6 +50,7 @@
 //! [`Insert::sample`]: soundcraft_model::Insert::sample
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+use soundcraft_dsp::meter::{MeterBank, MeterKind};
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
 use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
 use soundcraft_midi::CtrlKind;
@@ -148,13 +149,28 @@ pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_blo
     Some(NewInstance { plugin, refused_state })
 }
 
-/// Peak meter values for one strip (linear, per channel, max over the last block).
+/// Peak meter values for one strip (linear, per channel). [`MixEngine`] measures one block; a
+/// realtime host folds blocks together with [`StripMeter::accumulate`] so a reader polling less
+/// often than blocks arrive sees the highest peak since it last looked, not just the latest block.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StripMeter {
-    /// First two channels (mono strips repeat channel 0), for stereo meters.
+    /// Sample peaks of the first two channels (mono strips repeat channel 0), for stereo meters.
+    /// They drive the clip indicators whatever the meter type.
     pub peak: [f32; 2],
-    /// Every channel of the strip (or of the main mix).
+    /// Sample peaks of every channel of the strip (or of the main mix).
     pub peaks: Vec<f32>,
+    /// The highest sample peak over every channel (and, on a true-peak meter, the highest true
+    /// peak): what the clip indicator and peak readout watch, so a surround strip clips on any
+    /// channel, not only on the two its stereo bars show.
+    pub peak_all: f32,
+    /// The meter type's reading ([`Session`]'s `edit.meter_type`: sample or true peak, RMS, VU or
+    /// K-System), linear, first two channels; equal to `peak` for sample-peak meters.
+    pub level: [f32; 2],
+    /// The meter type's reading for every channel.
+    pub levels: Vec<f32>,
+    /// The meter type `level` and `levels` were measured as: readings of another type mean
+    /// nothing on this one's scale.
+    pub kind: MeterKind,
     /// Gain reduction of the first dynamics insert, dB.
     pub gain_reduction_db: f32,
     pub plugin_failures: PluginFailures,
@@ -182,20 +198,97 @@ impl StripMeter {
     pub fn copy_from(&mut self, o: &StripMeter) {
         self.peak = o.peak;
         self.peaks.clone_from(&o.peaks);
+        self.peak_all = o.peak_all;
+        self.level = o.level;
+        self.levels.clone_from(&o.levels);
+        self.kind = o.kind;
         self.gain_reduction_db = o.gain_reduction_db;
         self.plugin_failures = o.plugin_failures;
     }
 
-    fn measure(&mut self, bufs: &[Vec<f32>], frames: usize, gr: f32) {
+    /// Fold another (later) measurement in: per-channel peaks and the gain reduction keep their
+    /// maximum, plugin failures take the later value (the count only grows). Allocation-free once
+    /// the channel count is stable, so it can run on the audio thread every block.
+    pub fn accumulate(&mut self, o: &StripMeter) {
+        accumulate_channels(&mut self.peaks, &o.peaks);
+        for (p, q) in self.peak.iter_mut().zip(o.peak) {
+            *p = max_level(*p, q);
+        }
+        if self.kind == o.kind {
+            accumulate_channels(&mut self.levels, &o.levels);
+            for (p, q) in self.level.iter_mut().zip(o.level) {
+                *p = max_level(*p, q);
+            }
+        } else {
+            // The meter type changed: the earlier readings are on another scale.
+            self.levels.clone_from(&o.levels);
+            self.level = o.level;
+            self.kind = o.kind;
+        }
+        self.peak_all = max_level(self.peak_all, o.peak_all);
+        self.gain_reduction_db = max_level(self.gain_reduction_db, o.gain_reduction_db);
+        self.plugin_failures = o.plugin_failures;
+    }
+
+    /// Zero the levels (peaks and gain reduction) after a reader took them, keeping the channel
+    /// count and the plugin failure record. Never allocates.
+    pub fn reset_levels(&mut self) {
+        self.peak = [0.0; 2];
+        self.peaks.iter_mut().for_each(|p| *p = 0.0);
+        self.peak_all = 0.0;
+        self.level = [0.0; 2];
+        self.levels.iter_mut().for_each(|p| *p = 0.0);
+        self.gain_reduction_db = 0.0;
+    }
+
+    /// Measure one block with `bank` as a `kind` meter.
+    fn measure(&mut self, bank: &mut MeterBank, kind: MeterKind, bufs: &[Vec<f32>], frames: usize, gr: f32) {
         if self.peaks.len() != bufs.len() {
             self.peaks.resize(bufs.len(), 0.0);
+            self.levels.resize(bufs.len(), 0.0);
         }
-        for (p, b) in self.peaks.iter_mut().zip(bufs.iter()) {
-            *p = peak(b.get(..frames).unwrap_or(&[]));
-        }
-        let last = self.peaks.len().saturating_sub(1);
-        self.peak = [self.peaks.first().copied().unwrap_or(0.0), self.peaks.get(1.min(last)).copied().unwrap_or(0.0)];
+        bank.set_kind(kind);
+        self.kind = kind;
+        bank.process(bufs, frames, &mut self.peaks, &mut self.levels);
+        self.peak = first_two(&self.peaks);
+        self.level = first_two(&self.levels);
+        let tp = if kind == MeterKind::TruePeak { self.levels.as_slice() } else { &[] };
+        self.peak_all = self.peaks.iter().chain(tp).copied().fold(0.0, max_level);
         self.gain_reduction_db = gr;
+    }
+}
+
+/// The first two channels; a mono strip repeats channel 0.
+fn first_two(v: &[f32]) -> [f32; 2] {
+    let last = v.len().saturating_sub(1);
+    [v.first().copied().unwrap_or(0.0), v.get(1.min(last)).copied().unwrap_or(0.0)]
+}
+
+/// Per-channel max of a later reading into an earlier one.
+fn accumulate_channels(acc: &mut Vec<f32>, o: &[f32]) {
+    if acc.len() != o.len() {
+        // The strip's format changed (a document edit): earlier channels no longer line up.
+        acc.clear();
+        acc.extend_from_slice(o);
+    } else {
+        for (p, q) in acc.iter_mut().zip(o) {
+            *p = max_level(*p, *q);
+        }
+    }
+}
+
+/// The session's meter type (sample peak for an unknown id).
+fn meter_kind(s: &Session) -> MeterKind {
+    MeterKind::parse(&s.edit.meter_type).unwrap_or_default()
+}
+
+/// The larger of two meter levels; a NaN (from a misbehaving plugin) never wins or sticks.
+fn max_level(a: f32, b: f32) -> f32 {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => a.max(b),
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => 0.0,
     }
 }
 
@@ -242,6 +335,8 @@ struct Strip {
     out_extra: DelayLine,
     outbuf: Vec<Vec<f32>>,
     failures: PluginFailures,
+    /// The strip's meter state (sample rate, type and per-channel ballistics).
+    meter_bank: MeterBank,
 }
 
 /// Most latency delay compensation handles: 2^20 samples, about 22 s at 48 kHz. A strip reports
@@ -346,6 +441,7 @@ impl Strip {
             out_extra: DelayLine::default(),
             outbuf: Vec::new(),
             failures: PluginFailures::default(),
+            meter_bank: MeterBank::new(48_000.0),
         }
     }
 }
@@ -360,6 +456,16 @@ pub struct MixEngine {
     main_fmt: ChannelFormat,
     pub meters: HashMap<TrackId, StripMeter>,
     pub main_meter: StripMeter,
+    /// The main meter's state.
+    main_bank: MeterBank,
+    /// The main meter copied the last master fader's measurement of the same signal (no click
+    /// added after it), rather than measuring it again.
+    main_copied: bool,
+    /// Measure meters at all: off for offline renders (bounces, stems), which nobody watches.
+    metering: bool,
+    /// This block's meter type and Options › Pre-Fader Metering, from the session.
+    meter_kind: MeterKind,
+    pre_fader_metering: bool,
     pub pan_law: PanLaw,
     /// Last rendered position end (to detect seeks).
     last_end: Samples,
@@ -451,7 +557,12 @@ impl MixEngine {
             main: vec![vec![0.0; max_block]; MAIN_CHANNELS],
             main_fmt: ChannelFormat::Stereo,
             meters: HashMap::new(),
+            pre_fader_metering: false,
             main_meter: StripMeter::default(),
+            main_bank: MeterBank::new(if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 }),
+            main_copied: false,
+            metering: true,
+            meter_kind: MeterKind::SamplePeak,
             pan_law: PanLaw::Minus3,
             last_end: 0,
             synced: (0, 0, 0),
@@ -544,8 +655,14 @@ impl MixEngine {
                 fx.reset();
             }
         }
-        self.meters.clear();
-        self.main_meter = StripMeter::default();
+        // Zeroed in place: rebuilding the entries would allocate on the audio thread at every
+        // play, stop and locate.
+        self.meters.values_mut().for_each(StripMeter::reset_levels);
+        self.main_meter.reset_levels();
+        self.main_bank.reset();
+        for s in self.strips.values_mut() {
+            s.meter_bank.reset();
+        }
     }
 
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
@@ -560,6 +677,7 @@ impl MixEngine {
         let mut cx = SlotCtx { sr: self.sample_rate, mb, external: self.external, adopt: &mut self.adopt, retired: &mut self.retired };
         let gone: Vec<TrackId> = self.strips.keys().filter(|id| s.track(**id).is_none()).copied().collect();
         for id in gone {
+            self.meters.remove(&id);
             if let Some(mut st) = self.strips.remove(&id) {
                 for p in st.plugins.drain(..) {
                     cx.retire(p);
@@ -570,6 +688,7 @@ impl MixEngine {
         for t in &s.tracks {
             let ch = strip_channels(t, main_ch);
             let strip = self.strips.entry(t.id).or_insert_with(Strip::new);
+            strip.meter_bank.set_sample_rate(cx.sr);
             if strip.buf.len() != ch || strip.buf.first().map_or(0, Vec::len) != mb {
                 strip.buf = vec![vec![0.0; mb]; ch];
             }
@@ -640,6 +759,8 @@ impl MixEngine {
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
+        self.meter_kind = meter_kind(s);
+        self.pre_fader_metering = s.edit.pre_fader_metering;
         if pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
@@ -731,7 +852,7 @@ impl MixEngine {
             let ch = st.buf.len();
             st.align.set(lmax_t.saturating_sub(st.latency), ch);
             st.align.process(&mut st.buf, frames);
-            if t.mixer.sends.iter().flatten().any(|x| x.pre_fader) {
+            if needs_pre_tap(s, t) {
                 st.align_pre.set(lmax_t.saturating_sub(st.latency), ch);
                 st.align_pre.process(&mut st.pre, frames);
             }
@@ -770,7 +891,9 @@ impl MixEngine {
             self.strips.insert(t.id, st);
         }
         self.order = order;
-        // Master faders process the main mix.
+        // Master faders process the main mix. The last one to meter it measured what the main
+        // meter would (unless a click is added after it), so the main meter reuses that.
+        let mut main_measured = None;
         let transport = transport_at(s, pos, !self.monitor_only, self.recording);
         for t in s.tracks.iter().filter(|t| t.kind == TrackKind::Master && !t.inactive) {
             if let Some(strip) = self.strips.get_mut(&t.id) {
@@ -807,8 +930,12 @@ impl MixEngine {
                         }
                     }
                 }
+                // Master faders meter what they send out (post-fader), whatever Pre-Fader Metering says.
                 let m = self.meters.entry(t.id).or_default();
-                m.measure(&self.main, frames, 0.0);
+                if self.metering {
+                    m.measure(&mut strip.meter_bank, self.meter_kind, &self.main, frames, 0.0);
+                    main_measured = Some(t.id);
+                }
                 m.plugin_failures = strip.failures;
             }
         }
@@ -818,6 +945,7 @@ impl MixEngine {
         // start of the same beat would repeat every block as a buzz.
         if self.metronome && !self.monitor_only && s.edit.click && (!s.edit.flag("click.only_during_record") || self.recording) {
             click::render(s, pos, frames, &mut self.main);
+            main_measured = None;
         }
         // Output: min(out.len(), main channels) channels; any further output channels are silent.
         for (c, o) in out.iter_mut().enumerate() {
@@ -829,7 +957,34 @@ impl MixEngine {
                 }
             }
         }
-        self.main_meter.measure(&self.main, frames, 0.0);
+        if self.metering {
+            self.meter_main(main_measured, frames);
+        }
+    }
+
+    /// The main meter: a copy of the master fader's measurement of the same signal when there
+    /// is one (true peak need not oversample the main mix twice), else its own.
+    fn meter_main(&mut self, master: Option<TrackId>, frames: usize) {
+        match master.and_then(|id| self.meters.get(&id)) {
+            Some(m) => {
+                self.main_meter.copy_from(m);
+                self.main_meter.plugin_failures = PluginFailures::default();
+                self.main_copied = true;
+            }
+            None => {
+                if std::mem::take(&mut self.main_copied) {
+                    // Its averaging state stood still while it copied.
+                    self.main_bank.reset();
+                }
+                self.main_meter.measure(&mut self.main_bank, self.meter_kind, &self.main, frames, 0.0);
+            }
+        }
+    }
+
+    /// Turn metering on or off (on by default). Offline renders turn it off: nobody watches
+    /// their meters, and a true-peak meter costs a 4x oversampling filter per channel.
+    pub fn set_metering(&mut self, on: bool) {
+        self.metering = on;
     }
 
     /// The delay-compensation latency written onto `bus`: the slowest track insert, plus the
@@ -859,7 +1014,12 @@ impl MixEngine {
     /// Send, meter and pan a processed strip into the busses / main mix.
     fn route_strip(&mut self, t: &Track, strip: &mut Strip, pos: Samples, frames: usize) {
         let m = self.meters.entry(t.id).or_default();
-        m.measure(&strip.buf, frames, strip.gr);
+        if self.metering {
+            // Options › Pre-Fader Metering: the pre-fader tap (after the inserts, before fader and
+            // VCA, delay-compensated like the post-fader signal).
+            let pre = self.pre_fader_metering && strip.pre.len() == strip.buf.len();
+            m.measure(&mut strip.meter_bank, self.meter_kind, if pre { &strip.pre } else { &strip.buf }, frames, strip.gr);
+        }
         m.plugin_failures = strip.failures;
         let src_fmt = strip_format(t, strip.buf.len());
         let law = self.pan_law;
@@ -1072,7 +1232,7 @@ fn process_strip(
     strip.latency = latency.min(MAX_LATENCY);
     let soloed_out = any_solo && !t.mixer.solo && !t.mixer.solo_safe && !receives_solo(s, t);
     strip.muted = t.mixer.mute || soloed_out;
-    if t.mixer.sends.iter().flatten().any(|x| x.pre_fader) {
+    if needs_pre_tap(s, t) {
         strip.pre.resize_with(strip.buf.len(), Vec::new);
         for (d, src) in strip.pre.iter_mut().zip(strip.buf.iter()) {
             d.clear();
@@ -1129,6 +1289,12 @@ fn process_strip(
             }
         }
     }
+}
+
+/// A strip keeps a pre-fader copy of its signal for pre-fader sends, and for its meter under
+/// Options › Pre-Fader Metering.
+fn needs_pre_tap(s: &Session, t: &Track) -> bool {
+    s.edit.pre_fader_metering || t.mixer.sends.iter().flatten().any(|x| x.pre_fader)
 }
 
 /// Silences a block the plugin filled with NaN or infinity and takes the plugin out until the
@@ -1935,10 +2101,6 @@ fn lerp_gain(db0: f32, db1: f32, i: usize, n: usize) -> f32 {
     if n == 0 { g0 } else { g0 + (g1 - g0) * (i as f32 / n as f32) }
 }
 
-fn peak(x: &[f32]) -> f32 {
-    x.iter().fold(0.0f32, |m, v| if v.is_finite() { m.max(v.abs()) } else { m })
-}
-
 /// Per-block routing gains: `m[src][dst]`.
 type Matrix = [[f32; MAX_CHANNELS]; MAX_CHANNELS];
 
@@ -2255,7 +2417,9 @@ impl RangeRender {
     /// Renders the main mix over `range`, or `bus` when one is named.
     pub fn new(s: &Session, bus: Option<BusId>, range: Range, block: usize) -> Self {
         let nch = source_channels(s, bus);
-        let eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
+        let mut eng = MixEngine::new(s.sample_rate.as_f64() as f32, block);
+        // Nobody watches an offline render's meters.
+        eng.set_metering(false);
         let tmp = vec![vec![0.0f32; eng.max_block()]; nch];
         let len = if nch == 0 { 0 } else { usize::try_from(range.len().max(0)).unwrap_or(0) };
         RangeRender { eng, bus, tmp, start: range.start, done: 0, total: len, latency: 0 }
@@ -2547,6 +2711,144 @@ mod tests {
             pl.clips.push(Clip::audio(id, "dc", SourceId(900), 0, 0, frames as i64));
         }
         t
+    }
+
+    /// The track's meter after rendering `blocks` blocks of 512 from 0.
+    fn metered(s: &Session, t: TrackId, blocks: usize) -> StripMeter {
+        let mut eng = MixEngine::new(48_000.0, 512);
+        let mut out = vec![vec![0.0; 512]; 2];
+        for b in 0..blocks {
+            eng.render(s, (b * 512) as i64, 512, &mut out);
+        }
+        eng.meters.get(&t).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn offline_renders_do_not_meter() {
+        let (mut s, t) = session_with_dc(0.5, 48_000);
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.edit.meter_type = "true_peak".into();
+        let mut rr = RangeRender::new(&s, None, Range::new(0, 4096), 512);
+        while rr.next_block(&s).is_some() {}
+        // The meters never measured: no channel was ever looked at, true peak included.
+        assert!(rr.eng.meters.get(&t).is_none_or(|x| x.peaks.is_empty()), "{:?}", rr.eng.meters.get(&t));
+        assert!(rr.eng.meters.get(&m).is_none_or(|x| x.peaks.is_empty()));
+        assert!(rr.eng.main_meter.peaks.is_empty());
+    }
+
+    #[test]
+    fn the_main_meter_reuses_the_master_faders_measurement() {
+        let (mut s, _) = session_with_dc(0.5, 48_000);
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.edit.meter_type = "true_peak".into();
+        let mut eng = MixEngine::new(48_000.0, 512);
+        render_block(&mut eng, &s, 0);
+        let master = &eng.meters[&m];
+        assert!(master.level[0] > 0.3, "{master:?}");
+        assert!(eng.main_copied, "copied, not measured again");
+        assert_eq!((eng.main_meter.peaks.clone(), eng.main_meter.levels.clone()), (master.peaks.clone(), master.levels.clone()));
+        // Without a master fader the main meter measures for itself.
+        let (mut s, _) = session_with_dc(0.5, 48_000);
+        s.edit.meter_type = "true_peak".into();
+        let mut eng = MixEngine::new(48_000.0, 512);
+        render_block(&mut eng, &s, 0);
+        assert!(!eng.main_copied && eng.main_meter.level[0] > 0.3, "{:?}", eng.main_meter);
+    }
+
+    #[test]
+    fn accumulating_across_a_meter_type_change_keeps_only_the_new_type() {
+        let peak = StripMeter { levels: vec![0.5], level: [0.5; 2], peaks: vec![0.5], peak: [0.5; 2], peak_all: 0.5, ..StripMeter::default() };
+        let vu = StripMeter {
+            levels: vec![0.01],
+            level: [0.01; 2],
+            peaks: vec![0.4],
+            peak: [0.4; 2],
+            peak_all: 0.4,
+            kind: MeterKind::Vu,
+            ..StripMeter::default()
+        };
+        let mut acc = StripMeter::default();
+        acc.accumulate(&peak);
+        acc.accumulate(&vu);
+        assert_eq!((acc.kind, acc.levels.clone(), acc.level), (MeterKind::Vu, vec![0.01], [0.01; 2]), "no sample peak on the VU scale");
+        assert_eq!((acc.peak, acc.peak_all), ([0.5; 2], 0.5), "sample peaks are peaks whatever the type");
+    }
+
+    #[test]
+    fn the_main_meter_measures_for_itself_once_a_click_is_added() {
+        let (mut s, _) = session_with_dc(0.1, 48_000);
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.edit.click = true;
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.metronome = true;
+        render_block(&mut eng, &s, 0);
+        assert!(!eng.main_copied, "the click comes after the master fader");
+        assert!(eng.main_meter.peak[0] > eng.meters[&m].peak[0] + 0.05, "{:?} vs {:?}", eng.main_meter.peak, eng.meters[&m].peak);
+    }
+
+    #[test]
+    fn plugin_failures_are_recorded_with_metering_off() {
+        let (mut s, a) = session_with_dc(0.5, 48_000);
+        s.track_mut(a).unwrap().mixer.inserts[2] = Some(Insert::new("clap:test.nan"));
+        let mut eng = MixEngine::new(48_000.0, 512);
+        eng.set_metering(false);
+        eng.set_external_instances(true);
+        eng.adopt(nan(a, 2, 1));
+        render_block(&mut eng, &s, 0);
+        assert_eq!(eng.meters[&a].plugin_failures, PluginFailures { count: 1, last: 2 });
+        assert!(eng.meters[&a].peaks.is_empty(), "and nothing was measured");
+    }
+
+    #[test]
+    fn accumulating_keeps_the_highest_reading_per_channel() {
+        let a =
+            StripMeter { levels: vec![0.2, 0.9], level: [0.2, 0.9], peaks: vec![0.3, 0.9], peak: [0.3, 0.9], peak_all: 0.9, ..StripMeter::default() };
+        let b =
+            StripMeter { levels: vec![0.5, 0.1], level: [0.5, 0.1], peaks: vec![0.6, 0.1], peak: [0.6, 0.1], peak_all: 0.6, ..StripMeter::default() };
+        let mut acc = StripMeter::default();
+        acc.accumulate(&a);
+        acc.accumulate(&b);
+        assert_eq!((acc.levels.clone(), acc.level, acc.peak_all), (vec![0.5, 0.9], [0.5, 0.9], 0.9));
+        acc.reset_levels();
+        assert_eq!((acc.levels.clone(), acc.level, acc.peak_all), (vec![0.0, 0.0], [0.0; 2], 0.0));
+    }
+
+    #[test]
+    fn the_session_meter_type_sets_the_reading_and_peaks_stay_sample_peaks() {
+        let (mut s, t) = session_with_dc(0.5, 240_000);
+        let peak = metered(&s, t, 4);
+        assert_eq!(peak.level, peak.peak, "sample peak");
+        s.edit.meter_type = "rms".into();
+        // DC: after many time constants the RMS converges on the level.
+        let rms = metered(&s, t, 200);
+        assert!((rms.levels[0] - 0.5).abs() < 0.01 && (rms.peak[0] - 0.5).abs() < 1e-3, "{rms:?}");
+        let early = metered(&s, t, 1);
+        assert!(early.level[0] < 0.3, "RMS rises with its time constant: {early:?}");
+        s.edit.meter_type = "nonsense".into();
+        assert_eq!(metered(&s, t, 2).level, metered(&s, t, 2).peak, "unknown types meter sample peaks");
+    }
+
+    #[test]
+    fn a_surround_strip_reports_its_loudest_channel_for_the_clip_light() {
+        let mut s = Session::default();
+        s.outputs[0].format = ChannelFormat::Surround51;
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Surround51, None);
+        // L, R quiet; LFE (channel 3) over full scale.
+        let chans: Vec<Vec<f32>> = (0..6).map(|c| vec![if c == 3 { 1.2 } else { 0.1 }; 4800]).collect();
+        s.pool.insert(SourceId(901), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: chans })));
+        let id = s.new_clip_id();
+        s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "lfe", SourceId(901), 0, 0, 4800));
+        let mut eng = MixEngine::new(48_000.0, 512);
+        let mut out = vec![vec![0.0; 512]; 6];
+        eng.render(&s, 0, 512, &mut out);
+        let m = &eng.meters[&t];
+        assert!(m.peak[0] < 0.2 && m.peak[1] < 0.2, "{m:?}");
+        assert!((m.peak_all - 1.2).abs() < 1e-3, "{m:?}");
+        assert!((eng.main_meter.peak_all - 1.2).abs() < 1e-3, "the main meter too: {:?}", eng.main_meter);
+        let mut acc = StripMeter::default();
+        acc.accumulate(m);
+        acc.accumulate(&StripMeter::default());
+        assert_eq!(acc.peak_all, m.peak_all, "kept until taken");
     }
 
     #[test]
@@ -3032,6 +3334,79 @@ mod tests {
 
     fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
         vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(soundcraft_dsp::create("gain").unwrap())) }]
+    }
+
+    /// Passes audio through but reports `.1` samples of latency, so delay compensation delays the
+    /// other strips.
+    struct Late(Box<dyn Plugin>, usize);
+
+    impl Plugin for Late {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+        fn latency(&self) -> usize {
+            self.1
+        }
+    }
+
+    #[test]
+    fn pre_fader_metering_reads_before_the_fader_in_step_with_delay_compensation() {
+        let (mut s, a) = session_with_dc(0.5, 48_000);
+        let b = add_dc_track(&mut s, 0.5, 48_000);
+        s.track_mut(b).unwrap().mixer.volume_db = -20.0;
+        s.track_mut(a).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.late"));
+        let run = |s: &Session| {
+            let mut eng = MixEngine::new(48_000.0, 512);
+            eng.set_external_instances(true);
+            eng.adopt(vec![PreparedInstance {
+                track: a,
+                slot: 0,
+                id: "clap:test.late".into(),
+                ch: 1,
+                plugin: Box::new(Late(soundcraft_dsp::create("gain").unwrap(), 1024)),
+            }]);
+            (0..3)
+                .map(|i| {
+                    render_block(&mut eng, s, i * 512);
+                    eng.meters[&b].peak[0]
+                })
+                .collect::<Vec<f32>>()
+        };
+        // B waits 1024 samples for A's latency, so the first two blocks meter silence.
+        let post = run(&s);
+        assert!(post[0] == 0.0 && post[1] == 0.0 && (post[2] - 0.05).abs() < 1e-3, "post-fader: {post:?}");
+        s.edit.pre_fader_metering = true;
+        let pre = run(&s);
+        assert!(pre[0] == 0.0 && pre[1] == 0.0, "the pre-fader meter is delay-compensated too: {pre:?}");
+        assert!((pre[2] - 0.5).abs() < 1e-3, "and reads before the fader: {pre:?}");
+        // The Mute button leaves the pre-fader tap alone.
+        s.track_mut(b).unwrap().mixer.mute = true;
+        assert!((run(&s)[2] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn master_faders_meter_post_fader_even_with_pre_fader_metering() {
+        let (mut s, _) = session_with_dc(0.5, 48_000);
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.track_mut(m).unwrap().mixer.volume_db = -20.0;
+        s.edit.pre_fader_metering = true;
+        let mut eng = MixEngine::new(48_000.0, 512);
+        render_block(&mut eng, &s, 0);
+        let expect = 0.5 * std::f32::consts::FRAC_1_SQRT_2 * 0.1;
+        assert!((eng.meters[&m].peak[0] - expect).abs() < 1e-3, "{:?}", eng.meters[&m]);
     }
 
     #[test]

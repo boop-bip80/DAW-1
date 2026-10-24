@@ -210,6 +210,10 @@ pub struct EditState {
     pub scrolling: String,
     pub solo_mode: String,
     pub pre_fader_metering: bool,
+    /// What the track and main meters measure (`options.meter_type`): `sample_peak`, `true_peak`,
+    /// `rms`, `vu`, `k12`, `k14` or `k20`. Unknown values meter sample peaks.
+    #[serde(default = "sample_peak")]
+    pub meter_type: String,
     pub delay_compensation: bool,
     pub keyboard_focus: String,
     /// Timeline selection when it is unlinked from the edit selection.
@@ -241,6 +245,10 @@ impl EditState {
 
 fn yes() -> bool {
     true
+}
+
+fn sample_peak() -> String {
+    "sample_peak".into()
 }
 
 impl Default for EditState {
@@ -283,6 +291,7 @@ impl Default for EditState {
             scrolling: "page".into(),
             solo_mode: "sip".into(),
             pre_fader_metering: false,
+            meter_type: sample_peak(),
             delay_compensation: true,
             keyboard_focus: "commands".into(),
             timeline_selection: Range::default(),

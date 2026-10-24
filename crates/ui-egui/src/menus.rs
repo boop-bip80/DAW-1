@@ -74,6 +74,8 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("ui.bounce_dialog", "Bounce Mix…", "", None),
     ("ui.set", "Set UI State", "", None),
     ("ui.theme", "Appearance", "", None),
+    ("ui.meters", "Meter Options", "", None),
+    ("ui.meters.reset", "Reset Meter Peaks and Clips", "", None),
 ];
 
 /// Extra catalog mappings handled by the UI layer.
@@ -511,6 +513,11 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
     }
     if id == "ui.audio_device" {
         return Some(crate::windows::audio_device_command(app, p));
+    }
+    match id {
+        "ui.meters" => return Some(crate::meters::prefs_command(app, p)),
+        "ui.meters.reset" => return Some(crate::meters::reset_command(app, p)),
+        _ => {}
     }
     let toggle = |v: &mut bool| {
         *v = p.get("value").and_then(Value::as_bool).unwrap_or(!*v);
