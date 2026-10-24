@@ -240,8 +240,8 @@ impl SliceDecoder<'_> {
         if c.decode_decision(base + inc) == 0 {
             return 0;
         }
-        let mut prefix = 1;
-        while prefix < 9 && c.decode_decision(base + (prefix + 2).min(6)) == 1 {
+        let mut prefix: i32 = 1;
+        while prefix < 9 && c.decode_decision(base + (prefix + 2).min(6) as usize) == 1 {
             prefix += 1;
         }
         let mut val = prefix;
