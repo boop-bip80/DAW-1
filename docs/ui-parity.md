@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (Scroll Into View in the track name menu) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-24 · **Change:** minor (Shift-Alt-drag on a selected fader moves the selected faders) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -32,7 +32,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Default shortcuts | 🟡 146 bound (measured: distinct `Some("…")` shortcuts in the registry) | Pro Tools' default set is several hundred incl. numeric keypad and focus keys. Collisions: Mix/Edit toggle vs zoom (#144), Heal (#140), Export (#7) |
 | Ctrl as Cmd on Windows/Linux | ✅ since #15, #41 still open in some builds | #62 shows Ctrl in labels |
 | Numeric keypad transport and memory-location recall | 🟡 | Classic / Transport / Shuttle modes not all present |
-| Modifier gestures (Alt for all tracks, Shift-Alt for selected, Cmd-click fine faders, Ctrl-click defaults) | 🟡 | Main ones on faders and pan; not across every control |
+| Modifier gestures (Alt for all tracks, Shift-Alt for selected, Cmd-click fine faders, Ctrl-click defaults) | 🟡 | Main ones on faders and pan; Shift-Alt on a selected track's fader moves every selected fader by the same amount (#865); not across every control |
 | Scroll/zoom: wheel, trackpad pinch | 🟡 | Anchored trackpad zoom in open PRs #112, #137 |
 | Drag and drop: Clip List → tracks, files → tracks | ✅ macOS/Windows; 🟡 Wayland (PR #150) | |
 | Context menus (clip, track name, ruler, Clip List) | 🟡 | Clip and track menus exist; depth lower than Pro Tools'; Clip List delete (#4); track name ▸ Scroll Into View (Edit top, Mix left) |
@@ -69,6 +69,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | minor | Mix window: Shift-Alt-drag on a selected track's fader moves every selected fader by the same dB, one undo step (#865). Readiness estimate unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |

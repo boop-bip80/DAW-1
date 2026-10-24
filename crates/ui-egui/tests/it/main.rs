@@ -27,6 +27,7 @@ mod midi_front_visibility;
 mod midi_panel;
 mod midi_quantize;
 mod mix_narrow_headers;
+mod mix_selected_faders;
 mod mix_separate;
 mod new_midi_clip;
 mod new_tracks;
