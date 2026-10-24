@@ -360,6 +360,8 @@ pub struct MixEngine {
     main_fmt: ChannelFormat,
     pub meters: HashMap<TrackId, StripMeter>,
     pub main_meter: StripMeter,
+    /// This block's Options › Pre-Fader Metering.
+    pre_fader_metering: bool,
     pub pan_law: PanLaw,
     /// Last rendered position end (to detect seeks).
     last_end: Samples,
@@ -451,6 +453,7 @@ impl MixEngine {
             main: vec![vec![0.0; max_block]; MAIN_CHANNELS],
             main_fmt: ChannelFormat::Stereo,
             meters: HashMap::new(),
+            pre_fader_metering: false,
             main_meter: StripMeter::default(),
             pan_law: PanLaw::Minus3,
             last_end: 0,
@@ -640,6 +643,7 @@ impl MixEngine {
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
+        self.pre_fader_metering = s.edit.pre_fader_metering;
         if pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
@@ -731,7 +735,7 @@ impl MixEngine {
             let ch = st.buf.len();
             st.align.set(lmax_t.saturating_sub(st.latency), ch);
             st.align.process(&mut st.buf, frames);
-            if t.mixer.sends.iter().flatten().any(|x| x.pre_fader) {
+            if needs_pre_tap(s, t) {
                 st.align_pre.set(lmax_t.saturating_sub(st.latency), ch);
                 st.align_pre.process(&mut st.pre, frames);
             }
@@ -859,7 +863,10 @@ impl MixEngine {
     /// Send, meter and pan a processed strip into the busses / main mix.
     fn route_strip(&mut self, t: &Track, strip: &mut Strip, pos: Samples, frames: usize) {
         let m = self.meters.entry(t.id).or_default();
-        m.measure(&strip.buf, frames, strip.gr);
+        // Options › Pre-Fader Metering: the pre-fader tap (after the inserts, before fader and
+        // VCA, delay-compensated like the post-fader signal).
+        let pre = self.pre_fader_metering && strip.pre.len() == strip.buf.len();
+        m.measure(if pre { &strip.pre } else { &strip.buf }, frames, strip.gr);
         m.plugin_failures = strip.failures;
         let src_fmt = strip_format(t, strip.buf.len());
         let law = self.pan_law;
@@ -1072,7 +1079,7 @@ fn process_strip(
     strip.latency = latency.min(MAX_LATENCY);
     let soloed_out = any_solo && !t.mixer.solo && !t.mixer.solo_safe && !receives_solo(s, t);
     strip.muted = t.mixer.mute || soloed_out;
-    if t.mixer.sends.iter().flatten().any(|x| x.pre_fader) {
+    if needs_pre_tap(s, t) {
         strip.pre.resize_with(strip.buf.len(), Vec::new);
         for (d, src) in strip.pre.iter_mut().zip(strip.buf.iter()) {
             d.clear();
@@ -1129,6 +1136,12 @@ fn process_strip(
             }
         }
     }
+}
+
+/// A strip keeps a pre-fader copy of its signal for pre-fader sends, and for its meter under
+/// Options › Pre-Fader Metering.
+fn needs_pre_tap(s: &Session, t: &Track) -> bool {
+    s.edit.pre_fader_metering || t.mixer.sends.iter().flatten().any(|x| x.pre_fader)
 }
 
 /// Silences a block the plugin filled with NaN or infinity and takes the plugin out until the
@@ -3032,6 +3045,79 @@ mod tests {
 
     fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
         vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(soundcraft_dsp::create("gain").unwrap())) }]
+    }
+
+    /// Passes audio through but reports `.1` samples of latency, so delay compensation delays the
+    /// other strips.
+    struct Late(Box<dyn Plugin>, usize);
+
+    impl Plugin for Late {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+        fn latency(&self) -> usize {
+            self.1
+        }
+    }
+
+    #[test]
+    fn pre_fader_metering_reads_before_the_fader_in_step_with_delay_compensation() {
+        let (mut s, a) = session_with_dc(0.5, 48_000);
+        let b = add_dc_track(&mut s, 0.5, 48_000);
+        s.track_mut(b).unwrap().mixer.volume_db = -20.0;
+        s.track_mut(a).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.late"));
+        let run = |s: &Session| {
+            let mut eng = MixEngine::new(48_000.0, 512);
+            eng.set_external_instances(true);
+            eng.adopt(vec![PreparedInstance {
+                track: a,
+                slot: 0,
+                id: "clap:test.late".into(),
+                ch: 1,
+                plugin: Box::new(Late(soundcraft_dsp::create("gain").unwrap(), 1024)),
+            }]);
+            (0..3)
+                .map(|i| {
+                    render_block(&mut eng, s, i * 512);
+                    eng.meters[&b].peak[0]
+                })
+                .collect::<Vec<f32>>()
+        };
+        // B waits 1024 samples for A's latency, so the first two blocks meter silence.
+        let post = run(&s);
+        assert!(post[0] == 0.0 && post[1] == 0.0 && (post[2] - 0.05).abs() < 1e-3, "post-fader: {post:?}");
+        s.edit.pre_fader_metering = true;
+        let pre = run(&s);
+        assert!(pre[0] == 0.0 && pre[1] == 0.0, "the pre-fader meter is delay-compensated too: {pre:?}");
+        assert!((pre[2] - 0.5).abs() < 1e-3, "and reads before the fader: {pre:?}");
+        // The Mute button leaves the pre-fader tap alone.
+        s.track_mut(b).unwrap().mixer.mute = true;
+        assert!((run(&s)[2] - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn master_faders_meter_post_fader_even_with_pre_fader_metering() {
+        let (mut s, _) = session_with_dc(0.5, 48_000);
+        let m = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+        s.track_mut(m).unwrap().mixer.volume_db = -20.0;
+        s.edit.pre_fader_metering = true;
+        let mut eng = MixEngine::new(48_000.0, 512);
+        render_block(&mut eng, &s, 0);
+        let expect = 0.5 * std::f32::consts::FRAC_1_SQRT_2 * 0.1;
+        assert!((eng.meters[&m].peak[0] - expect).abs() < 1e-3, "{:?}", eng.meters[&m]);
     }
 
     #[test]
