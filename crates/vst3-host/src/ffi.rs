@@ -1973,6 +1973,8 @@ impl ViewSizer {
     /// The window's content was resized to `w`×`h` by the user (or the window manager): settles
     /// on the view's constrained size, makes the window follow it through `set_window` when it
     /// differs, and tells the view with `onSize`. Ignored while the host applies a resize itself.
+    // Called by the macOS and Windows host windows only (and the tests).
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     pub fn user_resized(&self, w: f64, h: f64, set_window: impl FnOnce(f64, f64)) {
         if !self.resizable() || self.is_applying() {
             return;
@@ -2134,8 +2136,10 @@ impl EditorLink {
         // Asked once attached: some plugins only know whether their editor resizes by then.
         // SAFETY: valid, attached view.
         let resizable = unsafe { view.canResize() } == sb::kResultTrue;
-        sizer.set_view(Some(view.clone()), resizable);
+        // The resize border first: the frame change it causes is not a user resize (the sizer
+        // negotiates only once it has the view).
         win.set_resizable(resizable);
+        sizer.set_view(Some(view.clone()), resizable);
         win.raise();
         g.view = Some(view);
         g.frame = Some(frame);

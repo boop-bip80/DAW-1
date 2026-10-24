@@ -1122,6 +1122,9 @@ impl GuiLink {
         sizer.set_target(Some(SizeTarget { plugin: g.plugin, adjust_size: vt.adjust_size, set_size: vt.set_size }), resizable);
         if let Some(win) = &mut g.window {
             win.set_sizer(&sizer);
+            // The frame change of the new sizing border is not a user resize: the window gives
+            // the client area back to the plugin's size, with nothing negotiated meanwhile.
+            let _applying = sizer.applying();
             win.set_resizable(resizable);
             win.raise();
         }
