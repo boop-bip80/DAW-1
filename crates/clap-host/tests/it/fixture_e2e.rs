@@ -3,7 +3,7 @@
 
 use soundcraft_dsp::{Category, Unit};
 
-use crate::common::fixture_dir;
+use crate::common::{FIXTURE_PLUGINS, fixture_dir};
 
 const GAIN: &str = "clap:org.soundcraft.test.gain";
 const SYNTH: &str = "clap:org.soundcraft.test.synth";
@@ -12,7 +12,7 @@ const SYNTH: &str = "clap:org.soundcraft.test.synth";
 fn scan_lists_both_fixture_plugins() {
     let dir = fixture_dir();
     let found = soundcraft_clap_host::scan_paths(&[dir.to_path_buf()]);
-    assert_eq!(found.len(), 5);
+    assert_eq!(found.len(), FIXTURE_PLUGINS);
     let g = found.iter().find(|d| d.id == GAIN).unwrap();
     assert_eq!(g.name, "Fixture Gain");
     assert_eq!(g.vendor, "SoundCraft tests");

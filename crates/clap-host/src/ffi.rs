@@ -773,8 +773,9 @@ pub(crate) struct GuiSizer {
     last: AtomicU64,
 }
 
-// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
-#[cfg_attr(not(windows), allow(dead_code))]
+// User resizes come from the Windows and macOS host windows only; elsewhere the plugin side is
+// unused.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 /// The plugin and the two `clap.gui` calls a user resize needs.
 #[derive(Clone, Copy)]
 struct SizeTarget {
@@ -798,15 +799,17 @@ impl Drop for Applying<'_> {
     }
 }
 
-// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
-#[cfg_attr(not(windows), allow(dead_code))]
+// User resizes come from the Windows and macOS host windows only; elsewhere the plugin side is
+// unused.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 /// A host-window size in whole pixels (non-finite or out-of-range sizes are clamped).
 fn px(v: f64) -> u32 {
     if v.is_finite() { v.round().clamp(1.0, 16_384.0) as u32 } else { 1 }
 }
 
-// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
-#[cfg_attr(not(windows), allow(dead_code))]
+// User resizes come from the Windows and macOS host windows only; elsewhere the plugin side is
+// unused.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 impl GuiSizer {
     pub fn new(w: u32, h: u32) -> GuiSizer {
         let s = GuiSizer {
@@ -922,8 +925,9 @@ impl GuiSizer {
     }
 }
 
-// User resizes come from the Windows host window only; elsewhere the plugin side is unused.
-#[cfg_attr(not(windows), allow(dead_code))]
+// User resizes come from the Windows and macOS host windows only; elsewhere the plugin side is
+// unused.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 /// `adjust_size` for a proposed `w`×`h`; the proposal stands when the plugin can't adjust it.
 fn adjust(t: &SizeTarget, w: u32, h: u32) -> (u32, u32) {
     let Some(f) = t.adjust_size else { return (w, h) };
@@ -1015,6 +1019,12 @@ impl GuiLink {
         }
         let mut g = self.lock();
         let vt = GuiLink::vt(&g).ok_or_else(|| "this plugin has no editor".to_string())?;
+        // The user closed the editor (its host window, or the plugin's floating window) since the
+        // last `idle`: free it and open a fresh one rather than reviving a closed window.
+        if g.created && (g.window.as_ref().is_some_and(|w| !w.is_visible()) || self.host.gui_closed.swap(false, Ordering::Relaxed)) {
+            self.host.gui_destroyed.store(false, Ordering::Relaxed);
+            GuiLink::destroy(&mut g);
+        }
         if g.created {
             if let Some(show) = vt.show {
                 // SAFETY: live plugin with a created GUI; main thread (checked).
@@ -1034,7 +1044,7 @@ impl GuiLink {
             if hostwin::SUPPORTED && unsafe { supported(g.plugin, api.as_ptr(), false) } {
                 return self.open_embedded(&mut g, vt, api, title);
             }
-            return Err("this plugin offers only an embedded editor, which SoundCraft hosts on Windows only".into());
+            return Err("this plugin offers only an embedded editor, which SoundCraft hosts on macOS and Windows only".into());
         }
         self.host.gui_closed.store(false, Ordering::Relaxed);
         self.host.gui_destroyed.store(false, Ordering::Relaxed);
@@ -1077,8 +1087,10 @@ impl GuiLink {
             return Err("the plugin could not create its editor".into());
         }
         g.created = true;
-        if let Some(f) = vt.set_scale {
-            // SAFETY: live plugin with a created GUI.
+        if !cfg!(target_os = "macos")
+            && let Some(f) = vt.set_scale
+        {
+            // SAFETY: live plugin with a created GUI. (Cocoa uses logical pixels: not called.)
             unsafe { f(g.plugin, 1.0) };
         }
         let (mut w, mut h) = (640u32, 480u32);
@@ -1096,7 +1108,13 @@ impl GuiLink {
                 return Err(e);
             }
         };
-        let parent = clap_window { api: api.as_ptr(), specific: clap_window_handle { win32: win.parent() } };
+        let handle = if cfg!(target_os = "macos") { clap_window_handle { cocoa: win.parent() } } else { clap_window_handle { win32: win.parent() } };
+        if win.parent().is_null() {
+            win.close();
+            GuiLink::destroy(g);
+            return Err("the editor window has no view to attach to".into());
+        }
+        let parent = clap_window { api: api.as_ptr(), specific: handle };
         // SAFETY: live plugin with a created embedded GUI; `parent` names our live window and
         // outlives the call.
         if !unsafe { set_parent(g.plugin, &parent) } {
@@ -1949,8 +1967,241 @@ mod hostwin {
     }
 }
 
+/// The macOS host window for embedded editors: a floating, transient `NSWindow` whose content view
+/// is the `NSView` the plugin adds its GUI's view to. Closing it only orders it out; the editor
+/// link notices in `idle`, destroys the GUI, then closes the window. Modelled on the VST3 host's
+/// window (same behaviour, `GuiSizer` in place of its `ViewSizer`).
+#[cfg(target_os = "macos")]
+mod hostwin {
+    use super::GuiSizer;
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSFloatingWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use std::ffi::c_void;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub const SUPPORTED: bool = true;
+
+    /// The delegate's state: the sizer, and whether the user closed the window.
+    struct Ivars {
+        sizer: Arc<GuiSizer>,
+        closed: Arc<AtomicBool>,
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and `ResizeDelegate` implements no
+        // `Drop` (its ivar, an `Arc`, is dropped by objc2 when the object is deallocated).
+        // No `#[name]`: objc2 then generates a crate- and version-specific name and reuses an
+        // already registered class of that name (e.g. a second copy of this crate in the process)
+        // instead of panicking, and never collides with the VST3 host's delegate class.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = Ivars]
+        struct ResizeDelegate;
+
+        // SAFETY: NSObjectProtocol has no safety requirements.
+        unsafe impl NSObjectProtocol for ResizeDelegate {}
+
+        // SAFETY: the methods below match the NSWindowDelegate selectors' signatures.
+        unsafe impl NSWindowDelegate for ResizeDelegate {
+            /// Live user resizes: the window only ever takes a size the plugin accepts.
+            #[unsafe(method(windowWillResize:toSize:))]
+            fn window_will_resize(&self, sender: &NSWindow, frame_size: NSSize) -> NSSize {
+                // Our own reference: the sizer stays alive even if the plugin closes the editor
+                // from a nested event loop during this call.
+                let sizer = self.ivars().sizer.clone();
+                constrained_frame(&sizer, sender, NSRect::new(NSPoint::new(0.0, 0.0), frame_size)).size
+            }
+
+            /// The zoom button: zoom to the largest size the plugin accepts within the default
+            /// (screen) frame, keeping the window's top edge.
+            #[unsafe(method(windowWillUseStandardFrame:defaultFrame:))]
+            fn window_standard_frame(&self, window: &NSWindow, default_frame: NSRect) -> NSRect {
+                let sizer = self.ivars().sizer.clone();
+                let mut frame = constrained_frame(&sizer, window, default_frame);
+                frame.origin.y = default_frame.origin.y + default_frame.size.height - frame.size.height;
+                frame
+            }
+
+            /// Every completed resize (drags, zoom): settles on an adjusted size and tells the
+            /// plugin (`set_size`). Resizes the host applies itself are ignored by the sizer.
+            #[unsafe(method(windowDidResize:))]
+            fn window_did_resize(&self, notification: &NSNotification) {
+                let sizer = self.ivars().sizer.clone();
+                let Some(window) = notification.object().and_then(|o| o.downcast::<NSWindow>().ok()) else { return };
+                let Some(view) = window.contentView() else { return };
+                let size = view.frame().size;
+                sizer.user_resized(size.width, size.height, |w, h| window.setContentSize(NSSize::new(w, h)));
+            }
+
+            /// The user closed the window (the host's own `close` clears the delegate first).
+            /// Tracked here rather than read from `isVisible`, which is also false while the app
+            /// is inactive and AppKit has hidden the window (`hidesOnDeactivate`).
+            #[unsafe(method(windowWillClose:))]
+            fn window_will_close(&self, _notification: &NSNotification) {
+                self.ivars().closed.store(true, Ordering::Relaxed);
+            }
+        }
+    );
+
+    /// `frame` with its content size adjusted by the plugin (unchanged when nothing is
+    /// negotiated); the origin stays.
+    fn constrained_frame(sizer: &GuiSizer, window: &NSWindow, frame: NSRect) -> NSRect {
+        let content = window.contentRectForFrameRect(frame);
+        match sizer.constrain(content.size.width, content.size.height) {
+            Some((w, h)) => {
+                let size = window.frameRectForContentRect(NSRect::new(content.origin, NSSize::new(w, h))).size;
+                NSRect::new(frame.origin, size)
+            }
+            None => frame,
+        }
+    }
+
+    impl ResizeDelegate {
+        fn new(mtm: MainThreadMarker, sizer: Arc<GuiSizer>, closed: Arc<AtomicBool>) -> Retained<ResizeDelegate> {
+            let this = ResizeDelegate::alloc(mtm).set_ivars(Ivars { sizer, closed });
+            // SAFETY: `init` of NSObject on a freshly allocated instance whose ivars are set.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    /// An `NSWindow` (titled, closable, floating above the app's windows) whose content view is
+    /// the plugin GUI's parent. Holds one retain of the window; main thread only.
+    pub struct HostWindow {
+        window: *mut NSWindow,
+        /// The window's delegate (one retain; the window only keeps a weak reference), or null.
+        delegate: *mut ResizeDelegate,
+        /// Set by the delegate when the user closes the window.
+        closed: Arc<AtomicBool>,
+    }
+
+    // SAFETY: the pointers are only dereferenced on the main thread (every method checks
+    // `MainThreadMarker`); the struct merely carries the retains between threads' locks.
+    unsafe impl Send for HostWindow {}
+
+    impl HostWindow {
+        fn get(&self) -> Option<&NSWindow> {
+            MainThreadMarker::new()?;
+            // SAFETY: we hold a retain of this window (from `new`) until `close`.
+            unsafe { self.window.as_ref() }
+        }
+
+        pub fn new(title: &str, w: f64, h: f64) -> Result<HostWindow, String> {
+            let mtm = MainThreadMarker::new().ok_or_else(|| "plugin editors must be opened on the main thread".to_string())?;
+            let _app = NSApplication::sharedApplication(mtm);
+            let rect = NSRect::new(NSPoint::new(200.0, 200.0), NSSize::new(w, h));
+            // Plugin editors are transient windows. In particular they must not be minimizable:
+            // minimized NSWindows become persistent thumbnails in the macOS Dock.
+            let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
+            // SAFETY: a freshly allocated window on the main thread; valid rect and style.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), rect, style, NSBackingStoreType::Buffered, false)
+            };
+            // SAFETY: we keep our own retain and release it in `close`, so AppKit must not
+            // release the window when the user closes it.
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setTitle(&NSString::from_str(title));
+            window.setLevel(NSFloatingWindowLevel);
+            window.setHidesOnDeactivate(true);
+            window.setExcludedFromWindowsMenu(true);
+            window.setCollectionBehavior(NSWindowCollectionBehavior::Transient | NSWindowCollectionBehavior::IgnoresCycle);
+            window.center();
+            Ok(HostWindow { window: Retained::into_raw(window), delegate: std::ptr::null_mut(), closed: Arc::new(AtomicBool::new(false)) })
+        }
+
+        /// The raw window pointer (for resizes).
+        pub fn raw(&self) -> *mut c_void {
+            self.window.cast()
+        }
+
+        /// Routes the window's resizes through `sizer` (an `NSWindowDelegate`). Once per window.
+        pub fn set_sizer(&mut self, sizer: &Arc<GuiSizer>) {
+            let (Some(mtm), Some(w)) = (MainThreadMarker::new(), self.get()) else { return };
+            if !self.delegate.is_null() {
+                return;
+            }
+            let delegate = ResizeDelegate::new(mtm, sizer.clone(), self.closed.clone());
+            w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            self.delegate = Retained::into_raw(delegate);
+        }
+
+        /// Gives the window a resize handle (the plugin said `can_resize`), or takes it away,
+        /// keeping the content size.
+        pub fn set_resizable(&self, resizable: bool) {
+            let Some(w) = self.get() else { return };
+            let style = w.styleMask();
+            let style = if resizable { style | NSWindowStyleMask::Resizable } else { style & !NSWindowStyleMask::Resizable };
+            if style == w.styleMask() {
+                return;
+            }
+            let size = w.contentView().map(|v| v.frame().size);
+            w.setStyleMask(style);
+            // A resizable window gets a zoom button; keep it out of full screen (the editor is a
+            // transient panel, and the sizer would fight a full-screen size the plugin refuses).
+            if resizable {
+                w.setCollectionBehavior(w.collectionBehavior() | NSWindowCollectionBehavior::FullScreenNone);
+            }
+            if let Some(size) = size {
+                w.setContentSize(size);
+            }
+        }
+
+        /// The content view (`NSView*`) the plugin adds its view to; null when unavailable.
+        pub fn parent(&self) -> *mut c_void {
+            self.get().and_then(|w| w.contentView()).map_or(std::ptr::null_mut(), |v| Retained::as_ptr(&v).cast_mut().cast())
+        }
+
+        pub fn raise(&self) {
+            if let Some(w) = self.get() {
+                w.makeKeyAndOrderFront(None);
+            }
+        }
+
+        /// The window is open: not closed by the user. (Before the delegate is set, the window's
+        /// own visibility.)
+        pub fn is_visible(&self) -> bool {
+            self.get().is_some_and(|w| if self.delegate.is_null() { w.isVisible() } else { !self.closed.load(Ordering::Relaxed) })
+        }
+
+        pub fn close(self) {
+            if let Some(w) = self.get() {
+                w.setDelegate(None);
+                w.orderOut(None);
+                w.close();
+            }
+            if MainThreadMarker::new().is_some() {
+                // SAFETY: balances the retain taken in `new`; nothing uses the pointer after this.
+                drop(unsafe { Retained::from_raw(self.window) });
+                // SAFETY: null, or balances the retain taken in `set_sizer`; the window no longer
+                // refers to it (delegate cleared above).
+                if let Some(d) = unsafe { Retained::from_raw(self.delegate) } {
+                    // Released when the event loop's autorelease pool drains, not now: `close` may
+                    // run inside one of the delegate's own methods (a plugin pumping a nested loop).
+                    let _ = Retained::autorelease_ptr(d);
+                }
+            }
+        }
+    }
+
+    /// Resizes a host window's content (`window` from [`HostWindow::raw`]); main thread only.
+    pub fn resize(window: *mut c_void, w: f64, h: f64) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        // SAFETY: null or a window the editor link keeps retained while the GUI is embedded.
+        if let Some(win) = unsafe { window.cast::<NSWindow>().as_ref() } {
+            win.setContentSize(NSSize::new(w, h));
+        }
+    }
+}
+
 /// Other platforms: embedded editors are not hosted (floating ones still are).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod hostwin {
     use std::ffi::c_void;
 

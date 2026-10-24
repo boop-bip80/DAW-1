@@ -14,6 +14,11 @@
 //! The gain plugin also implements `clap.state` (gain and mode as two little-endian f64s) and a
 //! floating-only `clap.gui` without a real window: showing it "edits" the gain to 0.25 in the GUI,
 //! reported as an output parameter event by the next `process`.
+//!
+//! - `org.soundcraft.test.embedded`: the gain plugin with an embedded-only `clap.gui` instead
+//!   (Cocoa on macOS): `set_parent` adds a child `NSView` to the host's view, `get_size` starts at
+//!   400×300, `can_resize` is true, `adjust_size` clamps to 200..=800 × 150..=600 and `set_size`
+//!   resizes the child view, so a test can read the negotiated size off the view.
 #![allow(clippy::missing_safety_doc, non_upper_case_globals)]
 
 use clap_sys::audio_buffer::clap_audio_buffer;
@@ -75,6 +80,19 @@ static GAIN_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     features: GAIN_FEATURES.0.as_ptr(),
 };
 
+static EMBEDDED_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
+    clap_version: CLAP_VERSION,
+    id: c"org.soundcraft.test.embedded".as_ptr(),
+    name: c"Fixture Embedded".as_ptr(),
+    vendor: c"SoundCraft tests".as_ptr(),
+    url: std::ptr::null(),
+    manual_url: std::ptr::null(),
+    support_url: std::ptr::null(),
+    version: c"1.0.0".as_ptr(),
+    description: std::ptr::null(),
+    features: GAIN_FEATURES.0.as_ptr(),
+};
+
 static SYNTH_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
     id: c"org.soundcraft.test.synth".as_ptr(),
@@ -102,6 +120,10 @@ struct Fx {
     gui_created: bool,
     gui_visible: bool,
     gui_edit_pending: bool,
+    /// The embedded-only GUI variant.
+    embedded: bool,
+    /// The embedded GUI's child view (macOS), owned (one retain) until `gui_destroy`.
+    gui_view: *mut c_void,
 }
 
 unsafe fn fx<'a>(p: *const clap_plugin) -> &'a mut Fx {
@@ -469,14 +491,19 @@ unsafe extern "C" fn state_load(p: *const clap_plugin, stream: *const clap_istre
 
 static STATE: clap_plugin_state = clap_plugin_state { save: Some(state_save), load: Some(state_load) };
 
-unsafe extern "C" fn gui_is_api_supported(_p: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
+unsafe extern "C" fn gui_is_api_supported(p: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
     assert!(!api.is_null());
-    floating
+    if unsafe { fx(p) }.embedded {
+        let api = unsafe { CStr::from_ptr(api) };
+        !floating && (api == CLAP_WINDOW_API_COCOA || api == CLAP_WINDOW_API_WIN32 || api == CLAP_WINDOW_API_X11)
+    } else {
+        floating
+    }
 }
 
 unsafe extern "C" fn gui_create(p: *const clap_plugin, _api: *const c_char, floating: bool) -> bool {
     let f = unsafe { fx(p) };
-    assert!(floating && !f.gui_created, "create");
+    assert!(floating != f.embedded && !f.gui_created, "create");
     f.gui_created = true;
     true
 }
@@ -484,12 +511,66 @@ unsafe extern "C" fn gui_create(p: *const clap_plugin, _api: *const c_char, floa
 unsafe extern "C" fn gui_destroy(p: *const clap_plugin) {
     let f = unsafe { fx(p) };
     assert!(f.gui_created, "destroy without create");
+    if !f.gui_view.is_null() {
+        unsafe { cocoa::remove_and_release(f.gui_view) };
+        f.gui_view = std::ptr::null_mut();
+    }
     f.gui_created = false;
     f.gui_visible = false;
 }
 
-unsafe extern "C" fn gui_set_scale(_p: *const clap_plugin, scale: f64) -> bool {
+unsafe extern "C" fn gui_set_scale(p: *const clap_plugin, scale: f64) -> bool {
+    // CLAP: Cocoa uses logical pixels, so a host never sets a scale there.
+    assert!(!(cfg!(target_os = "macos") && unsafe { fx(p) }.embedded), "set_scale on Cocoa");
     scale > 0.0
+}
+
+unsafe extern "C" fn gui_get_size(p: *const clap_plugin, w: *mut u32, h: *mut u32) -> bool {
+    assert!(unsafe { fx(p) }.gui_created);
+    unsafe {
+        *w = 400;
+        *h = 300;
+    }
+    true
+}
+
+unsafe extern "C" fn gui_can_resize(_p: *const clap_plugin) -> bool {
+    true
+}
+
+unsafe extern "C" fn gui_adjust_size(_p: *const clap_plugin, w: *mut u32, h: *mut u32) -> bool {
+    unsafe {
+        *w = (*w).clamp(200, 800);
+        *h = (*h).clamp(150, 600);
+    }
+    true
+}
+
+unsafe extern "C" fn gui_set_size(p: *const clap_plugin, w: u32, h: u32) -> bool {
+    let f = unsafe { fx(p) };
+    assert!(f.gui_created, "set_size without a GUI");
+    if !(200..=800).contains(&w) || !(150..=600).contains(&h) {
+        return false;
+    }
+    if !f.gui_view.is_null() {
+        unsafe { cocoa::set_size(f.gui_view, f64::from(w), f64::from(h)) };
+    }
+    true
+}
+
+unsafe extern "C" fn gui_set_parent(p: *const clap_plugin, window: *const clap_window) -> bool {
+    let f = unsafe { fx(p) };
+    assert!(f.gui_created && f.gui_view.is_null(), "set_parent");
+    let window = unsafe { &*window };
+    if cfg!(target_os = "macos") {
+        assert_eq!(unsafe { CStr::from_ptr(window.api) }, CLAP_WINDOW_API_COCOA);
+        let parent = unsafe { window.specific.cocoa };
+        assert!(!parent.is_null(), "no parent view");
+        f.gui_view = unsafe { cocoa::add_child(parent, 400.0, 300.0) };
+        !f.gui_view.is_null()
+    } else {
+        true
+    }
 }
 
 unsafe extern "C" fn gui_suggest_title(p: *const clap_plugin, title: *const c_char) {
@@ -513,6 +594,87 @@ unsafe extern "C" fn gui_show(p: *const clap_plugin) -> bool {
 unsafe extern "C" fn gui_hide(p: *const clap_plugin) -> bool {
     unsafe { fx(p) }.gui_visible = false;
     true
+}
+
+static GUI_EMBEDDED: clap_plugin_gui = clap_plugin_gui {
+    is_api_supported: Some(gui_is_api_supported),
+    get_preferred_api: None,
+    create: Some(gui_create),
+    destroy: Some(gui_destroy),
+    set_scale: Some(gui_set_scale),
+    get_size: Some(gui_get_size),
+    can_resize: Some(gui_can_resize),
+    get_resize_hints: None,
+    adjust_size: Some(gui_adjust_size),
+    set_size: Some(gui_set_size),
+    set_parent: Some(gui_set_parent),
+    set_transient: None,
+    suggest_title: None,
+    show: Some(gui_show),
+    hide: Some(gui_hide),
+};
+
+/// Just enough AppKit, through the Objective-C runtime, for the embedded GUI's child view.
+#[cfg(target_os = "macos")]
+mod cocoa {
+    use std::ffi::{c_char, c_void};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    }
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+
+    /// A new `NSView` of `w`×`h` added to `parent` (one retain, owned by the caller).
+    pub unsafe fn add_child(parent: *mut c_void, w: f64, h: f64) -> *mut c_void {
+        unsafe {
+            let send0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let init: unsafe extern "C" fn(*mut c_void, *mut c_void, Rect) -> *mut c_void = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let send1: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            let view = send0(objc_getClass(c"NSView".as_ptr()), sel_registerName(c"alloc".as_ptr()));
+            let view = init(view, sel_registerName(c"initWithFrame:".as_ptr()), Rect { x: 0.0, y: 0.0, w, h });
+            send1(parent, sel_registerName(c"addSubview:".as_ptr()), view);
+            view
+        }
+    }
+
+    pub unsafe fn set_size(view: *mut c_void, w: f64, h: f64) {
+        unsafe {
+            let send: unsafe extern "C" fn(*mut c_void, *mut c_void, f64, f64) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            send(view, sel_registerName(c"setFrameSize:".as_ptr()), w, h);
+        }
+    }
+
+    pub unsafe fn remove_and_release(view: *mut c_void) {
+        unsafe {
+            let send0: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            send0(view, sel_registerName(c"removeFromSuperview".as_ptr()));
+            send0(view, sel_registerName(c"release".as_ptr()));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod cocoa {
+    use std::ffi::c_void;
+    pub unsafe fn add_child(_parent: *mut c_void, _w: f64, _h: f64) -> *mut c_void {
+        std::ptr::null_mut()
+    }
+    pub unsafe fn set_size(_view: *mut c_void, _w: f64, _h: f64) {}
+    pub unsafe fn remove_and_release(_view: *mut c_void) {}
 }
 
 static GUI: clap_plugin_gui = clap_plugin_gui {
@@ -546,6 +708,8 @@ unsafe extern "C" fn get_extension(p: *const clap_plugin, id: *const c_char) -> 
         &NOTES as *const _ as *const c_void
     } else if id == CLAP_EXT_STATE && !synth {
         &STATE as *const _ as *const c_void
+    } else if id == CLAP_EXT_GUI && unsafe { fx(p) }.embedded {
+        &GUI_EMBEDDED as *const _ as *const c_void
     } else if id == CLAP_EXT_GUI && !synth {
         &GUI as *const _ as *const c_void
     } else {
@@ -558,7 +722,7 @@ unsafe extern "C" fn on_main_thread(_p: *const clap_plugin) {}
 // ---- factory + entry ----
 
 unsafe extern "C" fn factory_count(_f: *const clap_plugin_factory) -> u32 {
-    5
+    6
 }
 
 unsafe extern "C" fn factory_desc(_f: *const clap_plugin_factory, i: u32) -> *const clap_plugin_descriptor {
@@ -568,14 +732,18 @@ unsafe extern "C" fn factory_desc(_f: *const clap_plugin_factory, i: u32) -> *co
         2 => &WIDE16_DESC,
         3 => &WIDE17_DESC,
         4 => &WIDE65_DESC,
+        5 => &EMBEDDED_DESC,
         _ => std::ptr::null(),
     }
 }
 
 unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const clap_host, id: *const c_char) -> *const clap_plugin {
     let id = unsafe { CStr::from_ptr(id) };
+    let embedded = id == c"org.soundcraft.test.embedded";
     let (desc, synth, wide) = if id == c"org.soundcraft.test.gain" {
         (&GAIN_DESC as *const _, false, None)
+    } else if embedded {
+        (&EMBEDDED_DESC as *const _, false, None)
     } else if id == c"org.soundcraft.test.synth" {
         (&SYNTH_DESC as *const _, true, None)
     } else if id == c"org.soundcraft.test.wide16" {
@@ -613,6 +781,8 @@ unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const
         gui_created: false,
         gui_visible: false,
         gui_edit_pending: false,
+        embedded,
+        gui_view: std::ptr::null_mut(),
     });
     let raw = Box::into_raw(b);
     unsafe {
