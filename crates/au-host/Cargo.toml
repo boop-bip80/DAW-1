@@ -13,9 +13,25 @@ serde.workspace = true
 thiserror.workspace = true
 log.workspace = true
 
+# Editor views: the unit's Cocoa view (or CoreAudioKit's generic view) in an NSWindow.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSNotification", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"] }
+
+# The editor test inspects the host window (NSApp's window list, the view) and runs the run loop.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSDate", "NSRunLoop"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAccessibilityProtocols", "NSControl", "NSScreen", "NSSlider"] }
+
+[[test]]
+name = "editor_main_thread"
+harness = false
+
 # An isolated unsafe helper crate (craftrules never-crash), like soundcraft-vst3-host: this crate
 # opts out of the workspace `unsafe_code = "forbid"` for itself only. It denies unsafe everywhere
-# and allows it solely on the FFI module (`src/ffi.rs`). The rest mirrors `[workspace.lints]`.
+# and allows it solely on the FFI module (`src/ffi.rs` and its editor submodule
+# `src/ffi/editor.rs`). The rest mirrors `[workspace.lints]`.
 [lints.rust]
 unsafe_code = "deny"
 

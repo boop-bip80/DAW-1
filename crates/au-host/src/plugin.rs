@@ -1,7 +1,8 @@
 //! `AuPlugin`: a loaded Audio Unit behind the safe `soundcraft_dsp::Plugin` trait.
 
-use crate::ffi::Instance;
-use soundcraft_dsp::{Plugin, PluginInfo, Transport};
+use crate::ffi::{EditorLink, Instance};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport};
+use std::sync::Arc;
 
 /// Most MIDI events queued between two blocks (extra events are dropped).
 const EVENT_CAP: usize = 1024;
@@ -258,5 +259,56 @@ impl Plugin for AuPlugin {
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
         let link = self.inst.state_link();
         Some(Box::new(move || link.save_state()))
+    }
+
+    fn open_editor(&mut self) -> Result<(), String> {
+        self.inst.editor_link().open(self.info.name, &self.ids)
+    }
+
+    fn close_editor(&mut self) {
+        self.inst.editor_link().close();
+    }
+
+    fn editor(&mut self) -> Option<Box<dyn PluginEditor>> {
+        Some(Box::new(AuEditor { link: self.inst.editor_link(), info: self.info, ids: self.ids.clone() }))
+    }
+}
+
+/// An Audio Unit's editor view (its own Cocoa view, else the generic one) in a SoundCraft
+/// window, driven from the main thread (see [`EditorLink`]).
+struct AuEditor {
+    link: Arc<EditorLink>,
+    info: &'static PluginInfo,
+    /// Audio Unit id of each `info.params` entry (same order).
+    ids: Vec<u32>,
+}
+
+impl PluginEditor for AuEditor {
+    fn open(&mut self) -> Result<(), String> {
+        self.link.open(self.info.name, &self.ids)
+    }
+
+    fn close(&mut self) {
+        self.link.close();
+    }
+
+    fn is_open(&self) -> bool {
+        self.link.is_open()
+    }
+
+    fn idle(&mut self) -> Vec<(String, f32)> {
+        let mut out: Vec<(String, f32)> = Vec::new();
+        for (aid, v) in self.link.idle() {
+            let Some(i) = self.ids.iter().position(|&x| x == aid) else { continue };
+            let Some(p) = self.info.params.get(i) else { continue };
+            out.push((p.id.to_string(), p.clamp(v)));
+        }
+        out
+    }
+
+    fn set_param(&mut self, id: &str, value: f32) {
+        let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return };
+        let (Some(p), Some(&aid)) = (self.info.params.get(i), self.ids.get(i)) else { return };
+        self.link.set_param(aid, p.clamp(value));
     }
 }

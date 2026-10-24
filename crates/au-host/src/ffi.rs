@@ -6,6 +6,9 @@
 //! host callbacks read are leaked `Box`es freed only after the unit is disposed, and output buffers
 //! are re-pointed before each render.
 
+mod editor;
+
+pub(crate) use editor::EditorLink;
 use soundcraft_dsp::Transport;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
@@ -523,6 +526,7 @@ pub struct Instance {
     sample_rate: f64,
     sample_time: f64,
     link: std::sync::Arc<StateLink>,
+    editor: std::sync::Arc<EditorLink>,
 }
 
 // SAFETY: an Audio Unit instance may be used from any thread as long as calls are not
@@ -563,6 +567,7 @@ impl Instance {
             abl: AudioBufferList { number_buffers: 0, buffers: [empty; MAX_AU_CHANNELS] },
             has_input,
             link: std::sync::Arc::new(StateLink(std::sync::Mutex::new(LinkedUnit(Some(unit))))),
+            editor: std::sync::Arc::new(EditorLink::new(unit)),
             initialized: false,
             channels: 0,
             max_frames: 0,
@@ -862,6 +867,11 @@ impl Instance {
         std::sync::Arc::clone(&self.link)
     }
 
+    /// The link for editor handles.
+    pub fn editor_link(&self) -> std::sync::Arc<EditorLink> {
+        std::sync::Arc::clone(&self.editor)
+    }
+
     /// Restores a blob from [`StateLink::save_state`] (hostile input: parsed by CoreFoundation,
     /// must be a dictionary, and the unit validates it).
     pub fn load_state(&self, bytes: &[u8]) -> bool {
@@ -943,7 +953,14 @@ impl StateLink {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        // The editor goes first: its view calls into the unit for as long as it exists.
+        let leak = self.editor.kill();
         self.link.kill();
+        if leak {
+            // An editor still open off the main thread can't be torn down: never dispose of the
+            // unit under its live view. The unit (and the state its callbacks read) is leaked.
+            return;
+        }
         // SAFETY: the unit is live (disposed only here); after disposal nothing can call the
         // input callback or the host callbacks, so the leaked input state and host time can be
         // freed.

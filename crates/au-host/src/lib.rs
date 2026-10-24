@@ -10,11 +10,14 @@
 //! Boolean parameters become toggles, indexed ones starting at 0 become choices.
 //!
 //! Like `soundcraft-vst3-host`, this is an isolated `unsafe` crate (craftrules never-crash):
-//! `unsafe` is denied crate-wide and allowed only in the private `ffi` module (hand-written
-//! AudioToolbox / CoreFoundation declarations). The public API is safe, returns
+//! `unsafe` is denied crate-wide and allowed only in the private `ffi` module (`src/ffi.rs` and
+//! `src/ffi/editor.rs`: hand-written AudioToolbox / CoreFoundation declarations, and the
+//! Objective-C calls of the editor). The public API is safe, returns
 //! `Result`/`Option` and never panics. Limits of in-process hosting: an Audio Unit that itself
 //! crashes takes the process down with it. Components that require asynchronous instantiation
-//! (out-of-process AUv3 extensions) are not listed.
+//! (out-of-process AUv3 extensions) are not listed; AUv3 units that instantiate synchronously are
+//! hosted through their AUv2 bridge, and unless the bridge offers a Cocoa view they get the generic
+//! editor view (their `AUViewController` is not requested).
 //!
 //! `PluginInfo` must be `&'static`: the registry leaks exactly one `PluginInfo` (with its param
 //! table) per plugin *type* the first time that type is instantiated, and caches it.
@@ -25,8 +28,23 @@
 //!
 //! Host callbacks report the session's tempo, meter, position and play state.
 //!
-//! Not hosted yet: Audio Unit editor views (Cocoa `AUCocoaUIBase`), sidechain/extra buses, and
-//! parameters outside the global scope.
+//! Editors ([`Plugin::editor`], [`Plugin::open_editor`]; main thread only): the unit's own Cocoa
+//! view (`kAudioUnitProperty_CocoaUI`, an `AUCocoaUIBase` view factory in a bundle) or, when it
+//! has none, CoreAudioKit's `AUGenericView`, in a SoundCraft window sized to the view (following
+//! its size changes; user-resizable when the view resizes with its window both ways). An `AUEventListener`
+//! on the main run loop reports the view's global-scope parameter edits to the editor's `idle`;
+//! values the host sets are shown through `AUParameterSet` without echo. The view goes before
+//! the unit: an instance dropped off the main thread with its editor open leaks the unit and the
+//! view rather than dispose of one under the other. Objective-C exceptions thrown by a view are
+//! not caught.
+//!
+//! Units that show the host's name read it from the process's bundle: an unbundled build (the
+//! `cargo run` binary, tests) has none, so they show an empty host name. Automation applied with
+//! `AudioUnitSetParameter` notifies no listener, so a view shows it only when the unit itself
+//! refreshes (the editor's `set_param` does notify the view).
+//!
+//! Not hosted yet: AUv3 extensions that require asynchronous instantiation (they are not listed),
+//! sidechain/extra buses, and parameters outside the global scope.
 //!
 //! Off macOS (and on `wasm32`) the crate compiles to stubs: scans are empty and nothing can be
 //! created.
