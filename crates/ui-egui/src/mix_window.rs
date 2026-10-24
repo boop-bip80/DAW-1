@@ -79,6 +79,10 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         show(app, ui);
+        if class == egui::ViewportClass::Immediate {
+            // The plugin and Send windows opened from here (embedded, the main window draws them).
+            crate::panels::floating_in_mix(app, &ctx);
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             separate_closed(app);
         }
@@ -606,8 +610,8 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
     }
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
-    if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
-        app.ui.plugin_windows.push((id, slot));
+    if resp.clicked() && hosted {
+        app.open_plugin_window(id, slot, SoundApp::host_of(ui.ctx()));
     }
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
     let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
@@ -705,8 +709,8 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     if resp.clicked() && ins.is_some() {
         if ui.input(|i| i.modifiers.command) {
             let _ = app.run("mix.insert_bypass", json!({"track": id.0, "slot": slot}));
-        } else if !app.ui.plugin_windows.contains(&(id, slot)) {
-            app.ui.plugin_windows.push((id, slot));
+        } else {
+            app.open_plugin_window(id, slot, SoundApp::host_of(ui.ctx()));
         }
     }
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
@@ -772,9 +776,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
         if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
-            if !app.ui.plugin_windows.contains(&(id, slot)) {
-                app.ui.plugin_windows.push((id, slot));
-            }
+            app.open_plugin_window(id, slot, SoundApp::host_of(ui.ctx()));
             ui.close();
         }
         if let Some(p) = &app.player
@@ -814,7 +816,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
 /// it (`SoundApp::open_inserted`).
 fn pick_insert(app: &mut SoundApp, ui: &Ui, id: TrackId, slot: usize, plugin: &str) {
     match app.run("mix.insert", json!({"track": id.0, "slot": slot, "plugin": plugin})) {
-        Ok(_) => app.pending_open = Some((id, slot)),
+        Ok(_) => app.pending_open = Some((id, slot, SoundApp::host_of(ui.ctx()))),
         Err(e) => app.ui.status = e,
     }
     ui.close();
@@ -1039,6 +1041,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
             used_slot(ui.painter(), r, t.slot_face, mark, &name, color, Some(level));
             let which = (b'A' + slot as u8) as char;
             let shown = app.ui.send_window == Some((id, slot));
+            let in_mix = SoundApp::host_of(ui.ctx()) == crate::Host::Mix;
             let level_resp = ui.interact(level_r, ui.id().with(("send-value", id.0, slot)), Sense::click_and_drag());
             level_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Send {which} level")));
             if shown {
@@ -1048,7 +1051,10 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
                 if ui.input(|i| i.modifiers.alt) {
                     let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
                 } else {
-                    app.ui.send_window = (!shown).then_some((id, slot));
+                    // Open where it was clicked; open in the other window, it moves here.
+                    let here = shown && app.ui.send_window_in_mix == in_mix;
+                    app.ui.send_window = (!here).then_some((id, slot));
+                    app.ui.send_window_in_mix = in_mix;
                 }
             }
             if level_resp.dragged() {
@@ -1095,7 +1101,11 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
 
 /// The Send window, as in Pro Tools: one send's fader, level, pan, Mute and Pre-fader. Clicking a
 /// send's level opens it, moves it to that send, or closes it, and so does Escape.
-pub(crate) fn send_window(app: &mut SoundApp, ctx: &egui::Context) {
+/// It is drawn by the window it was opened from (`host`: the pass drawing it).
+pub(crate) fn send_window(app: &mut SoundApp, ctx: &egui::Context, host: crate::Host) {
+    if app.send_window_host(ctx) != host {
+        return;
+    }
     // egui closes menus and drops text focus on Escape before this runs, so whether this Escape
     // was theirs comes from the last frame. A dialog or the search on top takes it too.
     let busy_id = egui::Id::new("send_window_escape");

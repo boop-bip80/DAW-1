@@ -631,6 +631,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
             app.ui.show_audio_health = false;
             app.ui.show_automation = false;
             app.ui.plugin_windows.clear();
+            app.ui.mix_plugin_windows.clear();
             app.ui.audiosuite = None;
             json!({})
         }

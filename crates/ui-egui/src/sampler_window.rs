@@ -144,7 +144,7 @@ impl SoundApp {
         match r {
             Ok(v) => {
                 if !self.ui.plugin_windows.contains(&(track, soundcraft_mix::INSTRUMENT_SLOT)) {
-                    self.ui.plugin_windows.push((track, soundcraft_mix::INSTRUMENT_SLOT));
+                    self.open_plugin_window(track, soundcraft_mix::INSTRUMENT_SLOT, self.command_host());
                 }
                 let name = v.get("name").and_then(|n| n.as_str()).unwrap_or(what);
                 self.ui.status = format!("{name} loaded into the sampler");

@@ -53,6 +53,15 @@ pub enum MainWindow {
     Mix,
 }
 
+/// The native window a floating window (a plugin or Send window) lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Host {
+    /// The main window, which also draws a Mix window embedded in it.
+    Main,
+    /// The separate Mix window (Window › Mix in Separate Window).
+    Mix,
+}
+
 /// UI state (serde, so agents can read and set it).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -84,9 +93,15 @@ pub struct UiState {
     pub track_tint: f32,
     /// Open plugin windows (track, slot).
     pub plugin_windows: Vec<(TrackId, usize)>,
+    /// The plugin windows (of `plugin_windows`) opened from the separate Mix window: they are
+    /// drawn there while it is open, in the main window otherwise.
+    pub mix_plugin_windows: Vec<(TrackId, usize)>,
     /// The send in the Send window (track, slot).
     #[serde(skip)]
     pub send_window: Option<(TrackId, usize)>,
+    /// The Send window was opened from the separate Mix window (see `mix_plugin_windows`).
+    #[serde(skip)]
+    pub send_window_in_mix: bool,
     pub audiosuite: Option<String>,
     pub status: String,
     pub show_automation: bool,
@@ -199,7 +214,9 @@ impl Default for UiState {
             edit_views: vec!["color".into()],
             track_tint: 0.5,
             plugin_windows: Vec::new(),
+            mix_plugin_windows: Vec::new(),
             send_window: None,
+            send_window_in_mix: false,
             audiosuite: None,
             status: String::new(),
             show_automation: false,
@@ -364,7 +381,7 @@ pub struct SoundApp {
     control_rx: Option<Receiver<ControlRequest>>,
     pending_shots: Vec<control::PendingShot>,
     /// An insert just picked from its menu, opened once the audio engine has its instance.
-    pub(crate) pending_open: Option<(TrackId, usize)>,
+    pub(crate) pending_open: Option<(TrackId, usize, Host)>,
     last_rev: u64,
     fonts_ready: bool,
     fonts_installed: bool,
@@ -741,7 +758,7 @@ impl SoundApp {
     /// Opens the insert just picked from its menu: a hosted plugin's own editor, else (a built-in
     /// plugin, no audio engine, or an editor that can't open here) its plugin window.
     fn open_inserted(&mut self) {
-        let Some((track, slot)) = self.pending_open.take() else { return };
+        let Some((track, slot, host)) = self.pending_open.take() else { return };
         let Some(plugin) = self.engine.session().track(track).and_then(|t| t.mixer.inserts.get(slot).cloned().flatten()).map(|i| i.plugin) else {
             return;
         };
@@ -754,9 +771,47 @@ impl SoundApp {
                 Err(e) => self.ui.status = format!("{}: {e}", mix_window::plugin_info(&plugin).map_or(plugin.as_str(), |i| i.name)),
             }
         }
-        if !self.ui.plugin_windows.contains(&(track, slot)) {
-            self.ui.plugin_windows.push((track, slot));
+        self.open_plugin_window(track, slot, host);
+    }
+
+    /// Opens the plugin window of `track`'s `slot` in `host`; one already open moves there.
+    pub(crate) fn open_plugin_window(&mut self, track: TrackId, slot: usize, host: Host) {
+        let w = (track, slot);
+        if !self.ui.plugin_windows.contains(&w) {
+            self.ui.plugin_windows.push(w);
         }
+        self.ui.mix_plugin_windows.retain(|x| *x != w);
+        if host == Host::Mix {
+            self.ui.mix_plugin_windows.push(w);
+        }
+    }
+
+    /// The window `ctx` is drawing, where a floating window asked for from it opens: the separate
+    /// Mix window, or the main window (also for a Mix window embedded in it).
+    pub(crate) fn host_of(ctx: &egui::Context) -> Host {
+        if ctx.viewport_id() == mix_window::viewport_id() { Host::Mix } else { Host::Main }
+    }
+
+    /// Where a floating window asked for from no window (a command, a dropped file) opens: the
+    /// window that last had the keys, so the separate Mix window when it did, else the main one.
+    pub(crate) fn command_host(&self) -> Host {
+        if self.ui.mix_separate && self.mix_focused { Host::Mix } else { Host::Main }
+    }
+
+    /// Where the floating windows asked for from the separate Mix window are drawn: there while it
+    /// is a native window of its own, else (it is off, or embedded) in the main window.
+    pub(crate) fn mix_hosts_floating(&self, ctx: &egui::Context) -> bool {
+        self.ui.mix_separate && !ctx.embed_viewports()
+    }
+
+    /// The window the plugin window of `w` (track, slot) is drawn in.
+    pub(crate) fn plugin_window_host(&self, ctx: &egui::Context, w: (TrackId, usize)) -> Host {
+        if self.mix_hosts_floating(ctx) && self.ui.mix_plugin_windows.contains(&w) { Host::Mix } else { Host::Main }
+    }
+
+    /// The window the Send window is drawn in.
+    pub(crate) fn send_window_host(&self, ctx: &egui::Context) -> Host {
+        if self.mix_hosts_floating(ctx) && self.ui.send_window_in_mix { Host::Mix } else { Host::Main }
     }
 
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).

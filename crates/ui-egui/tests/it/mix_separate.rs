@@ -69,6 +69,22 @@ struct TwoWindows {
     mix_builder: Rc<RefCell<Option<egui::ViewportBuilder>>>,
     /// A widget in the Mix window holds the keyboard focus (a text field being typed into).
     mix_field_focused: Rc<Cell<bool>>,
+    /// The labelled widgets and windows each window drew last (with `ctx.enable_accesskit()`).
+    mix_nodes: Rc<RefCell<Vec<(String, egui::Rect)>>>,
+    main_nodes: RefCell<Vec<(String, egui::Rect)>>,
+}
+
+/// The labels (and values) of the accessibility nodes a pass output, with their bounds.
+fn labelled(update: Option<egui::accesskit::TreeUpdate>) -> Vec<(String, egui::Rect)> {
+    let nodes = update.map(|u| u.nodes).unwrap_or_default();
+    nodes
+        .iter()
+        .filter_map(|(_, n)| {
+            let text = n.label().or(n.value())?.to_string();
+            let b = n.bounds()?;
+            Some((text, egui::Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32))))
+        })
+        .collect()
 }
 
 impl TwoWindows {
@@ -84,9 +100,11 @@ impl TwoWindows {
             mix_commands: Rc::default(),
             mix_builder: Rc::default(),
             mix_field_focused: Rc::default(),
+            mix_nodes: Rc::default(),
+            main_nodes: RefCell::default(),
         };
         let (events, info, focused, builder) = (w.mix_events.clone(), w.mix_info.clone(), w.mix_focused.clone(), w.mix_builder.clone());
-        let field = w.mix_field_focused.clone();
+        let (field, nodes) = (w.mix_field_focused.clone(), w.mix_nodes.clone());
         egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
             let id = viewport.ids.this;
             *builder.borrow_mut() = Some(viewport.builder.clone());
@@ -97,14 +115,14 @@ impl TwoWindows {
                 focused: focused.get(),
                 ..Default::default()
             };
-            ctx.run_ui(input, |ui| {
+            let mut out = ctx.run_ui(input, |ui| {
                 if field.get() {
                     ui.memory_mut(|m| m.request_focus(egui::Id::new("mix text field")));
                 }
                 (viewport.viewport_ui_cb)(ui)
-            })
-            .textures_delta
-            .clear();
+            });
+            out.textures_delta.clear();
+            *nodes.borrow_mut() = labelled(out.platform_output.accesskit_update);
         });
         w
     }
@@ -124,6 +142,7 @@ impl TwoWindows {
             app.ui(ui);
         });
         out.textures_delta.clear();
+        *self.main_nodes.borrow_mut() = labelled(out.platform_output.accesskit_update.take());
         // The main window's pass carries the commands of the windows drawn inside it.
         if let Some(mix) = out.viewport_output.remove(&mix_window::viewport_id()) {
             self.mix_commands.borrow_mut().extend(mix.commands);
@@ -135,6 +154,28 @@ impl TwoWindows {
         self.mix_focused.set(true);
         *self.mix_events.borrow_mut() = key_press(key, modifiers);
         self.frame(app, Vec::new())
+    }
+
+    /// A click at `at` in the Mix window (`in_mix`) or the main window, over two frames.
+    fn click(&self, app: &mut SoundApp, in_mix: bool, at: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        self.mix_focused.set(in_mix);
+        for events in [vec![egui::Event::PointerMoved(at), button(true)], vec![button(false)]] {
+            if in_mix {
+                *self.mix_events.borrow_mut() = events;
+                self.frame(app, Vec::new());
+            } else {
+                self.frame(app, events);
+            }
+        }
+        self.frame(app, Vec::new());
+    }
+
+    /// Where the leftmost (then topmost) widget or window labelled `label` is in the Mix window or the
+    /// main one: the first track's, in the Mix strips or the Edit window's rows.
+    fn find(&self, in_mix: bool, label: impl Fn(&str) -> bool) -> Option<egui::Pos2> {
+        let nodes = if in_mix { self.mix_nodes.borrow().clone() } else { self.main_nodes.borrow().clone() };
+        nodes.iter().filter(|(l, _)| label(l)).map(|(_, r)| r.center()).min_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)))
     }
 
     fn type_in_main(&self, app: &mut SoundApp, key: Key, modifiers: Modifiers) -> Vec<egui::ViewportCommand> {
@@ -318,4 +359,84 @@ fn saved_numbers_too_big_for_the_preferences_get_their_defaults() {
     app.run("ui.set", json!({"track_tint": 2.0, "mix_window_pos": [-32000, -32000]})).unwrap();
     assert_eq!((app.ui.track_tint, app.ui.mix_window_pos), (1.0, None), "out of range: clamped, or the minimized-window sentinel dropped");
     app.run("ui.set", json!({"show_transport": true})).expect("later ui.set calls still round-trip");
+}
+
+#[test]
+fn plugin_and_send_windows_open_in_the_window_they_were_asked_from() {
+    let w = TwoWindows::new();
+    w.ctx.enable_accesskit();
+    let mut app = separate_app();
+    app.run("view.edit_inserts_ae", json!({})).unwrap();
+    let first = app.engine.session().tracks.first().map(|t| (t.id, t.name.clone())).unwrap();
+    app.run("mix.insert", json!({"track": first.0.0, "slot": 0, "plugin": "eq_7band"})).unwrap();
+    for _ in 0..3 {
+        w.frame(&mut app, Vec::new());
+    }
+    let title = format!("{} · a · ", first.1);
+    let window = |l: &str| l.starts_with(&title);
+
+    // Clicking an insert in the Mix window opens its plugin window there, not in the main window.
+    let insert = w.find(true, |l| l == "Insert A").expect("the Mix window shows inserts");
+    w.click(&mut app, true, insert);
+    assert_eq!(app.ui.plugin_windows, [(first.0, 0)]);
+    assert!(w.find(true, window).is_some(), "the plugin window opened in the Mix window");
+    assert!(w.find(false, window).is_none(), "and not in the main window");
+
+    // With the Mix window back inside the main one, so is the plugin window; turned on again,
+    // the plugin window goes back with it.
+    app.run("window.mix_separate", json!({"value": false})).unwrap();
+    w.frame(&mut app, Vec::new());
+    assert!(w.find(false, window).is_some(), "Mix in the main window: the plugin window is there");
+    app.run("window.mix_separate", json!({"value": true})).unwrap();
+    // A window reopened in a new native window takes a few frames to find its size.
+    for _ in 0..4 {
+        w.frame(&mut app, Vec::new());
+    }
+    assert!(w.find(true, window).is_some() && w.find(false, window).is_none(), "back in the separate Mix window");
+
+    // Its close button works there.
+    let close = w.find(true, |l| l == "Close window").expect("a close button");
+    w.click(&mut app, true, close);
+    assert!(app.ui.plugin_windows.is_empty() && app.ui.mix_plugin_windows.is_empty(), "closed from the Mix window");
+
+    // The same insert clicked in the Edit window opens it in the main window; clicked in the Mix
+    // window again, the open window moves there.
+    let insert_in_edit = w.find(false, |l| l == "Insert A").expect("the Edit window shows inserts");
+    w.click(&mut app, false, insert_in_edit);
+    assert!(w.find(false, window).is_some() && w.find(true, window).is_none(), "opened from Edit: in the main window");
+    w.click(&mut app, true, insert);
+    assert!(w.find(true, window).is_some() && w.find(false, window).is_none(), "asked for from Mix: moved there");
+    let close = w.find(true, |l| l == "Close window").unwrap();
+    w.click(&mut app, true, close);
+
+    // A send's level opens the Send window in the window it was clicked in, too.
+    let send = w.find(true, |l| l == "Send A level").expect("a send");
+    w.click(&mut app, true, send);
+    let send_window = |l: &str| l.contains(" · Send A");
+    assert!(app.ui.send_window.is_some());
+    assert!(w.find(true, send_window).is_some() && w.find(false, send_window).is_none(), "the Send window opened in the Mix window");
+    w.click(&mut app, true, send);
+    assert!(app.ui.send_window.is_none(), "clicking the send again closes it");
+}
+
+#[test]
+fn plugin_windows_of_a_mix_window_inside_the_main_one_are_drawn_there() {
+    // Backends without native windows: the Mix window and its plugin windows are in the main one.
+    let mut app = separate_app();
+    let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+    app.ui.plugin_windows = vec![(kick, 0)];
+    app.ui.mix_plugin_windows = vec![(kick, 0)];
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut nodes = Vec::new();
+    for _ in 0..3 {
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        });
+        out.textures_delta.clear();
+        nodes = labelled(out.platform_output.accesskit_update);
+    }
+    assert!(nodes.iter().any(|(l, _)| l.starts_with("Kick · a · ")), "the plugin window is drawn");
+    assert_eq!(app.ui.plugin_windows, [(kick, 0)], "and stays open");
 }
