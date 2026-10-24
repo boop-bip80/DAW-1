@@ -12,7 +12,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
-    ("window.mix_separate", "Mix in Separate Window", "", None),
+    ("window.mix_separate", "Mix in Separate Window", "Window > Mix in Separate Window", None),
     ("window.transport", "Transport", "Window > Transport", Some("Cmd+1")),
     ("window.big_counter", "Big Counter", "Window > Big Counter", Some("Cmd+3")),
     ("window.memory_locations", "Memory Locations", "Window > Memory Locations", Some("Cmd+5")),
@@ -203,6 +203,15 @@ pub fn tree() -> Vec<MenuNode> {
         insert_path(&mut roots, line);
     }
     insert_path(&mut roots, "Window > Reset Panel Layout");
+    // Not in the observed menu catalog; it belongs with Mix and Edit.
+    insert_path(&mut roots, "Window > Mix in Separate Window");
+    if let Some(window) = roots.iter_mut().find(|n| n.label == "Window")
+        && let Some(from) = window.children.iter().position(|n| n.path == "Window > Mix in Separate Window")
+        && let Some(edit) = window.children.iter().position(|n| n.path == "Window > Edit")
+    {
+        let item = window.children.remove(from);
+        window.children.insert((edit + 1).min(window.children.len()), item);
+    }
     // Not in the observed catalog either; Pro Tools lists it right under Identify Sync Point.
     if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
         let at = clip.children.iter().position(|n| n.label == "Identify Sync Point").map_or(clip.children.len(), |i| i + 1);
@@ -257,18 +266,6 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                             ui.separator();
                             ui.label(egui::RichText::new("Processes selected clips offline").small().color(t.text_dim));
                         }
-                        if root.label == "Window" {
-                            ui.separator();
-                            let mut separate = app.ui.mix_separate;
-                            if ui
-                                .checkbox(&mut separate, "Mix in Separate Window")
-                                .on_hover_text("Show Edit and Mix at once, e.g. one per monitor")
-                                .changed()
-                            {
-                                let _ = run_ui_command(app, "window.mix_separate", &json!({"value": separate}));
-                                ui.close();
-                            }
-                        }
                     });
                 }
                 let title = format!(
@@ -317,7 +314,11 @@ fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str
     let label = if checked { format!("✔ {label}") } else { label };
     let shortcut = id.as_deref().and_then(shortcut_for).unwrap_or("");
     let btn = egui::Button::new(label).shortcut_text(crate::shortcuts::shortcut_label(shortcut, ui.ctx().os().is_mac()));
-    if ui.add_enabled(enabled, btn).clicked()
+    let mut response = ui.add_enabled(enabled, btn);
+    if id.as_deref() == Some("window.mix_separate") {
+        response = response.on_hover_text("Show Edit and Mix at once, e.g. one per monitor");
+    }
+    if response.clicked()
         && let Some(id) = id
     {
         invoke_menu(app, &id, &n.path);
@@ -364,6 +365,7 @@ fn checked_state(app: &SoundApp, path: &str, id: Option<&str>) -> bool {
         Some("view.main_counter") => path.rsplit(" > ").next().map(ruler_id).is_some_and(|r| e.main_counter.id() == r),
         Some("window.mix") => app.ui.window == MainWindow::Mix,
         Some("window.edit") => app.ui.window == MainWindow::Edit,
+        Some("window.mix_separate") => app.ui.mix_separate,
         Some("window.track_list") => app.ui.show_tracks_list,
         Some("window.clip_list_view") | Some("window.clip_list") => app.ui.show_clip_list,
         Some("window.narrow_mix") => app.ui.narrow_mix,
