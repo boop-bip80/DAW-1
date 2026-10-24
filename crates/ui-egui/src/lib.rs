@@ -773,6 +773,11 @@ impl SoundApp {
         }
     }
 
+    /// Whether a slot's own editor or its parameter window is open: the slot is drawn lit.
+    pub(crate) fn slot_window_open(&self, track: TrackId, slot: usize) -> bool {
+        self.ui.plugin_windows.contains(&(track, slot)) || self.player.as_ref().is_some_and(|p| p.editor_open(track, slot))
+    }
+
     /// "{plugin name}: {reason}" on the status line; returned for the caller.
     fn slot_error(&mut self, plugin: &str, why: &str) -> String {
         let msg = format!("{}: {why}", mix_window::plugin_info(plugin).map_or(plugin, |i| i.name));
@@ -1510,8 +1515,9 @@ mod tests {
         assert_eq!(app.open_slot(t, 0, "gain"), Ok(super::SlotView::Parameters));
         app.open_parameters(t, 0, "gain").unwrap();
         assert_eq!(app.ui.plugin_windows, vec![(t, 0)]);
+        assert!(app.slot_window_open(t, 0) && !app.slot_window_open(t, 2));
         app.close_slot(t, 0, None);
-        assert!(app.ui.plugin_windows.is_empty());
+        assert!(!app.slot_window_open(t, 0));
     }
 
     #[test]

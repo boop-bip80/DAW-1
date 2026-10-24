@@ -499,17 +499,21 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
 
 /// An instrument track's INSTRUMENT row: click opens a hosted instrument (`window.plugin`: its own
 /// editor, else its parameter window), right-click (or click, when none is set) picks another
-/// instrument. A built-in's parameters open from that menu. Dropping an
-/// audio file on it loads the sampler.
+/// instrument. A built-in's parameters open from that menu. Lit while one of its windows is open.
+/// Dropping an audio file on it loads the sampler.
 pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
-    let id = track.id;
+    let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
     let ins = track.instrument.as_ref();
     let info = ins.and_then(|i| plugin_info(&i.plugin));
     let resp = ui.interact(r, ui.id().with(("instrument", id.0)), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Instrument"));
     match info {
-        Some(info) => used_slot(ui.painter(), r, t.slot_face, Mark::Dot, info.short_name, t.text, None),
+        Some(info) => {
+            let look = slot_look(&t, false, app.slot_window_open(id, slot), t.text);
+            used_slot(ui.painter(), r, look.faces, Mark::Dot, info.short_name, look.text, None);
+            look.outline(ui.painter(), r);
+        }
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
     }
     let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
@@ -549,6 +553,38 @@ fn draw_mark(p: &egui::Painter, r: Rect, mark: Mark, color: Color32) {
             let at = at + vec2(0.0, 0.5);
             p.rect_filled(Rect::from_min_max(at + vec2(-2.5, -1.5), at + vec2(0.0, 1.5)), 0.0, color);
             p.add(egui::Shape::convex_polygon(vec![at + vec2(-0.5, -3.5), at + vec2(2.75, 0.0), at + vec2(-0.5, 3.5)], color, Stroke::NONE));
+        }
+    }
+}
+
+/// How an occupied insert or instrument slot is drawn ([`slot_look`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SlotLook {
+    pub faces: [Color32; 2],
+    pub text: Color32,
+    /// A rim drawn over the key's own, where the theme needs one to set a lit slot apart.
+    pub edge: Option<Color32>,
+}
+
+impl SlotLook {
+    fn outline(&self, p: &egui::Painter, r: Rect) {
+        if let Some(edge) = self.edge {
+            p.rect_stroke(r.expand(1.0), 3.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+        }
+    }
+}
+
+/// An occupied insert or instrument slot's look: grey, blue when bypassed, and lit (a light face
+/// with dark text, as Pro Tools shows it) while its editor or parameter window is open. A
+/// bypassed slot with a window open is a lighter blue.
+pub(crate) fn slot_look(t: &Tokens, bypassed: bool, open: bool, text: Color32) -> SlotLook {
+    let edge = (t.slot_open_edge.a() > 0).then_some(t.slot_open_edge);
+    match (bypassed, open) {
+        (false, false) => SlotLook { faces: t.slot_face, text, edge: None },
+        (true, false) => SlotLook { faces: t.slot_bypassed, text, edge: None },
+        (false, true) => SlotLook { faces: t.slot_open, text: t.slot_open_text, edge },
+        (true, true) => {
+            SlotLook { faces: std::array::from_fn(|i| t.slot_bypassed[i].lerp_to_gamma(t.slot_open[i], 0.45)), text: t.slot_open_text, edge }
         }
     }
 }
@@ -604,9 +640,10 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     match &ins {
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
         Some(i) => {
-            let faces = if i.bypass { t.slot_bypassed } else { t.slot_face };
             let color = if info.is_some() { t.text } else { t.text_dim };
-            used_slot(ui.painter(), r, faces, Mark::Dot, name, color, None);
+            let look = slot_look(&t, i.bypass, app.slot_window_open(id, slot), color);
+            used_slot(ui.painter(), r, look.faces, Mark::Dot, name, look.text, None);
+            look.outline(ui.painter(), r);
         }
     }
     if resp.clicked() && ins.is_some() {
@@ -1318,6 +1355,36 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 mod tests {
     use super::{dragged_send_db, editable_readout, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+
+    /// A slot whose plugin window is open is lit, in both themes: its face is lighter than a closed
+    /// slot's where that one shades, and the key differs strongly from a closed one, by its face
+    /// (dark theme) or, where the closed face is already near white (light theme), by a dark rim.
+    /// Its name stays dark and readable; a bypassed one stays blue, lighter while open.
+    #[test]
+    fn a_slot_with_its_window_open_is_lit() {
+        use super::slot_look;
+        use crate::theme::Tokens;
+        let luma = |c: egui::Color32| (0.2126 * f32::from(c.r()) + 0.7152 * f32::from(c.g()) + 0.0722 * f32::from(c.b())) / 255.0;
+        let mean = |f: [egui::Color32; 2]| (luma(f[0]) + luma(f[1])) / 2.0;
+        for (name, t) in [("dark", Tokens::DARK), ("light", Tokens::LIGHT)] {
+            let text = t.text;
+            let closed = slot_look(&t, false, false, text);
+            assert_eq!((closed.faces, closed.text, closed.edge), (t.slot_face, text, None), "{name}: closed is unchanged");
+            assert_eq!(slot_look(&t, true, false, text).faces, t.slot_bypassed);
+            let open = slot_look(&t, false, true, text);
+            assert_eq!((open.faces, open.text), (t.slot_open, t.slot_open_text));
+            assert!(luma(open.faces[1]) - luma(closed.faces[1]) >= 0.15, "{name}: lit is lighter where the closed face shades");
+            let rim = crate::widgets::shade(t.slot_well, -0.3); // `raised_key`'s rim
+            let by_face = mean(open.faces) - mean(closed.faces) >= 0.3;
+            let by_rim = open.edge.is_some_and(|e| luma(rim) - luma(e) >= 0.3 && luma(open.faces[0]) - luma(e) >= 0.6);
+            assert!(by_face || by_rim, "{name}: a lit key stands out from a closed one: {open:?} vs {closed:?}");
+            assert!(luma(open.faces[1]) - luma(open.text) >= 0.6, "{name}: its name stays readable");
+            let bypassed_open = slot_look(&t, true, true, text).faces;
+            assert!(mean(bypassed_open) - mean(t.slot_bypassed) >= 0.09, "{name}: bypassed and open is a lighter blue");
+            assert!(bypassed_open[1].b() > bypassed_open[1].r(), "{name}: still blue");
+        }
+        assert!(slot_look(&Tokens::LIGHT, false, true, Tokens::LIGHT.text).edge.is_some(), "the light theme's lit key has a rim");
+    }
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {

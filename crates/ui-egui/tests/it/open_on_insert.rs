@@ -224,3 +224,70 @@ fn window_plugin_opens_and_closes_a_slots_windows() {
     app.run("window.close", json!({})).unwrap();
     assert!(app.ui.plugin_windows.is_empty());
 }
+
+/// The top colour of the raised key painted under `label`: an open slot's is lit, a closed
+/// one's is grey. Read from the shapes the real Mix and Edit drawing emits.
+fn face_under(h: &Harness<SoundApp>, label: &str) -> egui::Color32 {
+    use egui::Shape;
+    let shapes = &h.output().shapes;
+    // The label may appear elsewhere too (a parameter called the same): take the one on a key.
+    let key_under = |center: egui::Pos2| {
+        shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Mesh(m) if m.calc_bounds().contains(center) && m.calc_bounds().height() <= 18.0 => Some(m),
+                _ => None,
+            })
+            .min_by(|a, b| a.calc_bounds().area().total_cmp(&b.calc_bounds().area()))
+    };
+    let face = shapes
+        .iter()
+        .filter_map(|s| match &s.shape {
+            Shape::Text(t) if t.galley.job.text == label => key_under(t.visual_bounding_rect().center()),
+            _ => None,
+        })
+        .next()
+        .unwrap_or_else(|| panic!("no slot named {label}"));
+    let top = face.vertices.iter().filter(|v| v.color.a() == 255).min_by(|a, b| a.pos.y.total_cmp(&b.pos.y)).unwrap();
+    top.color
+}
+
+fn near(a: egui::Color32, b: egui::Color32) -> bool {
+    a.to_array().iter().zip(b.to_array()).all(|(p, q)| p.abs_diff(q) <= 2)
+}
+
+/// As in Pro Tools, an insert or instrument slot whose window is open is drawn lit, in the Mix
+/// window and the Edit window's Inserts column; the others stay grey.
+#[test]
+fn a_slot_with_its_window_open_is_drawn_lit() {
+    let t = soundcraft_ui_egui::theme::Tokens::DARK;
+    let (_, a, b) = two_effects();
+    let mut engine = vox();
+    engine.execute("mix.insert", &json!({"track": "Vox", "slot": 0, "plugin": a.id})).unwrap();
+    engine.execute("mix.insert", &json!({"track": "Vox", "slot": 1, "plugin": b.id})).unwrap();
+    engine.execute("track.new", &json!({"kind": "instrument", "name": "Keys"})).unwrap();
+    let synth = soundcraft_mix_plugin_name(&engine);
+    let mut h = harness(engine, MainWindow::Mix);
+    h.state_mut().run("view.mix_section", json!({"section": "instruments"})).unwrap();
+    h.run_steps(3);
+    assert!(near(face_under(&h, a.short_name), t.slot_face[0]) && near(face_under(&h, synth), t.slot_face[0]), "closed slots are grey");
+    h.state_mut().run("window.plugin", json!({"track": "Vox", "slot": 0})).unwrap();
+    h.state_mut().run("window.plugin", json!({"track": "Keys", "slot": "instrument", "view": "parameters"})).unwrap();
+    h.run_steps(3);
+    assert!(near(face_under(&h, a.short_name), t.slot_open[0]), "Mix: the open insert is lit");
+    assert!(near(face_under(&h, b.short_name), t.slot_face[0]), "Mix: the other insert stays grey");
+    assert!(near(face_under(&h, synth), t.slot_open[0]), "Mix: the open instrument is lit");
+    h.state_mut().run("window.edit", json!({})).unwrap();
+    h.run_steps(3);
+    assert!(near(face_under(&h, a.short_name), t.slot_open[0]), "Edit: the open insert is lit");
+    assert!(near(face_under(&h, b.short_name), t.slot_face[0]), "Edit: the other insert stays grey");
+    h.state_mut().run("window.plugin", json!({"track": "Vox", "slot": 0, "value": false})).unwrap();
+    h.run_steps(3);
+    assert!(near(face_under(&h, a.short_name), t.slot_face[0]), "closing it greys it again");
+}
+
+/// The short name the Keys track's instrument slot shows.
+fn soundcraft_mix_plugin_name(engine: &soundcraft_engine::Engine) -> &'static str {
+    let keys = engine.session().track_by_name("Keys").unwrap();
+    soundcraft_ui_egui::mix_window::plugin_info(&keys.instrument.as_ref().unwrap().plugin).unwrap().short_name
+}
