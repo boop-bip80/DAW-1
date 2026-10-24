@@ -188,3 +188,39 @@ fn a_hosted_instruments_menu_offers_no_parameter_window() {
     assert!(h.query_by_label("Fixture Synth").is_some(), "the instrument's name heads the menu");
     assert!(h.query_by_label("Edit Parameters…").is_none());
 }
+
+/// `window.plugin` opens a slot as a click does, or the view it names, and closes it again.
+#[test]
+fn window_plugin_opens_and_closes_a_slots_windows() {
+    let (_, plugin, _) = two_effects();
+    let mut engine = vox_with(plugin.id);
+    engine.session_mut().tracks[0].mixer.inserts[1] = Some(soundcraft_model::Insert::new(hosted()));
+    let id = engine.session().tracks[0].id;
+    let mut app = SoundApp::new(engine, None, Services::default());
+    let r = app.run("window.plugin", json!({"track": "Vox", "slot": "a"})).unwrap();
+    assert_eq!(r, json!({"track": id.0, "slot": 0, "view": "parameters", "value": true}), "a built-in opens its parameter window");
+    assert_eq!(app.ui.plugin_windows, vec![(id, 0)]);
+    let e = app.run("window.plugin", json!({"track": id.0, "slot": 1, "view": "editor"})).unwrap_err();
+    assert!(e.contains("no audio engine"), "{e}");
+    assert!(app.ui.status.starts_with(&format!("{}: ", soundcraft_ui_egui::mix_window::plugin_info(hosted()).unwrap().name)), "{}", app.ui.status);
+    assert_eq!(app.run("window.plugin", json!({"track": id.0, "slot": 1, "value": true})).unwrap()["view"], "parameters");
+    assert_eq!(app.ui.plugin_windows, vec![(id, 0), (id, 1)]);
+    let r = app.run("window.plugin", json!({"track": id.0, "slot": 0, "value": false})).unwrap();
+    assert_eq!(r, json!({"track": id.0, "slot": 0, "view": null, "value": false}));
+    assert_eq!(app.ui.plugin_windows, vec![(id, 1)]);
+    let r = app.run("window.plugin", json!({"track": id.0, "slot": "instrument", "view": "editor", "value": false})).unwrap();
+    assert_eq!(r, json!({"track": id.0, "slot": "instrument", "view": "editor", "value": false}), "closing an empty slot is a no-op");
+    for bad in
+        [json!({"value": "false"}), json!({"value": 0}), json!({"view": "gui"}), json!({"view": 1}), json!({"slot": 10}), json!({"track": null})]
+    {
+        let mut p = json!({"track": id.0, "slot": 0});
+        for (k, v) in bad.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        assert!(app.run("window.plugin", p.clone()).is_err(), "{p} is refused");
+    }
+    assert_eq!(app.ui.plugin_windows, vec![(id, 1)], "refused calls open nothing");
+    assert!(app.run("window.plugin", json!({"track": id.0, "slot": 2})).unwrap_err().contains("empty"));
+    app.run("window.close", json!({})).unwrap();
+    assert!(app.ui.plugin_windows.is_empty());
+}

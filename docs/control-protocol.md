@@ -93,6 +93,20 @@ System to Dark, or on Linux to the desktop's portal setting when one is availabl
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as
 Scroll Into View in the track name menu. A window not on screen catches up when it is next shown.
 
+`window.plugin {"track":"Vox","slot":"a"}` opens an occupied insert (`slot` 0-9 or a-j) or
+instrument (`"slot":"instrument"`) as a click on it does: a hosted plugin's own editor, else
+SoundCraft's parameter window. Without `value` (or with `"value":true`) it opens; it replies
+`{"track":…,"slot":…,"view":"editor"|"parameters","value":true}`, naming what opened.
+`"view":"editor"` opens only the plugin's own editor and fails, with the reason on the status
+line, when there is none here: a built-in plugin, an Audio Unit, no audio engine, an embedded
+CLAP editor outside Windows, or a VST3 editor outside macOS and Windows. `"view":"parameters"`
+opens only the parameter window and fails for a plugin that isn't installed. `"value":false`
+closes the named view, or both without `view`, and replies `{…,"view":<that view or
+null>,"value":false}`; closing succeeds whatever is open, also on an empty slot. A `value` that
+isn't true or false, or an unknown `view`, is an error. `window.hide_floating` also closes hosted
+plugin editors; `window.close` closes SoundCraft's floating windows, parameter windows included,
+but leaves hosted editors open.
+
 ## Panel docking
 
 Tracks and Groups, Clips, MIDI Editor, Memory Locations, and Undo History use movable panels. Commands target the active Edit or Mix view; floating panels stay inside the current viewport. Edit and Mix retain separate arrangements; Clips and MIDI Editor belong to Edit. Transport, plug-in, and specialist utility windows retain their existing hosts. The document/session view is protected. Layouts, active tabs, panel visibility, and floating rectangles are saved with the app's existing UI preferences. These operations do not edit document contents.

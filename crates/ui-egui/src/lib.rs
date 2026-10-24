@@ -53,11 +53,21 @@ pub enum MainWindow {
     Mix,
 }
 
-/// The two windows a plugin slot opens: the plugin's own editor, or SoundCraft's parameter window.
+/// The two windows a plugin slot opens (`window.plugin`'s `view`): the plugin's own editor, or
+/// SoundCraft's parameter window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlotView {
     Editor,
     Parameters,
+}
+
+impl SlotView {
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            SlotView::Editor => "editor",
+            SlotView::Parameters => "parameters",
+        }
+    }
 }
 
 /// UI state (serde, so agents can read and set it).
@@ -701,8 +711,8 @@ impl SoundApp {
         ins.map(|i| i.plugin.clone())
     }
 
-    /// Opens an occupied insert or instrument slot as DAWs do (a click on it): a hosted plugin's own
-    /// editor, else (a built-in plugin, no audio engine, a plugin without an
+    /// Opens an occupied insert or instrument slot as DAWs do (`window.plugin` without a `view`): a
+    /// hosted plugin's own editor, else (a built-in plugin, no audio engine, a plugin without an
     /// editor such as an Audio Unit, or an editor that can't open here: an embedded CLAP editor
     /// outside Windows, a VST3 editor outside macOS and Windows) SoundCraft's parameter window.
     /// Opening an editor that is open already raises it (VST3, and embedded CLAP editors on
@@ -726,8 +736,8 @@ impl SoundApp {
         }
     }
 
-    /// Opens a hosted plugin's own editor. A failure goes to the status line as
-    /// "{plugin name}: {reason}".
+    /// Opens a hosted plugin's own editor (`window.plugin {"view":"editor"}`). A failure goes to the
+    /// status line as "{plugin name}: {reason}".
     pub(crate) fn open_editor(&mut self, track: TrackId, slot: usize, plugin: &str) -> Result<(), String> {
         let opened = match &self.player {
             _ if !soundcraft_mix::is_third_party(plugin) => Err("a built-in plugin has no editor of its own".to_string()),
@@ -748,6 +758,19 @@ impl SoundApp {
             self.ui.plugin_windows.push((track, slot));
         }
         Ok(())
+    }
+
+    /// Closes a slot's own editor and its parameter window (`window.plugin {"value":false}`), or
+    /// only the one `view` names.
+    pub(crate) fn close_slot(&mut self, track: TrackId, slot: usize, view: Option<SlotView>) {
+        if view != Some(SlotView::Parameters)
+            && let Some(p) = &self.player
+        {
+            p.close_editor(track, slot);
+        }
+        if view != Some(SlotView::Editor) {
+            self.ui.plugin_windows.retain(|w| *w != (track, slot));
+        }
     }
 
     /// "{plugin name}: {reason}" on the status line; returned for the caller.
@@ -1487,6 +1510,8 @@ mod tests {
         assert_eq!(app.open_slot(t, 0, "gain"), Ok(super::SlotView::Parameters));
         app.open_parameters(t, 0, "gain").unwrap();
         assert_eq!(app.ui.plugin_windows, vec![(t, 0)]);
+        app.close_slot(t, 0, None);
+        assert!(app.ui.plugin_windows.is_empty());
     }
 
     #[test]

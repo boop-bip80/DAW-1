@@ -536,14 +536,9 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         let resp = ui.add_enabled(available, egui::Button::new(label));
                         let resp =
                             if available { resp } else { resp.on_disabled_hover_text("This plugin has no editor of its own, or it is not loaded") };
-                        if resp.clicked()
-                            && let Some(p) = &app.player
-                        {
-                            if open {
-                                p.close_editor(tid, slot);
-                            } else if let Err(e) = p.open_editor(tid, slot) {
-                                app.ui.status = format!("{}: {e}", info.name);
-                            }
+                        if resp.clicked() {
+                            let slot = if instrument { json!("instrument") } else { json!(slot) };
+                            let _ = app.run("window.plugin", json!({"track": tid.0, "slot": slot, "view": "editor", "value": !open}));
                         }
                     }
                 });
