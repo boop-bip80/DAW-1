@@ -136,6 +136,9 @@ mod api {
     pub fn register_search_dir(dir: &Path) {
         registry::register_search_dir(dir)
     }
+    pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<Vst3Descriptor> {
+        registry::rescan_paths_where(targets, allow)
+    }
     pub fn rescan_paths(targets: &[PathBuf]) -> Vec<Vst3Descriptor> {
         registry::rescan_paths(targets)
     }
@@ -182,6 +185,9 @@ mod api {
         false
     }
     pub fn register_search_dir(_dir: &Path) {}
+    pub fn rescan_paths_where(_targets: &[PathBuf], _allow: &dyn Fn(&Path) -> bool) -> Vec<Vst3Descriptor> {
+        Vec::new()
+    }
     pub fn rescan_paths(_targets: &[PathBuf]) -> Vec<Vst3Descriptor> {
         Vec::new()
     }
@@ -240,6 +246,13 @@ pub fn register_search_dir(dir: &Path) {
 /// process, so a rebuilt plugin's new code needs a new process.
 pub fn rescan_paths(targets: &[PathBuf]) -> Vec<Vst3Descriptor> {
     api::rescan_paths(targets)
+}
+
+/// [`rescan_paths`], loading only the bundles `allow` accepts: it is asked about every bundle
+/// found below the targets (a caller confining file access passes its read check, which then
+/// covers bundles reached through linked subfolders too).
+pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<Vst3Descriptor> {
+    api::rescan_paths_where(targets, allow)
 }
 
 /// Replaces the blocklist: plugins and folders that are never loaded (see [`scan::is_blocked`]

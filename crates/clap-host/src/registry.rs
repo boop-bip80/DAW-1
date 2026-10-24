@@ -70,10 +70,18 @@ pub fn scan_paths(dirs: &[PathBuf]) -> Vec<ClapDescriptor> {
 }
 
 fn scan_dirs(dirs: &[PathBuf], blocked: &[PathBuf]) -> Vec<ClapDescriptor> {
+    scan_dirs_where(dirs, blocked, &|_| true)
+}
+
+fn scan_dirs_where(dirs: &[PathBuf], blocked: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
     let mut out: Vec<ClapDescriptor> = Vec::new();
     for path in paths::find_bundles(dirs) {
         if paths::is_blocked(&path, blocked) {
             log::info!("CLAP plugin {} is blocked: not loaded", path.display());
+            continue;
+        }
+        if !allow(&path) {
+            log::warn!("CLAP plugin {} is outside the allowed folders: not loaded", path.display());
             continue;
         }
         match load_bundle(&path) {
@@ -147,7 +155,7 @@ fn search_dirs(r: &Registry) -> Vec<PathBuf> {
 /// True when `path` lies in a folder a full scan reads, so loading it needs no new trust.
 pub fn in_search_path(path: &Path) -> bool {
     let r = registry().lock().unwrap_or_else(PoisonError::into_inner);
-    search_dirs(&r).iter().any(|d| paths::is_under(path, d))
+    search_dirs(&r).iter().any(|d| paths::is_inside(path, d))
 }
 
 /// Adds a folder to the search path without scanning it: the next full scan reads it, and
@@ -167,12 +175,18 @@ pub fn register_search_dir(dir: &Path) {
 /// A binary loaded earlier in this process stays mapped, so a rebuilt plugin's new code needs a new
 /// process; its descriptors are read again either way.
 pub fn rescan_paths(targets: &[PathBuf]) -> Vec<ClapDescriptor> {
+    rescan_paths_where(targets, &|_| true)
+}
+
+/// [`rescan_paths`], loading only the bundles `allow` accepts (checked for every bundle found
+/// below the targets, so a caller confining file access also covers linked subfolders).
+pub fn rescan_paths_where(targets: &[PathBuf], allow: &dyn Fn(&Path) -> bool) -> Vec<ClapDescriptor> {
     let mut r = registry().lock().unwrap_or_else(PoisonError::into_inner);
     let roots = search_dirs(&r);
     let targets: Vec<PathBuf> = targets
         .iter()
         .filter(|t| {
-            let ok = t.is_absolute() && paths::entry_problem(t).is_none() && roots.iter().any(|d| paths::is_under(t, d));
+            let ok = t.is_absolute() && paths::entry_problem(t).is_none() && roots.iter().any(|d| paths::is_inside(t, d));
             if !ok {
                 log::warn!("CLAP rescan: ignoring `{}`: not an absolute bundle or folder path in the search path", t.display());
             }
@@ -182,7 +196,8 @@ pub fn rescan_paths(targets: &[PathBuf]) -> Vec<ClapDescriptor> {
         .collect();
     let under = |p: &Path| targets.iter().any(|t| paths::is_under(p, t));
     let stale: Vec<String> = r.scanned.iter().flatten().chain(&r.targeted).filter(|d| under(&d.path)).map(|d| d.id.clone()).collect();
-    let found = scan_dirs(&targets, r.blocked());
+    let blocked = r.blocked().to_vec();
+    let found = scan_dirs_where(&targets, &blocked, allow);
     for id in stale.iter().chain(found.iter().map(|d| &d.id)) {
         r.failed.remove(id);
     }

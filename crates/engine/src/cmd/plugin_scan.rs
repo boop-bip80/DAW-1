@@ -127,12 +127,13 @@ mod tests {
     fn blocklist_edits_apply_to_both_hosts() {
         let mut e = Engine::default();
         let before = e.execute("engine.plugin_blocklist", &json!({})).unwrap()["blocklist"].clone();
-        let r = e
-            .execute("engine.plugin_blocklist", &json!({"set": ["/nowhere/A.vst3", "/nowhere/./a.VST3"], "add": ["B", "b", "/nowhere/C.clap"]}))
-            .unwrap();
-        assert_eq!(r["blocklist"], json!(["/nowhere/A.vst3", "B", "/nowhere/C.clap"]), "duplicates by case and `.` dropped");
+        // Absolute on every platform (Windows paths need a drive).
+        let abs = |p: &str| if cfg!(windows) { format!("C:{p}") } else { p.to_string() };
+        let (a, a2, c) = (abs("/nowhere/A.vst3"), abs("/nowhere/./a.VST3"), abs("/nowhere/C.clap"));
+        let r = e.execute("engine.plugin_blocklist", &json!({"set": [a, a2], "add": ["B", "b", c]})).unwrap();
+        assert_eq!(r["blocklist"], json!([a, "B", c]), "duplicates by case and `.` dropped");
         let r = e.execute("engine.plugin_blocklist", &json!({"remove": ["b"]})).unwrap();
-        assert_eq!(r["blocklist"], json!(["/nowhere/A.vst3", "/nowhere/C.clap"]), "removal ignores case too");
+        assert_eq!(r["blocklist"], json!([a, c]), "removal ignores case too");
         assert_eq!(soundcraft_clap_host::blocklist(), soundcraft_vst3_host::blocklist());
         e.execute("engine.plugin_blocklist", &json!({"set": before})).unwrap();
     }

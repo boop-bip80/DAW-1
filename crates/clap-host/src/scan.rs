@@ -96,6 +96,26 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     })
 }
 
+/// True when `path` is `root` or lies inside it as the file system sees them: links resolved on
+/// both sides, case ignored only where file systems usually ignore it (macOS, Windows). Unlike
+/// [`is_under`], which blocklists use and which may match more than it should, this decides what
+/// may be loaded, so `/work/PLUGINS` is not inside `/work/plugins` on Linux.
+pub fn is_inside(path: &Path, root: &Path) -> bool {
+    let fold = cfg!(any(target_os = "macos", windows));
+    let parts = |p: &Path| -> Vec<String> {
+        let p = resolved(p).unwrap_or_else(|| p.to_path_buf());
+        p.components()
+            .filter(|c| *c != Component::CurDir)
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                if fold { s.to_lowercase() } else { s.into_owned() }
+            })
+            .collect()
+    };
+    let r = parts(root);
+    !r.is_empty() && parts(path).starts_with(&r)
+}
+
 /// True when a blocklist entry covers the plugin at `path`. An absolute entry blocks that bundle
 /// and everything inside a folder of that name, comparing links resolved on either side as well. A bare name blocks every bundle with that file name, with or without its extension
 /// (`AutoAlign2.vst3` or `AutoAlign2`). Case is ignored; entries with an [`entry_problem`] never match.
@@ -293,6 +313,11 @@ mod tests {
         }
     }
 
+    /// A test path made absolute on every platform (Windows paths need a drive).
+    fn abs(p: &str) -> PathBuf {
+        if cfg!(windows) && p.starts_with('/') { PathBuf::from(format!("C:{p}")) } else { PathBuf::from(p) }
+    }
+
     #[test]
     fn env_paths_extend_or_replace_the_standard_locations() {
         let std = vec![PathBuf::from("/Library/Audio/Plug-Ins/CLAP")];
@@ -304,8 +329,8 @@ mod tests {
 
     #[test]
     fn blocklist_entries_match_names_and_paths() {
-        let p = PathBuf::from("/Library/Audio/Plug-Ins/CLAP/vendor/Foo.clap");
-        let v = |e: &[&str]| e.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let p = abs("/Library/Audio/Plug-Ins/CLAP/vendor/Foo.clap");
+        let v = |e: &[&str]| e.iter().map(|e| abs(e)).collect::<Vec<_>>();
         assert!(is_blocked(&p, &v(&["Foo.clap"])));
         assert!(is_blocked(&p, &v(&["FOO"])));
         assert!(!is_blocked(&p, &v(&["Fo"])));
@@ -316,10 +341,26 @@ mod tests {
         assert!(!is_blocked(&p, &[]));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn loading_admission_is_exact_and_follows_links() {
+        let d = tmp("inside");
+        std::fs::create_dir_all(d.join("plugins/vendor")).unwrap();
+        std::fs::create_dir_all(d.join("PLUGINS")).unwrap();
+        std::os::unix::fs::symlink(d.join("plugins"), d.join("alias")).unwrap();
+        assert!(is_inside(&d.join("plugins/vendor"), &d.join("plugins")));
+        assert!(is_inside(&d.join("alias/vendor"), &d.join("plugins")), "through a link");
+        assert!(!is_inside(&d.join("plugin"), &d.join("plugins")));
+        if !cfg!(target_os = "macos") {
+            assert!(!is_inside(&d.join("PLUGINS"), &d.join("plugins")), "case matters where the file system says so");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn entries_are_checked_before_use() {
         assert_eq!(entry_problem(Path::new("Foo.clap")), None);
-        assert_eq!(entry_problem(Path::new("/Library/Audio/Plug-Ins/CLAP")), None);
+        assert_eq!(entry_problem(&abs("/Library/Audio/Plug-Ins/CLAP")), None);
         assert!(entry_problem(Path::new("/")).is_some());
         assert!(entry_problem(Path::new("vendor/Foo.clap")).is_some());
         assert!(entry_problem(Path::new("/a/../b")).is_some());

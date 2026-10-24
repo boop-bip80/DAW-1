@@ -19,7 +19,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let list = match plugin_scan::rescan_param("engine.vst3_plugins", p, soundcraft_vst3_host::in_search_path)? {
                 Rescan::No => soundcraft_vst3_host::scan(),
                 Rescan::All => soundcraft_vst3_host::rescan(),
-                Rescan::Paths(targets) => soundcraft_vst3_host::rescan_paths(&targets),
+                Rescan::Paths(targets) => soundcraft_vst3_host::rescan_paths_where(&targets, &|b| crate::file_access::check_read(b).is_ok()),
             };
             Ok(json!(list))
         }

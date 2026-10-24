@@ -167,7 +167,10 @@ SDKs are licensed, so we'd write our own ADM and object renderer.
 ### G-13. Plugin ecosystem depth
 
 No sidechain (key input) buses for any host; no ARA (Melodyne-style editing is a menu in Pro
-Tools); plugins run in-process, so a crashing plugin can take the session down. ≈ 30–50 h. AAX
+Tools); plugins run in-process, so a crashing plugin can take the session down. Plugins can be
+blocklisted and rescanned one by one, but only through commands (`engine.plugin_blocklist`,
+`rescan: [path]`): there is no Plug-In Manager UI, the blocklist is not saved in preferences, and
+scans are not cached on disk, so every launch loads each unblocked binary again. ≈ 35–60 h. AAX
 cannot be hosted (#109): Avid's AAX SDK licence and PACE signing; owner decision, likely never.
 
 ### G-14. Platforms and CI

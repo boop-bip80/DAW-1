@@ -61,6 +61,16 @@ fn main() {
     assert!(host::instantiate(&gain).is_ok());
     assert_eq!(host::rescan_paths(std::slice::from_ref(&bundle)).len(), 2);
     assert_eq!(path_of(&gain), Some(bundle.clone()), "and rescanning the installed one switches back");
+
+    // A caller's check (the engine passes its read-root check) is asked about every bundle found
+    // below a target, not only about the target.
+    let asked = std::cell::RefCell::new(Vec::new());
+    let none = host::rescan_paths_where(&[dir.to_path_buf()], &|b| {
+        asked.borrow_mut().push(b.to_path_buf());
+        false
+    });
+    assert!(none.is_empty());
+    assert!(asked.borrow().contains(&bundle) && asked.borrow().contains(&dev_bundle), "{:?}", asked.borrow());
     println!("scan_control: ok");
 }
 

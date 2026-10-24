@@ -19,7 +19,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let list = match plugin_scan::rescan_param("engine.clap_plugins", p, soundcraft_clap_host::in_search_path)? {
                 Rescan::No => soundcraft_clap_host::scan(),
                 Rescan::All => soundcraft_clap_host::rescan(),
-                Rescan::Paths(targets) => soundcraft_clap_host::rescan_paths(&targets),
+                Rescan::Paths(targets) => soundcraft_clap_host::rescan_paths_where(&targets, &|b| crate::file_access::check_read(b).is_ok()),
             };
             Ok(json!(list))
         }
