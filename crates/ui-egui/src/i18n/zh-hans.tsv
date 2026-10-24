@@ -1089,6 +1089,10 @@ automation	trim	微调
 	Return to Zero	回到零点
 	Rewind	倒回
 	Scroll Timeline	滚动时间轴
+	Scroll Into View	滚动至可见
+	Dither (TPDF)	抖动（TPDF）
+	Adds ±1 LSB triangular dither when writing 16- or 24-bit files. Leave it off when the master chain already dithers.	写入 16 位或 24 位文件时添加 ±1 LSB 三角抖动。若主控链已应用抖动，请保持关闭。
+	Record (F12 or Cmd+Space)	录音（F12 或 Cmd+Space）
 	Select Playlist	选择播放列表
 	Send Level	发送电平
 	Set Clip Effects	设置片段效果
