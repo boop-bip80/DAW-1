@@ -36,7 +36,36 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
+/// The largest block the mix renders when the device buffer is unknown or smaller, and the
+/// smallest one plugins are prepared for: what playback always used before it followed the
+/// device buffer.
 const BLOCK: usize = 512;
+/// The largest block playback renders in one go (8192, the largest device buffer offered).
+pub const MAX_BLOCK: usize = 8192;
+
+/// True when the session has automation to play: then playback keeps to [`BLOCK`]-frame blocks.
+/// The mix reads volume, trim, VCA, send and plugin-parameter automation once per block (at its
+/// ends, or its start), so larger blocks would coarsen automation from about 10 ms to as much as
+/// 170 ms. Any lane with points counts, whatever the track's automation mode: a few blocks too
+/// many cost nothing audible, a dip that vanishes does.
+fn plays_automation(s: &Session) -> bool {
+    s.tracks.iter().any(|t| t.automation.iter().any(|l| !l.points.is_empty()))
+}
+
+/// The largest block playback renders for a device buffer of `buffer` frames (`None`: the device
+/// default, size unknown), so a callback renders in one block, plugins see the buffer the user
+/// chose, and they are prepared for exactly that. A session faster than the device renders more
+/// frames than it plays, hence the rate ratio. Never below [`BLOCK`] or above [`MAX_BLOCK`];
+/// anything larger (an unknown default, a callback larger than asked for, varispeed above 1x) is
+/// rendered in several blocks, and so is a session with automation ([`plays_automation`]). Some
+/// drivers call back at their own period whatever buffer was asked for (WASAPI shared mode, about
+/// 10 ms): plugins are then prepared for the chosen buffer and see the device's callbacks.
+pub fn block_for(buffer: Option<u32>, device_rate: f64, session_rate: f64) -> usize {
+    let Some(frames) = buffer else { return BLOCK };
+    let ratio = if device_rate > 0.0 && session_rate > device_rate { session_rate / device_rate } else { 1.0 };
+    let n = (f64::from(frames) * ratio).ceil();
+    if n.is_finite() { (n as usize).clamp(BLOCK, MAX_BLOCK) } else { MAX_BLOCK }
+}
 
 /// Room for replaced snapshots on their way back; `update_session` empties it before each send.
 const OLD_SESSIONS: usize = 16;
@@ -171,10 +200,14 @@ struct AudioState {
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
     old_sessions: Option<SyncSender<Arc<Session>>>,
+    /// The largest block it renders and its plugins were prepared for ([`block_for`]).
+    block: usize,
+    /// The session has automation ([`plays_automation`]): blocks stay at [`BLOCK`] frames.
+    automated: bool,
 }
 
-fn new_engine(sr: f32) -> MixEngine {
-    let mut m = MixEngine::new(sr, BLOCK);
+fn new_engine(sr: f32, block: usize) -> MixEngine {
+    let mut m = MixEngine::new(sr, block);
     m.set_external_instances(true);
     m.metronome = true;
     m
@@ -182,6 +215,20 @@ fn new_engine(sr: f32) -> MixEngine {
 
 impl AudioState {
     fn new(rx: Receiver<Cmd>, shared: Arc<Shared>, session: Arc<Session>, device_rate: f64, garbage: Sender<Vec<Box<dyn Plugin>>>) -> Self {
+        Self::with_block(rx, shared, session, device_rate, garbage, BLOCK)
+    }
+
+    /// Like [`AudioState::new`], rendering blocks of up to `block` frames.
+    fn with_block(
+        rx: Receiver<Cmd>,
+        shared: Arc<Shared>,
+        session: Arc<Session>,
+        device_rate: f64,
+        garbage: Sender<Vec<Box<dyn Plugin>>>,
+        block: usize,
+    ) -> Self {
+        let block = block.clamp(BLOCK, MAX_BLOCK);
+        let automated = plays_automation(&session);
         let sr = session.sample_rate.as_f64() as f32;
         let nch = main_channels(&session);
         AudioState {
@@ -190,18 +237,20 @@ impl AudioState {
             fold: fold_gains(&session),
             rx,
             shared,
-            mix: new_engine(sr),
+            mix: new_engine(sr, block),
             session,
             pos: 0,
             playing: false,
             end: None,
             looped: None,
-            pending: vec![vec![0.0; BLOCK]; nch],
+            pending: vec![vec![0.0; block]; nch],
             pending_len: 0,
             read: 0.0,
             device_rate,
             input: None,
             recording: false,
+            block,
+            automated,
         }
     }
 
@@ -214,18 +263,23 @@ impl AudioState {
                 Cmd::Session(s, instances) => {
                     changed = true;
                     if (s.sample_rate.as_f64() - self.session.sample_rate.as_f64()).abs() > 0.5 {
-                        let mut old = std::mem::replace(&mut self.mix, new_engine(s.sample_rate.as_f64() as f32));
+                        let mut old = std::mem::replace(&mut self.mix, new_engine(s.sample_rate.as_f64() as f32, self.block));
                         let _ = self.garbage.send(old.drain_plugins());
                     }
                     self.mix.adopt(instances);
+                    let automated = plays_automation(&s);
+                    if automated && !self.automated {
+                        self.rebase_pending();
+                    }
                     // The main format changed (a document edit, not steady state): resize.
                     let nch = main_channels(&s);
                     if self.pending.len() != nch {
-                        self.pending = vec![vec![0.0; BLOCK]; nch];
+                        self.pending = vec![vec![0.0; self.block]; nch];
                         self.pending_len = 0;
                         self.read = 0.0;
                     }
                     self.fold = fold_gains(&s);
+                    self.automated = automated;
                     let old = std::mem::replace(&mut self.session, s);
                     if let Some(tx) = &self.old_sessions {
                         let _ = tx.try_send(old);
@@ -271,16 +325,33 @@ impl AudioState {
         }
     }
 
+    /// Drops the frames rendered but not yet heard and moves the render position back to the
+    /// first of them, so the next block renders from the audible position: nothing is skipped or
+    /// played twice. A session that gains automation calls it, so its 512-frame blocks start now
+    /// rather than after up to a whole long block rendered without the automation.
+    fn rebase_pending(&mut self) {
+        let heard = (self.read.max(0.0).floor() as usize).min(self.pending_len);
+        if self.playing {
+            let ahead = i64::try_from(self.pending_len - heard).unwrap_or(0);
+            self.pos = self.pos.saturating_sub(ahead).max(0);
+            self.shared.position.store(self.pos, Ordering::Relaxed);
+        }
+        self.read -= heard as f64;
+        self.pending_len = 0;
+    }
+
     /// Render the next block at the session rate into `pending`.
     fn render_next(&mut self, quantum: usize) {
-        let mut n = quantum.clamp(1, BLOCK);
+        // Automation is read once per block: keep the blocks it was always read in.
+        let largest = if self.automated { self.block.min(BLOCK) } else { self.block };
+        let mut n = quantum.clamp(1, largest);
         if let Some(l) = self.looped
             && self.pos >= l.end
         {
             self.pos = l.start;
         }
         if let Some(l) = self.looped {
-            n = n.min(usize::try_from((l.end - self.pos).max(1)).unwrap_or(BLOCK));
+            n = n.min(usize::try_from((l.end - self.pos).max(1)).unwrap_or(self.block));
         } else if let Some(e) = self.end {
             if self.pos >= e {
                 self.playing = false;
@@ -288,20 +359,20 @@ impl AudioState {
                 self.shared.playing.store(false, Ordering::Relaxed);
                 n = 0;
             } else {
-                n = n.min(usize::try_from(e - self.pos).unwrap_or(BLOCK));
+                n = n.min(usize::try_from(e - self.pos).unwrap_or(self.block));
             }
         }
         if n == 0 {
             for c in &mut self.pending {
                 c.iter_mut().for_each(|x| *x = 0.0);
             }
-            self.pending_len = BLOCK;
+            self.pending_len = self.block;
             return;
         }
         if let Some(ring) = &self.input {
             let ch = ring.channels.load(Ordering::Relaxed).max(1);
             if self.mix.input.len() != ch {
-                self.mix.input = vec![vec![0.0; BLOCK]; ch];
+                self.mix.input = vec![vec![0.0; self.block]; ch];
             }
             ring.pop_into(&mut self.mix.input, n, self.session.sample_rate.hz());
         }
@@ -343,7 +414,7 @@ impl AudioState {
         let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
         let step = self.session.sample_rate.as_f64() / self.device_rate.max(1.0) * speed.clamp(0.1, 4.0);
         let callback_frames = out.len() / channels;
-        let quantum = ((callback_frames as f64 * step).ceil() as usize).clamp(1, BLOCK);
+        let quantum = ((callback_frames as f64 * step).ceil() as usize).clamp(1, self.block);
         for frame in out.chunks_mut(channels) {
             while self.read >= self.pending_len as f64 {
                 self.read -= self.pending_len as f64;
@@ -362,7 +433,7 @@ impl AudioState {
             let sample = |c: usize| {
                 let ch = self.pending.get(c);
                 let a = ch.and_then(|v| v.get(i0)).copied().unwrap_or(0.0);
-                // `pending` is BLOCK long; only `pending_len` frames are valid. Hold the last one at the edge.
+                // `pending` holds `block` frames; only `pending_len` are valid. Hold the last one at the edge.
                 let b = if i0 + 1 < self.pending_len { ch.and_then(|v| v.get(i0 + 1)).copied().unwrap_or(a) } else { a };
                 a * (1.0 - fr) + b * fr
             };
@@ -409,6 +480,8 @@ struct Side {
     shadow: HashMap<(TrackId, usize), (String, usize, bool)>,
     /// Session sample rate the instances were prepared for.
     rate: f32,
+    /// The largest block they were prepared for (the audio thread's [`block_for`]).
+    block: usize,
     /// Editor handles of the live instances.
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
     /// State readers of the live instances.
@@ -421,8 +494,22 @@ struct Side {
 }
 
 impl Side {
+    #[cfg(test)]
     fn new(rate: f32, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
-        Side { shadow: HashMap::new(), rate, editors: HashMap::new(), states: BTreeMap::new(), refused: HashSet::new(), garbage, old_sessions: None }
+        Side::with_block(rate, BLOCK, garbage)
+    }
+
+    fn with_block(rate: f32, block: usize, garbage: Receiver<Vec<Box<dyn Plugin>>>) -> Side {
+        Side {
+            shadow: HashMap::new(),
+            rate,
+            block: block.clamp(BLOCK, MAX_BLOCK),
+            editors: HashMap::new(),
+            states: BTreeMap::new(),
+            refused: HashSet::new(),
+            garbage,
+            old_sessions: None,
+        }
     }
 
     /// Drops retired instances (closing their editors first, inside the plugin's drop) and
@@ -474,6 +561,8 @@ pub struct Player {
     pub device_channels: u16,
     /// The device buffer in frames when one was chosen (`None`: the device default).
     pub device_buffer: Option<u32>,
+    /// The largest block playback renders and plugins are prepared for ([`block_for`]).
+    pub block: usize,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
 }
@@ -521,7 +610,11 @@ impl Player {
         let want = session.sample_rate.hz();
         let want_ch = u16::try_from(main_channels(&session)).unwrap_or(2);
         let side_rate = session.sample_rate.as_f64() as f32;
-        let new_side = |garbage: Receiver<Vec<Box<dyn Plugin>>>| Mutex::new(Side::new(side_rate, garbage));
+        let new_side = |garbage: Receiver<Vec<Box<dyn Plugin>>>, block: usize| Mutex::new(Side::with_block(side_rate, block, garbage));
+        let fixed = |b: cpal::BufferSize| match b {
+            cpal::BufferSize::Fixed(n) => Some(n),
+            cpal::BufferSize::Default => None,
+        };
         match open_device(want, want_ch, cfg) {
             Ok((device, config, format, name)) => {
                 // The chosen buffer size first; if the device refuses it, its default.
@@ -536,27 +629,25 @@ impl Player {
                         let channels = usize::from(config.channels);
                         let (tx, rx) = channel();
                         let (gtx, grx) = channel();
-                        let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
+                        let block = block_for(fixed(config.buffer_size), f64::from(rate), session.sample_rate.as_f64());
+                        let state = AudioState::with_block(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx, block);
                         let fault = Arc::new(Fault::default());
                         let stream = match format {
                             cpal::SampleFormat::I32 => build_output::<i32>(&device, config, state, channels, &fault, &shared),
                             cpal::SampleFormat::I16 => build_output::<i16>(&device, config, state, channels, &fault, &shared),
                             _ => build_output::<f32>(&device, config, state, channels, &fault, &shared),
                         }?;
-                        Ok(Opened { stream, tx, grx, fault })
+                        Ok(Opened { stream, block, tx, grx, fault })
                     },
                     |opened| start_stream(&opened.stream),
                 );
                 match opened {
-                    Some((config, Opened { stream, tx, grx, fault })) => {
+                    Some((config, Opened { stream, block, tx, grx, fault })) => {
                         let rate = config.sample_rate;
                         let channels = usize::from(config.channels);
-                        let buffer = match config.buffer_size {
-                            cpal::BufferSize::Fixed(n) => Some(n),
-                            cpal::BufferSize::Default => None,
-                        };
+                        let buffer = fixed(config.buffer_size);
                         log::info!(
-                            "audio device: {name} @ {rate} Hz, {channels} ch, {format}, buffer {}",
+                            "audio device: {name} @ {rate} Hz, {channels} ch, {format}, buffer {}, blocks up to {block}",
                             buffer.map_or("default".to_string(), |n| n.to_string())
                         );
                         Player {
@@ -565,12 +656,13 @@ impl Player {
                             #[cfg(not(target_arch = "wasm32"))]
                             watch: Mutex::new(None),
                             tx,
-                            side: new_side(grx),
+                            side: new_side(grx, block),
                             _stream: Some(stream),
                             device_name: name,
                             device_rate: rate,
                             device_channels: config.channels,
                             device_buffer: buffer,
+                            block,
                             silent: false,
                         }
                     }
@@ -578,7 +670,7 @@ impl Player {
                         log::warn!("no usable audio stream; using a silent clock");
                         let (tx, rx) = channel();
                         let (gtx, grx) = channel();
-                        Player::silent_clock(shared, tx, rx, want, new_side(grx), gtx)
+                        Player::silent_clock(shared, tx, rx, want, new_side(grx, BLOCK), gtx)
                     }
                 }
             }
@@ -586,7 +678,7 @@ impl Player {
                 log::warn!("no audio output: {e}; using a silent clock");
                 let (tx, rx) = channel();
                 let (gtx, grx) = channel();
-                Player::silent_clock_with(shared, tx, rx, Arc::clone(&session), new_side(grx), gtx)
+                Player::silent_clock_with(shared, tx, rx, Arc::clone(&session), new_side(grx, BLOCK), gtx)
             }
         }
     }
@@ -648,6 +740,7 @@ impl Player {
             device_rate: rate,
             device_channels: 0,
             device_buffer: None,
+            block: BLOCK,
             silent: true,
         }
     }
@@ -671,6 +764,7 @@ impl Player {
             device_rate: session.sample_rate.hz(),
             device_channels: 0,
             device_buffer: None,
+            block: BLOCK,
             silent: true,
         }
     }
@@ -875,7 +969,7 @@ impl Side {
                 continue;
             }
             self.forget(key);
-            let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
+            let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, self.block, spec.ch);
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
@@ -926,6 +1020,8 @@ fn start_stream(stream: &impl cpal::traits::StreamTrait) -> bool {
 /// A built output stream and the channels and fault flag its callback shares with the player.
 struct Opened {
     stream: cpal::Stream,
+    /// The largest block its audio state renders ([`block_for`]).
+    block: usize,
     tx: Sender<Cmd>,
     grx: Receiver<Vec<Box<dyn Plugin>>>,
     fault: Arc<Fault>,
@@ -1231,6 +1327,119 @@ mod tests {
         let st = AudioState::new(rx, shared, Arc::new(s), 48_000.0, channel().0);
         tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
         st
+    }
+
+    #[test]
+    fn the_block_follows_the_device_buffer() {
+        assert_eq!(block_for(None, 48_000.0, 48_000.0), BLOCK, "unknown default buffer: as before");
+        assert_eq!(block_for(Some(64), 48_000.0, 48_000.0), BLOCK, "small buffers: as before");
+        assert_eq!(block_for(Some(512), 48_000.0, 48_000.0), 512);
+        assert_eq!(block_for(Some(1024), 48_000.0, 48_000.0), 1024);
+        assert_eq!(block_for(Some(4096), 96_000.0, 96_000.0), 4096);
+        assert_eq!(block_for(Some(2048), 44_100.0, 48_000.0), 2230, "a faster session renders more frames per callback (2229.03, rounded up)");
+        assert_eq!(block_for(Some(2048), 96_000.0, 48_000.0), 2048, "a slower session never shrinks it");
+        assert_eq!(block_for(Some(1 << 20), 48_000.0, 48_000.0), MAX_BLOCK);
+        assert_eq!(block_for(Some(1024), 0.0, 48_000.0), 1024);
+        assert_eq!(block_for(Some(u32::MAX), 1.0, f64::MAX), MAX_BLOCK);
+    }
+
+    /// Records the size of every block it processes.
+    struct Probe(Box<dyn Plugin>, Arc<Mutex<Vec<usize>>>);
+    impl Plugin for Probe {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.0.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.0.reset();
+        }
+        fn set_param(&mut self, id: &str, v: f32) -> bool {
+            self.0.set_param(id, v)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.1.lock().unwrap().push(frames);
+            self.0.process(io, frames);
+        }
+    }
+
+    #[test]
+    fn plugins_see_the_device_buffer_in_one_block() {
+        use soundcraft_model::{ChannelFormat, Insert};
+        // (largest block, device callback frames, automation, what the plugin sees per callback)
+        for (block, callback, automated, want) in [
+            (BLOCK, 2048, false, vec![512, 512, 512, 512]),
+            (2048, 2048, false, vec![2048]),
+            (2048, 1000, false, vec![1000]),
+            (BLOCK, 128, false, vec![128]),
+            (2048, 2048, true, vec![512, 512, 512, 512]),
+        ] {
+            let st = audio_output_state(ChannelFormat::Stereo, vec![vec![0.5; 8192]; 2]);
+            let mut session = (*st.session).clone();
+            let track = session.tracks[0].id;
+            session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.probe"));
+            if automated {
+                // Automation is read once per block: a session with any keeps 512-frame blocks.
+                let mut lane = soundcraft_model::AutomationLane::new(soundcraft_model::AutoParam::Volume);
+                lane.set_point(0, 0.0);
+                session.track_mut(track).unwrap().automation.push(lane);
+            }
+            let session = Arc::new(session);
+            let (tx, rx) = channel();
+            let mut st = AudioState::with_block(rx, Arc::clone(&st.shared), Arc::clone(&session), 48_000.0, channel().0, block);
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let mut gain = soundcraft_dsp::create("gain").unwrap();
+            gain.prepare(48_000.0, block, 2);
+            let probe = PreparedInstance { track, slot: 0, id: "clap:test.probe".into(), ch: 2, plugin: Box::new(Probe(gain, Arc::clone(&seen))) };
+            tx.send(Cmd::Session(session, vec![probe])).unwrap();
+            tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+            assert_eq!(st.mix.max_block(), block, "the engine is sized for the block");
+            let mut out = vec![0.0f32; 2 * callback];
+            st.fill(&mut out, 2);
+            assert_eq!(*seen.lock().unwrap(), want, "block {block}, callback {callback}, automation {automated}");
+            assert!(out.iter().any(|x| x.abs() > 0.1), "block {block}, callback {callback}: it sounds");
+        }
+    }
+
+    #[test]
+    fn gaining_automation_drops_the_long_block_not_yet_heard() {
+        use soundcraft_model::ChannelFormat;
+        // A ramp tells which session frame each output frame came from.
+        let ramp: Vec<f32> = (0..8192).map(|i| i as f32 / 8192.0).collect();
+        let st = audio_output_state(ChannelFormat::Stereo, vec![ramp.clone(), ramp.clone()]);
+        let (tx, rx) = channel();
+        let mut st = AudioState::with_block(rx, Arc::clone(&st.shared), Arc::clone(&st.session), 48_000.0, channel().0, 4096);
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        st.drain();
+        // One long block rendered, 1000 of its frames heard so far.
+        st.render_next(4096);
+        assert_eq!((st.pos, st.pending_len), (4096, 4096));
+        st.read = 1000.0;
+        let mut session = (*st.session).clone();
+        let track = session.tracks[0].id;
+        let mut lane = soundcraft_model::AutomationLane::new(soundcraft_model::AutoParam::Volume);
+        lane.set_point(0, 0.0);
+        session.track_mut(track).unwrap().automation.push(lane);
+        tx.send(Cmd::Session(Arc::new(session), Vec::new())).unwrap();
+        let mut out = vec![0.0f32; 2 * 600];
+        st.fill(&mut out, 2);
+        // The rest of the long block was dropped and rendered again in 512-frame blocks from the
+        // audible position: frame 1000 is next, nothing skipped or repeated.
+        assert_eq!(st.pos, 1000 + 2 * 512, "two fresh 512-frame blocks");
+        assert_eq!(st.pending_len, 512);
+        for (k, f) in out.chunks(2).enumerate() {
+            let want = ramp[1000 + k];
+            assert!((f[0] - want).abs() < 1e-6 && (f[1] - want).abs() < 1e-6, "frame {k}: {f:?}, want {want}");
+        }
+        // A session that already had automation keeps what is pending.
+        let (len, pos) = (st.pending_len, st.pos);
+        tx.send(Cmd::Session(Arc::clone(&st.session), Vec::new())).unwrap();
+        st.drain();
+        assert_eq!((st.pending_len, st.pos), (len, pos));
     }
 
     #[test]
