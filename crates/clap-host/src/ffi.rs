@@ -1679,8 +1679,8 @@ mod hostwin {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWL_EXSTYLE, GWL_STYLE,
-        GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassExW,
-        SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+        GWLP_USERDATA, GetClientRect, GetPropW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassExW, RemovePropW,
+        SIZE_MINIMIZED, SW_HIDE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetPropW,
         SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_NCDESTROY, WM_SIZE, WM_SIZING, WNDCLASSEXW, WS_CAPTION, WS_CLIPCHILDREN,
         WS_OVERLAPPED, WS_SYSMENU, WS_THICKFRAME,
     };
@@ -1694,6 +1694,14 @@ mod hostwin {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().filter(|&c| c != 0).chain(Some(0)).collect()
+    }
+
+    /// The window property that marks a window the user closed (`WM_CLOSE` only hides it).
+    /// Tracked instead of reading `IsWindowVisible`, which is also false while the owner window
+    /// is minimized (owned windows are hidden with it): that must not close the editor.
+    fn closed_prop() -> *const u16 {
+        static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+        NAME.get_or_init(|| wide("SoundCraftEditorClosed")).as_ptr()
     }
 
     const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
@@ -1742,8 +1750,12 @@ mod hostwin {
     unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
             WM_CLOSE => {
-                // SAFETY: `hwnd` is the window this procedure was called for.
-                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                // SAFETY: `hwnd` is the window this procedure was called for; the property name
+                // lives for the process; the property is removed on `WM_NCDESTROY` (or `raise`).
+                unsafe {
+                    SetPropW(hwnd, closed_prop(), 1usize as _);
+                    ShowWindow(hwnd, SW_HIDE);
+                }
                 return 0;
             }
             // Live user resizes: keep the dragged edges at a size the plugin accepts.
@@ -1766,6 +1778,8 @@ mod hostwin {
                 }
             }
             WM_NCDESTROY => {
+                // SAFETY: the window's last message; removes the property `WM_CLOSE` may have set.
+                unsafe { RemovePropW(hwnd, closed_prop()) };
                 // SAFETY: the window's last message: take the user data back and release the
                 // `Arc` reference `set_sizer` stored there; nothing reads it afterwards.
                 let p = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) } as *const GuiSizer;
@@ -1916,17 +1930,20 @@ mod hostwin {
 
         pub fn raise(&self) {
             if let Some(h) = self.live() {
-                // SAFETY: a live window of this thread.
+                // SAFETY: a live window of this thread. Shown again, it is open again.
                 unsafe {
+                    RemovePropW(h, closed_prop());
                     ShowWindow(h, SW_SHOW);
                     SetForegroundWindow(h);
                 }
             }
         }
 
+        /// The window is open: not closed by the user, even while hidden with its minimized
+        /// owner.
         pub fn is_visible(&self) -> bool {
-            // SAFETY: a live window of this thread.
-            self.live().is_some_and(|h| unsafe { IsWindowVisible(h) } != 0)
+            // SAFETY: a live window of this thread; the property name lives for the process.
+            self.live().is_some_and(|h| unsafe { GetPropW(h, closed_prop()) }.is_null())
         }
 
         pub fn close(self) {
