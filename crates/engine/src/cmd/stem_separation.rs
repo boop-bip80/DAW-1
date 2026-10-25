@@ -4,6 +4,9 @@ use super::*;
 use crate::cmd;
 use serde_json::json;
 use soundcraft_model::ClipContent;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
@@ -84,11 +87,56 @@ fn stem_separation(e: &mut Engine, p: &Value) -> Result<Value> {
         }?;
 
         log::info!("Starting stem separation for clip: {}", clip.name);
-        let result = soundcraft_dsp::stem_separation::separate_audio(
-            &audio_path,
-            &output_dir,
-            &model_path,
-        ).map_err(|e| bad("audiosuite.stem_separation", format!("separation failed: {}", e)))?;
+        
+        // Run stem separation in background thread with progress updates
+        let (progress_tx, progress_rx) = mpsc::channel::<(f32, String)>();
+        let audio_path_clone = audio_path.clone();
+        let output_dir_clone = output_dir.clone();
+        let model_path_clone = model_path.clone();
+        
+        let handle = thread::spawn(move || {
+            let progress_cb = std::sync::Arc::new(std::sync::Mutex::new(move |pct: f32, msg: &str| {
+                let _ = progress_tx.send((pct, msg.to_string()));
+            }));
+            
+            soundcraft_dsp::stem_separation::separate_audio(
+                &audio_path_clone,
+                &output_dir_clone,
+                &model_path_clone,
+                Some(progress_cb),
+            )
+        });
+        
+        // Poll for progress (non-blocking)
+        loop {
+            // Check for progress updates
+            match progress_rx.try_recv() {
+                Ok((pct, msg)) => {
+                    log::info!("Stem separation progress: {:.0}% - {}", pct * 100.0, msg);
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // No update yet
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread finished
+                    break;
+                }
+            }
+            
+            // Check if thread is done
+            if handle.is_finished() {
+                break;
+            }
+            
+            // Small sleep to avoid busy-waiting
+            thread::sleep(Duration::from_millis(100));
+        }
+        
+        // Get the result
+        let result = handle.join()
+            .map_err(|e| bad("audiosuite.stem_separation", format!("stem separation thread panicked: {:?}", e)))?;
+        
+        let result = result.map_err(|e| bad("audiosuite.stem_separation", format!("separation failed: {}", e)))?;
 
         model_name = result.model.clone();
 

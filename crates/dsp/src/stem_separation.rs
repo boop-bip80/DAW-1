@@ -5,6 +5,8 @@ use charon_audio::{Separator, SeparatorConfig};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const MODEL_URL: &str = "https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs.onnx";
 
@@ -13,9 +15,18 @@ pub struct SeparationResult {
     pub model: String,
 }
 
+/// Progress callback for stem separation
+pub type ProgressCallback = Arc<Mutex<dyn Fn(f32, &str) + Send + 'static>>;
+
 /// Download the HTDemucs model if it doesn't exist
-fn download_model(model_path: &str) -> Result<(), String> {
+fn download_model(model_path: &str, progress: Option<ProgressCallback>) -> Result<(), String> {
     log::info!("Downloading HTDemucs model from Hugging Face...");
+    
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(0.0, "Downloading model...");
+        }
+    }
     
     let response = ureq::get(MODEL_URL)
         .call()
@@ -45,6 +56,13 @@ fn download_model(model_path: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to write model file: {}", e))?;
     
     log::info!("Model downloaded successfully to {}", model_path);
+    
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(1.0, "Model downloaded");
+        }
+    }
+    
     Ok(())
 }
 
@@ -52,22 +70,44 @@ pub fn separate_audio(
     input_file: &str,
     output_dir: &str,
     model_path: &str,
+    progress: Option<ProgressCallback>,
 ) -> Result<SeparationResult, String> {
     // Download model if it doesn't exist
     if !Path::new(model_path).exists() {
-        download_model(model_path)?;
+        download_model(model_path, progress.clone())?;
     }
     
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(0.1, "Initializing separator...");
+        }
+    }
+    
+    // Configure separator with progress and try to use GPU
     let config = SeparatorConfig::htdemucs(model_path)
-        .with_progress(true)  // Enable progress reporting
+        .with_progress(true)
         .with_overlap(0.5)
         .with_shifts(1);
+    
     let separator = Separator::new(config)
         .map_err(|e| format!("Failed to initialize separator: {}", e))?;
     
     log::info!("Starting stem separation for: {}", input_file);
+    
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(0.2, "Separating audio...");
+        }
+    }
+    
     let stems = separator.separate_file(input_file)
         .map_err(|e| format!("Failed to separate audio: {}", e))?;
+    
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(0.9, "Saving stems...");
+        }
+    }
     
     log::info!("Saving stems to: {}", output_dir);
     stems.save_all(output_dir)
@@ -80,16 +120,35 @@ pub fn separate_audio(
     }
     
     log::info!("Stem separation complete");
+    
+    if let Some(ref cb) = progress {
+        if let Ok(cb) = cb.lock() {
+            cb(1.0, "Complete");
+        }
+    }
+    
     Ok(SeparationResult {
         stem_files,
         model: "HTDemucs 4-stem".to_string(),
     })
 }
 
+/// Run stem separation in a background thread
+pub fn separate_audio_async(
+    input_file: String,
+    output_dir: String,
+    model_path: String,
+    progress: ProgressCallback,
+) -> thread::JoinHandle<Result<SeparationResult, String>> {
+    thread::spawn(move || {
+        separate_audio(&input_file, &output_dir, &model_path, Some(progress))
+    })
+}
+
 pub fn init_stem_separation(model_path: &str) -> Result<(), String> {
     // Download model if it doesn't exist
     if !Path::new(model_path).exists() {
-        download_model(model_path)?;
+        download_model(model_path, None)?;
     }
     
     let config = SeparatorConfig::htdemucs(model_path);
