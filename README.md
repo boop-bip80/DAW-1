@@ -14,6 +14,10 @@
 <h1 align="center">SoundCraft</h1>
 
 <p align="center">
+  <i><b>This is a fork of SoundCraft with AI stem separation support using Charon Audio (HTDemucs).</b></i>
+</p>
+
+<p align="center">
   <b>Recording, editing and mixing audio; an open-source, modern digital audio workstation (DAW), built in pure Rust.</b>
 </p>
 
@@ -72,6 +76,25 @@ SoundCraft follows the workflow audio engineers already know: an **Edit window**
 editing, a **Mix window** for balancing, edit modes, tools, playlists, memory locations, AudioSuite
 processing and the rest. If you've spent years in that workflow, your hands should already know
 where things are.
+
+### ✨ New in This Fork: AI Stem Separation
+
+This fork adds **AI-powered stem separation** using Charon Audio (HTDemucs), allowing you to:
+
+- Separate any audio clip into 4 independent stems: **drums, bass, other, vocals**
+- Create separate tracks for each stem automatically
+- Mix, mute, and solo stems independently
+- Perfect for remixing, acapella extraction, and creative audio manipulation
+
+**How to use:**
+1. Right-click on any audio clip in the timeline
+2. Select "Stem Separation" from the context menu
+3. The AI will automatically separate the audio (takes 1-2 minutes)
+4. Four new tracks will be created with the separated stems
+
+**Supported formats:** MP3, WAV, FLAC, OGG, AAC, and more
+
+**Based on:** Charon Audio (https://github.com/Valkyra-Labs/charon-audio) - A pure Rust implementation of HTDemucs 4.1.0 using ONNX Runtime
 
 <table>
   <tr>
