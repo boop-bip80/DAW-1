@@ -1477,9 +1477,10 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
         let vol_row = Rect::from_x_y_ranges(vr.x_range(), vr.min.y + 1.5..=vr.min.y + 14.0).shrink2(vec2(1.5, 0.0));
         let pan_row = Rect::from_x_y_ranges(vr.x_range(), vr.min.y + 15.0..=vr.max.y - 1.5).shrink2(vec2(1.5, 0.0));
         let vol_text = crate::widgets::db_text(m.volume_db);
-        let vol = readout_button(&ui, vol_row, ui.id().with(("vol", id.0)), "Volume", &vol_text, "Volume: click for a fader, Alt-click for 0 dB");
-        let pan_resp =
-            pannable.then(|| readout_button(&ui, pan_row, ui.id().with(("pan", id.0)), "Pan", &pan, "Pan: click for sliders, Alt-click to reset"));
+        let vol =
+            readout_button(&ui, vol_row, ui.scope_id().with(("vol", id.0)), "Volume", &vol_text, "Volume: click for a fader, Alt-click for 0 dB");
+        let pan_resp = pannable
+            .then(|| readout_button(&ui, pan_row, ui.scope_id().with(("pan", id.0)), "Pan", &pan, "Pan: click for sliders, Alt-click to reset"));
         let alt = ui.input(|i| i.modifiers.alt);
         if vol.clicked() && alt && m.volume_db.abs() > f32::EPSILON {
             // Merged, so a reset during an automation pass joins the pass's undo step; the merge ends by itself on the next frame.
@@ -1507,7 +1508,7 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
 /// and paints nothing otherwise, so an untouched column looks the same as before.
 fn readout_button(ui: &Ui, r: Rect, id: egui::Id, name: &str, value: &str, tip: &str) -> egui::Response {
     let resp = ui.interact(r, id, Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{name} {value}")));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name} {value}")));
     if resp.hovered() || resp.has_focus() || egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp)) {
         ui.painter().rect_filled(r, 1.5, Color32::from_gray(38));
     }
@@ -1550,7 +1551,7 @@ fn volume_fader(app: &mut SoundApp, ui: &mut Ui, track: &Track) {
     let key = format!("fader:{}", id.0);
     let (well, _) = ui.allocate_exact_size(vec2(56.0, 16.0), Sense::hover());
     crate::widgets::inset(ui.painter(), well, t.counter_bg);
-    let readout_id = ui.id().with(("io-vol", id.0));
+    let readout_id = ui.scope_id().with(("io-vol", id.0));
     let (_, typed) = crate::mix_window::editable_readout(
         ui,
         well,
@@ -1569,7 +1570,7 @@ fn volume_fader(app: &mut SoundApp, ui: &mut Ui, track: &Track) {
     ui.add_space(4.0);
     // ponytail: the fader is drawn, not focusable, so the keyboard sets the volume in the readout above it. Upgrade: arrow keys in `widgets::fader`.
     let (slot, _) = ui.allocate_exact_size(vec2(56.0, 170.0), Sense::hover());
-    if let Some(moved) = crate::widgets::fader(ui, slot, db, ui.id().with(("io-fader", id.0))) {
+    if let Some(moved) = crate::widgets::fader(ui, slot, db, ui.scope_id().with(("io-fader", id.0)), &format!("{} level", track.name)) {
         app.gesture = Some(Gesture::Fader { track: id, start_db: db });
         let _ = app.engine.execute_merged("mix.volume", &json!({"track": id.0, "db": moved}), &key);
     }
