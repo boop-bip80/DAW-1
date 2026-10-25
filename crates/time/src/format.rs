@@ -43,7 +43,8 @@ impl TimeFormat {
 
 fn min_secs(s: Samples, sr: SampleRate) -> String {
     let neg = s < 0;
-    let ms_total = (sr.seconds(s.saturating_abs()) * 1000.0).floor() as i64;
+    // Integer maths: a float `seconds * 1000` lands just below exact millisecond positions.
+    let ms_total = i64::try_from(i128::from(s).abs() * 1000 / i128::from(sr.hz().max(1))).unwrap_or(i64::MAX);
     let mins = ms_total / 60_000;
     let secs = (ms_total / 1000) % 60;
     let ms = ms_total % 1000;
@@ -123,7 +124,7 @@ pub fn parse_position(
         }
         TimeFormat::BarsBeats => {
             let parts: Vec<i64> =
-                t.split(['|', '.', ' ']).filter(|p| !p.is_empty()).map(|p| p.parse::<i64>()).collect::<Result<_, _>>().map_err(|_| err())?;
+                t.split(['|', '.', ' ']).filter(|p| !p.is_empty()).map(str::parse::<i64>).collect::<Result<_, _>>().map_err(|_| err())?;
             let bb = BarBeat {
                 bar: *parts.first().ok_or_else(err)?,
                 beat: parts.get(1).copied().unwrap_or(1).max(1),
@@ -181,6 +182,19 @@ mod tests {
                 let text = format_position(s, fmt, sr, &map, rate, 0, 0);
                 let back = parse_position(&text, fmt, sr, &map, rate, 0, 0).unwrap();
                 assert!((back - s).abs() <= 48, "{fmt:?} {s} → {text} → {back}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_round_trips_timecode_negative() {
+        let (sr, map, _) = ctx();
+        let rate = FrameRate::Fps25;
+        for fmt in [TimeFormat::Timecode, TimeFormat::FeetFrames] {
+            for s in [-48_000i64, -96_000 * 3, -1_440_000] {
+                let text = format_position(s, fmt, sr, &map, rate, 0, 0);
+                let back = parse_position(&text, fmt, sr, &map, rate, 0, 0).unwrap();
+                assert_eq!(back, s, "{fmt:?} {s} → {text} → {back}");
             }
         }
     }

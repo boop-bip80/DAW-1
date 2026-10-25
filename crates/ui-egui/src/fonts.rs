@@ -12,8 +12,10 @@ const REGULAR: &[(&str, u32)] = &[
     ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0),
     ("/usr/share/fonts/TTF/DejaVuSans.ttf", 0),
     ("/usr/share/fonts/dejavu/DejaVuSans.ttf", 0),
+    ("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", 0),
     ("/usr/local/share/fonts/dejavu/DejaVuSans.ttf", 0),
     ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 0),
+    ("/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf", 0),
 ];
 const BOLD: &[(&str, u32)] = &[
     ("/System/Library/Fonts/HelveticaNeue.ttc", 1),
@@ -22,8 +24,10 @@ const BOLD: &[(&str, u32)] = &[
     ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0),
     ("/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", 0),
     ("/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf", 0),
+    ("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf", 0),
     ("/usr/local/share/fonts/dejavu/DejaVuSans-Bold.ttf", 0),
     ("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 0),
+    ("/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf", 0),
 ];
 /// Hangul fallback, appended after every family so Korean session, track and clip names draw
 /// whatever the interface language. The Noto Sans CJK collection's face 1 is its Korean face.
@@ -145,6 +149,29 @@ mod tests {
         }
         // Face 0 of the Noto Sans CJK collection is Japanese; the Korean face is 1.
         assert!(HANGUL.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 1));
+    }
+
+    /// Every literal glyph the UI fixtures paint is covered by the bundled faces in every family,
+    /// without relying on an installed system font. This is the 0.37 font-feature regression test.
+    #[test]
+    fn bundled_faces_cover_the_ui_glyphs_in_every_family() {
+        let mut defs = FontDefinitions::default();
+        let proportional = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+        defs.families.insert(FontFamily::Name("bold".into()), proportional);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(defs);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        // Status/menu text, transport/meter symbols, file/audio/search icons, music symbols and
+        // platform key hints used by the UI. Close/delete controls paint a cross in `icons.rs`
+        // instead of typesetting U+2715, which no bundled face covers in every family.
+        let glyphs = ["›", "v", "♩", "𝄞", "⌘", "📁", "🔊", "🔍", "⬆", "−", "∞"];
+        for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("bold".into())] {
+            let font = egui::FontId::new(13.0, family.clone());
+            for glyph in glyphs {
+                assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, glyph)), "{family:?} has no glyph for {glyph:?}");
+            }
+        }
     }
 
     /// Korean names draw in every family, not as boxes; skipped when the system has no Korean font.
