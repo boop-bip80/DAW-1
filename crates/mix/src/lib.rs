@@ -264,6 +264,8 @@ struct Strip {
     instrument: Option<PluginSlot>,
     /// The pool audio handed to the instrument with `set_sample` (sample-playing instruments).
     sample: Option<Arc<SourceAudio>>,
+    /// The SoundFont bank handed to the instrument with `set_soundfont`.
+    bank: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
     /// The instrument's next block starts somewhere new: send it the controllers in effect there.
@@ -374,6 +376,7 @@ impl Strip {
             plugins: Vec::new(),
             instrument: None,
             sample: None,
+            bank: None,
             held: Vec::new(),
             chase: true,
             muted: false,
@@ -649,8 +652,10 @@ impl MixEngine {
                 cx.retire(old);
                 strip.instrument = want.and_then(|i| cx.make(t.id, INSTRUMENT_SLOT, i, ich));
                 strip.sample = None;
+                strip.bank = None;
             }
             sync_sample(strip, want, s);
+            sync_soundfont(strip, want, s);
         }
         // Instances nobody claimed (the session changed again before they arrived).
         let leftovers: Vec<(TrackId, usize)> = cx.adopt.keys().copied().collect();
@@ -1913,6 +1918,25 @@ fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &S
         inst.plugin.set_sample(shared);
     }
     strip.sample = audio.cloned();
+}
+
+/// Hands a strip's instrument its insert's SoundFont bank when it changed (a new file, a
+/// cleared one, or a new instance). A bank not loaded (missing file) plays nothing.
+fn sync_soundfont(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &Session) {
+    let bank = want.and_then(|i| i.soundfont.as_deref()).and_then(|p| s.pool.bank(p));
+    let same = match (strip.bank.as_ref(), bank) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        return;
+    }
+    if let Some(inst) = strip.instrument.as_mut() {
+        let typed = bank.and_then(|b| Arc::clone(b).downcast::<soundcraft_dsp::soundfont::SoundFont>().ok());
+        inst.plugin.set_soundfont(typed);
+    }
+    strip.bank = bank.cloned();
 }
 
 /// Record insert latency without processing audio, so this block can compensate for it.
