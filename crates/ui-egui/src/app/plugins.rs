@@ -1,4 +1,4 @@
-use super::{SoundApp, TrackId, json, mix_window};
+use super::{SoundApp, TrackId, Value, json, mix_window};
 
 /// The plugins whose state the session takes this frame, out of those changed in their editors
 /// (`pending`, kept across frames). A plugin editor doesn't say when a gesture ends: a plugin's
@@ -48,17 +48,30 @@ impl SoundApp {
 
     pub(crate) fn store_plugin_states(&mut self, states: soundcraft_playback::PluginStates) {
         for (t, slot, data) in states {
-            let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
-            let params = json!({"track": t.0, "slot": slot, "state": soundcraft_model::b64::encode(&data)});
-            // A state read while a knob is dragged (or a pass recorded) joins that gesture, so it
-            // stays one undo step.
-            let stored = match self.engine.merge_key().map(str::to_string) {
-                Some(key) => self.engine.execute_merged("mix.insert_state", &params, &key),
-                None => self.engine.execute("mix.insert_state", &params),
-            };
-            if let Err(e) = stored {
-                log::warn!("storing plugin state: {e}");
+            let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
+            let slot = if instrument { json!("instrument") } else { json!(slot) };
+            if instrument {
+                let (edited, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.editor_instrument_params).into_iter().partition(|e| e.0 == t);
+                self.editor_instrument_params = rest;
+                if !edited.is_empty() {
+                    let values: serde_json::Map<String, Value> = edited.into_iter().map(|(_, k, v)| (k, json!(v))).collect();
+                    self.execute_in_gesture("mix.insert_params", &json!({"track": t.0, "slot": "instrument", "params": values}));
+                }
             }
+            let params = json!({"track": t.0, "slot": slot, "state": soundcraft_model::b64::encode(&data)});
+            self.execute_in_gesture("mix.insert_state", &params);
+        }
+    }
+
+    /// Runs a command that stores what a plugin editor changed. While a knob is dragged (or a pass
+    /// recorded) it joins that gesture, so it stays one undo step.
+    fn execute_in_gesture(&mut self, id: &str, params: &Value) {
+        let stored = match self.engine.merge_key().map(str::to_string) {
+            Some(key) => self.engine.execute_merged(id, params, &key),
+            None => self.engine.execute(id, params),
+        };
+        if let Err(e) = stored {
+            log::warn!("storing plugin state ({id}): {e}");
         }
     }
 
@@ -85,7 +98,7 @@ impl SoundApp {
 
     /// Parameter edits made in plugin editors go into the session (one undo step per gesture).
     /// Hosted instruments keep their parameters in their own state, which the session takes
-    /// instead, as it does for plugins that said their state changed: either way the session is
+    /// instead (a parameter the session also holds, set by command, is kept in step), as it does for plugins that said their state changed: either way the session is
     /// modified, so it is autosaved and asks to be saved. The state is read once per gesture (see
     /// `editor_states_due`).
     pub(super) fn apply_editor_edits(&mut self) {
@@ -115,6 +128,14 @@ impl SoundApp {
     pub(crate) fn store_editor_changes(&mut self, edits: Vec<soundcraft_playback::EditorEdit>, states: soundcraft_playback::PluginStates) {
         for (t, slot, param, value) in edits {
             if slot == soundcraft_mix::INSTRUMENT_SLOT {
+                // The instrument's state carries its edits. A value the session holds as well (set
+                // by command) follows the editor when the state is stored, or it would undo the edit
+                // on top of the state when the session is opened again.
+                let held = self.engine.session().track(t).and_then(|tr| tr.instrument.as_ref()).is_some_and(|i| i.params.contains_key(&param));
+                if held {
+                    self.editor_instrument_params.retain(|(pt, pp, _)| (*pt, pp) != (t, &param));
+                    self.editor_instrument_params.push((t, param, value));
+                }
                 continue;
             }
             let key = format!("param:{}:{slot}:{param}", t.0);

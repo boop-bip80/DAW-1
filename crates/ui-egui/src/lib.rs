@@ -394,6 +394,9 @@ pub struct SoundApp {
     /// Tests supply drained editor reports at the native polling boundary without an audio device.
     #[cfg(test)]
     editor_poll_fixture: Option<EditorPollFixture>,
+    /// Instrument parameters changed in their editors that the session also holds (set by
+    /// command): stored with the instrument's state (see `store_plugin_states`).
+    editor_instrument_params: Vec<(TrackId, String, f32)>,
     pub frame_ms: f32,
     last_frame: Option<f64>,
     last_meter_poll: f64,

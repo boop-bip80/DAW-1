@@ -295,6 +295,35 @@ fn an_instrument_editor_drag_reads_and_stores_its_state_once() {
     assert_eq!(instrument_state(&app, keys), Some(vec![59, 1]));
 }
 
+fn instrument_param(app: &SoundApp, t: TrackId, id: &str) -> Option<f32> {
+    app.engine.session().track(t).and_then(|tr| tr.instrument.as_ref()).and_then(|i| i.params.get(id).copied())
+}
+
+#[test]
+fn an_instrument_parameter_the_session_holds_follows_its_editor_with_the_state() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let keys = app.engine.session().track_by_name("Keys").unwrap().id;
+    app.engine.execute("mix.instrument_param", &json!({"track": keys.0, "param": "cutoff", "value": 1000})).unwrap();
+    let steps = app.engine.undo_history().len();
+    for now in 40..45 {
+        editor_frame(&mut app, &[keys], &[], &[], now);
+    }
+    assert_eq!(instrument_param(&app, keys, "cutoff"), Some(1000.0), "mid-gesture the session is left alone");
+    editor_frame(&mut app, &[], &[], &[], 44);
+    let cutoff = soundcraft_dsp::plugin_info("subtractive_synth").and_then(|i| i.param("cutoff")).unwrap();
+    assert_eq!(instrument_param(&app, keys, "cutoff"), Some(44f32.clamp(cutoff.min, cutoff.max)), "stored with the state");
+    assert_eq!(instrument_state(&app, keys), Some(vec![44, 1]));
+    assert_eq!(app.engine.undo_history().len(), steps + 1, "one undo step for the gesture");
+    assert!(app.editor_instrument_params.is_empty());
+
+    // A parameter the session doesn't hold stays in the instrument's state only.
+    app.engine.session_mut().track_mut(keys).and_then(|tr| tr.instrument.as_mut()).unwrap().params.remove("cutoff");
+    editor_frame(&mut app, &[keys], &[], &[], 50);
+    editor_frame(&mut app, &[], &[], &[], 50);
+    assert_eq!(instrument_param(&app, keys, "cutoff"), None);
+    assert_eq!(instrument_state(&app, keys), Some(vec![50, 1]));
+}
+
 #[test]
 fn two_instrument_editor_drags_store_its_state_twice() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());

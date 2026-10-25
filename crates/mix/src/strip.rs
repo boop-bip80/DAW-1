@@ -8,6 +8,7 @@ use super::{
     AutoParam, BusId, ChannelFormat, MAX_CHANNELS, PanLaw, Plugin, Range, Route, Samples, Session, SourceAudio, Track, TrackId, TrackKind, Transport,
     db_to_gain,
 };
+use soundcraft_model::INSTRUMENT_AUTO_SLOT;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,6 +25,9 @@ pub(crate) struct PluginSlot {
     pub(crate) plugin: Box<dyn Plugin>,
     /// Last values pushed to the plugin, in the insert's parameter-map order.
     applied: Vec<f32>,
+    /// Last values pushed from automation lanes of parameters the insert holds no value for, in
+    /// the track's lane order.
+    lane_applied: Vec<f32>,
     pub(crate) failed: bool,
 }
 
@@ -191,7 +195,7 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), lane_applied: Vec::new(), failed: false })
     }
 }
 
@@ -486,22 +490,37 @@ pub(crate) fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
 }
 
 pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
-    // Automation lanes address insert slots; the instrument (`INSTRUMENT_SLOT`) has none, so it
-    // must not pick up slot A's lanes.
-    let Ok(slot_u8) = u8::try_from(i) else {
-        return apply_values(slot, ins, |_, v| v);
+    // Automation lanes address insert slots by index and the instrument (`INSTRUMENT_SLOT`) by
+    // `INSTRUMENT_AUTO_SLOT`, so the instrument never picks up slot A's lanes.
+    let slot_u8 = match u8::try_from(i) {
+        _ if i == INSTRUMENT_SLOT => INSTRUMENT_AUTO_SLOT,
+        Ok(s) => s,
+        Err(_) => return apply_values(slot, ins, |_, v| v),
     };
-    let automated = t.mixer.automation_mode.reads()
-        && t.automation.iter().any(|l| matches!(&l.param, AutoParam::Plugin { slot, .. } if *slot == slot_u8) && !l.points.is_empty());
-    apply_values(slot, ins, |k, val| {
-        if automated
-            && let Some(l) = t.automation.iter().find(|l| matches!(&l.param, AutoParam::Plugin { slot, param } if *slot == slot_u8 && param == k))
-            && !l.points.is_empty()
-        {
-            return l.value_at(pos, val);
+    let reads = t.mixer.automation_mode.reads();
+    let lanes = || {
+        t.automation.iter().filter_map(move |l| match &l.param {
+            AutoParam::Plugin { slot, param } if reads && *slot == slot_u8 && !l.points.is_empty() => Some((param.as_str(), l)),
+            _ => None,
+        })
+    };
+    if lanes().next().is_none() {
+        return apply_values(slot, ins, |_, v| v);
+    }
+    apply_values(slot, ins, |k, val| lanes().find(|(p, _)| *p == k).map_or(val, |(_, l)| l.value_at(pos, val)));
+    // A hosted plugin keeps the parameters the session holds no value for in its own state; their
+    // lanes drive it too.
+    let n = lanes().filter(|(p, _)| !ins.params.contains_key(*p)).count();
+    if slot.lane_applied.len() != n {
+        slot.lane_applied = vec![f32::NAN; n];
+    }
+    for ((p, l), last) in lanes().filter(|(p, _)| !ins.params.contains_key(*p)).zip(slot.lane_applied.iter_mut()) {
+        let val = l.value_at(pos, 0.0);
+        if val.to_bits() != last.to_bits() {
+            slot.plugin.set_param(p, val);
+            *last = val;
         }
-        val
-    });
+    }
 }
 
 /// Sends each stored param (as mapped by `value`) to the plugin when it changed since last time.

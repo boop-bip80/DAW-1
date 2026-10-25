@@ -62,6 +62,32 @@ fn stored_instrument_params_reach_the_plugin() {
 }
 
 #[test]
+fn instrument_automation_drives_the_instrument() {
+    let quiet = render_range(&synth_session(-48.0), Range::new(0, 12_000), 512);
+    let mut s = synth_session(-6.0);
+    let tr = &mut s.tracks[0];
+    let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: soundcraft_model::INSTRUMENT_AUTO_SLOT, param: "level".into() });
+    lane.set_point(0, -48.0);
+    tr.automation.push(lane);
+    assert_eq!(render_range(&s, Range::new(0, 12_000), 512), quiet, "the lane overrides the stored -6 dB");
+}
+
+#[test]
+fn automation_drives_a_parameter_the_session_holds_no_value_for() {
+    // A hosted instrument made by `track.new` starts with an empty parameter map.
+    let quiet = render_range(&synth_session(-48.0), Range::new(0, 12_000), 512);
+    let mut s = synth_session(-6.0);
+    let tr = &mut s.tracks[0];
+    if let Some(ins) = tr.instrument.as_mut() {
+        ins.params.clear();
+    }
+    let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: soundcraft_model::INSTRUMENT_AUTO_SLOT, param: "level".into() });
+    lane.set_point(0, -48.0);
+    tr.automation.push(lane);
+    assert_eq!(render_range(&s, Range::new(0, 12_000), 512), quiet);
+}
+
+#[test]
 fn insert_slot_a_automation_does_not_drive_the_instrument() {
     let mut s = synth_session(-6.0);
     let reference = render_range(&s, Range::new(0, 12_000), 512);
