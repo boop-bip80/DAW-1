@@ -158,16 +158,15 @@ def parse_ts(path: Path) -> list[tuple[str, str]]:
             continue
         if translation_el.get("type") in {"unfinished", "vanished"}:
             continue
-        # plural forms: join all <numerusform> texts
+        # Qt plural forms are one translation per plural form: emit a pair each, as `parse_po`
+        # does, instead of joining them with " | " (which misreports agreement as disagreement).
         numerus = translation_el.findall("numerusform")
-        if numerus:
-            zh = " | ".join(n.text or "" for n in numerus)
-        else:
-            zh = translation_el.text or ""
-        zh = zh.strip()
+        texts = [n.text or "" for n in numerus] if numerus else [translation_el.text or ""]
         en = source.strip()
-        if en and zh:
-            pairs.append((en, zh))
+        for text in texts:
+            zh = text.strip()
+            if en and zh:
+                pairs.append((en, zh))
     return pairs
 
 

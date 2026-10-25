@@ -134,7 +134,12 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         self.app.close_autosave();
         save_prefs(&self.app.ui);
-        if let Err(error) = save_engine_prefs(&self.app.engine) {
+        // Only write when a preference actually changed: `load_prefs_json` is lenient, so an
+        // unconditional save would replace a hand-edited (or damaged) file with defaults, and an
+        // older build would drop the keys a newer one wrote.
+        if self.saved_prefs_revision != Some(self.app.engine.prefs_revision())
+            && let Err(error) = save_engine_prefs(&self.app.engine)
+        {
             log::warn!("preferences: {error}");
         }
         if let Some(logger) = self.logger {

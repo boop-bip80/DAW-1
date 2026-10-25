@@ -474,7 +474,7 @@ fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, devices
 }
 
 fn number_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<u32>, options: &[u32], unit: &str) {
-    let shown = value.map_or("Device default".to_string(), |v| format!("{v} {unit}"));
+    let shown = value.map_or_else(|| crate::i18n::t("Device default").to_string(), |v| format!("{v} {unit}"));
     egui::ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
         ui.selectable_value(value, None, crate::i18n::t("Device default"));
         for v in options {

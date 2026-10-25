@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-24 · **Change:** trivial (remaining UI literals translated; coverage gate extended to widget-helper tooltips) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-25 · **Change:** trivial (remaining UI literals translated; coverage gate extended to widget-helper tooltips) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft ships **English** (the source language) and **简体中文**. Every menu path segment,
 every command label, every panel title, dialog, tooltip and status message the UI draws goes
@@ -82,6 +82,7 @@ Per-language hours exclude the shared catalog and script work, which are done.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-25 | trivial | Review pass: the icon buttons announce their translated label to screen readers, the parity table’s delimiter row matches its nine columns, `prefs.reset` trims the path it reports, the preferences file is only rewritten when a preference changed, and the cross-check counts Qt plural forms separately (1,078 keys) |
 | 2026-10-24 | trivial | Rebased onto `main` (which advanced ~230 commits): the new Clip List Auto Rename, Strip Silence Rename/Extract/Separate, Virtual Instrument/dither bounce controls and edit-mode helpers keep their Chinese labels, so the catalog grows 1,141 → 1,160 entries; `cargo xtask ci` green against the new dependency set |
 | 2026-10-22 | trivial | Catalog 1,106 → 1,141 entries: the remaining UI literals that bypassed `t()` (toolbar icon tooltips, send headers and tooltips, bounce status, Memory Locations headers, Freeze/Unfreeze, MIDI editor buttons, record-hint tooltips) now translate; the coverage test also scans `icon_button`/`text_toggle` tooltip literals; malformed catalog lines are reported at run time |
 | 2026-10-20 | minor | Wording pass and review: catalog 1,106 entries (Shuffle = 推移, new preference command labels); `interface.language` preference with `prefs.*` commands, Appearance preview and persistence (native `preferences.json`, web `localStorage`), legacy `ui.json` migration; catalogs packed and deflated at build time; Han-before-Hangul fallback order; bundled Noto Sans SC subset for the web; docs refreshed and wording knowledge base re-cross-checked (1,032 keys) |

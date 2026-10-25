@@ -48,11 +48,13 @@ fn prefs_set_changes(p: &Value) -> Result<Vec<(String, Value)>> {
 }
 
 fn prefs_reset(e: &mut Engine, p: &Value) -> Result<Value> {
-    let path = str_param(p, "path").or_else(|| str_param(p, "section"));
+    // `Preferences::reset` trims the path and treats a blank one as "everything", so normalize
+    // once here: the reply must describe the reset that actually happened.
+    let requested = str_param(p, "path").or_else(|| str_param(p, "section")).unwrap_or("");
+    let path = requested.trim();
     let mut next = e.prefs().clone();
-    next.reset(path).map_err(|error| bad("prefs.reset", error))?;
+    next.reset(Some(path)).map_err(|error| bad("prefs.reset", error))?;
     e.edit_prefs(|prefs| *prefs = next);
-    let path = path.unwrap_or("");
     e.prefs().get(path).ok_or_else(|| bad("prefs.reset", format!("unknown preference `{path}`")))
 }
 
@@ -161,6 +163,19 @@ mod tests {
         let revision = e.prefs_revision();
         assert!(matches!(run(&mut e, "prefs.reset", json!({"path": "nope"})), Err(EngineError::BadParams(..))));
         assert_eq!(e.prefs_revision(), revision);
+    }
+
+    #[test]
+    fn reset_trims_the_path_it_reports() {
+        let mut e = Engine::default();
+        run(&mut e, "prefs.set", json!({"path": "interface.language", "value": "zh-hans"})).unwrap();
+        // A padded path resets *and* replies: the reply used to describe the untrimmed string and
+        // failed with "unknown preference" after the change had already happened.
+        assert_eq!(run(&mut e, "prefs.reset", json!({"path": " interface.language "})).unwrap(), json!("auto"));
+        assert_eq!(e.prefs().interface.language, "auto");
+        run(&mut e, "prefs.set", json!({"path": "interface.language", "value": "zh-hans"})).unwrap();
+        assert_eq!(run(&mut e, "prefs.reset", json!({"path": "   "})).unwrap(), json!({"interface": {"language": "auto"}}));
+        assert_eq!(e.prefs().interface.language, "auto");
     }
 
     #[test]

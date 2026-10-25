@@ -11,12 +11,12 @@ The reference corpora are GPL-licensed, so this committed report records only te
 
 | verdict | count |
 |---|---:|
-| consensus | 174 |
-| differs | 57 |
+| consensus | 175 |
+| differs | 58 |
 | split | 43 |
-| no-data | 787 |
+| no-data | 802 |
 
-Catalog keys compared: 1061 (deduplicated, length ≥ 3).
+Catalog keys compared: 1078 (deduplicated, length ≥ 3).
 
 
 ## Majority differs from our wording (review first)
@@ -34,6 +34,7 @@ Catalog keys compared: 1061 (deduplicated, length ≥ 3).
 | Harmonic | 谐波 | 0/1 | differs |
 | Latch | 锁存 | 0/1 | differs |
 | Minimal | 最简 | 0/1 | differs |
+| Number | 编号 | 0/1 | differs |
 | Object | 对象 | 0/1 | differs |
 | Page | 翻页 | 0/1 | differs |
 | Paste Special | 特殊粘贴 | 0/1 | differs |
@@ -197,6 +198,7 @@ Catalog keys compared: 1061 (deduplicated, length ≥ 3).
 | Snap to | 吸附到 | 2/2 | consensus |
 | Stereo | 立体声 | 3/5 | consensus |
 | Stretch... | 拉伸... | 2/2 | consensus |
+| Suffix | 后缀 | 1/1 | consensus |
 | Tempo | 速度 | 3/5 | consensus |
 | Timecode | 时间码 | 2/2 | consensus |
 | Transparency | 透明度 | 1/1 | consensus |

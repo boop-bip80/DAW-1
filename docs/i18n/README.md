@@ -75,9 +75,9 @@ composition.
 python3 docs/i18n/tools/cross_check.py          # regenerate the report
 ```
 
-The current report compares **1,061** deduplicated catalog keys: 174 consensus,
-57 majority-differs, 43 split and 787 with no data in the corpora (corpus and
-catalog of 2026-10-22).
+The current report compares **1,078** deduplicated catalog keys: 175 consensus,
+58 majority-differs, 43 split and 802 with no data in the corpora (corpus and
+catalog of 2026-10-25).
 
 When the English catalog grows, re-run the cross-check before translating new
 strings: a term the ecosystem already agrees on should not be reinvented, and a
