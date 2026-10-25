@@ -74,17 +74,19 @@ def parse_po(path: Path) -> list[tuple[str, str]]:
 
     Plural entries carry one English source per form (`msgid` / `msgid_plural`) and the matching
     indexed translations (`msgstr[0]`, `msgstr[1]`, ...); every form becomes its own pair, so the
-    corpus also votes on singular/plural labels.
+    corpus also votes on singular/plural labels. A `msgctxt` is only a disambiguator, so it is
+    collected into its own buffer and never merged into a translation.
     """
     pairs: list[tuple[str, str]] = []
     msgid: list[str] | None = None
     msgid_plural: list[str] | None = None
     msgstr: list[str] | None = None
     msgstr_forms: dict[int, list[str]] = {}
+    msgctxt: list[str] | None = None
     last: list[str] | None = None
 
     def flush() -> None:
-        nonlocal msgid, msgid_plural, msgstr, msgstr_forms, last
+        nonlocal msgid, msgid_plural, msgstr, msgstr_forms, msgctxt, last
         if msgid is not None:
             en = "".join(msgid)
             plural = "".join(msgid_plural) if msgid_plural is not None else None
@@ -98,7 +100,7 @@ def parse_po(path: Path) -> list[tuple[str, str]]:
                 zh = "".join(msgstr)
                 if en and zh:
                     pairs.append((en, zh))
-        msgid = msgid_plural = msgstr = last = None
+        msgid = msgid_plural = msgstr = msgctxt = last = None
         msgstr_forms = {}
 
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -115,6 +117,9 @@ def parse_po(path: Path) -> list[tuple[str, str]]:
             except ValueError:
                 continue
             msgstr_forms[number] = last = [_po_unquote(text.strip())]
+        elif line.startswith("msgctxt "):
+            # Its continuation lines belong to the context, not to the entry above it.
+            msgctxt = last = [_po_unquote(line[8:])]
         elif line.startswith("msgstr "):
             msgstr = last = [_po_unquote(line[7:])]
         elif line.startswith('"') and last is not None:
