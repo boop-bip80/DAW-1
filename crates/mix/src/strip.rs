@@ -24,10 +24,10 @@ pub(crate) struct PluginSlot {
     pub(crate) ch: usize,
     pub(crate) plugin: Box<dyn Plugin>,
     /// Last values pushed to the plugin, in the insert's parameter-map order.
-    applied: Vec<f32>,
+    pub(crate) applied: Vec<f32>,
     /// Last values pushed from automation lanes of parameters the insert holds no value for, in
-    /// the track's lane order.
-    lane_applied: Vec<f32>,
+    /// the track's lane order, each with the lane it came from (its parameter id's address).
+    pub(crate) lane_applied: Vec<(usize, f32)>,
     pub(crate) failed: bool,
 }
 
@@ -512,9 +512,16 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
     // lanes drive it too.
     let n = lanes().filter(|(p, _)| !ins.params.contains_key(*p)).count();
     if slot.lane_applied.len() != n {
-        slot.lane_applied = vec![f32::NAN; n];
+        slot.lane_applied = vec![(0, f32::NAN); n];
     }
-    for ((p, l), last) in lanes().filter(|(p, _)| !ins.params.contains_key(*p)).zip(slot.lane_applied.iter_mut()) {
+    for ((p, l), (lane, last)) in lanes().filter(|(p, _)| !ins.params.contains_key(*p)).zip(slot.lane_applied.iter_mut()) {
+        // Another lane in this place (lanes added, removed, or a new session snapshot) is sent
+        // afresh rather than compared with the value of the one before.
+        let id = p.as_ptr() as usize;
+        if *lane != id {
+            *lane = id;
+            *last = f32::NAN;
+        }
         let val = l.value_at(pos, 0.0);
         if val.to_bits() != last.to_bits() {
             slot.plugin.set_param(p, val);

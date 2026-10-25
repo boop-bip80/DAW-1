@@ -372,7 +372,7 @@ fn insert(e: &mut Engine, p: &Value) -> Result<Value> {
             let Some(pi) = info.params.iter().find(|x| x.id == k) else {
                 return Err(bad("mix.insert", format!("`{plugin}` has no parameter `{k}`")));
             };
-            let val = v.as_f64().map_or(pi.default, |f| (f as f32).clamp(pi.min, pi.max));
+            let val = v.as_f64().map_or(pi.default, |f| pi.clamp(f as f32));
             ins.params.insert(k.clone(), val);
         }
     }
@@ -414,7 +414,7 @@ fn insert_param(e: &mut Engine, p: &Value) -> Result<Value> {
     let info = super::clap::plugin_info(&ins.plugin).ok_or_else(|| bad("mix.insert_param", "unknown plugin"))?;
     let pi =
         info.params.iter().find(|x| x.id == param).ok_or_else(|| bad("mix.insert_param", format!("`{}` has no parameter `{param}`", info.id)))?;
-    let v = value.clamp(pi.min, pi.max);
+    let v = pi.clamp(value);
     ins.params.insert(param, v);
     Ok(json!({"value": v}))
 }
@@ -447,7 +447,7 @@ fn insert_params(e: &mut Engine, p: &Value) -> Result<Value> {
     let mut n = 0;
     for (k, v) in obj {
         if let (Some(pi), Some(f)) = (info.params.iter().find(|x| x.id == k), v.as_f64().filter(|f| f.is_finite())) {
-            ins.params.insert(k, (f as f32).clamp(pi.min, pi.max));
+            ins.params.insert(k, pi.clamp(f as f32));
             n += 1;
         }
     }
@@ -559,7 +559,15 @@ pub(crate) fn current_value(tr: &soundcraft_model::Track, param: &AutoParam) -> 
         AutoParam::SendLevel(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(-144.0, |s| s.level_db),
         AutoParam::SendPan(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| s.pan),
         AutoParam::SendMute(i) => tr.mixer.sends.get(usize::from(*i)).and_then(Option::as_ref).map_or(0.0, |s| f32::from(u8::from(s.mute))),
-        AutoParam::Plugin { slot, param } => tr.plugin_at(*slot).and_then(|i| i.params.get(param).copied()).unwrap_or(0.0),
+        // A parameter the session holds no value for (a hosted instrument made by `track.new`)
+        // starts from the plugin's default, not 0.
+        AutoParam::Plugin { slot, param } => tr.plugin_at(*slot).map_or(0.0, |i| {
+            i.params
+                .get(param)
+                .copied()
+                .or_else(|| super::clap::plugin_info(&i.plugin).and_then(|info| info.param(param)).map(|pi| pi.default))
+                .unwrap_or(0.0)
+        }),
     }
 }
 

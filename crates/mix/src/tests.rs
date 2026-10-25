@@ -88,6 +88,31 @@ fn automation_drives_a_parameter_the_session_holds_no_value_for() {
 }
 
 #[test]
+fn a_new_unstored_lane_in_the_place_of_another_is_sent() {
+    // The cache of lane values is per lane: a different lane whose value happens to equal the
+    // previous one's must still reach the plugin.
+    let Some(plugin) = super::instances::create_plugin("subtractive_synth") else { return };
+    let mut slot =
+        super::strip::PluginSlot { id: "subtractive_synth".into(), ch: 2, plugin, applied: Vec::new(), lane_applied: Vec::new(), failed: false };
+    let ins = Insert::new("subtractive_synth");
+    let mut s = Session::default();
+    let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+    let lane = |param: &str| {
+        let mut l = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: soundcraft_model::INSTRUMENT_AUTO_SLOT, param: param.into() });
+        l.set_point(0, -30.0);
+        l
+    };
+    let tr = s.track_mut(t).unwrap();
+    tr.automation = vec![lane("level")];
+    super::strip::apply_params(&mut slot, &ins, tr, INSTRUMENT_SLOT, 0);
+    assert_eq!(slot.plugin.param("level"), Some(-30.0));
+    let cutoff = slot.plugin.param("cutoff");
+    tr.automation = vec![lane("cutoff")];
+    super::strip::apply_params(&mut slot, &ins, tr, INSTRUMENT_SLOT, 0);
+    assert_ne!(slot.plugin.param("cutoff"), cutoff, "the cutoff lane reached the plugin");
+}
+
+#[test]
 fn insert_slot_a_automation_does_not_drive_the_instrument() {
     let mut s = synth_session(-6.0);
     let reference = render_range(&s, Range::new(0, 12_000), 512);

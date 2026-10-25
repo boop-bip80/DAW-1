@@ -401,6 +401,37 @@ fn instrument_automation_lanes_take_the_stored_value() {
     assert_eq!(lane, Some(300.0));
 }
 
+#[test]
+fn toggles_and_choices_are_rounded_like_instrument_param() {
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({})).unwrap();
+    let t = e.session().tracks[0].id;
+    e.execute("mix.insert", &json!({"track": t.0, "slot": 0, "plugin": "eq_7band", "params": {"hpf_on": 0.7}})).unwrap();
+    let stored = |e: &Engine, k: &str| e.session().track(t).and_then(|tr| tr.mixer.inserts[0].as_ref()).and_then(|i| i.params.get(k).copied());
+    assert_eq!(stored(&e, "hpf_on"), Some(1.0), "mix.insert");
+    e.execute("mix.insert_param", &json!({"track": t.0, "slot": 0, "param": "hpf_on", "value": 0.3})).unwrap();
+    assert_eq!(stored(&e, "hpf_on"), Some(0.0), "mix.insert_param");
+    e.execute("mix.insert_params", &json!({"track": t.0, "slot": 0, "params": {"hpf_slope": 1.6}})).unwrap();
+    assert_eq!(stored(&e, "hpf_slope"), Some(2.0), "mix.insert_params");
+}
+
+#[test]
+fn a_lane_written_on_an_unstored_instrument_parameter_starts_from_its_default() {
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({"kind": "instrument"})).unwrap();
+    let t = e.session().tracks[0].id;
+    if let Some(ins) = e.session_mut().track_mut(t).and_then(|tr| tr.instrument.as_mut()) {
+        ins.params.clear();
+    }
+    let default = soundcraft_dsp::plugin_info("subtractive_synth").and_then(|i| i.param("cutoff")).map(|p| p.default).unwrap();
+    e.execute("automation.write_range", &json!({"tracks": [t.0], "param": "plugin:instrument:cutoff", "start": 48_000, "end": 96_000, "value": 300}))
+        .unwrap();
+    let param = AutoParam::parse("plugin:instrument:cutoff").unwrap();
+    let lane = e.session().track(t).and_then(|tr| tr.lane(&param)).cloned().unwrap();
+    assert_eq!(lane.value_at(0, f32::NAN), default, "before the range: the default, not 0");
+    assert_eq!(lane.value_at(72_000, f32::NAN), 300.0);
+}
+
 /// Apple's DLS synth ships with every Mac: a hosted instrument's parameters can be set by
 /// numeric id on its slot, which used to answer "not a built-in instrument".
 #[cfg(target_os = "macos")]
