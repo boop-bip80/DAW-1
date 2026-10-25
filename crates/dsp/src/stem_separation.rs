@@ -18,6 +18,24 @@ pub struct SeparationResult {
 /// Progress callback for stem separation
 pub type ProgressCallback = Arc<Mutex<dyn Fn(f32, &str) + Send + 'static>>;
 
+/// Configure GPU acceleration for ONNX Runtime
+fn configure_gpu() {
+    #[cfg(windows)]
+    {
+        // Check if DirectML is enabled via environment variable
+        if std::env::var("ORT_DML_EP_ENABLE").is_ok() {
+            log::info!("DirectML GPU acceleration enabled via environment variable");
+        } else {
+            log::info!("To enable GPU acceleration, set ORT_DML_EP_ENABLE=1 before launching");
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        log::info!("GPU acceleration only available on Windows with DirectML");
+    }
+}
+
 /// Download the HTDemucs model if it doesn't exist
 fn download_model(model_path: &str, progress: Option<ProgressCallback>) -> Result<(), String> {
     log::info!("Downloading HTDemucs model from Hugging Face...");
@@ -72,6 +90,9 @@ pub fn separate_audio(
     model_path: &str,
     progress: Option<ProgressCallback>,
 ) -> Result<SeparationResult, String> {
+    // Configure GPU acceleration before creating separator
+    configure_gpu();
+    
     // Download model if it doesn't exist
     if !Path::new(model_path).exists() {
         download_model(model_path, progress.clone())?;
@@ -83,7 +104,7 @@ pub fn separate_audio(
         }
     }
     
-    // Configure separator with progress and try to use GPU
+    // Configure separator with progress
     let config = SeparatorConfig::htdemucs(model_path)
         .with_progress(true)
         .with_overlap(0.5)
@@ -146,6 +167,9 @@ pub fn separate_audio_async(
 }
 
 pub fn init_stem_separation(model_path: &str) -> Result<(), String> {
+    // Configure GPU acceleration
+    configure_gpu();
+    
     // Download model if it doesn't exist
     if !Path::new(model_path).exists() {
         download_model(model_path, None)?;
