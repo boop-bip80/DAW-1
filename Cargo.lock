@@ -4067,6 +4067,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "soundcraft-au-host",
  "soundcraft-audio-io",
  "soundcraft-clap-host",

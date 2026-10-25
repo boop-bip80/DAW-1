@@ -37,7 +37,7 @@ fn check_audio_clip(
         add("missing_source", "Source metadata is missing. Reimport the audio and replace this clip.");
     }
     let Some(audio) = audio else {
-        add("unavailable_audio", "Audio is not loaded; this clip will be silent. Restore the media and reopen the session, or reimport it.");
+        add("unavailable_audio", "Audio is not loaded; this clip will be silent. Use Relink Audio to select the original media, or reimport it.");
         return;
     };
     if audio.buffer.sample_rate != ctx.session_sample_rate {
