@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-25 · **Change:** trivial (G-04: Clip Looping crossfade and loop count; previously trivial: G-08 and G-20: built-in plugin count, the sampler shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-25 · **Change:** trivial (G-01: audio load and dropout meter; G-04: Clip Looping crossfade and loop count) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -46,6 +46,8 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
   device, sample rate and device buffer size (kept with the preferences, per machine; `ui.audio_device`
   for agents); f32 and 16/32-bit integer devices; ASIO behind the opt-in `asio` build feature
   (verified on Windows with an SSL 2+ at 128 samples).
+- **Done (2026-10-25):** Window › System Usage shows the audio callback's load (render time over
+  buffer duration, average and peak) and counts late callbacks (dropouts); `ui.audio_load` for agents.
 - **Missing:** routing to physical channels (I/O Setup), one duplex stream on one clock (input and
   output are still separate cpal streams), latency reporting and record-offset compensation, ASIO
   in official builds (owner decision: Steinberg's SDK is proprietary or GPLv3), JACK, and
@@ -226,6 +228,7 @@ missing. Out of scope unless the owner decides otherwise.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-25 | trivial | G-04: Clip Looping (#1030) lacks the loop crossfade option, and Number of Loops stops at 512 while length and fill make up to 1000 loops |
+| 2026-10-25 | trivial | G-01: Window › System Usage shows the audio callback load and late callbacks (dropouts); `ui.audio_load` |
 | 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |
 | 2026-10-18 | trivial | G-04: mono device stereo/surround fold-down fixed and regression-tested; estimates unchanged |
