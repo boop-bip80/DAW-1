@@ -7,6 +7,7 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("app.checkForUpdates", "Check for Updates…", "", None),
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
@@ -233,7 +234,7 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                         app.ui.show_about = true;
                     }
                     if ui.button("Check for Updates…").clicked() {
-                        crate::updates_ui::check(app);
+                        let _ = app.run("app.checkForUpdates", json!({}));
                     }
                     if ui.button("Session Info").clicked() {
                         app.ui.show_session_info = true;

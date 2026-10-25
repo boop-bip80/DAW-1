@@ -70,8 +70,8 @@ pub(crate) fn tick(app: &mut SoundApp, ctx: &egui::Context) {
 pub(crate) fn show(app: &mut SoundApp, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // The restart helper is scheduled before the app closes, so no update starts over unsaved work.
-        let clean = !app.has_unsaved_changes();
+        // The restart helper is scheduled before the app closes, so no update starts over unsaved work or a take being recorded.
+        let clean = !app.has_unsaved_changes() && !app.engine.transport.recording;
         match app.updates_rt.updater.show_if(ctx, clean) {
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
