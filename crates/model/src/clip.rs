@@ -134,6 +134,10 @@ pub struct Clip {
     /// Optional colour override (RGB).
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// The key in [`crate::Session::auto_names`] of the names that editing gives the clips it
+    /// separates from this one (Clip List › Auto Rename). `None` keeps the clip's name.
+    #[serde(default)]
+    pub auto_name: Option<u64>,
     /// Elastic / Vari-speed ratio (1.0 = none) — applied by rendered processing.
     #[serde(default = "one")]
     pub stretch: f64,
@@ -168,6 +172,7 @@ impl Clip {
             rating: 0,
             sync_point: 0,
             color: None,
+            auto_name: None,
             stretch: 1.0,
             group: None,
             loop_id: None,
