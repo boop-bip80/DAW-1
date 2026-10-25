@@ -1990,11 +1990,12 @@ impl SoundApp {
         let mut claimed = false;
         for (file, pos) in std::mem::take(&mut self.pending_drops) {
             let path = file.path().to_string_lossy().into_owned();
-            // A SoundFont dropped on an instrument slot becomes what that track plays.
+            // A SoundFont dropped on an instrument slot becomes what that track plays; dropped
+            // anywhere else, the selected instrument track's.
             if !claimed
                 && path.to_ascii_lowercase().ends_with(".sf2")
                 && file.path().is_absolute()
-                && let Some(track) = self.drop_track(pos)
+                && let Some(track) = self.drop_track(pos).or_else(|| menus::instrument_track(self.engine.session()))
             {
                 claimed = true;
                 self.ui.status = match self.run("mix.soundfont_load", json!({"track": track.0, "path": path})) {
