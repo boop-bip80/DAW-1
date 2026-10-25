@@ -9,9 +9,11 @@ use soundcraft_ui_egui::{Gesture, MainWindow, Services, SoundApp};
 const CMD: Modifiers = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
 const ALT: Modifiers = Modifiers { alt: true, ..Modifiers::NONE };
 
+/// Feed one harness frame through the raw-input hook before stepping, so scripted input reaches the app.
 fn step(h: &mut Harness<'_, SoundApp>) {
     let mut raw = std::mem::take(h.input_mut());
-    h.state_mut().raw_input_hook(&mut raw);
+    let ctx = h.ctx.clone();
+    h.state_mut().raw_input_hook(&ctx, &mut raw);
     *h.input_mut() = raw;
     h.step();
 }
@@ -85,6 +87,8 @@ fn header_keys_freeze_silence_and_show_automation() {
     assert_eq!(h.state().ui.window, MainWindow::Mix);
 }
 
+/// From the Edit window's insert column, clicking a plugin opens it, Cmd-click bypasses it, right-click changes or
+/// removes it through the menu and an empty slot adds a plugin.
 #[test]
 fn edit_window_insert_slots_open_change_and_add_plugins() {
     let (mut h, kick, row) = harness("Kick", "medium", "view.edit_inserts_ae");
@@ -105,7 +109,7 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
 
     let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
     click(&mut h, slot(2));
-    let category = h.get_by_label(&format!("{:?} ⏵", plugin.category)).rect().center();
+    let category = h.get_by_label(&format!("{:?}", plugin.category)).rect().center();
     h.state_mut().synthetic.push(Event::PointerMoved(category));
     for _ in 0..10 {
         step(&mut h);
@@ -115,6 +119,7 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
     assert_eq!(insert(&h, 2).as_deref(), Some(plugin.id));
 }
 
+/// Short tracks draw insert slots as squares that still open, bypass and open the add-plugin menu.
 #[test]
 fn short_tracks_show_insert_slots_as_squares() {
     let (mut h, kick, row) = harness("Kick", "small", "view.edit_inserts_ae");
@@ -128,7 +133,7 @@ fn short_tracks_show_insert_slots_as_squares() {
 
     click(&mut h, square(4));
     let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
-    assert!(h.query_by_label(&format!("{:?} ⏵", plugin.category)).is_some());
+    assert!(h.query_by_label(&format!("{:?}", plugin.category)).is_some());
 }
 
 #[test]
