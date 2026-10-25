@@ -1569,9 +1569,9 @@ fn soloed(s: &Session, t: &Track) -> bool {
     t.mixer.solo || t.mixer.vca.is_some_and(|vid| s.tracks.iter().any(|v| v.id.0 == vid && v.kind == TrackKind::Vca && !v.inactive && v.mixer.solo))
 }
 
-/// True when `t` writes onto bus `b`, by its output or a send.
+/// True when `t` writes onto bus `b`, by its output or a send that is not muted (a muted send carries nothing).
 fn feeds(t: &Track, b: BusId) -> bool {
-    t.mixer.output == Route::Bus(b) || t.mixer.sends.iter().flatten().any(|sn| sn.target == Route::Bus(b))
+    t.mixer.output == Route::Bus(b) || t.mixer.sends.iter().flatten().any(|sn| sn.target == Route::Bus(b) && !sn.mute)
 }
 
 /// Marks in `heard` (by track index) the tracks the solo lets through: the soloed ones and,
@@ -2758,6 +2758,19 @@ mod tests {
         let mut heard = Vec::new();
         assert!(solo_reach(s, order, &mut heard), "something is soloed");
         heard
+    }
+
+    #[test]
+    fn a_muted_send_does_not_carry_the_solo() {
+        let (mut s, src, _, _) = aux_chain(true);
+        s.track_mut(src).unwrap().mixer.solo = true;
+        // src 0, other 1, aux 1 2, aux 2 3.
+        assert_eq!(reach(&s, &processing_order(&s)), vec![true, false, true, true], "the send carries the solo down the chain");
+        if let Some(Some(sn)) = s.track_mut(src).unwrap().mixer.sends.first_mut() {
+            sn.mute = true;
+        }
+        assert_eq!(reach(&s, &processing_order(&s)), vec![true, false, false, false], "a muted send carries nothing");
+        assert_eq!(solo_muted_tracks(&s), vec![false, true, true, true], "so the solo mutes both auxes");
     }
 
     #[test]
