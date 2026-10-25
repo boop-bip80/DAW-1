@@ -1,13 +1,13 @@
 //! The Edit window toolbar.
 
-use crate::theme::{Tokens, bold, mono, regular};
+use crate::theme::{bold, mono, regular, Tokens};
 use crate::widgets::{icon_button, key, key_fill};
-use crate::{SoundApp, icons};
-use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use crate::{icons, SoundApp};
+use egui::{pos2, vec2, Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui};
 use serde_json::json;
 use soundcraft_engine::edit::{SHUFFLE_LOCK, SNAP_TO_GRID};
 use soundcraft_model::{EditMode, Tool};
-use soundcraft_time::{TimeFormat, format_length};
+use soundcraft_time::{format_length, TimeFormat};
 
 pub const HEIGHT: f32 = 78.0;
 
@@ -345,14 +345,14 @@ fn transport(app: &mut SoundApp, ui: &mut Ui) {
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
                 key(ui.painter(), r, &resp, key_fill(&resp));
                 icons::draw(ui.painter(), r.shrink(5.0), "stop", if playing { t.text } else { t.accent });
-                if resp.on_hover_text("Stop (Space)").clicked() {
+                if resp.on_hover_text("Stop").clicked() {
                     let _ = app.run("transport.stop", json!({}));
                 }
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
                 key(ui.painter(), r, &resp, if playing { Color32::from_rgb(40, 90, 50) } else { key_fill(&resp) });
                 icons::draw(ui.painter(), r.shrink(5.0), "play", if playing { Color32::from_rgb(120, 255, 140) } else { t.counter_text });
-                if resp.on_hover_text("Play (Space)").clicked() {
-                    let _ = app.run("transport.play", json!({}));
+                if resp.on_hover_text(if playing { "Pause (Space)" } else { "Play (Space)" }).clicked() {
+                    let _ = app.run(if playing { "transport.pause" } else { "transport.play" }, json!({}));
                 }
                 let (r, resp) = ui.allocate_exact_size(vec2(38.0, 28.0), Sense::click());
                 key(ui.painter(), r, &resp, if recording { Color32::from_rgb(110, 30, 30) } else { key_fill(&resp) });

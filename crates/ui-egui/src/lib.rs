@@ -379,6 +379,9 @@ pub struct SoundApp {
     pub(crate) docking_context: Option<egui::Context>,
     /// Transport simulation when there is no player (tests, offscreen renders).
     sim: Option<(Samples, Option<Samples>, Option<Range>)>,
+    /// Playhead to resume from after Pause. Stop clears it so the next Play
+    /// starts at the selection again.
+    resume_at: Option<Samples>,
     /// When Record last found nothing to record on, and why: the Record buttons show it for a moment.
     record_hint: Option<(f64, &'static str)>,
     pub quit_requested: bool,
@@ -538,6 +541,7 @@ impl SoundApp {
             theme_applied: None,
             docking_context: None,
             sim: None,
+            resume_at: None,
             record_hint: None,
             quit_requested: false,
             arrange_request: false,
@@ -652,8 +656,22 @@ impl SoundApp {
     }
 
     fn stop_play(&mut self) {
+        self.finish_transport(false);
+    }
+
+    fn pause_play(&mut self) {
+        if !self.engine.transport.playing && !self.engine.transport.recording {
+            return;
+        }
+        self.finish_transport(true);
+    }
+
+    /// Shared teardown for Stop and Pause. Pause keeps the playhead and remembers
+    /// it for the next Play. Both reset half-speed, finish an open take, and
+    /// move the selection only when insertion follows playback.
+    fn finish_transport(&mut self, pause: bool) {
         if let Some(p) = &self.player {
-            // Half-speed is a separate command. Stop must not leave that rate for the next Play.
+            // Half-speed is a separate command. Stop and Pause must not leave that rate for the next Play.
             p.set_speed(1.0);
             p.stop();
         }
@@ -670,6 +688,12 @@ impl SoundApp {
             let s = self.engine.session();
             (s.edit.insertion_follows_playback, s.edit.scrolling == "after_playback")
         };
+        if pause {
+            self.resume_at = Some(stop_at);
+            self.engine.session_mut().edit.playhead = stop_at;
+        } else {
+            self.resume_at = None;
+        }
         if follow_insertion {
             let pos = self.engine.transport.position;
             self.engine.session_mut().edit.selection = Range::point(pos);
@@ -1255,10 +1279,15 @@ impl SoundApp {
                 }
                 TransportRequest::Play => {
                     if !self.is_playing() {
-                        self.play_from_selection();
+                        if let Some(at) = self.resume_at.take() {
+                            self.start_play(at, None, None);
+                        } else {
+                            self.play_from_selection();
+                        }
                     }
                 }
-                TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
+                TransportRequest::Stop => self.stop_play(),
+                TransportRequest::Pause => self.pause_play(),
                 TransportRequest::TogglePlay => {
                     if self.is_playing() {
                         self.stop_play();
@@ -2085,6 +2114,38 @@ mod tests {
             assert_eq!(app.latest_autosave().is_some(), gesture);
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn pause_keeps_the_playhead_and_the_selection_and_resumes_there() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.run("transport.play", json!({"from": 48_000})).unwrap();
+        app.handle_transport(0.25);
+        assert!(app.is_playing());
+        let pos = app.engine.transport.position;
+        assert!(pos > 48_000);
+        // A range that does not contain the playhead. Pause must leave it alone
+        // when insertion does not follow playback.
+        let selection = soundcraft_time::Range::new(1_000, 8_000);
+        app.engine.session_mut().edit.selection = selection;
+        app.engine.session_mut().edit.insertion_follows_playback = false;
+        app.engine.transport.recording = true;
+        app.run("transport.pause", json!({})).unwrap();
+        app.handle_transport(0.0);
+        assert!(!app.is_playing());
+        assert!(!app.engine.transport.recording, "pause finishes a take the way stop does");
+        assert_eq!(app.engine.transport.position, pos);
+        assert_eq!(app.engine.session().edit.selection, selection, "pause must not replace a selection");
+        assert_eq!(app.engine.session().edit.playhead, pos);
+        app.run("transport.play", json!({})).unwrap();
+        app.handle_transport(0.0);
+        assert!(app.is_playing());
+        assert_eq!(app.engine.transport.position, pos, "play after pause resumes at the playhead, not the selection");
+        app.run("transport.stop", json!({})).unwrap();
+        app.handle_transport(0.0);
+        app.run("transport.play", json!({})).unwrap();
+        app.handle_transport(0.0);
+        assert_eq!(app.engine.transport.position, selection.start, "stop clears the pause so the next play uses the selection");
     }
 
     #[test]
