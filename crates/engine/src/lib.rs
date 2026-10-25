@@ -15,6 +15,7 @@ pub mod edit;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
+mod live;
 pub mod score;
 
 use serde_json::{Value, json};
@@ -24,6 +25,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
+pub use live::LivePlugins;
 pub use soundcraft_model as model;
 
 /// Shuts the third-party plugin hosts down, running the module exit of every plugin binary they
@@ -195,6 +197,8 @@ pub struct Engine {
     pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
     /// Audio decoded off the UI thread, waiting for its `file.import_audio` (see `offer_import`).
     imports: Vec<io::DecodedImport>,
+    /// Live plugin instances of the desktop player, when one is running. Empty for the CLI and MCP.
+    live_plugins: Option<Box<dyn LivePlugins>>,
 }
 
 impl Default for Engine {
@@ -226,7 +230,25 @@ impl Engine {
             messages: Vec::new(),
             last_selection: None,
             imports: Vec::new(),
+            live_plugins: None,
         }
+    }
+
+    /// Installs (or removes) the desktop player's live plugin instances. Commands consult them
+    /// before creating a temporary plugin to parse text or probe values.
+    pub fn set_live_plugins(&mut self, live: Option<Box<dyn LivePlugins>>) {
+        self.live_plugins = live;
+    }
+
+    /// Whether [`set_live_plugins`](Self::set_live_plugins) installed a source.
+    pub fn has_live_plugins(&self) -> bool {
+        self.live_plugins.is_some()
+    }
+
+    pub(crate) fn live_plugins_mut(&mut self) -> Option<&mut dyn LivePlugins> {
+        // `&mut dyn Trait` is invariant in the trait object's lifetime, so `as_deref_mut` will not
+        // hand back the `'static` object for this shorter borrow. The cast reborrows it.
+        self.live_plugins.as_mut().map(|live| &mut **live as &mut dyn LivePlugins)
     }
 
     /// Hands over audio [`io::decode_import`] made off the UI thread: the next `file.import_audio`
