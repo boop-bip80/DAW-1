@@ -101,6 +101,11 @@ pub struct UiState {
     pub show_playback_engine: bool,
     /// The audio device choice (Setup › Playback Engine), kept with the preferences: per machine.
     pub audio: soundcraft_playback::AudioConfig,
+    /// Setup › MIDI › MIDI Input Devices window.
+    pub show_midi_input_devices: bool,
+    /// MIDI input ports the user turned off, by name, kept with the preferences: per machine.
+    /// Every other port, including one plugged in later, is played.
+    pub midi_inputs_disabled: Vec<String>,
     /// The Mix window lives in its own native window (Window › Mix in Separate Window); the main
     /// window then always shows Edit.
     pub mix_separate: bool,
@@ -167,6 +172,8 @@ impl Default for UiState {
             show_configurations: false,
             show_playback_engine: false,
             audio: soundcraft_playback::AudioConfig::default(),
+            show_midi_input_devices: false,
+            midi_inputs_disabled: Vec::new(),
             mix_separate: false,
             show_io_setup: false,
             show_shortcuts: false,
@@ -256,6 +263,10 @@ pub struct SoundApp {
     /// When the recent sessions were last checked for existence, which list, and the result.
     recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
     pub player: Option<Player>,
+    /// MIDI keyboards and controllers, played through the instruments of armed tracks.
+    pub midi_inputs: soundcraft_playback::midi_in::MidiInputs,
+    /// When the MIDI input ports were last brought in line with the system (uptime, seconds).
+    midi_checked: Option<f64>,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
     record_start: Samples,
@@ -474,6 +485,8 @@ impl SoundApp {
             recent_checked: None,
             engine,
             player,
+            midi_inputs: soundcraft_playback::midi_in::MidiInputs::new(),
+            midi_checked: None,
             recorder: None,
             record_start: 0,
             punch: None,
@@ -1036,6 +1049,24 @@ impl SoundApp {
         Ok(())
     }
 
+    /// Keep the MIDI input ports feeding the current player (a new one after the audio device
+    /// reopened), and every few seconds open newly plugged keyboards and drop unplugged ones.
+    /// `retry` (Refresh) also retries ports that failed to open. Without an audio output
+    /// (silent clock, tests) no port is opened: nothing could be heard.
+    pub fn service_midi_inputs(&mut self, retry: bool) {
+        const EVERY_S: f64 = 3.0;
+        let Some(p) = self.player.as_ref().filter(|p| !p.silent) else {
+            self.midi_inputs.unroute();
+            self.midi_inputs.close_all();
+            return;
+        };
+        self.midi_inputs.route_to(p);
+        if retry || self.midi_checked.is_none_or(|t| self.uptime - t >= EVERY_S) {
+            self.midi_checked = Some(self.uptime);
+            self.midi_inputs.sync(&self.ui.midi_inputs_disabled, retry);
+        }
+    }
+
     /// Open the input device once (for recording and input monitoring) and feed the player.
     fn ensure_input(&mut self) {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
@@ -1413,6 +1444,7 @@ impl SoundApp {
         }
         self.watch_output();
         self.watch_input();
+        self.service_midi_inputs(false);
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
         if self.engine.revision != self.last_rev {
