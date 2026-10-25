@@ -774,13 +774,25 @@ impl Default for StripNames {
 
 impl StripNames {
     /// The largest first number.
-    pub const MAX_NUMBER: u64 = 999_999_999;
+    pub const MAX_NUMBER: u64 = soundcraft_model::AutoName::MAX_NUMBER;
     /// The most zeros before the number.
-    pub const MAX_ZEROS: usize = 9;
+    pub const MAX_ZEROS: usize = soundcraft_model::AutoName::MAX_ZEROS;
 
     /// The name of the clip `i` places after the first one.
     pub fn clip_name(&self, i: u64) -> String {
         format!("{}{}{}{}", self.name, "0".repeat(self.zeros), self.number.saturating_add(i), self.suffix)
+    }
+}
+
+impl From<&soundcraft_model::AutoName> for StripNames {
+    fn from(a: &soundcraft_model::AutoName) -> Self {
+        Self { name: a.name.clone(), number: a.number, zeros: a.zeros, suffix: a.suffix.clone() }
+    }
+}
+
+impl From<StripNames> for soundcraft_model::AutoName {
+    fn from(n: StripNames) -> Self {
+        Self { name: n.name, number: n.number, zeros: n.zeros, suffix: n.suffix, id: 0 }
     }
 }
 
@@ -803,8 +815,20 @@ pub fn name_stripped_clips(s: &mut Session, t: TrackId, r: Range, names: &StripN
 /// non-silent ranges (`Strip`), only the silent ranges (`Extract`), or every piece (`Separate`).
 /// `pad` is the clip start and end pad added around each non-silent range. Returns the number of
 /// ranges kept: non-silent ranges for `Strip` and `Separate`, silent ranges that still hold a clip for
-/// `Extract`.
-pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: Samples, pad: (Samples, Samples), mode: StripMode) -> Result<usize> {
+/// `Extract`. The new pieces that are kept take Auto Rename names in time order, and the removed
+/// ones do not. When `named` is true the caller names the audio clips left inside `r` with
+/// [`name_stripped_clips`], so those clips do not take Auto Rename names either.
+#[allow(clippy::too_many_arguments)]
+pub fn strip_silence(
+    s: &mut Session,
+    t: TrackId,
+    r: Range,
+    thr: f32,
+    min_len: Samples,
+    pad: (Samples, Samples),
+    mode: StripMode,
+    named: bool,
+) -> Result<usize> {
     let r = bounded_to_track(s, t, r);
     let keep = non_silent(s, t, r, thr, min_len, pad, &AtomicBool::new(false))?;
     let mut cut_points = vec![r.start];
@@ -813,15 +837,23 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
         cut_points.push(*b);
     }
     cut_points.push(r.end);
+    let old: std::collections::HashSet<_> = s.track(t).map(|x| x.clips().iter().map(|c| c.id).collect()).unwrap_or_default();
     for p in &cut_points {
-        crate::edit::separate_at(s, t, *p);
+        crate::edit::separate_at_if(s, t, *p, |_| false);
     }
+    let kept = strip_pieces(s, t, r, &keep, mode);
+    crate::edit::auto_name_new_clips(s, t, &old, |c| !(named && c.is_audio() && c.start >= r.start && c.end() <= r.end));
+    Ok(kept)
+}
+
+/// Removes the pieces that Strip Silence does not keep in `mode` and returns the number of ranges kept.
+fn strip_pieces(s: &mut Session, t: TrackId, r: Range, keep: &[(Samples, Samples)], mode: StripMode) -> usize {
     if mode == StripMode::Separate {
-        return Ok(keep.len());
+        return keep.len();
     }
     let mut gaps = Vec::new();
     let mut prev = r.start;
-    for (a, b) in &keep {
+    for (a, b) in keep {
         if *a > prev {
             gaps.push(Range::new(prev, *a));
         }
@@ -833,12 +865,12 @@ pub fn strip_silence(s: &mut Session, t: TrackId, r: Range, thr: f32, min_len: S
     let audio: Vec<Range> = keep.iter().map(|(a, b)| Range::new(*a, *b)).collect();
     let remove = if mode == StripMode::Extract { &audio } else { &gaps };
     let inside = |c: &Clip, g: &Range| c.start >= g.start && c.end() <= g.end;
-    let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) else { return Ok(if mode == StripMode::Extract { 0 } else { keep.len() }) };
+    let Some(pl) = s.track_mut(t).and_then(|x| x.playlist_mut()) else { return if mode == StripMode::Extract { 0 } else { keep.len() } };
     pl.clips.retain(|c| !remove.iter().any(|g| inside(c, g)));
     if mode == StripMode::Extract {
-        return Ok(gaps.iter().filter(|g| pl.clips.iter().any(|c| inside(c, g))).count());
+        return gaps.iter().filter(|g| pl.clips.iter().any(|c| inside(c, g))).count();
     }
-    Ok(keep.len())
+    keep.len()
 }
 
 /// The ranges [`strip_silence`] finds on `t` inside `r` with the same settings: the non-silent ranges
@@ -2546,6 +2578,31 @@ mod strip_tests {
     }
 
     #[test]
+    fn strip_names_leave_the_auto_rename_sequence_unbroken() {
+        let (mut e, t) = tone_gap_tone();
+        let id = e.session().track(t).unwrap().clips()[0].id;
+        e.execute("clip.auto_rename", &json!({"clips": [id], "name": "Take"})).unwrap();
+        let p = json!({"track": t.0, "start": 0, "end": 120_000, "pad_before_ms": 0, "pad_after_ms": 0, "mode": "separate", "name": "SFX"});
+        assert_eq!(e.execute("edit.strip_silence", &p).unwrap()["named"], 3);
+        // Strip Silence does not name the piece after the range, so that piece takes the first Auto Rename name.
+        assert_eq!(names(&e, t), ["SFX1", "SFX2", "SFX3", "Take1"]);
+        e.execute("edit.separate", &json!({"tracks": [t], "at": 132_000})).unwrap();
+        assert_eq!(names(&e, t)[4], "Take2");
+    }
+
+    #[test]
+    fn only_the_pieces_strip_silence_keeps_take_auto_rename_numbers() {
+        for (mode, kept) in [("strip", ["tone gap tone", "Take1", "Take2"].as_slice()), ("extract", ["Take1", "Take2"].as_slice())] {
+            let (mut e, t) = tone_gap_tone();
+            let id = e.session().track(t).unwrap().clips()[0].id;
+            e.execute("clip.auto_rename", &json!({"clips": [id], "name": "Take"})).unwrap();
+            let p = json!({"track": t.0, "start": 0, "end": 120_000, "pad_before_ms": 0, "pad_after_ms": 0, "mode": mode});
+            e.execute("edit.strip_silence", &p).unwrap();
+            assert_eq!(names(&e, t), kept, "{mode}");
+        }
+    }
+
+    #[test]
     fn bad_naming_params_are_refused() {
         for bad in [
             json!({"suffix": ".Reel1"}),
@@ -2555,6 +2612,7 @@ mod strip_tests {
             json!({"name": "SFX", "number": StripNames::MAX_NUMBER + 1}),
             json!({"name": "SFX", "zeros": StripNames::MAX_ZEROS + 1}),
             json!({"name": "SFX", "suffix": null}),
+            json!({"name": "S".repeat(300)}),
         ] {
             let (mut e, t) = tone_gap_tone();
             let mut p = json!({"track": t.0, "start": 0, "end": 144_000});

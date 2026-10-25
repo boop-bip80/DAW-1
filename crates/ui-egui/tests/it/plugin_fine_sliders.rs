@@ -92,7 +92,7 @@ fn plugin_window_sliders_move_a_tenth_as_far_with_ctrl_held() {
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.ui.plugin_windows = vec![(kick, 0)];
     let mut h = harness(app);
-    let rails = window_sliders(&h, Id::new(("plugin", kick.0, 0usize)));
+    let rails = window_sliders(&h, Id::unique(("plugin", kick.0, 0usize)));
     let params = slider_params("eq_7band");
     for i in [0, 2] {
         let p = params[i];
@@ -108,7 +108,7 @@ fn a_small_ctrl_drag_at_the_low_end_of_a_log_slider_moves_the_value() {
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.ui.plugin_windows = vec![(kick, 1)];
     let mut h = harness(app);
-    let rails = window_sliders(&h, Id::new(("plugin", kick.0, 1usize)));
+    let rails = window_sliders(&h, Id::unique(("plugin", kick.0, 1usize)));
     let attack = slider_params("compressor")[2];
     assert_eq!(attack.id, "attack");
     let from = rails[2].left_center() + vec2(1.0, 0.0);
@@ -130,7 +130,7 @@ fn whole_number_instrument_sliders_move_a_tenth_as_far_and_stay_whole() {
     app.run("mix.instrument", json!({"track": keys.0, "plugin": "sampler"})).unwrap();
     app.ui.plugin_windows = vec![(keys, soundcraft_mix::INSTRUMENT_SLOT)];
     let mut h = harness(app);
-    let rails = window_sliders(&h, Id::new(("plugin", keys.0, soundcraft_mix::INSTRUMENT_SLOT)));
+    let rails = window_sliders(&h, Id::unique(("plugin", keys.0, soundcraft_mix::INSTRUMENT_SLOT)));
     let root = slider_params("sampler")[0];
     assert_eq!(root.id, "root_note");
     // Each read during the drags checks that the instrument was sent a whole number.
@@ -165,7 +165,7 @@ fn audiosuite_parameter_sliders_move_a_tenth_as_far_with_ctrl_held() {
     let mut h = harness(app);
     for (label, id) in [("Threshold", "threshold"), ("Knee", "knee")] {
         let read = move |h: &Harness<'_, SoundApp>| {
-            let params: BTreeMap<String, f32> = h.ctx.data(|d| d.get_temp(Id::new(("as_params", "compressor".to_string())))).unwrap_or_default();
+            let params: BTreeMap<String, f32> = h.ctx.data(|d| d.get_temp(Id::unique(("as_params", "compressor".to_string())))).unwrap_or_default();
             f64::from(params[id])
         };
         let rail = h.get_by_role_and_label(Role::Slider, label).rect();
