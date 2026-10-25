@@ -25,8 +25,18 @@ SoundCraft bundles one font file: Droid Sans Mono (Apache-2.0, listed under File
 face of the monospace family (counters, readouts, values) because its zero is plain: no slash, no dot.
 It also uses the default fonts shipped inside the `egui` crate (Ubuntu-Light: Ubuntu Font Licence 1.0;
 Hack: MIT, kept as the monospace fallback for glyphs Droid Sans Mono lacks; Noto Emoji: OFL-1.1;
-emoji-icon-font: OFL-1.1/MIT) and, at runtime, the operating system's own UI fonts when available
+emoji-icon-font: MIT) and, at runtime, the operating system's own UI fonts when available
 (never redistributed).
+
+## Bundled egui font icons
+
+These dependency fonts are embedded by the pinned egui font definitions; no font file is added
+here. The subset uses default_fonts; the parent face uses monochrome_emoji_fonts.
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `epaint_default_fonts/fonts/egui-icons.ttf` | John Slegers (emoji-icon-font) | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/egui-icons.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in NOTICE) |
+| `epaint_default_fonts/fonts/emoji-icon-font.ttf` | John Slegers | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/emoji-icon-font-mit-license.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in NOTICE) |
 
 ## Files
 

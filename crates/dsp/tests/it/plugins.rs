@@ -513,6 +513,112 @@ fn saturator_adds_harmonics_and_stays_bounded() {
     assert!(spec[third - 1..=third + 1].iter().cloned().fold(f32::MIN, f32::max) > -30.0);
 }
 
+/// Amplitude of the `freq` component of `x` (a whole number of cycles keeps it exact).
+fn tone_level(x: &[f32], freq: f32) -> f32 {
+    let (mut re, mut im) = (0.0f64, 0.0f64);
+    for (i, v) in x.iter().enumerate() {
+        let w = f64::from(TAU * freq / SR) * i as f64;
+        re += f64::from(*v) * w.cos();
+        im += f64::from(*v) * w.sin();
+    }
+    (2.0 * (re * re + im * im).sqrt() / x.len() as f64) as f32
+}
+
+/// A Subharmonic with only the wet path and wide filters, so a band's octave reaches the output.
+fn subharmonic_wet() -> Box<dyn Plugin> {
+    let mut p = prepared("subharmonic");
+    p.set_param("mix", 100.0);
+    p.set_param("hp_freq", 5.0);
+    p.set_param("lp_freq", 1000.0);
+    p
+}
+
+#[test]
+fn subharmonic_adds_the_octave_below_each_range_band() {
+    for (range, lower, upper) in [(0.0, 120.0, 180.0), (1.0, 80.0, 120.0), (2.0, 60.0, 90.0), (3.0, 40.0, 60.0)] {
+        for (band, freq) in [("lower", lower), ("upper", upper)] {
+            let mut p = subharmonic_wet();
+            p.set_param("range", range);
+            p.set_param("lower_gain", if band == "lower" { 0.0 } else { -120.0 });
+            p.set_param("upper_gain", if band == "upper" { 0.0 } else { -120.0 });
+            let out = run(p.as_mut(), &[sine(freq, 0.5, 96_000)]);
+            // One second after the filters settle: a whole number of cycles of both tones.
+            let tail = &out[0][48_000..];
+            let sub = tone_level(tail, freq / 2.0);
+            assert!(sub > 0.2, "range {range} {band} band: {sub} at {} Hz", freq / 2.0);
+            assert!(sub > 4.0 * tone_level(tail, freq), "range {range} {band} band keeps its input tone");
+        }
+    }
+}
+
+#[test]
+fn subharmonic_mix_keeps_one_path_at_full_level() {
+    // A 1 kHz tone is far above every band, so the output is the dry path alone.
+    for (mix, dry) in [(0.0, 1.0), (25.0, 1.0), (50.0, 1.0), (75.0, 0.5), (100.0, 0.0)] {
+        let mut p = prepared("subharmonic");
+        p.set_param("mix", mix);
+        let out = run(p.as_mut(), &[sine(1000.0, 0.5, 48_000)]);
+        let level = tone_level(&out[0][24_000..], 1000.0);
+        assert!((level - 0.5 * dry).abs() < 0.01, "mix {mix}: dry level {level}");
+    }
+    // The wet path is at full level from 50 % up and at half level at 25 %.
+    let wet = |mix: f32| {
+        let mut p = prepared("subharmonic");
+        p.set_param("mix", mix);
+        p.set_param("wet_solo", 1.0);
+        let out = run(p.as_mut(), &[sine(60.0, 0.5, 96_000)]);
+        tone_level(&out[0][48_000..], 30.0)
+    };
+    let full = wet(50.0);
+    assert!(full > 0.1, "wet level {full}");
+    assert!((wet(100.0) - full).abs() < 0.01 * full);
+    assert!((wet(25.0) - 0.5 * full).abs() < 0.01 * full);
+}
+
+#[test]
+fn subharmonic_solo_plays_one_band_and_mutes_the_dry_signal() {
+    let level = |solo: &str, gain: f32| {
+        let mut p = prepared("subharmonic");
+        p.set_param("lower_gain", gain);
+        p.set_param(solo, 1.0);
+        let x = sine(60.0, 0.5, 96_000).iter().zip(sine(1000.0, 0.5, 96_000)).map(|(a, b)| a + b).collect();
+        let out = run(p.as_mut(), &[x]);
+        let tail = &out[0][48_000..];
+        (tone_level(tail, 30.0), tone_level(tail, 1000.0))
+    };
+    let (sub, dry) = level("lower_solo", 0.0);
+    assert!(sub > 0.1 && dry < 0.01, "lower solo: sub {sub}, dry {dry}");
+    // With the soloed band turned off nothing else plays, though the upper band is on.
+    let (sub, dry) = level("lower_solo", -120.0);
+    assert!(sub < 0.01 && dry < 0.01, "silent lower solo: sub {sub}, dry {dry}");
+    let (sub, dry) = level("upper_solo", -120.0);
+    assert!(sub > 0.05 && dry < 0.01, "upper solo: sub {sub}, dry {dry}");
+}
+
+#[test]
+fn subharmonic_drive_keeps_every_character_bounded() {
+    let driven = |character: usize, q: f32| {
+        let mut p = subharmonic_wet();
+        p.set_param("input", 18.0);
+        p.set_param("lower_gain", 24.0);
+        p.set_param("upper_gain", 24.0);
+        p.set_param("drive", 18.0);
+        p.set_param("character", character as f32);
+        p.set_param("hp_q", q);
+        p.set_param("lp_q", q);
+        run(p.as_mut(), &[sine(60.0, 1.0, 48_000)])
+    };
+    for character in 0..6 {
+        let out = driven(character, 0.707);
+        let top = peak(&out[0][24_000..]);
+        assert!(top > 0.5 && top < 1.5, "character {character}: peak {top}");
+        // Q 5 filters after the saturator ring well above full scale, but never to infinity.
+        let out = driven(character, 5.0);
+        assert!(out[0].iter().all(|v| v.is_finite()), "character {character} at Q 5");
+        assert!(peak(&out[0][24_000..]) > 0.5, "character {character} at Q 5 is silent");
+    }
+}
+
 #[test]
 fn lofi_quantizes() {
     let mut p = prepared("lofi");
@@ -523,4 +629,96 @@ fn lofi_quantizes() {
     levels.sort();
     levels.dedup();
     assert!(levels.len() <= 5, "{levels:?}");
+}
+
+fn ring_mod(params: &[(&str, f32)]) -> Box<dyn Plugin> {
+    let mut p = prepared("ring_mod");
+    for &(id, v) in params {
+        assert!(p.set_param(id, v), "ring_mod.{id}");
+    }
+    p.reset();
+    p
+}
+
+/// Loudest bin within two bins of `hz` in an 8192-point spectrum.
+fn band_db(spec: &[f32], hz: f32) -> f32 {
+    let bin = (hz / (SR / 8192.0)).round() as usize;
+    spec[bin - 2..=bin + 2].iter().cloned().fold(f32::MIN, f32::max)
+}
+
+fn zero_crossings(x: &[f32]) -> usize {
+    x.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count()
+}
+
+#[test]
+fn ring_mod_makes_sum_and_difference_tones() {
+    let mut p = ring_mod(&[("effect", 0.0), ("frequency", 300.0), ("mod_depth", 0.0), ("mix", 100.0)]);
+    let out = run(p.as_mut(), &[sine(1000.0, 0.5, 48_000)]);
+    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
+    let (low, high, input) = (band_db(&spec, 700.0), band_db(&spec, 1300.0), band_db(&spec, 1000.0));
+    // The two tones fall at different places between bins, so their bin peaks differ a little.
+    assert!((low - high).abs() < 2.0, "700 Hz {low} dB, 1300 Hz {high} dB");
+    assert!(low - input > 40.0, "the 1000 Hz input is left at {input} dB against {low} dB");
+}
+
+#[test]
+fn ring_mod_frequency_mod_adds_sidebands() {
+    let x = sine(1000.0, 0.5, 48_000);
+    let dry = soundcraft_dsp::spectrum::magnitude_db(&x[8192..], 8192);
+    assert!(band_db(&dry, 1000.0) - band_db(&dry, 1200.0) > 40.0);
+    let mut p = ring_mod(&[("effect", 1.0), ("frequency", 200.0), ("mix", 100.0)]);
+    let out = run(p.as_mut(), &[x]);
+    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
+    for hz in [800.0, 1200.0] {
+        assert!(band_db(&spec, 1000.0) - band_db(&spec, hz) < 20.0, "no sideband at {hz} Hz");
+    }
+}
+
+#[test]
+fn ring_mod_resonators_ring_at_the_frequency_with_their_sign() {
+    // 480 Hz at 48 kHz is a 100-sample period.
+    for (effect, sign) in [(2.0, 1.0), (3.0, -1.0)] {
+        let mut p = ring_mod(&[("effect", effect), ("frequency", 480.0), ("resonance", 90.0), ("mix", 100.0)]);
+        let mut x = vec![0.0f32; 9600];
+        x[0] = 1.0;
+        let out = run(p.as_mut(), &[x]);
+        let y = &out[0];
+        assert!((y[0] - 0.1).abs() < 1e-4, "effect {effect}: direct {}", y[0]);
+        assert!((y[100] - sign * 0.09).abs() < 1e-4, "effect {effect}: first echo {}", y[100]);
+        assert!((y[200] - 0.081).abs() < 1e-4, "effect {effect}: second echo {}", y[200]);
+        assert!(y[50].abs() < 1e-6 && y[150].abs() < 1e-6, "effect {effect}: sound between the echoes");
+        let last = y.iter().rposition(|v| v.abs() > 0.1e-3).unwrap();
+        assert!(last < p.tail_samples(), "effect {effect}: ringing at {last}, tail {}", p.tail_samples());
+    }
+}
+
+#[test]
+fn ring_mod_modulation_sources_move_the_frequency() {
+    // A constant input through Ring gives the carrier itself.
+    let dc = vec![1.0f32; 48_000];
+
+    // The envelope of a full-scale input lifts 100 Hz by one octave at 50 % depth.
+    let mut p = ring_mod(&[("effect", 0.0), ("frequency", 100.0), ("mod_source", 1.0), ("mod_depth", 50.0), ("mix", 100.0)]);
+    let out = run(p.as_mut(), std::slice::from_ref(&dc));
+    let n = zero_crossings(&out[0][24_000..]);
+    assert!((195..=205).contains(&n), "envelope: {n} crossings in 0.5 s, 200 expected for 200 Hz");
+
+    // A 1 Hz LFO raises the frequency for its first half cycle and lowers it for the second.
+    let mut p = ring_mod(&[("effect", 0.0), ("frequency", 100.0), ("mod_source", 0.0), ("mod_rate", 1.0), ("mod_depth", 100.0), ("mix", 100.0)]);
+    let out = run(p.as_mut(), std::slice::from_ref(&dc));
+    let (up, down) = (zero_crossings(&out[0][..12_000]), zero_crossings(&out[0][24_000..36_000]));
+    assert!(up > 3 * down, "LFO: {up} crossings rising, {down} falling");
+
+    // Sample and hold at 4 Hz keeps one frequency for each 12,000-sample step.
+    let mut p = ring_mod(&[("effect", 0.0), ("frequency", 100.0), ("mod_source", 2.0), ("mod_rate", 4.0), ("mod_depth", 100.0), ("mix", 100.0)]);
+    let out = run(p.as_mut(), std::slice::from_ref(&dc));
+    let mut steps = Vec::new();
+    for s in out[0].chunks(12_000) {
+        let (a, b) = (zero_crossings(&s[..6000]), zero_crossings(&s[6000..]));
+        assert!(a.abs_diff(b) <= 2, "sample and hold changed within a step: {a} then {b}");
+        steps.push(a);
+    }
+    steps.sort_unstable();
+    steps.dedup_by(|a, b| a.abs_diff(*b) <= 2);
+    assert!(steps.len() >= 3, "sample and hold steps: {steps:?}");
 }
