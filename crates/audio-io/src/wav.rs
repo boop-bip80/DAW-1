@@ -154,28 +154,43 @@ pub(crate) fn is_wav(b: &[u8]) -> bool {
     matches!(tag(b, 0), Some(t) if &t == b"RIFF" || &t == b"RF64" || &t == b"BW64") && tag(b, 8).is_some_and(|t| &t == b"WAVE")
 }
 
-/// True when everything from `from` to the end of the file is whole RIFF chunks (four printable
-/// ASCII id bytes, a size that fits, the pad byte after an odd size; the last chunk's pad may be
-/// missing): the metadata of a finished file, not samples.
-fn only_chunks_follow(b: &[u8], from: usize) -> bool {
+/// Everything from `from` to the end of the file is whole RIFF chunks (four printable ASCII id
+/// bytes, a size that fits, the pad byte after an odd size; the last chunk's pad may be missing):
+/// the metadata of a finished file, not samples.
+enum ChunksAhead {
+    /// Every chunk to the end parsed cleanly.
+    All,
+    /// Hit the chunk cap with every chunk seen so far well-formed: not proof of audio, just a
+    /// deliberate stop before spinning forever.
+    Bounded,
+    /// Something at an offset is not a well-formed RIFF chunk (so what follows may be audio).
+    NotChunks,
+}
+
+fn only_chunks_follow(b: &[u8], from: usize) -> ChunksAhead {
     let mut pos = from;
+    let mut chunks = 0usize;
     while pos < b.len() {
-        let (Some(id), Some(size)) = (tag(b, pos), le_u32(b, pos + 4)) else { return false };
+        chunks += 1;
+        if chunks > 100_000 {
+            return ChunksAhead::Bounded;
+        }
+        let (Some(id), Some(size)) = (tag(b, pos), le_u32(b, pos + 4)) else { return ChunksAhead::NotChunks };
         if !id.iter().all(|c| (0x20..0x7f).contains(c)) {
-            return false;
+            return ChunksAhead::NotChunks;
         }
         let size = size as usize;
-        let Some(end) = pos.checked_add(8).and_then(|body| body.checked_add(size)) else { return false };
+        let Some(end) = pos.checked_add(8).and_then(|body| body.checked_add(size)) else { return ChunksAhead::NotChunks };
         if end > b.len() {
-            return false;
+            return ChunksAhead::NotChunks;
         }
         let next = end + (size & 1);
         if end == b.len() || next == b.len() {
-            return true;
+            return ChunksAhead::All;
         }
         pos = next;
     }
-    false
+    ChunksAhead::NotChunks
 }
 
 pub(crate) fn parse(b: &[u8]) -> Result<WavParse> {
@@ -209,8 +224,12 @@ pub(crate) fn parse(b: &[u8]) -> Result<WavParse> {
             // A size of 0 in a file whose RIFF size is right and that has only chunks after it is an
             // empty data chunk followed by metadata (LIST, bext, …); otherwise it is a recording
             // that was never finalised, and what follows is audio.
+            // Only the first data chunk is used, so its emptiness is decided once, not per chunk.
             let finished = u64::from(le_u32(b, 4).unwrap_or(0)) + 8 == b.len() as u64;
-            let empty = size32 == 0 && !is_rf64 && finished && only_chunks_follow(b, body);
+            // `Bounded` (cap hit, all chunks so far well-formed) counts as metadata here too:
+            // none of those bytes are audio, so they must not be assigned to `data_len`. Only
+            // `NotChunks` means "what follows is audio".
+            let empty = data.is_none() && size32 == 0 && !is_rf64 && finished && !matches!(only_chunks_follow(b, body), ChunksAhead::NotChunks);
             let len = if size32 == 0 && !is_rf64 && !empty { remaining } else { declared.min(remaining) };
             if data.is_none() {
                 data = Some((body, len));
