@@ -222,14 +222,16 @@ pub(crate) fn selector_box_named(ui: &mut Ui, width: f32, height: f32, text: &st
     resp.on_hover_text(labels.tooltip)
 }
 
-/// Rotary knob for pan / send pan (-1..1). Drag vertically; double-click resets.
+/// Rotary knob for pan / send pan (-1..1). Drag vertically; double-click resets. While Ctrl
+/// (Command on a Mac) is held, a drag turns it a tenth as far, as on a [`fader`].
 pub fn pan_knob(ui: &mut Ui, size: f32, value: &mut f32, tip: &str) -> Response {
     let t = Tokens::current();
     let (r, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
     resp.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), f64::from(*value), tip));
     if resp.dragged() {
         let d = resp.drag_delta();
-        *value = (*value + (d.x - d.y) * 0.01).clamp(-1.0, 1.0);
+        let fine = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+        *value = (*value + (d.x - d.y) * if fine { 0.001 } else { 0.01 }).clamp(-1.0, 1.0);
     }
     if resp.double_clicked() {
         *value = 0.0;
@@ -454,11 +456,18 @@ pub struct FineSlider<'a> {
     logarithmic: bool,
     integer: bool,
     default: Option<f64>,
+    suffix: &'a str,
 }
 
 impl<'a> FineSlider<'a> {
     pub fn new(value: &'a mut f64, range: std::ops::RangeInclusive<f64>) -> Self {
-        Self { value, range, text: "", id_salt: None, show_value: true, logarithmic: false, integer: false, default: None }
+        Self { value, range, text: "", id_salt: None, show_value: true, logarithmic: false, integer: false, default: None, suffix: "" }
+    }
+
+    /// Text after the number in the value box, as `egui::Slider::suffix`.
+    pub fn suffix(mut self, suffix: &'a str) -> Self {
+        self.suffix = suffix;
+        self
     }
 
     /// The value that an Alt-click (Option-click on a Mac) on the slider or its value box sets,
@@ -503,7 +512,7 @@ impl<'a> FineSlider<'a> {
     }
 
     pub fn show(self, ui: &mut Ui) -> Response {
-        let Self { value, range, text, id_salt, show_value, logarithmic, integer, default } = self;
+        let Self { value, range, text, id_salt, show_value, logarithmic, integer, default, suffix } = self;
         let id = ui.scope_id().with(("fine_slider", id_salt.unwrap_or(text)));
         let (fine, x) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.pointer.interact_pos().map(|p| p.x)));
         let reset = default.is_some() && ui.input(|i| i.modifiers.alt);
@@ -550,6 +559,7 @@ impl<'a> FineSlider<'a> {
         .show_value(show_value)
         .logarithmic(log)
         .min_decimals(decimals)
+        .suffix(suffix)
         .text(text);
         if integer {
             slider = slider.integer();
