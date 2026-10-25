@@ -232,6 +232,9 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                     if ui.button("About SoundCraft").clicked() {
                         app.ui.show_about = true;
                     }
+                    if ui.button("Check for Updates…").clicked() {
+                        crate::updates_ui::check(app);
+                    }
                     if ui.button("Session Info").clicked() {
                         app.ui.show_session_info = true;
                     }
@@ -519,6 +522,10 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         json!({"value": *v})
     };
     let r = match id {
+        "app.checkForUpdates" | "help.checkForUpdates" => {
+            crate::updates_ui::check(app);
+            json!({})
+        }
         "window.mix" => {
             app.ui.window = MainWindow::Mix;
             app.focus_mix = app.ui.mix_separate;
