@@ -329,7 +329,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         }
     }
     // Keyboard: Cmd+A select all; arrows transpose (Shift = octave) and move by the grid.
-    if ui.rect_contains_pointer(roll) && !ui.ctx().egui_wants_keyboard_input() {
+    if ui.rect_contains_pointer(roll) && !ui.ctx().egui_wants_keyboard_input() && !app.dialogs.batch_rename_open() {
         let (all, up, down, left, right, shift) = ui.input(|i| {
             let arrows = !i.modifiers.alt && !i.modifiers.command && !i.modifiers.ctrl;
             (
@@ -365,7 +365,8 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
             app.midi.selected = moved.ok().and_then(|v| serde_json::from_value(v["indices"].clone()).ok()).unwrap_or_default();
         }
     }
-    if !app.midi.selected.is_empty()
+    if !app.dialogs.batch_rename_open()
+        && !app.midi.selected.is_empty()
         && !ui.ctx().egui_wants_keyboard_input()
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
     {

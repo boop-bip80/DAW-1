@@ -150,6 +150,7 @@ pub const AUDIOSUITE: &[(&str, &str)] = &[
 const DIALOG_COMMANDS: &[&str] = &[
     "clip.clear",
     "track.new",
+    "track.batch_rename",
     "file.bounce_mix",
     "session.new",
     "file.import_audio",
@@ -210,6 +211,7 @@ pub fn tree() -> Vec<MenuNode> {
         let at = clip.children.iter().position(|n| n.label == "Identify Sync Point").map_or(clip.children.len(), |i| i + 1);
         clip.children.insert(at, MenuNode { label: "Remove Sync Point".into(), path: "Clip > Remove Sync Point".into(), children: Vec::new() });
     }
+    insert_path(&mut roots, "Track > Batch Rename Tracks");
     // Not in the incumbent catalog, but the only UI path to an empty MIDI clip (#282).
     // It creates a clip rather than acting on the selected ones, so it leads the Clip menu.
     insert_path(&mut roots, "Clip > New MIDI Clip");

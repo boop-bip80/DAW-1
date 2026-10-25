@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod appearance;
+pub mod batch_rename;
 pub mod bounce;
 pub mod control;
 pub mod credits;
@@ -469,6 +470,7 @@ impl SoundApp {
                 if replacing {
                     // Note indices and gestures belong to the old session's clips.
                     self.midi = midi_editor::MidiEditorState::default();
+                    self.dialogs.clear_batch_rename();
                 }
                 if replacing || (id.starts_with("session.save") && !self.engine.is_dirty()) {
                     self.release_autosave(false);
