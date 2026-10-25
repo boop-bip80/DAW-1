@@ -6,7 +6,7 @@ use crate::theme::{Tokens, clip_colors, fade_colors, is_light, regular};
 use crate::widgets::{key, key_fill, shade};
 use craft_ui::buttons::{ButtonVisuals, IconButton, IconButtonStyle};
 use egui::{
-    Align2, Color32, CornerRadius, Mesh, Painter, Rect, Response, Sense, Shape as Draw, Stroke, StrokeKind, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align2, Color32, CornerRadius, Mesh, Painter, Rect, Response, Role, Sense, Shape as Draw, Stroke, StrokeKind, Ui, WidgetInfo, pos2, vec2,
 };
 use soundcraft_model::{ClipContent, ClipId, Fade, FadeShape, Session};
 use soundcraft_time::Range;
@@ -172,7 +172,7 @@ impl Lane {
 fn plot(ui: &mut Ui, ed: &FadeEditor, s: &Session, width: f32) {
     let (t, tn) = (Tokens::current(), tones());
     let (rect, resp) = ui.allocate_exact_size(vec2(width.max(80.0), PLOT_HEIGHT), Sense::hover());
-    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, "Fade curves"));
+    resp.widget_info(|| WidgetInfo::labeled(Role::Image, true, "Fade curves"));
     let p = ui.painter_at(rect);
     p.rect_filled(rect, 2.0, t.slot_bg);
     let r = rect.shrink(1.0);
@@ -268,7 +268,7 @@ pub fn toggle_button(ui: &mut Ui, label: &str, on: bool, tip: &str) -> Response 
     let t = Tokens::current();
     let galley = ui.painter().layout_no_wrap(label.to_string(), regular(12.0), t.text);
     let resp = ui.allocate_response(vec2(galley.size().x + 24.0, 22.0), Sense::click());
-    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), on, label));
+    resp.widget_info(|| WidgetInfo::selected(Role::Button, ui.is_enabled(), on, label));
     let p = ui.painter();
     key(p, resp.rect, &resp, if on { t.accent_dark } else { key_fill(&resp) });
     if on {
@@ -306,9 +306,9 @@ pub fn preset_choice(ui: &mut Ui, side: Side, out: bool, why: Option<&str>) -> O
     let (radio, thumb) = ui
         .add_enabled_ui(why.is_none(), |ui| {
             let radio = ui.add(egui::RadioButton::new(on, ""));
-            radio.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, ui.is_enabled(), on, "Preset curve"));
+            radio.widget_info(|| WidgetInfo::selected(Role::RadioButton, ui.is_enabled(), on, "Preset curve"));
             let (rect, resp) = ui.allocate_exact_size(vec2(THUMB_W, 30.0), Sense::click());
-            resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Choose a preset curve"));
+            resp.widget_info(|| WidgetInfo::labeled(Role::Button, ui.is_enabled(), "Choose a preset curve"));
             let p = ui.painter();
             p.rect_filled(rect, 4.0, if resp.is_pointer_button_down_on() { shade(t.slot_bg, -0.1) } else { t.slot_bg });
             p.rect_stroke(rect, 4.0, Stroke::new(1.0, if resp.hovered() { t.border_light } else { t.button_border }), StrokeKind::Inside);
@@ -345,7 +345,7 @@ fn menu_row(ui: &mut Ui, shape: FadeShape, out: bool) -> Response {
     let t = Tokens::current();
     let name = ui.painter().layout_no_wrap(shape.label().to_string(), regular(12.0), t.text);
     let (rect, resp) = ui.allocate_exact_size(vec2(6.0 + 32.0 + 8.0 + name.size().x + 8.0, 24.0), Sense::click());
-    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, shape.label()));
+    resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, shape.label()));
     if resp.hovered() || resp.has_focus() {
         ui.painter().rect_filled(rect, 3.0, t.button);
     }
