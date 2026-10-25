@@ -95,7 +95,7 @@ fn alt_click_returns_a_plugin_window_slider_to_its_default_in_one_undo_step() {
     let (mut h, kick) = kick_eq();
     let input = param("eq_7band", "input_gain");
     assert_ne!(input.default, 6.0);
-    let rail = window_sliders(&h, Id::new(("plugin", kick.0, 0usize)))[0];
+    let rail = window_sliders(&h, Id::unique(("plugin", kick.0, 0usize)))[0];
     let steps = undo_steps(&h);
     alt_press(&mut h, near_left(rail), 0.0);
     assert_eq!(insert_param(&h, kick, 0, input), input.default, "Alt-click did not return Input to its default");
@@ -108,7 +108,7 @@ fn alt_click_returns_a_plugin_window_slider_to_its_default_in_one_undo_step() {
 fn alt_drag_leaves_a_plugin_window_slider_where_it_is() {
     let (mut h, kick) = kick_eq();
     let input = param("eq_7band", "input_gain");
-    let rail = window_sliders(&h, Id::new(("plugin", kick.0, 0usize)))[0];
+    let rail = window_sliders(&h, Id::unique(("plugin", kick.0, 0usize)))[0];
     let steps = undo_steps(&h);
     alt_press(&mut h, near_left(rail), 40.0);
     assert_eq!(insert_param(&h, kick, 0, input), 6.0, "an Alt-drag moved Input");
@@ -169,7 +169,7 @@ fn alt_click_returns_audiosuite_parameter_sliders_to_their_defaults() {
     app.ui.audiosuite = Some("compressor".into());
     let mut h = harness(app);
     let read = |h: &Harness<'_, SoundApp>| -> BTreeMap<String, f32> {
-        h.ctx.data(|d| d.get_temp(Id::new(("as_params", "compressor".to_string())))).unwrap_or_default()
+        h.ctx.data(|d| d.get_temp(Id::unique(("as_params", "compressor".to_string())))).unwrap_or_default()
     };
     let threshold = param("compressor", "threshold");
     let rail = h.get_by_role_and_label(Role::Slider, "Threshold").rect();
