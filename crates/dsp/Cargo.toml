@@ -11,6 +11,9 @@ repository.workspace = true
 serde.workspace = true
 log.workspace = true
 rustfft.workspace = true
+charon-audio = { version = "0.1", features = ["decode", "ort-backend", "realtime"] }
+anyhow = "1.0"
+ureq = "2"
 
 [dev-dependencies]
 proptest.workspace = true

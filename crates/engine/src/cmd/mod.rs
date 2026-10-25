@@ -27,6 +27,7 @@ mod plugin_state;
 mod query;
 pub(crate) mod sampler;
 mod setup_more;
+mod stem_separation;
 mod surround;
 mod tab;
 mod track;
@@ -134,6 +135,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(plugin_state::specs());
         v.extend(instrument::specs());
         v.extend(sampler::specs());
+        v.extend(stem_separation::specs());
         v.extend(video::specs());
         v.extend(zoom_toggle::specs());
         v

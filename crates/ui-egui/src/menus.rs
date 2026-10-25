@@ -12,6 +12,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
     ("window.edit", "Edit", "Window > Edit", Some("Cmd+=")),
     ("window.toggle_mix_edit", "Toggle Mix/Edit", "", Some("Cmd+=")),
+    ("audiosuite.stem_separation", "Stem Separation", "AudioSuite > Other > Stem Separation", None),
     ("window.mix_separate", "Mix in Separate Window", "", None),
     ("window.transport", "Transport", "Window > Transport", Some("Cmd+1")),
     ("window.big_counter", "Big Counter", "Window > Big Counter", Some("Cmd+3")),

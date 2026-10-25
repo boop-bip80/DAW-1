@@ -25,7 +25,8 @@ pub mod sampler_window;
 pub mod score_editor;
 pub mod shortcuts;
 pub mod spot;
-pub mod theme;
+pub mod stem_separation;
+mod theme;
 pub mod toolbar;
 pub mod video_track;
 pub mod video_window;
@@ -329,6 +330,8 @@ pub struct SoundApp {
     pub video: video_track::VideoPool,
     /// The Bounce Mix in progress, rendered a slice per frame.
     pub bounce: Option<soundcraft_engine::io::Bounce>,
+    /// Stem separation progress.
+    pub stem_progress: Option<(String, f32)>,
     /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
@@ -336,7 +339,6 @@ pub struct SoundApp {
 }
 
 /// Whether another automation-write pass is due: the transport moved at least
-/// `step` since `last` in either direction. `last == i64::MIN` marks "never
 /// written", so the first pass after (re)start is always due. Saturating
 /// arithmetic keeps restarts and loop wraps overflow-free: the previous
 /// `(pos - last).abs()` panicked in debug builds on the first playing frame,
@@ -404,6 +406,7 @@ impl SoundApp {
             last_meter_poll: f64::NEG_INFINITY,
             video: video_track::VideoPool::default(),
             bounce: None,
+            stem_progress: None,
             #[cfg(test)]
             _palette_lock: theme::lock_test_palette(),
         }

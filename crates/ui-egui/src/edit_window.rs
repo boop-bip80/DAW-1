@@ -2616,6 +2616,22 @@ fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
         }
     }
     ui.separator();
+    if ui.button("Stem Separation").clicked() {
+        // Show progress modal
+        app.stem_progress = Some(("Processing audio...".to_string(), 0.0));
+        ui.ctx().request_repaint();
+        
+        // Run stem separation
+        let result = app.run("audiosuite.stem_separation", json!({}));
+        
+        // Hide progress modal
+        app.stem_progress = None;
+        
+        if let Err(e) = result {
+            app.ui.status = format!("Stem separation failed: {}", e);
+        }
+    }
+    ui.separator();
     if ui.button("Rename...").clicked() {
         let name = app.engine.session().find_clip(c).map(|(_, x)| x.name.clone()).unwrap_or_default();
         app.dialogs.open_rename_clip(c, &name);

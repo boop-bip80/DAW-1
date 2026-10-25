@@ -22,6 +22,7 @@ mod params;
 pub mod pitch_detect;
 pub mod plugins;
 pub mod spectrum;
+pub mod stem_separation;
 mod util;
 
 pub use offline::FadeShape;
