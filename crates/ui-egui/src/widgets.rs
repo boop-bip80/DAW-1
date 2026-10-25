@@ -397,11 +397,20 @@ pub struct FineSlider<'a> {
     show_value: bool,
     logarithmic: bool,
     integer: bool,
+    default: Option<f64>,
 }
 
 impl<'a> FineSlider<'a> {
     pub fn new(value: &'a mut f64, range: std::ops::RangeInclusive<f64>) -> Self {
-        Self { value, range, text: "", id_salt: None, show_value: true, logarithmic: false, integer: false }
+        Self { value, range, text: "", id_salt: None, show_value: true, logarithmic: false, integer: false, default: None }
+    }
+
+    /// The value that an Alt-click (Option-click on a Mac) on the slider or its value box sets,
+    /// as a [`fader`] returns to 0 dB. While Alt is held, a drag and a click on the rail leave the
+    /// value where it is, and the click does not open the value box for typing.
+    pub fn default_value(mut self, default: f64) -> Self {
+        self.default = Some(default);
+        self
     }
 
     /// The label after the slider. It also tells sliders in the same `Ui` apart unless
@@ -438,9 +447,10 @@ impl<'a> FineSlider<'a> {
     }
 
     pub fn show(self, ui: &mut Ui) -> Response {
-        let Self { value, range, text, id_salt, show_value, logarithmic, integer } = self;
+        let Self { value, range, text, id_salt, show_value, logarithmic, integer, default } = self;
         let id = ui.id().with(("fine_slider", id_salt.unwrap_or(text)));
         let (fine, x) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.pointer.interact_pos().map(|p| p.x)));
+        let reset = default.is_some() && ui.input(|i| i.modifiers.alt);
         // A drag lasts through the pass that releases the button, where egui still sets the value
         // from the pointer. An anchor that the previous pass did not store was left by an earlier
         // drag, and is ignored.
@@ -463,7 +473,7 @@ impl<'a> FineSlider<'a> {
         let scale = if fine { 0.1 } else { 1.0 };
         let decimals = if integer { 0 } else { (-(per_point(lo) * 0.1).log10()).ceil().clamp(0.0, 3.0) as usize };
         if let (Some(d), Some(x)) = (&mut drag, x) {
-            if d.fine != fine {
+            if d.fine != fine || reset {
                 *d = FineDrag { x, value: *value, fine, relative: true, pass };
             } else if d.relative {
                 let moved = at(along(d.value) + f64::from(x - d.x) / travel * scale);
@@ -471,7 +481,7 @@ impl<'a> FineSlider<'a> {
                 *value = moved.clamp(lo, hi);
             }
         }
-        let hold = drag.is_some_and(|d| d.relative);
+        let hold = reset || drag.is_some_and(|d| d.relative);
         let speed = per_point(*value) * scale;
         let mut slider = egui::Slider::from_get_set(range, |v| {
             if let Some(v) = v
@@ -491,7 +501,19 @@ impl<'a> FineSlider<'a> {
         if fine {
             slider = slider.drag_value_speed(speed);
         }
-        let resp = ui.add(slider);
+        let mut resp = ui.add(slider);
+        // The rail senses drags only, so a click on it ends as a drag that the pointer did not
+        // move far enough to count as one.
+        let clicked = resp.clicked() || (resp.drag_stopped() && ui.input(|i| i.pointer.could_any_button_be_click()));
+        if let Some(d) = default
+            && reset
+            && clicked
+        {
+            let d = if integer { d.round() } else { d };
+            *value = d.clamp(lo, hi);
+            resp.surrender_focus();
+            resp.mark_changed();
+        }
         let rail = Rect::from_min_size(resp.rect.min, vec2(ui.spacing().slider_width, resp.rect.height()));
         let on_rail = resp.dragged() && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| rail.contains(p));
         let next = match (on_rail, drag, x) {

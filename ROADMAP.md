@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (fine adjustment on plugin parameter sliders) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (Alt-click returns a plugin parameter to its default) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-24:** An Alt-click (Option-click on a Mac) on a parameter in the plugin window, the Clip Effects window or an AudioSuite plugin's window returns it to its default value, on a slider, a slider's value box or a choice list, as an Alt-click returns a fader to 0 dB. In the plugin window and the Clip Effects window the reset is one undo step. While Alt is held, a drag on a slider leaves the value where it is. No readiness percentage change.
 - **2026-10-24:** The parameter sliders of the plugin window, the Clip Effects window and AudioSuite plugins move a tenth as far for the same drag while Ctrl (Command on a Mac) is held, as the Strip Silence sliders do. Logarithmic sliders move a tenth as far along the slider, and whole-number sliders stay on whole numbers. No readiness percentage change.
 - **2026-10-24:** The Strip Silence window's four sliders move a tenth as far for the same drag while Ctrl (Command on a Mac) is held, on the slider and on its value box. Pressing or releasing the key during a drag leaves the value where it is. The Threshold and Clip Start Pad boxes show one decimal place. No readiness percentage change.
 - **2026-10-24:** While the Strip Silence window is open, the Edit window draws a rectangle around each range that Strip would keep on the selected tracks, padded by Clip Start Pad and Clip End Pad, and the rectangles follow the sliders as they move. They are removed when the window closes. `edit.strip_silence_preview` returns the same ranges without changing the session. No readiness percentage change.
@@ -171,6 +172,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-24 | trivial | Progress log: Alt-click returns a plugin parameter to its default; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: fine adjustment on plugin parameter sliders; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Strip Silence fine adjustment; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Strip Silence rectangles; readiness estimates unchanged |

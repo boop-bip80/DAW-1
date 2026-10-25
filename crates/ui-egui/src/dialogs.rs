@@ -987,7 +987,10 @@ fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
             for p in info.params {
                 let v = params.entry(p.id.to_string()).or_insert(p.default);
                 let mut wide = f64::from(*v);
-                crate::widgets::fine_slider(ui, &mut wide, f64::from(p.min)..=f64::from(p.max), p.name);
+                crate::widgets::FineSlider::new(&mut wide, f64::from(p.min)..=f64::from(p.max))
+                    .text(p.name)
+                    .default_value(f64::from(p.default))
+                    .show(ui);
                 *v = wide as f32;
             }
         } else {

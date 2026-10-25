@@ -717,7 +717,10 @@ pub fn clip_effects(app: &mut SoundApp, ctx: &egui::Context) {
                         let mut v = get(app, &key, p.default);
                         let before = v;
                         let mut wide = f64::from(v);
-                        crate::widgets::fine_slider(col, &mut wide, f64::from(p.min)..=f64::from(p.max), p.name);
+                        crate::widgets::FineSlider::new(&mut wide, f64::from(p.min)..=f64::from(p.max))
+                            .text(p.name)
+                            .default_value(f64::from(p.default))
+                            .show(col);
                         v = wide as f32;
                         if (v - before).abs() > f32::EPSILON {
                             let mut m = serde_json::Map::new();
