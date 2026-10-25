@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-22 · **Change:** trivial (remaining UI literals translated; coverage gate extended to widget-helper tooltips) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-20 · **Last updated:** 2026-10-24 · **Change:** trivial (remaining UI literals translated; coverage gate extended to widget-helper tooltips) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft ships **English** (the source language) and **简体中文**. Every menu path segment,
 every command label, every panel title, dialog, tooltip and status message the UI draws goes

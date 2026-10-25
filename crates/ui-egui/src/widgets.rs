@@ -105,12 +105,15 @@ fn button_style(selected_fill: Color32, normal_icon: Color32, radius: u8) -> Ico
 pub fn icon_button(ui: &mut Ui, size: egui::Vec2, icon: &str, on: bool, tip: &str) -> Response {
     let t = Tokens::current();
     let style = button_style(t.accent, t.text, 3);
-    let resp = IconButton::new(tip, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
+    // The accessible name is the translated tip: screen readers announce it, and the icon is
+    // the only visual label.
+    let label = crate::i18n::t(tip);
+    let resp = IconButton::new(label, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
         key_light(ui.painter(), r.shrink(1.0));
         let s = r.height().min(r.width()) * 0.78;
         icons::draw(ui.painter(), Rect::from_center_size(r.center(), vec2(s, s)), icon, tint);
     });
-    resp.on_hover_text(crate::i18n::t(tip))
+    resp.on_hover_text(label)
 }
 
 /// Square text toggle used for S / M / I / record etc.
@@ -127,7 +130,8 @@ pub fn text_toggle(ui: &mut Ui, size: egui::Vec2, text: &str, on: bool, on_color
 pub fn rec_toggle(ui: &mut Ui, size: egui::Vec2, on: bool, tip: &str) -> Response {
     let t = Tokens::current();
     let style = button_style(t.rec, Color32::from_rgb(218, 112, 106), 2);
-    let resp = IconButton::new(tip, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
+    let label = crate::i18n::t(tip);
+    let resp = IconButton::new(label, size, &style).selected(on).single_shape_frame().show(ui, |ui, r, tint| {
         key_light(ui.painter(), r.shrink(1.0));
         let rad = size.y * 0.24;
         if on {
@@ -143,7 +147,7 @@ pub fn rec_toggle(ui: &mut Ui, size: egui::Vec2, on: bool, tip: &str) -> Respons
         }
         ui.painter().circle_stroke(r.center(), rad, Stroke::new(1.0, Color32::from_black_alpha(90)));
     });
-    resp.on_hover_text(crate::i18n::t(tip))
+    resp.on_hover_text(label)
 }
 
 /// A dropdown-looking selector box. Returns the response (caller opens a menu on click).
