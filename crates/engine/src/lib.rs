@@ -15,6 +15,7 @@ pub mod edit;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
+#[cfg(test)]
 mod live;
 pub mod score;
 
@@ -25,8 +26,8 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
-pub use live::LivePlugins;
 pub use soundcraft_model as model;
+pub use soundcraft_model::LivePlugins;
 
 /// Shuts the third-party plugin hosts down, running the module exit of every plugin binary they
 /// loaded. Call it at the end of `main`, once every plugin instance (mixer, player) is gone: a
