@@ -287,8 +287,9 @@ pub struct SoundApp {
     pub dialogs: dialogs::Dialogs,
     pub meters: HashMap<TrackId, MeterDisplay>,
     pub main_meter: MeterDisplay,
-    /// Reused multichannel snapshot; populated at an adaptive rate by `logic`.
-    meter_snapshot: soundcraft_playback::MeterSnapshot,
+    /// Reused meter snapshot, taken from the player at an adaptive rate by `logic`: the highest
+    /// peaks since the previous take. The only reader of the player's meters; windows read this.
+    pub(crate) meter_snapshot: soundcraft_playback::MeterSnapshot,
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
@@ -1311,7 +1312,7 @@ impl SoundApp {
             let now = self.uptime;
             let meter_interval = if self.ui.window == MainWindow::Mix { 1.0 / 60.0 } else { 1.0 / 20.0 };
             if now - self.last_meter_poll >= meter_interval {
-                p.copy_meters(&mut self.meter_snapshot);
+                p.take_meters(&mut self.meter_snapshot);
                 self.last_meter_poll = now;
             }
             let snap = &self.meter_snapshot;
