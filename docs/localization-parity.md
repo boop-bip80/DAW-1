@@ -59,7 +59,7 @@ Open work: Traditional Chinese (needs a `zh-hant` catalog — the tag negotiatio
 layout, IME testing, and native-speaker review of the Chinese wording.
 
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | Est. to full (h) | In Pro Tools |
-|---|---|---|---|---|---|---|---|---|---:|
+|---|---|---|---|---|---|---|---:|---|
 | English | en | all (source) | ✅ | Latin ✅ | — | **full** | 0 | ✅ |
 | Simplified Chinese | zh-hans | all (1,160 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Han fallback; bundled web subset; IME untested | no | **full** (engine diagnostics stay English) | 3–5 (review) | ✅ |
 | Spanish | es | 0 (0 %) — PR #143 pending | ❌ | Latin ✅ | no | none | 3–5 | ✅ |
