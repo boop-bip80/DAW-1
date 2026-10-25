@@ -812,6 +812,9 @@ impl SoundApp {
         // The input reopens on the next record or monitor with the new choice.
         self.recorder = None;
         self.recorder_failed = false;
+        // Closed before the new one opens: an ASIO driver stays loaded while a stream uses it,
+        // and only one can be loaded at a time.
+        self.player = None;
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
@@ -907,6 +910,8 @@ impl SoundApp {
         }
         self.recorder = None;
         self.recorder_failed = false;
+        // Closed before the new one opens (see `apply_audio_config`).
+        self.player = None;
         self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
     }
 

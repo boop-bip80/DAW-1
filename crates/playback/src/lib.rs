@@ -465,6 +465,9 @@ pub struct Player {
     _stream: Option<cpal::Stream>,
     #[cfg(target_arch = "wasm32")]
     _stream: Option<cpal::Stream>,
+    /// Keeps the stream's device value shared while the stream lives (declared after it, so the
+    /// stream closes first).
+    _lease: Option<devices::DeviceLease>,
     pub device_name: String,
     pub device_rate: u32,
     /// Output channels the device was opened with (0 for the silent clock).
@@ -520,7 +523,7 @@ impl Player {
         let side_rate = session.sample_rate.as_f64() as f32;
         let new_side = |garbage: Receiver<Vec<Box<dyn Plugin>>>| Mutex::new(Side::new(side_rate, garbage));
         match open_device(want, want_ch, cfg) {
-            Ok((device, config, format, name)) => {
+            Ok((device, lease, config, format, name)) => {
                 // The chosen buffer size first; if the device refuses it, its default.
                 let mut attempts = vec![config.clone()];
                 if config.buffer_size != cpal::BufferSize::Default {
@@ -564,6 +567,7 @@ impl Player {
                             tx,
                             side: new_side(grx),
                             _stream: Some(stream),
+                            _lease: Some(lease),
                             device_name: name,
                             device_rate: rate,
                             device_channels: config.channels,
@@ -641,6 +645,7 @@ impl Player {
             tx,
             side,
             _stream: None,
+            _lease: None,
             device_name: "No audio device (silent)".into(),
             device_rate: rate,
             device_channels: 0,
@@ -664,6 +669,7 @@ impl Player {
             tx,
             side,
             _stream: None,
+            _lease: None,
             device_name: "No audio device".into(),
             device_rate: session.sample_rate.hz(),
             device_channels: 0,
@@ -964,10 +970,14 @@ where
 /// rate) if possible, in the best sample format it offers (f32, else 32- or 16-bit integers),
 /// with as many channels as it offers up to `want_ch` (at least stereo when available), and the
 /// chosen buffer size when the device allows it.
-fn open_device(want_rate: u32, want_ch: u16, cfg: &AudioConfig) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, String), String> {
+fn open_device(
+    want_rate: u32,
+    want_ch: u16,
+    cfg: &AudioConfig,
+) -> Result<(cpal::Device, devices::DeviceLease, cpal::StreamConfig, cpal::SampleFormat, String), String> {
     use cpal::traits::DeviceTrait;
     let host = devices::host(cfg);
-    let device = devices::device(&host, cfg.output.as_deref(), true).ok_or_else(|| "no output device".to_string())?;
+    let (device, lease) = devices::device(&host, cfg.output.as_deref(), true).ok_or_else(|| "no output device".to_string())?;
     #[allow(deprecated)]
     let name = device.name().unwrap_or_else(|_| "Audio device".into());
     // Prefer a config at the chosen (else session) rate; else the device default (we resample).
@@ -1015,7 +1025,7 @@ fn open_device(want_rate: u32, want_ch: u16, cfg: &AudioConfig) -> Result<(cpal:
             (c, format)
         }
     };
-    Ok((device, config, format, name))
+    Ok((device, lease, config, format, name))
 }
 
 #[cfg(test)]

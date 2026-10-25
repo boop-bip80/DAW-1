@@ -128,6 +128,9 @@ pub struct Recorder {
     pub monitor: Arc<InputRing>,
     #[cfg(not(target_os = "freebsd"))]
     _stream: Option<cpal::Stream>,
+    /// Keeps the stream's device value shared while the stream lives (after it: dropped later).
+    #[cfg(not(target_os = "freebsd"))]
+    _lease: Option<crate::devices::DeviceLease>,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: usize,
@@ -201,7 +204,7 @@ impl Recorder {
     pub fn open_with(audio: &crate::AudioConfig) -> Result<Recorder, String> {
         use cpal::traits::{DeviceTrait, StreamTrait};
         let host = crate::devices::host(audio);
-        let device = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
+        let (device, lease) = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
         #[allow(deprecated)]
         let name = device.name().unwrap_or_else(|_| "Input".into());
         // At the chosen rate when the device offers it, so input and output run together: the
@@ -245,7 +248,17 @@ impl Recorder {
         };
         stream.play().map_err(|e| e.to_string())?;
         let seen = (0, Instant::now());
-        Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate.0, channels, writer: None, seen })
+        Ok(Recorder {
+            monitor,
+            shared,
+            _stream: Some(stream),
+            _lease: Some(lease),
+            device_name: name,
+            sample_rate: config.sample_rate.0,
+            channels,
+            writer: None,
+            seen,
+        })
     }
 
     #[cfg(target_os = "freebsd")]
@@ -469,6 +482,8 @@ mod tests {
             monitor: InputRing::new(1, 48_000),
             #[cfg(not(target_os = "freebsd"))]
             _stream: None,
+            #[cfg(not(target_os = "freebsd"))]
+            _lease: None,
             device_name: "Mic In".into(),
             sample_rate: 48_000,
             channels: 1,

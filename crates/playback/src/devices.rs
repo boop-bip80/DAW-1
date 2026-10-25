@@ -147,8 +147,9 @@ pub(crate) fn host(cfg: &AudioConfig) -> HostRef {
         })
 }
 
-/// The named output (or input) device of `host`, else its default device.
-pub(crate) fn device(host: &cpal::Host, name: Option<&str>, output: bool) -> Option<cpal::Device> {
+/// The named output (or input) device of `host`, else its default device, and the lease to keep
+/// with the stream opened from it (see [`shared_asio`]).
+pub(crate) fn device(host: &cpal::Host, name: Option<&str>, output: bool) -> Option<(cpal::Device, DeviceLease)> {
     shared_asio(host, find_device(host, name, output))
 }
 
@@ -169,19 +170,56 @@ fn find_device(host: &cpal::Host, name: Option<&str>, output: bool) -> Option<cp
 /// value: an input opened from a second value of the same driver would recreate the buffers for
 /// input only, leaving the output stream (opened from the first value) writing into buffers the
 /// driver has disposed, and silent. Sharing the value makes cpal create both sides together.
-fn shared_asio(host: &cpal::Host, found: Option<cpal::Device>) -> Option<cpal::Device> {
+///
+/// The value is kept only while a lease on it lives: ASIO loads one driver per process, and a
+/// value kept for good would keep its driver loaded, hiding every other driver from the device
+/// lists and from a later choice in the settings.
+fn shared_asio(host: &cpal::Host, found: Option<cpal::Device>) -> Option<(cpal::Device, DeviceLease)> {
     let d = found?;
     if !host.id().name().eq_ignore_ascii_case("ASIO") {
-        return Some(d);
+        return Some((d, DeviceLease(None)));
     }
-    let Some(name) = device_name(&d) else { return Some(d) };
-    static SHARED: std::sync::OnceLock<std::sync::Mutex<Vec<(String, cpal::Device)>>> = std::sync::OnceLock::new();
-    let mut shared = SHARED.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, kept)) = shared.iter().find(|(n, _)| *n == name) {
-        return Some(kept.clone());
+    let Some(name) = device_name(&d) else { return Some((d, DeviceLease(None))) };
+    let d = acquire(&mut shared_devices(), &name, d);
+    Some((d, DeviceLease(Some(name))))
+}
+
+/// One kept device value per driver name, with the number of leases on it.
+type SharedDevices = Vec<(String, cpal::Device, usize)>;
+
+fn shared_devices() -> std::sync::MutexGuard<'static, SharedDevices> {
+    static SHARED: std::sync::OnceLock<std::sync::Mutex<SharedDevices>> = std::sync::OnceLock::new();
+    SHARED.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The kept value for `name` (else `found`, kept from now on), with one more lease on it.
+fn acquire<D: Clone>(shared: &mut Vec<(String, D, usize)>, name: &str, found: D) -> D {
+    if let Some((_, kept, leases)) = shared.iter_mut().find(|(n, ..)| n == name) {
+        *leases = leases.saturating_add(1);
+        return kept.clone();
     }
-    shared.push((name, d.clone()));
-    Some(d)
+    shared.push((name.to_string(), found.clone(), 1));
+    found
+}
+
+/// Keeps the shared value of an ASIO driver while the stream opened from it lives (nothing for
+/// other systems). Dropping the last lease on a driver forgets the value, so the driver can unload.
+#[must_use]
+pub(crate) struct DeviceLease(Option<String>);
+
+impl Drop for DeviceLease {
+    fn drop(&mut self) {
+        let Some(name) = self.0.take() else { return };
+        release(&mut shared_devices(), &name);
+    }
+}
+
+/// One lease on `name` ends; the last one removes its value.
+fn release<D>(shared: &mut Vec<(String, D, usize)>, name: &str) {
+    if let Some((_, _, leases)) = shared.iter_mut().find(|(n, ..)| n == name) {
+        *leases = leases.saturating_sub(1);
+    }
+    shared.retain(|(_, _, leases)| *leases > 0);
 }
 
 /// The buffer to request: the chosen size when the device's range allows it, else the default.
@@ -242,8 +280,24 @@ mod tests {
         assert_eq!(host(&cfg).id(), cpal::default_host().id());
         // No device with this name exists: the default (or none, on a machine without audio).
         let h = cpal::default_host();
-        let fallback = device(&h, Some("No Such Device 1234"), true).as_ref().and_then(device_name);
+        let fallback = device(&h, Some("No Such Device 1234"), true).and_then(|(d, _lease)| device_name(&d));
         assert_eq!(fallback, h.default_output_device().as_ref().and_then(device_name));
+    }
+
+    /// Input and output of one driver share a value while either stream is open; once both
+    /// close the value is forgotten, so another driver can load.
+    #[test]
+    fn a_shared_driver_is_released_with_its_last_stream() {
+        let mut shared: Vec<(String, u32, usize)> = Vec::new();
+        assert_eq!(acquire(&mut shared, "A", 1), 1, "output opens A");
+        assert_eq!(acquire(&mut shared, "A", 2), 1, "input reuses the output's value");
+        release(&mut shared, "A");
+        assert_eq!(shared, [("A".to_string(), 1, 1)], "the input still holds A");
+        release(&mut shared, "A");
+        assert!(shared.is_empty(), "A is no longer kept");
+        assert_eq!(acquire(&mut shared, "B", 3), 3, "B is kept fresh");
+        release(&mut shared, "missing");
+        assert_eq!(shared.len(), 1);
     }
 
     #[test]
