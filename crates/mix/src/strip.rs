@@ -8,7 +8,7 @@ use super::{
     AutoParam, BusId, ChannelFormat, MAX_CHANNELS, PanLaw, Plugin, Range, Route, Samples, Session, SourceAudio, Track, TrackId, TrackKind, Transport,
     db_to_gain,
 };
-use soundcraft_model::INSTRUMENT_AUTO_SLOT;
+use soundcraft_model::{AutomationLane, INSTRUMENT_AUTO_SLOT};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,6 +18,27 @@ pub(crate) struct BusBuf {
     pub(crate) buf: Vec<Vec<f32>>,
 }
 
+/// One unstored parameter an automation lane is driving.
+///
+/// `param` is an index into `plugin.info().params` (those ids are `'static`, so restoring does
+/// not keep the session's `String`). `lane` is that string's address. `last` is the value last
+/// sent. `original` is the plugin's value from before the lane took over; nothing in the session
+/// stores it.
+struct LaneHold {
+    param: usize,
+    lane: usize,
+    last: f32,
+    original: f32,
+}
+
+/// Unstored automated parameters a new slot can take before the holds vector has to grow.
+/// Growing past this happens once, on the block a further parameter comes under automation.
+pub(crate) const UNSTORED_HOLD_CAP: usize = 8;
+
+/// Absolute and relative tolerance for "the plugin already has the lane's value". A plugin that
+/// quantizes can sit a hair off what automation sent; an editor move is far larger.
+const PARAM_MATCH_TOLERANCE: f32 = 1.0e-6;
+
 pub(crate) struct PluginSlot {
     pub(crate) id: String,
     /// Channel count the plugin was prepared for.
@@ -25,10 +46,17 @@ pub(crate) struct PluginSlot {
     pub(crate) plugin: Box<dyn Plugin>,
     /// Last values pushed to the plugin, in the insert's parameter-map order.
     pub(crate) applied: Vec<f32>,
-    /// Last values pushed from automation lanes of parameters the insert holds no value for, in
-    /// the track's lane order, each with the lane it came from (its parameter id's address).
-    pub(crate) lane_applied: Vec<(usize, f32)>,
+    /// Unstored parameters currently under automation. Looked up by parameter index and lane
+    /// identity, not by position. Reserved for [`UNSTORED_HOLD_CAP`] at creation; it grows only
+    /// when a new hold is pushed.
+    pub(crate) holds: Vec<LaneHold>,
     pub(crate) failed: bool,
+}
+
+impl PluginSlot {
+    pub(crate) fn new(id: String, ch: usize, plugin: Box<dyn Plugin>) -> Self {
+        PluginSlot { id, ch, plugin, applied: Vec::new(), holds: Vec::with_capacity(UNSTORED_HOLD_CAP), failed: false }
+    }
 }
 
 pub(crate) struct Strip {
@@ -195,7 +223,7 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), lane_applied: Vec::new(), failed: false })
+        Some(PluginSlot::new(ins.plugin.clone(), ch, plugin))
     }
 }
 
@@ -495,7 +523,11 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
     let slot_u8 = match u8::try_from(i) {
         _ if i == INSTRUMENT_SLOT => INSTRUMENT_AUTO_SLOT,
         Ok(s) => s,
-        Err(_) => return apply_values(slot, ins, |_, v| v),
+        Err(_) => {
+            // This call is not driving the slot, so a lane that was driving it has let go.
+            release_inactive_holds(slot, |_| false);
+            return apply_values(slot, ins, |_, v| v);
+        }
     };
     let reads = t.mixer.automation_mode.reads();
     let lanes = || {
@@ -504,28 +536,137 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
             _ => None,
         })
     };
+    // Parameters the insert stores go through `apply_values`. The rest live in the plugin (a
+    // hosted plug-in's state blob) and are tracked in `slot.holds`.
+    let unstored = || lanes().filter(|(name, _)| !ins.params.contains_key(*name));
     if lanes().next().is_none() {
+        // No lane is reading this slot: automation is off, or the lanes are gone. Put unstored
+        // parameters back; the session has no value of its own to restore.
+        release_inactive_holds(slot, |_| false);
         return apply_values(slot, ins, |_, v| v);
     }
-    apply_values(slot, ins, |k, val| lanes().find(|(p, _)| *p == k).map_or(val, |(_, l)| l.value_at(pos, val)));
-    // A hosted plugin keeps the parameters the session holds no value for in its own state; their
-    // lanes drive it too.
-    let n = lanes().filter(|(p, _)| !ins.params.contains_key(*p)).count();
-    if slot.lane_applied.len() != n {
-        slot.lane_applied = vec![(0, f32::NAN); n];
+    if !slot.holds.is_empty() {
+        // A rebuilt session allocates a new parameter `String` for the same lane. Retarget the
+        // hold before releasing, or the lane would look gone and the value it took over from
+        // would be read back as a fresh original.
+        rebind_unstored_holds(slot, unstored());
+        release_inactive_holds(slot, |lane| unstored().any(|(name, _)| lane_identity(name) == lane));
     }
-    for ((p, l), (lane, last)) in lanes().filter(|(p, _)| !ins.params.contains_key(*p)).zip(slot.lane_applied.iter_mut()) {
-        // Another lane in this place (lanes added, removed, or a new session snapshot) is sent
-        // afresh rather than compared with the value of the one before.
-        let id = p.as_ptr() as usize;
-        if *lane != id {
-            *lane = id;
-            *last = f32::NAN;
+    apply_values(slot, ins, |k, val| lanes().find(|(p, _)| *p == k).map_or(val, |(_, l)| l.value_at(pos, val)));
+    for (name, lane) in unstored() {
+        drive_unstored_lane(slot, name, lane, pos);
+    }
+}
+
+/// Address of the session's parameter id. A new `String` with the same text is a different lane
+/// identity until [`rebind_unstored_holds`] matches it to the parameter index.
+fn lane_identity(param: &str) -> usize {
+    param.as_ptr() as usize
+}
+
+fn plugin_param_index(slot: &PluginSlot, id: &str) -> Option<usize> {
+    slot.plugin.info().params.iter().position(|p| p.id == id)
+}
+
+fn plugin_param_id(slot: &PluginSlot, index: usize) -> Option<&'static str> {
+    slot.plugin.info().params.get(index).map(|p| p.id)
+}
+
+/// Plugin value to put back when the lane lets go. The live value wins; the parameter's default
+/// covers a plugin that does not report it. Non-finite values are not a value we can restore.
+fn read_original(slot: &PluginSlot, id: &str, index: usize) -> f32 {
+    let reported = slot.plugin.param(id).filter(|v| v.is_finite());
+    if let Some(v) = reported {
+        return v;
+    }
+    slot.plugin.info().params.get(index).map(|p| p.default).filter(|v| v.is_finite()).unwrap_or(0.0)
+}
+
+fn live_differs_from_lane(live: f32, lane: f32) -> bool {
+    if live.to_bits() == lane.to_bits() {
+        return false;
+    }
+    let diff = (live - lane).abs();
+    if !diff.is_finite() {
+        return true;
+    }
+    let scale = live.abs().max(lane.abs());
+    diff > PARAM_MATCH_TOLERANCE * (1.0 + scale)
+}
+
+/// Point an existing hold at a lane whose `String` was rebuilt, matching the parameter id to the
+/// cached index. The parameter table is scanned only then, not while the identity is unchanged.
+fn rebind_unstored_holds<'a>(slot: &mut PluginSlot, lanes: impl Iterator<Item = (&'a str, &'a AutomationLane)>) {
+    for (name, _) in lanes {
+        let id = lane_identity(name);
+        if slot.holds.iter().any(|h| h.lane == id) {
+            continue;
         }
-        let val = l.value_at(pos, 0.0);
-        if val.to_bits() != last.to_bits() {
-            slot.plugin.set_param(p, val);
-            *last = val;
+        let Some(param) = plugin_param_index(slot, name) else { continue };
+        if let Some(hold) = slot.holds.iter_mut().find(|h| h.param == param) {
+            hold.lane = id;
+        }
+    }
+}
+
+fn release_inactive_holds(slot: &mut PluginSlot, mut still_active: impl FnMut(usize) -> bool) {
+    let mut i = 0;
+    while i < slot.holds.len() {
+        let lane = match slot.holds.get(i) {
+            Some(hold) => hold.lane,
+            None => break,
+        };
+        if still_active(lane) {
+            i += 1;
+            continue;
+        }
+        restore_hold(slot, i);
+        slot.holds.swap_remove(i);
+    }
+}
+
+fn restore_hold(slot: &mut PluginSlot, index: usize) {
+    let Some((param, original)) = slot.holds.get(index).map(|h| (h.param, h.original)) else { return };
+    if let Some(id) = plugin_param_id(slot, param) {
+        slot.plugin.set_param(id, original);
+    }
+}
+
+fn drive_unstored_lane(slot: &mut PluginSlot, name: &str, lane: &AutomationLane, pos: Samples) {
+    let id = lane_identity(name);
+    let index = if let Some(i) = slot.holds.iter().position(|h| h.lane == id) {
+        i
+    } else if let Some(param) = plugin_param_index(slot, name) {
+        if let Some(i) = slot.holds.iter().position(|h| h.param == param) {
+            if let Some(hold) = slot.holds.get_mut(i) {
+                hold.lane = id;
+            }
+            i
+        } else {
+            // Read the plugin before the first write, so the lane can give the parameter back.
+            let original = read_original(slot, name, param);
+            slot.holds.push(LaneHold { param, lane: id, last: f32::NAN, original });
+            match slot.holds.len().checked_sub(1) {
+                Some(i) => i,
+                None => return,
+            }
+        }
+    } else {
+        return;
+    };
+    drive_hold(slot, index, lane, pos);
+}
+
+fn drive_hold(slot: &mut PluginSlot, index: usize, lane: &AutomationLane, pos: Samples) {
+    let Some((param, original, last)) = slot.holds.get(index).map(|h| (h.param, h.original, h.last)) else { return };
+    let value = lane.value_at(pos, original);
+    let Some(id) = plugin_param_id(slot, param) else { return };
+    let changed = value.to_bits() != last.to_bits();
+    let diverged = slot.plugin.param(id).is_some_and(|live| live_differs_from_lane(live, value));
+    if changed || diverged {
+        slot.plugin.set_param(id, value);
+        if let Some(hold) = slot.holds.get_mut(index) {
+            hold.last = value;
         }
     }
 }
