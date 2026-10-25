@@ -478,7 +478,10 @@ mod tests {
                 a.sort_unstable();
                 b.sort_unstable();
                 assert_eq!(a, b, "{}: placeholders differ for {src:?} → {tr:?}", lang.code());
-                assert_eq!(src.ends_with('…'), tr.ends_with('…'), "{}: ellipsis differs for {src:?} → {tr:?}", lang.code());
+                // Three ASCII dots and the single-character ellipsis both mark "opens a dialog":
+                // the English source may use either, so the translation may too.
+                let ellipsis = |s: &str| s.ends_with('…') || s.ends_with("...");
+                assert_eq!(ellipsis(src), ellipsis(tr), "{}: ellipsis differs for {src:?} → {tr:?}", lang.code());
                 // Chinese writes a full-width colon; both forms are acceptable.
                 let colon = |s: &str| s.ends_with(':') || s.ends_with('：');
                 assert_eq!(colon(src), colon(tr), "{}: colon differs for {src:?} → {tr:?}", lang.code());

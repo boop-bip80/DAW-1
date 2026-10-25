@@ -20,7 +20,7 @@ Language 0 is always English, the fallback.
 | Language | Code | Catalog | Plural forms | Menus complete |
 |---|---|---|---|---|
 | English (source) | `en` | — (strings live in the code) | one / other | — (source) |
-| 简体中文 — Simplified Chinese | `zh-hans` | [`crates/ui-egui/src/i18n/zh-hans.tsv`](../crates/ui-egui/src/i18n/zh-hans.tsv) · 1,141 entries | one (Chinese has no plural inflection) | yes |
+| 简体中文 — Simplified Chinese | `zh-hans` | [`crates/ui-egui/src/i18n/zh-hans.tsv`](../crates/ui-egui/src/i18n/zh-hans.tsv) · 1,160 entries | one (Chinese has no plural inflection) | yes |
 
 `code` is the lowercase BCP 47 tag stored in the preference; `name` is the native name shown in the
 Appearance window; `plural` picks the form to use for a count; `complete_menus` promises that the
@@ -166,7 +166,7 @@ Rules the tests enforce:
   tests fail; the app itself never panics on a bad catalog.
 - Escapes inside source and translation: `\n`, `\t` and `\\`.
 
-The shipped Simplified Chinese catalog has **1,141 entries**: 1,125 plain, 9 `@plural` and 7 in the
+The shipped Simplified Chinese catalog has **1,160 entries**: 1,144 plain, 9 `@plural` and 7 in the
 `automation` namespace. For example `SHUFFLE` is 推移 (edit-mode toolbar), `Shuffle Lock` is
 推移锁定, and the Shuffle tooltips are 推移模式.
 

@@ -48,6 +48,7 @@
 	9.0.6	9.0.6
 	9.1.4	9.1.4
 	9.1.6	9.1.6
+	Adds ±1 LSB triangular dither when writing 16- or 24-bit files. Leave it off when the master chain already dithers.	写入 16 位或 24 位文件时加入 ±1 LSB 三角抖动。主控链已做抖动时请保持关闭。
 	AFL (After Fader Listen)	推子后监听 (AFL)
 	ARA Note Overlay	ARA 音符叠加
 	ARA Plugins	ARA 插件
@@ -65,6 +66,8 @@
 	Audio as MIDI	音频转为 MIDI
 	Audio...	音频...
 	AudioSuite	AudioSuite
+	Auto Rename...	自动重命名…
+	Auto Rename…	自动重命名…
 	Auto-Spot Clips	自动定位片段
 	Auto-Update Active Configuration	自动更新当前配置
 	Automation	自动化
@@ -155,6 +158,7 @@
 	Disk Allocation...	磁盘分配...
 	Disk Usage	磁盘用量
 	Display on All Channels	在所有通道上显示
+	Dither (TPDF)	抖动（TPDF）
 	Double Edit	双倍编辑
 	Dropped Video Frame Indicator	视频丢帧指示
 	Duplicate	复制
@@ -192,6 +196,7 @@
 	Extend Edit Up	向上扩展编辑
 	Extend Edit Up to Members	向上扩展到编组成员
 	External Timecode Offset...	外部时间码偏移...
+	Extract	提取
 	Extract Chords from Selection	从选区提取和弦
 	Extract MIDI to New Track	将 MIDI 提取到新轨道
 	Fade to End	淡出到结尾
@@ -200,6 +205,7 @@
 	Feet+Frames	英尺+帧
 	File	文件
 	Find Talent	寻找人员
+	First clip: {name}	首个片段：{name}
 	Flatten Performance...	展平演奏...
 	Folder Lines	文件夹连线
 	Freeze	冻结
@@ -310,6 +316,7 @@
 	Mute Sends	静音发送
 	Name	名称
 	Narrow Mix	窄混音
+	New clips are named {a}, {b} and so on.	新片段依次命名为 {a}、{b} 等。
 	New Configuration...	新建配置...
 	New Playlist	新建播放列表
 	New Workspace	新建工作区
@@ -319,6 +326,8 @@
 	No Time	无时间基准
 	None	无
 	Normalize	标准化
+	Number	编号
+	Number of Places	位数
 	Object	对象
 	On Grid	在网格
 	Open	打开
@@ -364,6 +373,7 @@
 	QuickPunch	快速穿插
 	Rating	评分
 	Real-Time Properties	实时属性
+	Record (F12 or Cmd+Space)	录音（F12 或 Cmd+Space）
 	Recti-Fi	Recti-Fi
 	Rectified	整流
 	Regroup	重新编组
@@ -374,6 +384,7 @@
 	Remove Sync Point	移除同步点
 	Remove Warp	移除扭曲
 	Rename...	重命名...
+	Rename…	重命名…
 	Render	渲染
 	Renderer	渲染器
 	Renumber Bars...	重新编号小节...
@@ -390,6 +401,7 @@
 	Ruler Lines	标尺线
 	Rulers	标尺
 	S-Curve...	S 曲线...
+	Scroll Into View	滚动到可见位置
 	Set Preferences	设置首选项
 	SIP (Solo In Place)	就地独奏 (SIP)
 	Samples	采样
@@ -451,10 +463,14 @@
 	Start Collaboration...	开始协作...
 	Start to Fill Selection	开头填充选区
 	Start to Insertion	开头到插入点
+	Starting Number	起始编号
 	Step Input...	步进输入...
 	Stereo	立体声
 	Stretch...	拉伸...
+	Strip	去除
 	Strip Silence	去除无声
+	Strip Silence Rectangles	去除无声矩形
+	Suffix	后缀
 	Sync Point	同步点
 	Synchronization	同步
 	System Usage	系统使用情况
@@ -466,6 +482,7 @@
 	Tempo Editor	速度编辑器
 	Tempo Operations	速度操作
 	Tempo Operations Window	速度操作窗口
+	Text for naming the clips that editing makes from the selected clips:	为所选片段编辑生成的剪辑命名：
 	Thin	精简
 	Thin All	全部精简
 	Tile	平铺
@@ -524,6 +541,7 @@
 	Waveforms	波形
 	Window	窗口
 	Window Configuration List	窗口配置列表
+	Without a name, the clips keep their names.	未填名称时，片段保留原有名称。
 	Workspaces	工作区
 	Write MIDI Real-Time Properties	写入 MIDI 实时属性
 	Write to All Enabled	写入全部已启用项
@@ -732,6 +750,7 @@
 	Write to Notes	写入音符
 	bar(s)	小节
 	the audio engine hit an internal error (see the log)	音频引擎遇到内部错误（详见日志）
+	Zeros	位数
 	{menu} — {command}	{menu} — {command}
 	“{name}” stopped asking for audio	“{name}”不再请求音频
 	“{name}” was disconnected	“{name}”已断开连接
