@@ -462,8 +462,8 @@ impl<'a> FineSlider<'a> {
     }
 
     /// The value that an Alt-click (Option-click on a Mac) on the slider or its value box sets,
-    /// as a [`fader`] returns to 0 dB. While Alt is held, a drag and a click on the rail leave the
-    /// value where it is, and the click does not open the value box for typing.
+    /// as a [`fader`] returns to 0 dB. While Alt is held, a drag leaves the value where it is, and
+    /// an Alt-click on the value box does not open it for typing.
     pub fn default_value(mut self, default: f64) -> Self {
         self.default = Some(default);
         self
