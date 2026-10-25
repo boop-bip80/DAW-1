@@ -628,7 +628,9 @@ impl MixEngine {
     }
 
     /// [`MixEngine::render`], finding each block's clips with `clips` (built from `s`, off the
-    /// audio thread). The result is the same with any index: it only saves time.
+    /// audio thread). The result is the same as `render` while `clips` was built from `s` as it is
+    /// now: an index of another session only saves less time, but an edit that moves or resizes a
+    /// clip in place (same clip list, same length) is not detected, so rebuild the index after one.
     pub fn render_with(&mut self, s: &Session, clips: &ClipIndex, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
         if pos != self.last_end {
@@ -2118,7 +2120,8 @@ impl RangeRender {
         }
     }
 
-    /// Renders one more block of the mix of `s` (the session given to [`RangeRender::new`]) and
+    /// Renders one more block of the mix of `s` (the session given to [`RangeRender::new`],
+    /// unchanged since: its clip index was built then) and
     /// returns it as `(channels, n)`: the next `n` samples of the range lead each channel (none
     /// while the mix's latency is still being skipped). `None` once the range is done.
     pub fn next_block(&mut self, s: &Session) -> Option<(&[Vec<f32>], usize)> {
