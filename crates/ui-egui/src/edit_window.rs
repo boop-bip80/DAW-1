@@ -1477,10 +1477,24 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
         let vol_row = Rect::from_x_y_ranges(vr.x_range(), vr.min.y + 1.5..=vr.min.y + 14.0).shrink2(vec2(1.5, 0.0));
         let pan_row = Rect::from_x_y_ranges(vr.x_range(), vr.min.y + 15.0..=vr.max.y - 1.5).shrink2(vec2(1.5, 0.0));
         let vol_text = crate::widgets::db_text(m.volume_db);
-        let vol =
-            readout_button(&ui, vol_row, ui.scope_id().with(("vol", id.0)), "Volume", &vol_text, "Volume: click for a fader, Alt-click for 0 dB");
-        let pan_resp = pannable
-            .then(|| readout_button(&ui, pan_row, ui.scope_id().with(("pan", id.0)), "Pan", &pan, "Pan: click for sliders, Alt-click to reset"));
+        let vol = readout_button(
+            &ui,
+            vol_row,
+            ui.scope_id().with(("vol", id.0)),
+            &format!("{} volume", track.name),
+            &vol_text,
+            "Volume: click for a fader, Alt-click for 0 dB",
+        );
+        let pan_resp = pannable.then(|| {
+            readout_button(
+                &ui,
+                pan_row,
+                ui.scope_id().with(("pan", id.0)),
+                &format!("{} pan", track.name),
+                &pan,
+                "Pan: click for sliders, Alt-click to reset",
+            )
+        });
         let alt = ui.input(|i| i.modifiers.alt);
         if vol.clicked() && alt && m.volume_db.abs() > f32::EPSILON {
             // Merged, so a reset during an automation pass joins the pass's undo step; the merge ends by itself on the next frame.
@@ -1504,7 +1518,7 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     }
 }
 
-/// A readout row of the I/O column as a button. It lights up under the pointer, with the keyboard focus or while its popup is open,
+/// A readout row of the I/O column as a button, named `name` (the track's, so two tracks showing the same value differ) and its value. It lights up under the pointer, with the keyboard focus or while its popup is open,
 /// and paints nothing otherwise, so an untouched column looks the same as before.
 fn readout_button(ui: &Ui, r: Rect, id: egui::Id, name: &str, value: &str, tip: &str) -> egui::Response {
     let resp = ui.interact(r, id, Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);

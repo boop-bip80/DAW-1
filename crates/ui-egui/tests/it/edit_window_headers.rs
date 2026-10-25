@@ -269,8 +269,8 @@ fn clicking_the_volume_readout_opens_a_fader_whose_drag_is_one_undo_step() {
     let before = undo_steps(&h);
     assert!(!egui::Popup::is_any_open(&h.ctx));
 
-    // The readout is a button named after its value.
-    let readout = h.get_by_label("Volume -3.0").rect().center();
+    // The readout is a button named after its track and its value.
+    let readout = h.get_by_label("Kick volume -3.0").rect().center();
     click(&mut h, readout);
     assert!(egui::Popup::is_any_open(&h.ctx), "the click didn't open the fader");
     assert_eq!(kick(&h).mixer.volume_db, db, "opening the fader changed the volume");
