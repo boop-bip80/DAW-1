@@ -124,6 +124,19 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
         "session.inspect" | "document.inspect" => {
             ok(soundcraft_engine::inspect::session(&app.engine, p.get("detail").and_then(Value::as_str) == Some("full")))
         }
+        "audio.health" => match &app.player {
+            Some(player) => {
+                let h = if p.get("reset").and_then(Value::as_bool) == Some(true) { player.take_health() } else { player.health() };
+                ok(json!({
+                    "device": player.device_name,
+                    "silent": player.silent,
+                    "sample_rate": player.device_rate,
+                    "buffer_frames": player.device_buffer,
+                    "health": h,
+                }))
+            }
+            None => err("no audio output"),
+        },
         "ui.inspect" => {
             let mut v = app.inspect(ctx);
             v["edit_layout"] = json!(app.edit_layout);

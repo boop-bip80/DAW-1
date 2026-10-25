@@ -458,6 +458,7 @@ fn is_control_method(method: &str) -> bool {
             | "ui.key"
             | "ui.text"
             | "ui.screenshot"
+            | "audio.health"
             | "app.quit"
     )
 }
@@ -608,7 +609,7 @@ mod tests {
         assert_eq!(m, "engine.execute");
         let (m, _) = app_request("track.new", json!({}));
         assert_eq!(m, "engine.execute");
-        for method in ["session.inspect", "engine.commands", "engine.parity", "ui.screenshot", "app.quit"] {
+        for method in ["session.inspect", "engine.commands", "engine.parity", "ui.screenshot", "audio.health", "app.quit"] {
             assert_eq!(app_request(method, json!({})).0, method);
         }
     }

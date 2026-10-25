@@ -664,7 +664,8 @@ impl MixEngine {
         let order = std::mem::take(&mut self.order);
         let live = |t: &Track| !(t.kind == TrackKind::Master || t.inactive || t.kind == TrackKind::Vca);
         let is_aux = |t: &Track| matches!(t.kind, TrackKind::Aux | TrackKind::Folder);
-        // Phase 1: independent strips (audio, instrument, MIDI) in parallel.
+        // Phase 1: independent strips (audio, instrument, MIDI), in parallel except on the audio
+        // thread.
         let mut work = std::mem::take(&mut self.work);
         work.clear();
         for &i in &order {
@@ -1293,42 +1294,29 @@ std::thread_local! {
 }
 
 /// Mark the calling thread as the realtime audio thread (`soundcraft_playback`'s cpal callbacks
-/// do, every call: one thread-local store). Strips [`MixEngine::render`] hands to worker threads
-/// count as the audio thread while they render for it. Code that might run there asks
+/// do, every call: one thread-local store). [`MixEngine::render`] renders every strip on that
+/// thread itself instead of handing strips to worker threads. Code that might run there asks
 /// [`on_audio_thread`] before doing anything that blocks; the desktop app's logger does, so a
 /// `log::` record from the audio thread never takes a lock or touches a file.
 pub fn mark_audio_thread() {
     AUDIO_THREAD.set(true);
 }
 
-/// True on the thread [`mark_audio_thread`] marked, and on a worker while it renders strips for
-/// it. Lock-free and allocation-free.
+/// True on the thread [`mark_audio_thread`] marked. Lock-free and allocation-free.
 pub fn on_audio_thread() -> bool {
     AUDIO_THREAD.get()
 }
 
-/// Run `f` on this thread as (or as not) the audio thread, then restore the thread's own mark
-/// (also when `f` unwinds): a pool worker renders for realtime playback and offline bounces alike.
-#[cfg(not(target_arch = "wasm32"))]
-fn as_audio_thread(audio: bool, f: impl FnOnce()) {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            AUDIO_THREAD.set(self.0);
-        }
-    }
-    let _restore = Restore(AUDIO_THREAD.replace(audio));
-    f();
-}
-
-/// Process strips, in parallel on native targets when there are enough of them.
+/// Process strips: in parallel on native targets when there are enough of them, except on the
+/// realtime audio thread. There they render one after the other on the thread itself: the pool's
+/// workers run at normal priority, so under load the callback would wait for starved workers
+/// (priority inversion) and miss its deadline, and waiting on them blocks, which the callback
+/// never may. Offline renders (bounces) keep the parallelism.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_strips<T: Send>(work: &mut [T], f: impl Fn(&mut T) + Sync + Send) {
     use rayon::prelude::*;
-    if work.len() >= 4 {
-        // The workers render on behalf of this thread: on the audio thread, they are it too.
-        let audio = on_audio_thread();
-        work.par_iter_mut().for_each(|w| as_audio_thread(audio, || f(w)));
+    if work.len() >= 4 && !on_audio_thread() {
+        work.par_iter_mut().for_each(f);
     } else {
         work.iter_mut().for_each(f);
     }
@@ -2449,10 +2437,39 @@ mod audio_thread_tests {
         .unwrap()
     }
 
+    /// The threads each strip job of `run_strips` ran on, seen from a thread that is (or is not)
+    /// the audio thread, and that thread's own id.
+    fn strip_threads(audio: bool) -> (Vec<std::thread::ThreadId>, std::thread::ThreadId) {
+        std::thread::spawn(move || {
+            if audio {
+                mark_audio_thread();
+            }
+            let mut work = vec![None; 64];
+            run_strips(&mut work, |w| {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                *w = Some(std::thread::current().id());
+            });
+            (work.into_iter().map(|w| w.unwrap()).collect(), std::thread::current().id())
+        })
+        .join()
+        .unwrap()
+    }
+
+    #[test]
+    fn strips_for_the_audio_thread_render_on_it_and_bounces_use_the_pool() {
+        // The realtime callback must never wait on other threads: pool workers run at normal
+        // priority, so under load the callback would wait on starved workers (priority inversion).
+        let (threads, caller) = strip_threads(true);
+        assert!(threads.iter().all(|t| *t == caller), "every strip renders on the audio thread itself");
+        // Offline renders (bounces) keep the parallelism.
+        let (threads, caller) = strip_threads(false);
+        assert!(threads.iter().any(|t| *t != caller), "a bounce spreads strips over the pool");
+    }
+
     #[test]
     fn strips_rendered_for_the_audio_thread_count_as_the_audio_thread_and_only_then() {
-        assert!(seen_by_strips(true).iter().all(|&rt| rt), "a worker rendering for the audio thread is on it");
-        assert!(seen_by_strips(false).iter().all(|&rt| !rt), "the workers don't stay marked afterwards");
+        assert!(seen_by_strips(true).iter().all(|&rt| rt), "strips rendered for the audio thread are on it");
+        assert!(seen_by_strips(false).iter().all(|&rt| !rt), "pool workers are never marked");
     }
 }
 

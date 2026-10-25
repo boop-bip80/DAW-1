@@ -41,8 +41,8 @@ const BLOCK: usize = 512;
 /// Room for replaced snapshots on their way back; `update_session` empties it before each send.
 const OLD_SESSIONS: usize = 16;
 
-/// The realtime audio thread marker lives in the mix engine, which carries it into the strips it
-/// renders on worker threads; the cpal callbacks here set it.
+/// The realtime audio thread marker lives in the mix engine, which renders every strip on the
+/// marked thread itself; the cpal callbacks here set it.
 pub use soundcraft_mix::{mark_audio_thread, on_audio_thread};
 
 /// Meter values for the UI.
@@ -103,6 +103,29 @@ struct Fault {
     beats: std::sync::atomic::AtomicU64,
     /// The UI has been told.
     reported: AtomicBool,
+    /// Underruns the device reported, callbacks that overran their buffer period, and the worst
+    /// callback's share of its buffer time (‰), since the stream opened or the last
+    /// [`Player::take_health`], and the device callbacks in that time.
+    xruns: std::sync::atomic::AtomicU64,
+    late_callbacks: std::sync::atomic::AtomicU64,
+    worst_load: AtomicU32,
+    callbacks: std::sync::atomic::AtomicU64,
+}
+
+/// How the realtime audio path keeps up, for the UI and for stress tests: since the output
+/// opened, or since the last [`Player::take_health`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct AudioHealth {
+    /// Device callbacks (none for the silent clock).
+    pub callbacks: u64,
+    /// Underruns (dropouts) the device reported.
+    pub xruns: u64,
+    /// Callbacks that overran their buffer period. Not every one is an audible gap, and the
+    /// device may report the same overrun as an xrun too (CoreAudio does).
+    pub late_callbacks: u64,
+    /// The slowest callback's render time as a share of its buffer period, to 0.001 (1.0 = it
+    /// overran).
+    pub worst_load: f64,
 }
 
 impl Fault {
@@ -118,6 +141,51 @@ impl Fault {
             return None;
         };
         (!self.reported.swap(true, Ordering::Relaxed)).then_some(trouble)
+    }
+
+    /// A device callback rendered `frames` at `rate` in `took`. Lock-free and allocation-free.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_callback(&self, took: std::time::Duration, frames: usize, rate: f64) {
+        self.callbacks.fetch_add(1, Ordering::Relaxed);
+        if frames == 0 || rate <= 0.0 {
+            return;
+        }
+        let load = took.as_secs_f64() * rate / frames as f64;
+        if load > 1.0 {
+            self.late_callbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        self.worst_load.fetch_max((load * 1000.0).min(f64::from(u32::MAX)) as u32, Ordering::Relaxed);
+    }
+
+    /// The stream reported an error (on the audio thread or another).
+    fn note_stream_error(&self, e: &cpal::Error) {
+        match e.kind() {
+            cpal::ErrorKind::DeviceNotAvailable => self.gone.store(true, Ordering::Relaxed),
+            cpal::ErrorKind::Xrun => {
+                self.xruns.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn health(&self) -> AudioHealth {
+        AudioHealth {
+            callbacks: self.callbacks.load(Ordering::Relaxed),
+            xruns: self.xruns.load(Ordering::Relaxed),
+            late_callbacks: self.late_callbacks.load(Ordering::Relaxed),
+            worst_load: f64::from(self.worst_load.load(Ordering::Relaxed)) / 1000.0,
+        }
+    }
+
+    /// The health so far, counting afresh from here: each counter is swapped for zero, so an
+    /// event the callback records meanwhile lands in this reading or the next, never in neither.
+    fn take_health(&self) -> AudioHealth {
+        AudioHealth {
+            callbacks: self.callbacks.swap(0, Ordering::Relaxed),
+            xruns: self.xruns.swap(0, Ordering::Relaxed),
+            late_callbacks: self.late_callbacks.swap(0, Ordering::Relaxed),
+            worst_load: f64::from(self.worst_load.swap(0, Ordering::Relaxed)) / 1000.0,
+        }
     }
 }
 
@@ -505,6 +573,19 @@ impl Player {
         #[cfg(target_arch = "wasm32")]
         let stalled = false;
         self.fault.trouble(stalled)
+    }
+
+    /// How the realtime path has kept up since the output opened or the last
+    /// [`Player::take_health`]: callbacks, device-reported underruns, late callbacks and the
+    /// worst callback load.
+    pub fn health(&self) -> AudioHealth {
+        self.fault.health()
+    }
+
+    /// [`Player::health`] so far, then count afresh (a stress run measures from a take). No
+    /// event is lost between the reading and the restart.
+    pub fn take_health(&self) -> AudioHealth {
+        self.fault.take_health()
     }
 
     fn side(&self) -> std::sync::MutexGuard<'_, Side> {
@@ -967,10 +1048,14 @@ where
     let mut scratch = vec![0.0f32; 8192 * frame];
     let chunk = scratch.len();
     let (failed, guard, gone) = (Arc::clone(fault), Arc::clone(shared), Arc::clone(fault));
+    #[cfg(not(target_arch = "wasm32"))]
+    let rate = f64::from(config.sample_rate);
     device.build_output_stream(
         *config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             mark_audio_thread();
+            #[cfg(not(target_arch = "wasm32"))]
+            let started = std::time::Instant::now();
             for out in data.chunks_mut(chunk) {
                 let Some(s) = scratch.get_mut(..out.len()) else { return };
                 guarded_block(&failed, &guard, s, |d| state.fill(d, channels));
@@ -978,14 +1063,14 @@ where
                     *o = T::from_sample(*x);
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            failed.note_callback(started.elapsed(), data.len() / frame, rate);
         },
         // cpal may call this on the audio thread (on ALSA in a loop while the device stays
         // broken): marked, so the logger hands the record off instead of writing it.
         move |e: cpal::Error| {
             mark_audio_thread();
-            if e.kind() == cpal::ErrorKind::DeviceNotAvailable {
-                gone.gone.store(true, Ordering::Relaxed);
-            }
+            gone.note_stream_error(&e);
             log::warn!("audio stream error: {e}");
         },
         None,
@@ -1177,6 +1262,27 @@ mod tests {
     }
 
     #[test]
+    fn underruns_and_late_callbacks_are_counted_until_taken() {
+        use std::time::Duration;
+        let f = Fault::default();
+        f.note_stream_error(&cpal::ErrorKind::Xrun.into());
+        f.note_stream_error(&cpal::ErrorKind::Xrun.into());
+        // 512 frames at 48 kHz last 10.67 ms.
+        f.note_callback(Duration::from_millis(4), 512, 48_000.0);
+        f.note_callback(Duration::from_millis(16), 512, 48_000.0);
+        f.note_callback(Duration::from_millis(2), 512, 48_000.0);
+        let h = f.health();
+        assert_eq!(h, AudioHealth { callbacks: 3, xruns: 2, late_callbacks: 1, worst_load: 1.5 });
+        assert!(!f.gone.load(Ordering::Relaxed), "an underrun is not a lost device");
+        assert_eq!(f.take_health(), h);
+        assert_eq!(f.health(), AudioHealth::default());
+        f.note_callback(Duration::from_millis(2), 512, 48_000.0);
+        assert_eq!(f.health().callbacks, 1);
+        f.note_stream_error(&cpal::ErrorKind::DeviceNotAvailable.into());
+        assert!(f.gone.load(Ordering::Relaxed));
+    }
+
+    #[test]
     fn audio_state_plays_and_stops_at_end() {
         let s = Arc::new(soundcraft_model::Session::default());
         let shared = Arc::new(Shared {
@@ -1192,6 +1298,99 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(shared.position.load(Ordering::Relaxed) >= 1000);
         assert!(!shared.playing.load(Ordering::Relaxed));
+    }
+
+    /// A session like a real mix: `tracks` stereo tracks, each looping 10 s of noise through an
+    /// EQ and a compressor.
+    fn busy_session(tracks: usize) -> Arc<soundcraft_model::Session> {
+        use soundcraft_model::{ChannelFormat, Clip, Insert, SourceAudio, SourceId, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let mut seed = 1u32;
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let len = 480_000;
+        let x: Vec<f32> = (0..len).map(|_| noise() * 0.5).collect();
+        s.pool
+            .insert(SourceId(1), Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![x.clone(), x] })));
+        for _ in 0..tracks {
+            let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+            let id = s.new_clip_id();
+            let track = s.track_mut(t).unwrap();
+            track.playlist_mut().unwrap().clips.push(Clip::audio(id, "noise", SourceId(1), 0, 0, len as i64));
+            track.mixer.inserts[0] = Some(Insert::new("eq_7band"));
+            track.mixer.inserts[1] = Some(Insert::new("compressor"));
+        }
+        Arc::new(s)
+    }
+
+    /// The realtime path under load, without a device: callbacks come once per buffer period (so
+    /// helper threads, if the engine used any, would park between them, as with a real device)
+    /// while all cores but one are kept busy. One core stays free, so late blocks come from waiting
+    /// on other threads rather than from the load itself (the test thread is not realtime, so other
+    /// processes can still preempt it, and a slow machine may lack the throughput). Opt-in, as it measures
+    /// time: `cargo test -p soundcraft-playback -- --ignored`.
+    #[test]
+    #[ignore = "timing stress test, run explicitly"]
+    fn no_callback_misses_its_deadline_while_every_core_but_one_is_busy() {
+        use std::time::{Duration, Instant};
+        const FRAMES: usize = 512;
+        const CALLBACKS: usize = 1500;
+        let period = Duration::from_secs_f64(FRAMES as f64 / 48_000.0);
+        let session = busy_session(16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cores = std::thread::available_parallelism().map_or(2, usize::from);
+        let load: Vec<_> = (1..cores)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    let mut x = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+                    }
+                })
+            })
+            .collect();
+        let mut times = std::thread::spawn(move || {
+            mark_audio_thread();
+            let shared = Arc::new(Shared {
+                position: AtomicI64::new(0),
+                playing: AtomicBool::new(false),
+                speed: AtomicU32::new(1000),
+                meters: Mutex::new(MeterSnapshot::default()),
+            });
+            let (tx, rx) = channel();
+            let mut st = AudioState::new(rx, shared, session, 48_000.0, channel().0);
+            tx.send(Cmd::Play { from: 0, end: None, looped: Some(Range::new(0, 480_000)) }).unwrap();
+            let mut out = vec![0.0f32; 2 * FRAMES];
+            let mut times = Vec::with_capacity(CALLBACKS);
+            let mut next = Instant::now();
+            for i in 0..CALLBACKS + 50 {
+                let t0 = Instant::now();
+                st.fill(&mut out, 2);
+                // The first blocks create the plugins and warm the caches.
+                if i >= 50 {
+                    times.push(t0.elapsed());
+                }
+                next += period;
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+            times
+        })
+        .join()
+        .unwrap();
+        stop.store(true, Ordering::Relaxed);
+        load.into_iter().for_each(|h| h.join().unwrap());
+        times.sort();
+        let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+        let (p50, p99, max) = (at(0.5), at(0.99), at(1.0));
+        let late = times.iter().filter(|t| **t > period).count();
+        eprintln!("{cores} cores, period {period:?}: p50 {p50:?}, p99 {p99:?}, max {max:?}, {late} of {CALLBACKS} late");
+        // A callback that takes longer than its period is a dropout on a real device. Two of
+        // 1500 are allowed: the test thread is not realtime, so another process can preempt it
+        // (the waits this test is about made 23 and 30 late).
+        assert!(late <= 2, "{late} callbacks missed their deadline, the slowest took {max:?} of a {period:?} period");
     }
 
     #[test]
