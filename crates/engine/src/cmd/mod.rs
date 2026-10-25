@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 mod audio_midi;
 mod audiosuite;
+mod auto_rename;
 mod clap;
 mod clip;
 mod clip_list;
@@ -148,6 +149,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(track_more::specs());
         v.extend(clip_more::specs());
         v.extend(clip_list::specs());
+        v.extend(auto_rename::specs());
         v.extend(event_more::specs());
         v.extend(setup_more::specs());
         v.extend(clap::specs());

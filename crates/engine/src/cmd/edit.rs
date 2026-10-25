@@ -289,6 +289,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
             .unwrap_or_default();
         cb.automation.push(lanes);
     }
+    cb.keep_auto_names(e.session());
     cb.markers = e
         .session()
         .markers
@@ -325,10 +326,21 @@ fn cut_track(s: &mut Session, t: TrackId, r: soundcraft_time::Range, sh: bool, f
     ops::clear_range(s, t, r, sh);
 }
 
+/// The clipboard for a paste, with the Auto Rename schemes of its clips put into the session first
+/// ([`Clipboard::adopt_auto_names`]).
+pub(super) fn clipboard_for_paste(e: &mut Engine) -> Clipboard {
+    let mut cb = e.clipboard.clone();
+    if cb.tracks.iter().flatten().any(|c| c.auto_name.is_some()) {
+        cb.adopt_auto_names(e.session_mut());
+        e.clipboard = cb.clone();
+    }
+    cb
+}
+
 fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "edit.paste", p)?;
     let given = position_param(e, "edit.paste", p, "at")?;
-    let cb = e.clipboard.clone();
+    let cb = clipboard_for_paste(e);
     let s = e.session();
     let at = match given {
         Some(at) => at,
@@ -426,7 +438,7 @@ fn repeat_to_fill(e: &mut Engine, p: &Value) -> Result<Value> {
     let range = range_param(e, "edit.paste_repeat_to_fill", p)?;
     let len = e.clipboard.length.max(1);
     let tracks = tracks_required(e, "edit.paste_repeat_to_fill", p)?;
-    let cb = e.clipboard.clone();
+    let cb = clipboard_for_paste(e);
     let s = e.session_mut();
     let mut at = range.start;
     let mut n = 0;
@@ -835,12 +847,12 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
         Some(Value::String(m)) => crate::io::StripMode::from_id(m).ok_or_else(|| bad("edit.strip_silence", format!("unknown mode `{m}`")))?,
         Some(_) => return Err(bad("edit.strip_silence", "mode must be strip, extract or separate")),
     };
-    let names = strip_names(p)?;
+    let names = strip_names("edit.strip_silence", p)?;
     let s = e.session_mut();
     let mut kept = 0;
     let mut named = 0;
     for t in &tracks {
-        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode)?;
+        kept += crate::io::strip_silence(s, *t, r, thr, min_len, (pre, post), mode, names.is_some())?;
         if let Some(names) = &names {
             named += crate::io::name_stripped_clips(s, *t, r, names, named);
         }
@@ -848,11 +860,10 @@ fn strip_silence(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"clips": kept, "named": named}))
 }
 
-/// The naming scheme in `edit.strip_silence`'s `name`, `number`, `zeros` and `suffix` params, or
-/// `None` when `name` is missing or blank.
-fn strip_names(p: &Value) -> Result<Option<crate::io::StripNames>> {
+/// The naming scheme in the `name`, `number`, `zeros` and `suffix` params of `cmd`
+/// (`edit.strip_silence`, `clip.auto_rename`), or `None` when `name` is missing or blank.
+pub(super) fn strip_names(cmd: &str, p: &Value) -> Result<Option<crate::io::StripNames>> {
     use crate::io::StripNames;
-    let cmd = "edit.strip_silence";
     let text = |k: &str| match p.get(k) {
         None => Ok(None),
         Some(Value::String(v)) => Ok(Some(v.clone())),
@@ -871,18 +882,22 @@ fn strip_names(p: &Value) -> Result<Option<crate::io::StripNames>> {
         return Ok(None);
     };
     let d = StripNames::default();
-    Ok(Some(StripNames {
-        name,
-        number: number.unwrap_or(d.number),
-        zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros),
-        suffix: suffix.unwrap_or(d.suffix),
-    }))
+    let suffix = suffix.unwrap_or(d.suffix);
+    let max_text = soundcraft_model::AutoName::MAX_TEXT_CHARS;
+    if name.chars().count() + suffix.chars().count() > max_text {
+        return Err(bad(cmd, format!("`name` and `suffix` together must be at most {max_text} characters")));
+    }
+    Ok(Some(StripNames { name, number: number.unwrap_or(d.number), zeros: zeros.and_then(|z| usize::try_from(z).ok()).unwrap_or(d.zeros), suffix }))
 }
 
 fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
-    let shape = str_param(p, "shape")
-        .map_or(Some(FadeShape::EqualPower), FadeShape::from_id)
-        .ok_or_else(|| bad("edit.fades_create", "unknown fade shape"))?;
+    let shape = match p.get("shape") {
+        None => FadeShape::EqualPower,
+        Some(v) => v
+            .as_str()
+            .and_then(FadeShape::from_id)
+            .ok_or_else(|| bad("edit.fades_create", "shape must be linear|equal power|s-curve|exponential|logarithmic"))?,
+    };
     if p.get("clip").is_some() || p.get("side").is_some() {
         let curvature = match p.get("curvature") {
             None => 0.0,
@@ -909,9 +924,6 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
         let available = clip.length.min(clip.end().saturating_sub(clip.start));
         if available <= 0 {
             return Err(bad("edit.fades_create", "clip has no length"));
-        }
-        if p.get("shape").is_some_and(|v| !v.is_string()) {
-            return Err(bad("edit.fades_create", "shape must be a fade shape name"));
         }
         let fade = Fade { len: length.min(available), shape, curvature };
         let clip = e.session_mut().find_clip_mut(id).ok_or_else(|| bad("edit.fades_create", "clip not found"))?;
@@ -1147,6 +1159,19 @@ mod tests {
         let before = e.session().clone();
         assert!(e.execute("edit.fades_create", &json!({"clip": id, "side": "in", "length": 1})).is_err());
         assert_eq!(e.session(), &before);
+    }
+
+    #[test]
+    fn range_fades_refuse_a_shape_that_is_not_a_shape_name() {
+        for shape in [json!("bad"), json!(null), json!(true), json!(1)] {
+            let (mut e, t, _) = trim_session(&[(0, 10_000, 0), (10_000, 10_000, 10_000)]);
+            let before = e.session().clone();
+            let history = e.undo_history();
+            let params = json!({"tracks": [t], "start": 9_500, "end": 10_500, "shape": shape});
+            assert!(e.execute("edit.fades_create", &params).is_err(), "{params}");
+            assert_eq!(e.session(), &before, "{params}");
+            assert_eq!(e.undo_history(), history, "{params}");
+        }
     }
 
     #[test]
