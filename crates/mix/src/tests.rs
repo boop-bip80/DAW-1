@@ -125,6 +125,36 @@ fn a_new_unstored_lane_in_the_place_of_another_is_sent() {
 }
 
 #[test]
+fn a_reused_lane_address_on_another_parameter_is_not_the_old_hold() {
+    // The allocator may put a new lane's parameter string where a dropped lane's was. Simulate
+    // that: a `level` hold whose lane identity is the address of a new `cutoff` lane.
+    let Some(plugin) = super::instances::create_plugin("subtractive_synth") else { return };
+    let mut slot = super::strip::PluginSlot::new("subtractive_synth".into(), 2, plugin);
+    let ins = Insert::new("subtractive_synth");
+    let mut s = Session::default();
+    let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+    let lane = |param: &str, v: f32| {
+        let mut l = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: soundcraft_model::INSTRUMENT_AUTO_SLOT, param: param.into() });
+        l.set_point(0, v);
+        l
+    };
+    let level = slot.plugin.param("level").unwrap();
+    let cutoff = slot.plugin.param("cutoff").unwrap();
+    let tr = s.track_mut(t).unwrap();
+    tr.automation = vec![lane("level", -30.0)];
+    super::strip::apply_params(&mut slot, &ins, tr, INSTRUMENT_SLOT, 0);
+    assert_eq!(slot.plugin.param("level"), Some(-30.0));
+    tr.automation = vec![lane("cutoff", 300.0)];
+    if let (Some(AutoParam::Plugin { param, .. }), Some(hold)) = (tr.automation.first().map(|l| &l.param), slot.holds.first_mut()) {
+        hold.lane = super::strip::lane_identity(param);
+    }
+    super::strip::apply_params(&mut slot, &ins, tr, INSTRUMENT_SLOT, 0);
+    assert_eq!(slot.plugin.param("level"), Some(level), "level is given back");
+    assert_eq!(slot.plugin.param("cutoff"), Some(300.0), "cutoff follows its own lane");
+    assert_ne!(cutoff, 300.0);
+}
+
+#[test]
 fn an_unstored_lane_regains_control_after_an_editor_change() {
     let Some((mut slot, ins, mut session, track)) = unstored_synth() else { return };
     {

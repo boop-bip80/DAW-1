@@ -24,9 +24,9 @@ pub(crate) struct BusBuf {
 /// not keep the session's `String`). `lane` is that string's address. `last` is the value last
 /// sent. `original` is the plugin's value from before the lane took over; nothing in the session
 /// stores it.
-struct LaneHold {
+pub(crate) struct LaneHold {
     param: usize,
-    lane: usize,
+    pub(crate) lane: usize,
     last: f32,
     original: f32,
 }
@@ -550,7 +550,8 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
         // hold before releasing, or the lane would look gone and the value it took over from
         // would be read back as a fresh original.
         rebind_unstored_holds(slot, unstored());
-        release_inactive_holds(slot, |lane| unstored().any(|(name, _)| lane_identity(name) == lane));
+        let info = slot.plugin.info();
+        release_inactive_holds(slot, |hold| unstored().any(|(name, _)| hold_is(info, hold, name)));
     }
     apply_values(slot, ins, |k, val| lanes().find(|(p, _)| *p == k).map_or(val, |(_, l)| l.value_at(pos, val)));
     for (name, lane) in unstored() {
@@ -560,7 +561,7 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
 
 /// Address of the session's parameter id. A new `String` with the same text is a different lane
 /// identity until [`rebind_unstored_holds`] matches it to the parameter index.
-fn lane_identity(param: &str) -> usize {
+pub(crate) fn lane_identity(param: &str) -> usize {
     param.as_ptr() as usize
 }
 
@@ -594,12 +595,20 @@ fn live_differs_from_lane(live: f32, lane: f32) -> bool {
     diff > PARAM_MATCH_TOLERANCE * (1.0 + scale)
 }
 
+/// Whether `hold` is the hold of lane `name`: the same lane identity AND the same parameter. An
+/// address alone is not enough: the allocator can reuse a dropped lane's address for a lane on
+/// another parameter.
+fn hold_is(info: &soundcraft_dsp::PluginInfo, hold: &LaneHold, name: &str) -> bool {
+    hold.lane == lane_identity(name) && info.params.get(hold.param).is_some_and(|p| p.id == name)
+}
+
 /// Point an existing hold at a lane whose `String` was rebuilt, matching the parameter id to the
 /// cached index. The parameter table is scanned only then, not while the identity is unchanged.
 fn rebind_unstored_holds<'a>(slot: &mut PluginSlot, lanes: impl Iterator<Item = (&'a str, &'a AutomationLane)>) {
+    let info = slot.plugin.info();
     for (name, _) in lanes {
         let id = lane_identity(name);
-        if slot.holds.iter().any(|h| h.lane == id) {
+        if slot.holds.iter().any(|h| hold_is(info, h, name)) {
             continue;
         }
         let Some(param) = plugin_param_index(slot, name) else { continue };
@@ -609,14 +618,14 @@ fn rebind_unstored_holds<'a>(slot: &mut PluginSlot, lanes: impl Iterator<Item = 
     }
 }
 
-fn release_inactive_holds(slot: &mut PluginSlot, mut still_active: impl FnMut(usize) -> bool) {
+fn release_inactive_holds(slot: &mut PluginSlot, mut still_active: impl FnMut(&LaneHold) -> bool) {
     let mut i = 0;
     while i < slot.holds.len() {
-        let lane = match slot.holds.get(i) {
-            Some(hold) => hold.lane,
+        let active = match slot.holds.get(i) {
+            Some(hold) => still_active(hold),
             None => break,
         };
-        if still_active(lane) {
+        if active {
             i += 1;
             continue;
         }
@@ -634,7 +643,8 @@ fn restore_hold(slot: &mut PluginSlot, index: usize) {
 
 fn drive_unstored_lane(slot: &mut PluginSlot, name: &str, lane: &AutomationLane, pos: Samples) {
     let id = lane_identity(name);
-    let index = if let Some(i) = slot.holds.iter().position(|h| h.lane == id) {
+    let info = slot.plugin.info();
+    let index = if let Some(i) = slot.holds.iter().position(|h| hold_is(info, h, name)) {
         i
     } else if let Some(param) = plugin_param_index(slot, name) {
         if let Some(i) = slot.holds.iter().position(|h| h.param == param) {
