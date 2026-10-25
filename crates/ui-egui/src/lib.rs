@@ -11,6 +11,7 @@ pub mod credits;
 pub mod dialogs;
 pub mod docking;
 pub mod edit_window;
+mod export;
 pub mod extra_windows;
 pub mod fonts;
 pub mod icons;
@@ -343,6 +344,8 @@ pub struct SoundApp {
     /// and colour assertions in one test can never straddle another test's palette change.
     #[cfg(test)]
     _palette_lock: theme::TestPaletteGuard,
+    #[cfg(test)]
+    captured_states_for_test: Option<soundcraft_playback::PluginStates>,
 }
 
 /// The plugins whose state the session takes this frame, out of those changed in their editors
@@ -443,6 +446,8 @@ impl SoundApp {
             imports: import::Imports::default(),
             #[cfg(test)]
             _palette_lock: theme::lock_test_palette(),
+            #[cfg(test)]
+            captured_states_for_test: None,
         }
     }
 
@@ -458,6 +463,14 @@ impl SoundApp {
         }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
+        }
+        if export::is_detached(id) {
+            let result = self.export_engine().and_then(|mut copy| copy.execute(id, &params).map_err(|error| error.to_string()));
+            if let Err(error) = &result {
+                self.ui.status = error.clone();
+                log::warn!("{id}: {error}");
+            }
+            return result;
         }
         if id.starts_with("session.save") || id.starts_with("file.bounce") || id == "track.save_preset" {
             // Third-party plugins keep state the session can't see: store it first.
@@ -659,8 +672,7 @@ impl SoundApp {
     /// Reads every live third-party plugin's state and stores it on its insert
     /// (`mix.insert_state`), so saves and bounces include it.
     pub fn capture_plugin_states(&mut self) {
-        let Some(p) = &self.player else { return };
-        let states = p.capture_states();
+        let states = self.live_plugin_states();
         self.store_plugin_states(states);
     }
 
