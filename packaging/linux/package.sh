@@ -125,7 +125,6 @@ if has appimage; then
   fi
   APPDIR="$WORK/SoundCraft.AppDir"
   cp -R "$STAGE" "$APPDIR"
-  mv "$APPDIR/usr/share/doc" "$WORK/doc-unused"
   # Keep sctk-adwaita's MIT notice in the AppImage.
   install -Dm644 "$ROOT/NOTICE" "$APPDIR/usr/share/doc/soundcraft/NOTICE"
   ln -s usr/bin/soundcraft "$APPDIR/AppRun"

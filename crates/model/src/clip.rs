@@ -126,6 +126,10 @@ pub struct Clip {
     /// Optional colour override (RGB).
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// The key in [`crate::Session::auto_names`] of the names that editing gives the clips it
+    /// separates from this one (Clip List › Auto Rename). `None` keeps the clip's name.
+    #[serde(default)]
+    pub auto_name: Option<u64>,
     /// Elastic / Vari-speed ratio (1.0 = none) — applied by rendered processing.
     #[serde(default = "one")]
     pub stretch: f64,
@@ -160,6 +164,7 @@ impl Clip {
             rating: 0,
             sync_point: 0,
             color: None,
+            auto_name: None,
             stretch: 1.0,
             group: None,
             loop_id: None,
@@ -242,6 +247,11 @@ impl Clip {
         g
     }
 
+    /// Gain envelope value in dB at `rel` samples from the clip start (0 without an envelope).
+    pub fn env_db_at(&self, rel: Samples) -> f32 {
+        env_value(&self.gain_env, rel)
+    }
+
     /// Move the start edge to `new_start` keeping material anchored (trim start).
     pub fn trim_start_to(&mut self, new_start: Samples) {
         // #907: these are public APIs, so they have to survive arguments a command would never
@@ -251,8 +261,16 @@ impl Clip {
         let end = self.end();
         let new_start = new_start.max(end.saturating_sub(MAX_POSITION)).clamp(-MAX_POSITION, MAX_POSITION).min(end.saturating_sub(1));
         let delta = new_start.saturating_sub(self.start);
-        if let ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } = &mut self.content {
-            *offset = offset.saturating_add(delta);
+        // The mixer plays a stretched audio clip from `offset + rel / stretch`.
+        let stretch = if self.stretch.is_finite() && self.stretch > 0.0 { self.stretch } else { 1.0 };
+        match &mut self.content {
+            ClipContent::Audio { offset, .. } if (stretch - 1.0).abs() >= 1e-9 => {
+                *offset = offset.saturating_add((delta as f64 / stretch).round() as Samples);
+            }
+            ClipContent::Audio { offset, .. } | ClipContent::Video { offset, .. } => {
+                *offset = offset.saturating_add(delta);
+            }
+            ClipContent::Midi { .. } => {}
         }
         // MIDI note ticks are re-anchored by the engine, which knows the tempo map.
         self.length = self.length.saturating_sub(delta).clamp(1, MAX_POSITION);
@@ -505,5 +523,22 @@ mod tests {
             assert!((1..=MAX_POSITION).contains(&c.length), "end {new_end}: length {}", c.length);
             assert!(c.end() - c.start == c.length, "end {new_end}: start {} end {}", c.start, c.end());
         }
+    }
+
+    #[test]
+    fn trim_start_of_stretched_audio_advances_offset_by_source_time() {
+        // The mixer plays source `offset + rel / stretch`, so a split at timeline 1000 of a 2x clip
+        // must start the right half at source sample 500.
+        let mut c = Clip::audio(ClipId(1), "a", SourceId(1), 0, 0, 2000);
+        c.stretch = 2.0;
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 500);
+        let mut c = Clip::audio(ClipId(2), "b", SourceId(1), 0, 0, 2000);
+        c.stretch = 0.5;
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 2000);
+        let mut c = Clip::audio(ClipId(3), "c", SourceId(1), 0, 0, 2000);
+        c.trim_start_to(1000);
+        assert_eq!(c.source_offset(), 1000);
     }
 }

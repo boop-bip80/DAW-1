@@ -7,6 +7,7 @@ use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
+    ("app.checkForUpdates", "Check for Updates…", "", None),
     ("ui.dock", "Arrange Panel", "", None),
     ("ui.dock.reset", "Reset Panel Layout", "Window > Reset Panel Layout", None),
     ("window.mix", "Mix", "Window > Mix", Some("Cmd+=")),
@@ -128,10 +129,10 @@ pub const AUDIOSUITE: &[(&str, &str)] = &[
     ("AudioSuite > Pitch Shift > Pitch II", "pitch_shift"),
     ("AudioSuite > Pitch Shift > Pitch Shift Legacy", "pitch_shift"),
     ("AudioSuite > Pitch Shift > Time Shift", "time_stretch"),
-    ("AudioSuite > Pitch Shift > Vari-Fi", "varispeed"),
+    ("AudioSuite > Pitch Shift > Vari-Fi", "speed_ramp"),
     ("AudioSuite > Reverb > D-Verb", "room_reverb"),
     ("AudioSuite > Delay > Mod Delay III", "mod_delay"),
-    ("AudioSuite > Modulation > Sci-Fi", "flanger"),
+    ("AudioSuite > Modulation > Sci-Fi", "ring_mod"),
     ("AudioSuite > Harmonic > Eleven Lite", "saturator"),
     ("AudioSuite > Harmonic > Lo-Fi", "lofi"),
     ("AudioSuite > Harmonic > Recti-Fi", "rectifier"),
@@ -166,7 +167,9 @@ const DIALOG_COMMANDS: &[&str] = &[
     "event.quantize",
     "event.transpose",
     "edit.strip_silence",
+    "clip.auto_rename",
     "clip.rename",
+    "clip.loop",
 ];
 
 /// Shared menu hierarchy for egui and native desktop hosts.
@@ -229,6 +232,9 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
                 ui.menu_button("SoundCraft", |ui| {
                     if ui.button("About SoundCraft").clicked() {
                         app.ui.show_about = true;
+                    }
+                    if ui.button("Check for Updates…").clicked() {
+                        let _ = app.run("app.checkForUpdates", json!({}));
                     }
                     if ui.button("Session Info").clicked() {
                         app.ui.show_session_info = true;
@@ -504,7 +510,7 @@ fn wants_dialog(id: &str) -> bool {
 /// Handle UI-layer commands. Returns None when `id` is not a UI command.
 pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<Value, String>> {
     if matches!(id, "ui.dock" | "ui.dock.reset") {
-        return Some(crate::docking::command(app, id == "ui.dock.reset", p));
+        return Some(crate::docking::command(app, id, p));
     }
     if let Some(v) = crate::extra_windows::run(app, id, p) {
         return Some(Ok(v));
@@ -517,6 +523,10 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         json!({"value": *v})
     };
     let r = match id {
+        "app.checkForUpdates" | "help.checkForUpdates" => {
+            crate::updates_ui::check(app);
+            json!({})
+        }
         "window.mix" => {
             app.ui.window = MainWindow::Mix;
             app.focus_mix = app.ui.mix_separate;
@@ -591,7 +601,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "window.configurations" => toggle(&mut app.ui.show_configurations),
         "window.config_new" | "window.config_update" => {
-            if let Err(error) = app.ui.docking.validate().and_then(|()| app.ui.mix_docking.validate_mix()) {
+            if let Err(error) = crate::docking::validate(&app.ui.docking).and_then(|()| crate::docking::validate_mix(&app.ui.mix_docking)) {
                 return Some(Err(error));
             }
             let mut snap = app.ui.clone();
@@ -687,7 +697,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
                 }
                 match serde_json::from_value::<crate::UiState>(cur) {
                     Ok(ns) => {
-                        if let Err(error) = ns.docking.validate().and_then(|()| ns.mix_docking.validate_mix()) {
+                        if let Err(error) = crate::docking::validate(&ns.docking).and_then(|()| crate::docking::validate_mix(&ns.mix_docking)) {
                             return Some(Err(error));
                         }
                         crate::docking::cancel_replaced_state(app, &ns);
@@ -771,5 +781,14 @@ mod tests {
         assert_eq!(instrument_track(e.session()), None, "an audio track has no instrument");
         e.execute("edit.select", &json!({"tracks": [audio, inst]})).unwrap();
         assert_eq!(instrument_track(e.session()).map(|t| t.0), Some(inst));
+    }
+
+    #[test]
+    fn audiosuite_sci_fi_opens_the_ring_modulator() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, "audiosuite.process", "AudioSuite > Modulation > Sci-Fi");
+        assert_eq!(app.ui.audiosuite.as_deref(), Some("ring_mod"));
+        let info = soundcraft_dsp::plugin_info("ring_mod").unwrap();
+        assert!(info.audiosuite && info.category == soundcraft_dsp::Category::Modulation);
     }
 }
