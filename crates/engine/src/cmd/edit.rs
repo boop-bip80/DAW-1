@@ -535,6 +535,37 @@ fn select_all(e: &mut Engine, _: &Value) -> Result<Value> {
     Ok(json!({"tracks": s.edit.selected_tracks.len(), "end": end}))
 }
 
+/// Adds the members of every active edit group that touches `t`, then puts `t` in track order.
+fn add_group_members(s: &Session, t: &mut Vec<TrackId>) {
+    let extra: Vec<TrackId> =
+        s.groups.iter().filter(|g| g.active && g.edit && g.members.iter().any(|m| t.contains(m))).flat_map(|g| g.members.clone()).collect();
+    for m in extra {
+        if !t.contains(&m) {
+            t.push(m);
+        }
+    }
+    let order: Vec<TrackId> = s.tracks.iter().map(|x| x.id).collect();
+    t.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
+}
+
+/// Selecting clips also selects their range and tracks (Grabber click). A clip in a crossfade is selected as far as it
+/// shows: up to or from its cut, not under the crossfade's zone.
+fn select_clip_ids(s: &Session, ed: &mut soundcraft_model::EditState, c: Vec<ClipId>) {
+    let mut trs = Vec::new();
+    for id in &c {
+        if let Some((tid, _)) = s.find_clip(*id)
+            && !trs.contains(&tid)
+        {
+            trs.push(tid);
+        }
+    }
+    if let Some(r) = ops::clips_span(s, &c, true) {
+        ed.selection = r;
+        ed.selected_tracks = trs;
+    }
+    ed.selected_clips = c;
+}
+
 fn select(e: &mut Engine, p: &Value) -> Result<Value> {
     let crossfade = match p.get("crossfade") {
         None => None,
@@ -571,15 +602,7 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
     if let Some(mut t) = tracks {
         // Active edit groups select all their members together.
         if !exact {
-            let extra: Vec<soundcraft_model::TrackId> =
-                s.groups.iter().filter(|g| g.active && g.edit && g.members.iter().any(|m| t.contains(m))).flat_map(|g| g.members.clone()).collect();
-            for m in extra {
-                if !t.contains(&m) {
-                    t.push(m);
-                }
-            }
-            let order: Vec<soundcraft_model::TrackId> = s.tracks.iter().map(|x| x.id).collect();
-            t.sort_by_key(|x| order.iter().position(|o| o == x).unwrap_or(usize::MAX));
+            add_group_members(s, &mut t);
         }
         ed.selected_tracks = t;
     }
@@ -589,21 +612,7 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
         _ => {}
     }
     if let Some(c) = clips {
-        // Selecting clips also selects their range and tracks (Grabber click). A clip in a crossfade is selected as far
-        // as it shows: up to or from its cut, not under the crossfade's zone.
-        let mut trs = Vec::new();
-        for id in &c {
-            if let Some((tid, _)) = s.find_clip(*id)
-                && !trs.contains(&tid)
-            {
-                trs.push(tid);
-            }
-        }
-        if let Some(r) = ops::clips_span(s, &c, true) {
-            ed.selection = r;
-            ed.selected_tracks = trs;
-        }
-        ed.selected_clips = c;
+        select_clip_ids(s, &mut ed, c);
     } else if list_changes {
         ed.selected_clips.clear();
     }
