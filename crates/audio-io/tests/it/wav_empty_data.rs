@@ -102,6 +102,10 @@ fn many_empty_data_chunks_parse_in_linear_time() {
     let n = u32::try_from(b.len() - 8).unwrap_or(u32::MAX);
     b[4..8].copy_from_slice(&n.to_le_bytes());
     let t = std::time::Instant::now();
-    let _ = probe(&b, Some("wav")).unwrap();
+    let info = probe(&b, Some("wav")).unwrap();
     assert!(t.elapsed() < std::time::Duration::from_secs(1), "parse took {:?}", t.elapsed());
+    // The 500 000 following chunks are empty metadata, not audio: the hundreds of thousands of
+    // chunk headers after the first empty `data` chunk must not be handed back as sample bytes,
+    // even though `only_chunks_follow` stops at its cap rather than walking to the end.
+    assert_eq!(info.frames, 0, "empty chunks are not samples");
 }
