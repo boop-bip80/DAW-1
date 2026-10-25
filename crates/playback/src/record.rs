@@ -613,9 +613,10 @@ impl InputRing {
 
     pub fn push(&self, samples: &[f32]) {
         let ch = self.channels.load(Ordering::Relaxed).max(1);
-        self.last_push.store(samples.len() / ch, Ordering::Relaxed);
         if let Ok(mut s) = self.state.try_lock() {
             s.data.extend(samples.iter().copied().map(finite));
+            // Only a callback whose frames were queued sets the backlog allowance.
+            self.last_push.store(samples.len() / ch, Ordering::Relaxed);
             while s.data.len() > self.cap {
                 s.data.pop_front();
             }
