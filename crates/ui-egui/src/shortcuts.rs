@@ -59,7 +59,13 @@ fn search_chord(m: Modifiers, mac: bool) -> bool {
 pub fn handle(app: &mut SoundApp, ctx: &egui::Context) {
     // Cmd+= and Cmd+0 are Mix/Edit and Quantize to Grid, not egui's built-in interface zoom.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
-    if ctx.egui_wants_keyboard_input() || app.dialogs.open.is_some() {
+    if ctx.egui_wants_keyboard_input()
+        || app.dialogs.open.is_some()
+        || app.context_menus.active
+        || app.context_menus.search.as_ref().is_some_and(|search| search.viewport == ctx.viewport_id())
+        || app.context_menus.routing.as_ref().is_some_and(|search| search.viewport == ctx.viewport_id())
+        || app.context_menus.preset.is_some_and(|preset| preset.2 == ctx.viewport_id())
+    {
         return;
     }
     // A scripted press is identified by its exact position in this pass's events, not by matching

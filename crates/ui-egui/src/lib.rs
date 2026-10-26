@@ -6,10 +6,12 @@
 
 pub mod appearance;
 pub mod bounce;
+pub mod context_menu;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
 pub mod docking;
+pub mod dropdown;
 pub mod edit_window;
 pub mod extra_windows;
 pub mod fonts;
@@ -18,6 +20,8 @@ pub mod import;
 pub mod menus;
 pub mod midi_editor;
 pub mod mix_window;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_host;
 pub mod ops_windows;
 pub mod palette;
 pub mod panels;
@@ -271,6 +275,7 @@ pub struct SoundApp {
     pub services: Services,
     /// Set only by a desktop host after installing an OS menu bar.
     pub native_menu_bar: bool,
+    pub context_menus: context_menu::State,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Writes the open session's autosaves in the background, once there is something to write.
@@ -484,6 +489,7 @@ impl SoundApp {
             audio_health_report: None,
             services,
             native_menu_bar: false,
+            context_menus: context_menu::State::default(),
             autosave_dir: None,
             autosaver: None,
             autosaved_rev: 0,
@@ -611,6 +617,7 @@ impl SoundApp {
     /// as bytes). Screenshot requests admitted for the old document must never receive the new
     /// one's pixels, so every replacement path bumps the epoch.
     pub(crate) fn document_replaced(&mut self) {
+        self.context_menus.invalidate();
         self.doc_epoch = self.doc_epoch.wrapping_add(1);
         // Note indices and gestures belong to the old session's clips (#443); every document
         // replacement (run, Recover, a session the browser read) goes through here.
@@ -1756,6 +1763,9 @@ impl SoundApp {
         if self.ui.mix_separate {
             mix_window::show_separate(self, &ctx);
         }
+        mix_window::plugin_search_window(self, &ctx);
+        mix_window::routing_search_window(self, &ctx);
+        panels::save_preset_window(self, &ctx);
         panels::floating(self, &ctx);
         windows::show(self, &ctx);
         video_window::show(self, &ctx);

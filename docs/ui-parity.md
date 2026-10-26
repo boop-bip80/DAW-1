@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-16 · **Change:** minor (Scroll Into View in the track name menu) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (native macOS popup menus) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -64,11 +64,23 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Clip indicators, track colours, waveform views (peak/power/rectified/outlines) | ✅ | |
 | Fader resolution, fine adjust, numeric entry | 🟡 | |
 | macOS system menu bar | ✅ | #10 |
+| macOS native context menus | ✅ | Track, Clip, Groups, Clip List, Insert, Instrument and Send use AppKit; system materials and accessibility preferences are owned by macOS. Plugin Search opens a focused picker; Send offers quick actions and its detailed controls. Main and separate Mix viewports share dispatch; other platforms retain egui |
+| macOS native dropdown menus | ✅ | Track View/Playlist/Voice/Automation/Timebase/Elastic, columns, routes/sends, inserts/instruments, counter/grid/nudge, presets and form/settings ComboBoxes use AppKit. Routing Search and Save Preset retain their detailed controls in auxiliary windows; form choices apply once after tracking |
+
+Native context menus and dropdowns are presented after releasing the app state borrow. Cancellation has no
+command side effects; results from replaced sessions or deleted targets are discarded. The
+macOS 11 deployment minimum is unchanged; the new system design requires a macOS 26+ SDK
+and a supporting runtime. Desktop verification used macOS/SDK 27, with keyboard selection
+from Track, Insert, Send and Track View menus, plus Track View and New Tracks format changes
+through native menu accessibility actions and visual checks of their resulting controls. The window
+capture tool excludes system popup windows; older macOS, physical multi-monitor placement
+and accessibility preference variations still need runtime coverage.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Native macOS context menus and dropdowns with focused plugin/routing search and Send/preset controls; readiness estimates unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |
 | 2026-10-13 | minor | Drag across checkboxes (#399) |

@@ -429,7 +429,14 @@ fn command_list(app: &mut SoundApp, p: &Value) -> Value {
         |id: &str, label: &str| filter.as_deref().is_none_or(|f| id.to_ascii_lowercase().contains(f) || label.to_ascii_lowercase().contains(f));
     if let Some(arr) = list.as_array_mut() {
         for (id, label, path, sc) in crate::menus::UI_COMMANDS.iter().filter(|c| matches(c.0, c.1)) {
-            arr.push(json!({"id": id, "label": label, "menu": path, "shortcut": sc, "enabled": true, "params": "{}"}));
+            let params = match *id {
+                "window.plugin_search" => "{track: id, slot: index, instruments?: false, scan?: CLAP|VST3} — focused plugin search",
+                "window.send_controls" => "{track: id, slot: index} — detailed controls for an assigned Send",
+                "window.routing_search" => "{track: id, input?: false, send?: slot} — searchable route destinations",
+                "window.save_preset" => "{track: id, slot: index} — save the current insert parameters as a user preset",
+                _ => "{}",
+            };
+            arr.push(json!({"id": id, "label": label, "menu": path, "shortcut": sc, "enabled": true, "params": params}));
         }
     }
     ok(list)

@@ -4,7 +4,6 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold, mono, regular, rgb};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipId, SourceId};
 
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
 fn drag_track(app: &mut SoundApp, ui: &Ui, row: Rect, id: u64, dropped: bool) {
@@ -109,12 +108,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
         if all.double_clicked() {
             let _ = app.run("edit.select_all", json!({}));
         }
-        all.context_menu(|ui| {
-            if ui.button("New Group…").clicked() {
-                let _ = app.dialogs.open_for_command(&app.engine, "track.group");
-                ui.close();
-            }
-        });
+        crate::context_menu::attach(app, ui, &all, crate::context_menu::Target::Group(None));
         for (id, letter, name, active, color) in groups {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, active, &name));
@@ -137,24 +131,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
             if resp.double_clicked() {
                 let _ = app.run("edit.select", json!({"tracks": members, "exact": true}));
             }
-            resp.context_menu(|ui| {
-                if ui.button("Select Tracks in Group").clicked() {
-                    let _ = app.run("edit.select", json!({"tracks": members, "exact": true}));
-                    ui.close();
-                }
-                if ui.button(if active { "Disable" } else { "Enable" }).clicked() {
-                    let _ = app.run("track.group_toggle", json!({"group": id}));
-                    ui.close();
-                }
-                if ui.button("Modify Group…").clicked() {
-                    let _ = app.dialogs.open_modify_group(&app.engine, soundcraft_model::GroupId(id));
-                    ui.close();
-                }
-                if ui.button("Delete Group").clicked() {
-                    let _ = app.run("track.ungroup", json!({"group": id}));
-                    ui.close();
-                }
-            });
+            crate::context_menu::attach(app, ui, &resp, crate::context_menu::Target::Group(Some(soundcraft_model::GroupId(id))));
         }
     });
     gutter_scroll(ui, gutter, &out);
@@ -278,33 +255,7 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
         };
         for (id, name, whole, color, selected) in items {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), if whole { Sense::click_and_drag() } else { Sense::click() });
-            resp.context_menu(|ui| {
-                if whole {
-                    if ui.button("Place on New Track").clicked() {
-                        let _ = app.run("clip.place_source", json!({"source": id}));
-                        ui.close();
-                    }
-                    let sel_track = app.engine.session().edit.selected_tracks.first().map(|t| t.0);
-                    if let Some(t) = sel_track
-                        && ui.button("Place on Selected Track").clicked()
-                    {
-                        let _ = app.run("clip.place_source", json!({"source": id, "track": t}));
-                        ui.close();
-                    }
-                    ui.separator();
-                }
-                if !whole && ui.button("Auto Rename…").clicked() {
-                    // The selected clips when the row is one of them, otherwise the row's clip.
-                    let clips = if selected { app.engine.session().edit.selected_clips.clone() } else { vec![ClipId(id)] };
-                    app.dialogs.open_auto_rename(&app.engine, clips);
-                    ui.close();
-                }
-                if ui.button("Clear…").clicked() {
-                    let (clips, sources) = if whole { (vec![], vec![SourceId(id)]) } else { (vec![ClipId(id)], vec![]) };
-                    app.dialogs.open_clear(&app.engine, clips, sources);
-                    ui.close();
-                }
-            });
+            crate::context_menu::attach(app, ui, &resp, crate::context_menu::Target::ClipList { id, source: whole });
             if whole {
                 // Whole files drag onto tracks.
                 resp.dnd_set_drag_payload(crate::DragSource(id));
@@ -554,7 +505,16 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         if ui.button(label).clicked() {
                             let _ = app.run("mix.insert_bypass", json!({"track": tid.0, "slot": slot}));
                         }
-                        ui.menu_button("Presets v", |ui| preset_menu(app, ui, tid, slot, info, &ins));
+                        if app.context_menus.enabled {
+                            let response = ui.button("Presets");
+                            crate::context_menu::dropdown(
+                                app,
+                                &response,
+                                crate::context_menu::Target::Presets { track: tid, slot, plugin: ins.plugin.clone() },
+                            );
+                        } else {
+                            ui.menu_button("Presets v", |ui| preset_menu(app, ui, tid, slot, info, &ins));
+                        }
                     }
                     if soundcraft_mix::is_third_party(&ins.plugin) {
                         let open = app.player.as_ref().is_some_and(|p| p.editor_open(tid, slot));
@@ -594,7 +554,7 @@ fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                             let mut x = v;
                             let resp = if !p.choices.is_empty() {
                                 let mut idx = x.round().max(0.0) as usize;
-                                let r = egui::ComboBox::from_id_salt(("pc", tid.0, slot, p.id))
+                                let r = crate::dropdown::ComboBox::from_id_salt(("pc", tid.0, slot, p.id))
                                     .selected_text(p.choices.get(idx).copied().unwrap_or("?"))
                                     .show_ui(ui, |ui| {
                                         for (i, c) in p.choices.iter().enumerate() {
@@ -735,7 +695,137 @@ fn preset_dir(app: &SoundApp, plugin: &str) -> Option<std::path::PathBuf> {
     app.preset_dir.as_ref().map(|d| d.join(crate::preset_folder_name(plugin)))
 }
 
-/// Factory default plus user presets for a plugin insert; user presets need a desktop preset directory.
+pub(crate) fn native_preset_menu(app: &SoundApp, track: soundcraft_model::TrackId, slot: usize) -> Vec<crate::context_menu::Entry> {
+    use crate::context_menu::{Action, Entry};
+    let Some(info) = app
+        .engine
+        .session()
+        .track(track)
+        .and_then(|t| t.mixer.inserts.get(slot))
+        .and_then(Option::as_ref)
+        .and_then(|insert| crate::mix_window::plugin_info(&insert.plugin))
+    else {
+        return vec![];
+    };
+    let defaults: serde_json::Map<String, serde_json::Value> = info.params.iter().map(|p| (p.id.into(), json!(p.default))).collect();
+    let mut entries = vec![Entry::command(
+        "<factory default>",
+        "mix.insert_params",
+        json!({"track": track.0, "slot": slot, "params": defaults, "preset": "<factory default>"}),
+    )];
+    if let Some(dir) = preset_dir(app, info.id) {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|list| {
+                list.flatten()
+                    .take(4096)
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+                            path.file_stem().and_then(|name| name.to_str()).map(str::to_owned)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        entries.push(Entry::Separator);
+        entries.extend(names.into_iter().map(|name| Entry::item(name.clone(), Action::LoadPreset { track, slot, name })));
+        entries.push(Entry::Separator);
+        entries.push(Entry::command("Save Preset…", "window.save_preset", json!({"track": track.0, "slot": slot})));
+    }
+    entries
+}
+
+pub(crate) fn load_preset(app: &mut SoundApp, track: soundcraft_model::TrackId, slot: usize, name: &str) -> Result<(), String> {
+    use std::io::Read;
+    if std::path::Path::new(name).components().count() != 1 || std::path::Path::new(name).file_name().and_then(|name| name.to_str()) != Some(name) {
+        return Err("Invalid preset name".into());
+    }
+    let info = app
+        .engine
+        .session()
+        .track(track)
+        .and_then(|t| t.mixer.inserts.get(slot))
+        .and_then(Option::as_ref)
+        .and_then(|insert| crate::mix_window::plugin_info(&insert.plugin))
+        .ok_or("Insert no longer exists")?;
+    let dir = preset_dir(app, info.id).ok_or("User presets need the desktop app")?;
+    let mut text = String::new();
+    std::fs::File::open(dir.join(format!("{name}.json")))
+        .map_err(|e| e.to_string())?
+        .take(1_048_577)
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    if text.len() > 1_048_576 {
+        return Err("Preset is too large".into());
+    }
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let params: serde_json::Map<String, serde_json::Value> = value
+        .get("params")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(key, value)| info.params.iter().any(|param| param.id == key.as_str()) && value.as_f64().is_some_and(f64::is_finite))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    app.run("mix.insert_params", json!({"track": track.0, "slot": slot, "params": params, "preset": name})).map(|_| ())
+}
+
+pub(crate) fn save_preset_command(app: &mut SoundApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let track = soundcraft_model::TrackId(p.get("track").and_then(serde_json::Value::as_u64).ok_or("track must be an unsigned integer")?);
+    let slot =
+        p.get("slot").and_then(serde_json::Value::as_u64).and_then(|slot| usize::try_from(slot).ok()).ok_or("slot must be an unsigned integer")?;
+    let info = app
+        .engine
+        .session()
+        .track(track)
+        .and_then(|t| t.mixer.inserts.get(slot))
+        .and_then(Option::as_ref)
+        .and_then(|insert| crate::mix_window::plugin_info(&insert.plugin))
+        .ok_or("Insert no longer exists")?;
+    if preset_dir(app, info.id).is_none() {
+        return Err("User presets need the desktop app".into());
+    }
+    app.context_menus.preset = Some((track, slot, egui::ViewportId::ROOT));
+    Ok(json!({"track": track.0, "slot": slot}))
+}
+
+pub(crate) fn save_preset_window(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some((track, slot, viewport)) = app.context_menus.preset else { return };
+    if viewport != ctx.viewport_id() {
+        return;
+    }
+    let insert = app.engine.session().track(track).and_then(|t| t.mixer.inserts.get(slot)).and_then(Option::as_ref).cloned();
+    let Some(insert) = insert else {
+        app.context_menus.preset = None;
+        return;
+    };
+    let Some(info) = crate::mix_window::plugin_info(&insert.plugin) else {
+        app.context_menus.preset = None;
+        return;
+    };
+    let Some(dir) = preset_dir(app, info.id) else {
+        app.context_menus.preset = None;
+        return;
+    };
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        app.context_menus.preset = None;
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Save Preset")
+        .id(egui::Id::unique(("save_preset_window", track.0, slot)))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .show(ctx, |ui| save_preset_controls(app, ui, track, slot, info, &insert, &dir));
+    if !open {
+        app.context_menus.preset = None;
+    }
+}
+
 fn preset_menu(
     app: &mut SoundApp,
     ui: &mut Ui,
@@ -777,6 +867,18 @@ fn preset_menu(
         }
     }
     ui.separator();
+    save_preset_controls(app, ui, tid, slot, info, ins, &dir);
+}
+
+fn save_preset_controls(
+    app: &mut SoundApp,
+    ui: &mut Ui,
+    tid: soundcraft_model::TrackId,
+    slot: usize,
+    info: &soundcraft_dsp::PluginInfo,
+    ins: &soundcraft_model::Insert,
+    dir: &std::path::Path,
+) {
     let key = egui::Id::unique(("preset_name", tid.0, slot));
     let mut name: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| format!("{} preset", info.name));
     ui.horizontal(|ui| {
@@ -784,7 +886,7 @@ fn preset_menu(
         if ui.button("Save").clicked() {
             let clean = soundcraft_engine::io::sanitize_name(&name);
             let body = json!({"format": "soundcraft-plugin-preset", "plugin": info.id, "params": ins.params});
-            let ok = std::fs::create_dir_all(&dir).is_ok() && std::fs::write(dir.join(format!("{clean}.json")), body.to_string()).is_ok();
+            let ok = std::fs::create_dir_all(dir).is_ok() && std::fs::write(dir.join(format!("{clean}.json")), body.to_string()).is_ok();
             app.ui.status = if ok { format!("Saved preset {clean}") } else { "Could not save the preset".into() };
             if ok {
                 let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": {}, "preset": clean}));
@@ -797,6 +899,7 @@ fn preset_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soundcraft_model::SourceId;
     use soundcraft_model::{ChannelFormat, Clip, Session, TrackKind};
 
     #[test]
