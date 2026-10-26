@@ -612,10 +612,14 @@ fn a_crossfade_is_a_box_over_the_whole_clip_with_no_line_at_the_cut_and_the_late
             near(b_bar.min.x, zone_end) && near(b_bar.max.x, x_at(&app, t, B_START + 2 * SEC)),
             "{view}: B's bar {b_bar:?}, the zone ends at {zone_end}"
         );
-        // The names sit at the start of their bars.
+        // The names sit at the start of their bars. Only text over the clips counts: the docked Clips list lists them too.
         let label = |name: &str| {
             shapes.iter().enumerate().find_map(|(i, c)| match &c.shape {
-                Shape::Text(tx) if tx.galley.text() == name && tx.pos.y > top && tx.pos.y < top + height => Some((i, tx.pos.x)),
+                Shape::Text(tx)
+                    if tx.galley.text() == name && tx.pos.y > top && tx.pos.y < top + height && tx.pos.x >= a_bar.min.x && tx.pos.x < b_bar.max.x =>
+                {
+                    Some((i, tx.pos.x))
+                }
                 _ => None,
             })
         };
