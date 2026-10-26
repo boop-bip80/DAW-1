@@ -814,7 +814,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             if ui.button("Don't Save").clicked() {
                                 action = Some(then.clone());
                             }
-                            if buttons(ui, "Save", enter) {
+                            // Enter on a focused Don't Save clicks it, so Enter presses Save only when it was not clicked.
+                            if buttons(ui, "Save", enter) && action.is_none() {
                                 save_first = Some(then.clone());
                             }
                         });
@@ -822,15 +823,14 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         });
+    // Enter on a focused Cancel also presses OK, so Cancel drops the command and the save that OK asked for.
     if esc || ctx.memory(|m| m.data.get_temp::<bool>(egui::Id::unique("dlg_cancel")).unwrap_or(false)) {
         keep = false;
+        action = None;
+        save_first = None;
         app.dialogs.after_save = None;
         app.dialogs.pending_session = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::unique("dlg_cancel")));
-    }
-    // Enter on a focused Cancel also presses OK. In Auto Rename, the dialog then closes without running the command.
-    if !keep && matches!(d, Dialog::AutoRename { .. }) {
-        action = None;
     }
     if let Some(strip) = rename_from
         && keep
@@ -1090,7 +1090,9 @@ fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
         if let Some(info) = soundcraft_dsp::plugin_info(&process) {
             for p in info.params {
                 let v = params.entry(p.id.to_string()).or_insert(p.default);
-                ui.add(egui::Slider::new(v, p.min..=p.max).text(p.name));
+                let mut wide = f64::from(*v);
+                crate::widgets::fine_slider(ui, &mut wide, f64::from(p.min)..=f64::from(p.max), p.name);
+                *v = wide as f32;
             }
         } else {
             match process.as_str() {
