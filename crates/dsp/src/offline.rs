@@ -193,27 +193,58 @@ impl SincTable {
     }
 }
 
+/// Dot product of the taps `x` with their weights `w`, in eight partial sums so the compiler can
+/// keep several multiply-adds in flight: one f32 accumulator serializes the whole loop. Only the
+/// order of the additions changes, so the result differs from a plain left-to-right sum by
+/// rounding alone.
+#[inline]
+fn dot(x: &[f32], w: &[f32]) -> f32 {
+    let (x8, x_rest) = x.as_chunks::<8>();
+    let (w8, w_rest) = w.as_chunks::<8>();
+    let mut sums = [0.0f32; 8];
+    for (a, b) in x8.iter().zip(w8) {
+        for (s, (v, k)) in sums.iter_mut().zip(a.iter().zip(b)) {
+            *s += v * k;
+        }
+    }
+    let mut sum = ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    for (v, k) in x_rest.iter().zip(w_rest) {
+        sum += v * k;
+    }
+    sum
+}
+
 /// Resamples one channel to exactly `out_len` samples, where output sample `n` is read at input
 /// time `n / ratio`.
 fn resample_channel(x: &[f32], ratio: f64, out_len: usize, table: &SincTable) -> Vec<f32> {
+    resample_channel_reported(x, ratio, out_len, table, &mut |_| true).unwrap_or_default()
+}
+
+fn resample_channel_reported(x: &[f32], ratio: f64, out_len: usize, table: &SincTable, report: &mut dyn FnMut(f32) -> bool) -> Option<Vec<f32>> {
+    if !report(0.0) {
+        return None;
+    }
     let len = x.len() as i64;
     let hw = table.half_width;
-    (0..out_len)
-        .map(|n| {
-            let t = n as f64 / ratio;
-            let lo = (t - hw).ceil().max(0.0) as i64;
-            let hi = ((t + hw).floor() as i64).min(len - 1);
-            let mut acc = 0.0f32;
-            let mut j = lo;
-            while j <= hi {
-                if let Some(&v) = x.get(j as usize) {
-                    acc += v * table.at(t - j as f64);
-                }
-                j += 1;
+    let mut out = Vec::with_capacity(out_len);
+    for n in 0..out_len {
+        if n > 0 && n.is_multiple_of(PROGRESS_BLOCK) && !report(n as f32 / out_len as f32) {
+            return None;
+        }
+        let t = n as f64 / ratio;
+        let lo = (t - hw).ceil().max(0.0) as i64;
+        let hi = ((t + hw).floor() as i64).min(len - 1);
+        let mut acc = 0.0f32;
+        let mut j = lo;
+        while j <= hi {
+            if let Some(&v) = x.get(j as usize) {
+                acc += v * table.at(t - j as f64);
             }
-            acc
-        })
-        .collect()
+            j += 1;
+        }
+        out.push(acc);
+    }
+    report(1.0).then_some(out)
 }
 
 fn resample_ratio(ch: &[Vec<f32>], ratio: f64, out_len: usize) -> Vec<Vec<f32>> {
@@ -234,7 +265,7 @@ const MAX_POLYPHASE_WEIGHTS: usize = 1 << 22;
 /// `n * step / phases`: whole part `i`, phase `p`. Its taps are input samples `i + first ..`, one
 /// weight each, so every output is one dot product over contiguous memory instead of a table
 /// lookup and interpolation per tap. The weights are the ones `resample_channel` computes, taps
-/// beyond the kernel's half width weigh 0, and taps are summed in the same order.
+/// beyond the kernel's half width weigh 0. The dot product changes only the additions' rounding.
 struct Polyphase {
     phases: u64,
     step: u64,
@@ -269,17 +300,26 @@ impl Polyphase {
         Some(Polyphase { phases, step, first, taps, weights })
     }
 
-    fn run(&self, x: &[f32], out_len: usize) -> Vec<f32> {
+    /// Resamples `x` to `out_len` samples, calling `report` with the fraction of the output it has
+    /// written and stopping (`None`) as soon as `report` returns false. Progress is checked every
+    /// [`PROGRESS_BLOCK`] samples, so cancelling costs at most one block of work.
+    fn run_reported(&self, x: &[f32], out_len: usize, report: &mut dyn FnMut(f32) -> bool) -> Option<Vec<f32>> {
+        if !report(0.0) {
+            return None;
+        }
         let len = x.len() as i64;
         let mut out = Vec::with_capacity(out_len);
         for n in 0..out_len as u64 {
+            if n > 0 && n.is_multiple_of(PROGRESS_BLOCK as u64) && !report(n as f32 / out_len as f32) {
+                return None;
+            }
             let Some(pos) = n.checked_mul(self.step) else { break };
             let (i, p) = ((pos / self.phases) as i64, (pos % self.phases) as usize);
             let w = self.weights.get(p * self.taps..(p + 1) * self.taps).unwrap_or_default();
             let start = i + self.first;
             let acc = match usize::try_from(start).ok().and_then(|s| x.get(s..s + self.taps)) {
                 // Inside the signal: a plain dot product.
-                Some(xs) => xs.iter().zip(w).fold(0.0f32, |a, (v, k)| a + v * k),
+                Some(xs) => dot(xs, w),
                 // At the edges, taps outside the signal are skipped, as `resample_channel` does.
                 None => (0..self.taps as i64)
                     .filter(|k| (0..len).contains(&(start + k)))
@@ -288,9 +328,12 @@ impl Polyphase {
             out.push(acc);
         }
         out.resize(out_len, 0.0);
-        out
+        report(1.0).then_some(out)
     }
 }
+
+/// Output samples between progress reports while resampling.
+const PROGRESS_BLOCK: usize = 8192;
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
     while b != 0 {
@@ -301,22 +344,38 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 
 /// High-quality windowed-sinc sample-rate conversion from `from` Hz to `to` Hz.
 pub fn resample(ch: &[Vec<f32>], from: u32, to: u32) -> Vec<Vec<f32>> {
+    resample_reported(ch, from, to, &mut |_| true).unwrap_or_default()
+}
+
+/// [`resample`], calling `report` with the fraction of the work done and stopping (`None`) as soon
+/// as `report` returns false: a UI can then show a long conversion's progress and cancel it,
+/// dropping the partial output. Channels are reported in turn, so the fraction rises evenly until
+/// the last one finishes.
+pub fn resample_reported(ch: &[Vec<f32>], from: u32, to: u32, report: &mut dyn FnMut(f32) -> bool) -> Option<Vec<Vec<f32>>> {
+    // Check before building a kernel or allocating output, including no-op and empty inputs.
+    if !report(0.0) {
+        return None;
+    }
     if from == 0 || to == 0 || from == to {
-        return ch.to_vec();
+        let out = ch.to_vec();
+        return report(1.0).then_some(out);
     }
     let ratio = f64::from(to) / f64::from(from);
     let cutoff = if ratio < 1.0 { ratio * 0.94 } else { 0.97 };
     let table = SincTable::new(cutoff);
     let bank = Polyphase::new(from, to, &table);
-    ch.iter()
-        .map(|c| {
-            let out_len = ((c.len() as f64 * ratio).round() as usize).min(MAX_OFFLINE_SAMPLES);
-            match &bank {
-                Some(b) => b.run(c, out_len),
-                None => resample_channel(c, ratio, out_len, &table),
-            }
-        })
-        .collect()
+    let channels = ch.len().max(1) as f64;
+    let mut out = Vec::with_capacity(ch.len());
+    for (index, c) in ch.iter().enumerate() {
+        let mut local = |f: f32| report(((index as f64 + f64::from(f)) / channels) as f32);
+        let out_len = ((c.len() as f64 * ratio).round() as usize).min(MAX_OFFLINE_SAMPLES);
+        let channel = match &bank {
+            Some(b) => b.run_reported(c, out_len, &mut local),
+            None => resample_channel_reported(c, ratio, out_len, &table, &mut local),
+        };
+        out.push(channel?);
+    }
+    report(1.0).then_some(out)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -837,7 +896,7 @@ mod tests {
             let table = SincTable::new(cutoff);
             let reference = resample_channel(&x, ratio, out_len, &table);
             let bank = Polyphase::new(from, to, &table).expect("small common ratio");
-            let fast = bank.run(&x, out_len);
+            let fast = bank.run_reported(&x, out_len, &mut |_| true).expect("nothing stops the bank");
             assert_eq!(fast.len(), reference.len(), "{from}->{to}");
             let worst = fast.iter().zip(&reference).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
             assert!(worst < 1e-5, "{from}->{to}: worst difference {worst}");
@@ -847,11 +906,93 @@ mod tests {
         let short = [0.5f32, -0.25, 0.75];
         let table = SincTable::new(0.97);
         let reference = resample_channel(&short, 48_000.0 / 44_100.0, 3, &table);
-        let fast = Polyphase::new(44_100, 48_000, &table).expect("bank").run(&short, 3);
+        let fast = Polyphase::new(44_100, 48_000, &table).expect("bank").run_reported(&short, 3, &mut |_| true).expect("short bank");
         assert!(fast.iter().zip(&reference).all(|(a, b)| (a - b).abs() < 1e-6), "{fast:?} {reference:?}");
         // Rates with no small common ratio fall back to the per-tap kernel.
         assert!(Polyphase::new(44_100, 96_001, &table).is_none());
         assert_eq!(resample(&[short.to_vec()], 44_100, 96_001)[0].len(), 7);
+    }
+
+    /// A long conversion moves its progress forward block by block and stops when its caller
+    /// cancels, dropping the partial output.
+    #[test]
+    fn resampling_reports_progress_and_stops_when_asked() {
+        let x: Vec<f32> = (0..20_000).map(|i| (i as f32 * 0.01).sin()).collect();
+        let channels = vec![x.clone(); 7];
+        let mut fractions = Vec::new();
+        let out = resample_reported(&channels, 44_100, 48_000, &mut |f| {
+            fractions.push(f);
+            true
+        })
+        .expect("nothing stops it");
+        assert_eq!(out[0].len(), (20_000.0 * 48_000.0 / 44_100.0_f64).round() as usize);
+        assert!(fractions.len() > 2, "a 20 000-sample channel is converted in blocks");
+        assert!(fractions.iter().any(|&f| f > 0.0 && f < 1.0 / 7.0), "the first channel must report partial progress: {fractions:?}");
+        assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
+        assert!(fractions.iter().all(|f| (0.0..=1.0).contains(f)), "{fractions:?}");
+        assert_eq!(fractions.last().copied(), Some(1.0));
+
+        let mut stopped_at = 0.0;
+        let cancelled = resample_reported(std::slice::from_ref(&x), 44_100, 48_000, &mut |f| {
+            stopped_at = f;
+            f == 0.0
+        });
+        assert!(cancelled.is_none(), "the first completed block cancels it");
+        assert!(stopped_at > 0.0 && stopped_at < 1.0, "cancellation must happen during conversion: {stopped_at}");
+    }
+
+    #[test]
+    fn fallback_resampling_reports_and_cancels_between_blocks() {
+        let input = vec![vec![0.25; 20_000]; 2];
+        let mut fractions = Vec::new();
+        let out = resample_reported(&input, 44_100, 96_001, &mut |f| {
+            fractions.push(f);
+            true
+        })
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
+        assert!(fractions.iter().any(|&f| f > 0.0 && f < 0.5), "the first channel must report partial progress: {fractions:?}");
+        assert_eq!(fractions.last().copied(), Some(1.0));
+
+        let mut stopped_at = 0.0;
+        let stopped = resample_reported(&input, 44_100, 96_001, &mut |f| {
+            stopped_at = f;
+            f == 0.0
+        });
+        assert!(stopped.is_none());
+        assert!(stopped_at > 0.0 && stopped_at < 0.5, "cancellation must happen before the first channel finishes: {stopped_at}");
+    }
+
+    #[test]
+    fn resampling_honours_cancellation_at_every_report() {
+        for (channels, from, to) in [
+            (vec![vec![0.25; 32]], 44_100, 48_000),
+            (vec![vec![0.25; 32]], 44_100, 96_001),
+            (vec![vec![0.25; 32]], 48_000, 48_000),
+            (vec![vec![0.25; 32]], 0, 48_000),
+            (vec![vec![0.25; 32]], 48_000, 0),
+            (vec![Vec::new()], 44_100, 48_000),
+            (Vec::new(), 44_100, 48_000),
+        ] {
+            let mut reports = 0;
+            assert!(
+                resample_reported(&channels, from, to, &mut |_| {
+                    reports += 1;
+                    true
+                })
+                .is_some()
+            );
+            for stop_at in 1..=reports {
+                let mut calls = 0;
+                let out = resample_reported(&channels, from, to, &mut |_| {
+                    calls += 1;
+                    calls != stop_at
+                });
+                assert!(out.is_none(), "{from}->{to}, {} channels, stop at {stop_at}/{reports}", channels.len());
+                assert_eq!(calls, stop_at, "there must be no reports after cancellation");
+            }
+        }
     }
 
     #[test]

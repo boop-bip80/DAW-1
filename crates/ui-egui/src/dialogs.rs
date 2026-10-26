@@ -267,6 +267,9 @@ pub fn ask_to_save(app: &mut SoundApp, id: &str, params: &Value) -> bool {
     {
         return false;
     }
+    if crate::import::refuses_session_switch(app) {
+        return true;
+    }
     if app.engine.transport.recording {
         app.stop_play();
     }
@@ -291,7 +294,7 @@ const OPEN_PENDING: &str = "ui.open_pending_session";
 /// Opens a session the browser read as bytes (picked or dropped), asking first when the open one
 /// has changes. The read finishes later than the pick, so the question is asked only now.
 pub fn open_session_bytes(app: &mut SoundApp, name: String, bytes: Vec<u8>) {
-    if crate::bounce::refuses_session_switch(app) {
+    if crate::bounce::refuses_session_switch(app) || crate::import::refuses_session_switch(app) {
         return;
     }
     app.dialogs.pending_session = Some((name, bytes));
@@ -304,7 +307,7 @@ pub fn open_session_bytes(app: &mut SoundApp, name: String, bytes: Vec<u8>) {
 /// marks the document replaced so pending captures cancel and reports any missing media.
 fn open_pending_session(app: &mut SoundApp) {
     let Some((name, bytes)) = app.dialogs.pending_session.take() else { return };
-    if crate::bounce::refuses_session_switch(app) {
+    if crate::bounce::refuses_session_switch(app) || crate::import::refuses_session_switch(app) {
         return;
     }
     let _ = app.run("transport.stop", json!({}));
@@ -871,7 +874,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         keep = false;
         if cmd == "file.import_audio" {
             // Decoded in the background so a long file doesn't freeze the app (#597).
-            crate::import::start(app, params);
+            let _ = crate::import::start(app, &params);
         } else {
             match run_then(app, &cmd, params) {
                 Ok(v) if cmd == "file.export_clips" => {
@@ -899,6 +902,9 @@ fn run_then(app: &mut SoundApp, cmd: &str, params: Value) -> Result<Value, Strin
     if cmd == OPEN_PENDING {
         open_pending_session(app);
         return Ok(Value::Null);
+    }
+    if cmd == "file.import_audio" {
+        return crate::import::start(app, &params);
     }
     app.run(cmd, params)
 }

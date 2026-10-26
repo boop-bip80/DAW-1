@@ -1,12 +1,14 @@
 # SoundCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** trivial (built-in plugin count; the sampler shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (audio import progress, cancellation and faster rate conversion) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Forward-looking plan. Status and numbers: [`../ROADMAP.md`](../ROADMAP.md) and
 [`target-app-parity.md`](target-app-parity.md); the ranked work list: [`gaps.md`](gaps.md).
 Hours are Opus 5.5 agent-hours.
 
 ## Current focus
+
+**Delivered 2026-10-24:** Native audio import progress and background sample processing, with a cumulative filling bar, Cancel/Esc, atomic multi-file placement and one-step Undo. Browser import workers and broader Task Manager behavior remain future work; milestone/readiness estimates unchanged.
 
 1. **Merge or close the open bug-fix PRs** (#123–#134, #146, #148, #75) and fix the rest of the
    correctness backlog (G-04). ≈ 15–25 h.
@@ -89,6 +91,7 @@ There is no `cargo xtask scorecard` in this repo; the measured number is `cargo 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Native audio imports prepare an atomic batch with cumulative progress, block-wise read/resample cancellation and one-step Undo; ten-minute 44.1 → 48 kHz import improves from 5.56 s to 1.19 s on the development Mac; readiness estimates unchanged |
 | 2026-10-24 | trivial | 27 built-in processors, as the plugin registry holds; the sampler (#108) is no longer listed under plugin essentials |
 | 2026-10-14 | trivial | M8: reject oversized MCP batches before execution (#460) |
 | 2026-10-10 | minor | Added the alpha gate (3 of 6 core workflows fail → pre-alpha) |

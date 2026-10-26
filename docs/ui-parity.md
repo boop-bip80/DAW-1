@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (audio import progress, cancellation and faster rate conversion) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -48,6 +48,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Transport, Big Counter, Memory Locations, Automation, Video, Universe, Renderer, UI Customization | ✅ present | |
 | Workspace / sound browser with previews | ❌ | G-16 |
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
+| Audio import progress | 🟡 | Native menu/Workspace imports and file drops show filename, file count and one cumulative bar filling left to right across the batch. Each file contributes reading, decoding, conversion and waveform stages; reading, decoding and conversion supply measured fractional progress, and final atomic placement reserves the last step. Reading in 64 KiB blocks and resampling in 8192-output-sample blocks means a long file moves the bar instead of holding at 0 %. Cancel is checked between blocks for both the polyphase and fallback resamplers, and honoured for same-rate audio and completion callbacks. This is work-stage progress rather than a time estimate. The fill never resets between files; cancellation freezes it. 100% is painted after successful placement before the popup closes. Cancel/Esc, atomic batch failure and one-step Undo covered. Browser byte imports remain synchronous; no claim of full Pro Tools Task Manager parity |
 | Preferences | 🟡 | Many settings stored, fewer honoured |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
 | Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
@@ -69,6 +70,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Native audio imports prepare an atomic batch with cumulative progress, block-wise read/resample cancellation and one-step Undo; ten-minute 44.1 → 48 kHz import improves from 5.56 s to 1.19 s on the development Mac; readiness estimates unchanged |
 | 2026-10-25 | minor | Edit and Mix windows: Tracks and Groups and Clips in full-height dock columns. Readiness estimate unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |

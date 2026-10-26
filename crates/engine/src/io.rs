@@ -6,6 +6,7 @@ use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
 use soundcraft_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
 use soundcraft_time::{Range, Samples};
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,16 +16,25 @@ pub(crate) const MAX_IMPORT_SAMPLES: usize = 1 << 30;
 
 /// `buf` converted to `rate`, unless it would then hold more than `limit` samples: a file with a
 /// tiny sample rate grows by orders of magnitude.
-pub(crate) fn at_rate(mut buf: AudioBuffer, rate: u32, limit: usize) -> Option<AudioBuffer> {
+pub(crate) fn at_rate(buf: AudioBuffer, rate: u32, limit: usize) -> Option<AudioBuffer> {
+    at_rate_reported(buf, rate, limit, &mut |_| true)
+}
+
+/// [`at_rate`] reporting the conversion's progress and stopping (`None`) when `report` returns
+/// false: a cancelled import must not finish resampling a long file first.
+pub(crate) fn at_rate_reported(mut buf: AudioBuffer, rate: u32, limit: usize, report: &mut dyn FnMut(f32) -> bool) -> Option<AudioBuffer> {
+    if !report(0.0) {
+        return None;
+    }
     let from = buf.sample_rate.max(1);
     if buf.frames() as f64 * buf.num_channels() as f64 * f64::from(rate) / f64::from(from) > limit as f64 {
         return None;
     }
     if from != rate {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, from, rate);
+        buf.channels = soundcraft_dsp::offline::resample_reported(&buf.channels, from, rate, report)?;
         buf.sample_rate = rate;
     }
-    Some(buf)
+    report(1.0).then_some(buf)
 }
 
 // ─── Checked file access ──────────────────────────────────────────────────────────────────────
@@ -47,6 +57,65 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
         return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
     }
     std::fs::read(path).map_err(err)
+}
+
+/// [`read_file`] reporting how much of the file it has read, and stopping as soon as `cancelled`
+/// is set: a big file on a slow disk otherwise leaves an import at 0% with a Cancel button that
+/// does nothing until the whole read finishes. The bytes are grown with `try_reserve`, so a
+/// failed allocation can be returned as an error.
+pub fn read_file_cancellable(path: impl AsRef<Path>, cancelled: &AtomicBool, mut report: impl FnMut(f32)) -> Result<Vec<u8>> {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    let err = |err: std::io::Error| EngineError::Io(format!("{}: {err}", path.display()));
+    let cancelled_err = || EngineError::Io(format!("{}: cancelled", path.display()));
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(cancelled_err());
+    }
+    // Opening a FIFO can block before the handle's metadata can be checked.
+    if !std::fs::metadata(path).map_err(err)?.is_file() {
+        return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
+    }
+    let mut file = std::fs::File::open(path).map_err(err)?;
+    let meta = file.metadata().map_err(err)?;
+    if !meta.is_file() {
+        return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
+    }
+    let size = meta.len();
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(cancelled_err());
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(usize::try_from(size).map_err(|_| EngineError::Io(format!("{}: file is too large to read", path.display())))?)
+        .map_err(|_| EngineError::Io(format!("{}: not enough memory to read {size} bytes", path.display())))?;
+    let mut chunk = [0u8; 1 << 16];
+    let mut read = 0u64;
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err(cancelled_err());
+        }
+        let n = match file.read(&mut chunk) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(err)?,
+        };
+        if n == 0 {
+            break;
+        }
+        bytes.try_reserve(n).map_err(|_| EngineError::Io(format!("{}: not enough memory to read the file", path.display())))?;
+        bytes.extend_from_slice(chunk.get(..n).unwrap_or_default());
+        read = read.saturating_add(n as u64);
+        if size > 0 {
+            report((read.min(size) as f64 / size as f64) as f32);
+        }
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(cancelled_err());
+    }
+    report(1.0);
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(cancelled_err());
+    }
+    Ok(bytes)
 }
 
 /// [`read_file`] as UTF-8 text.
@@ -231,6 +300,94 @@ fn place_import(
     let stem = s.source(src).map(|x| x.name.clone()).unwrap_or_default();
     crate::edit::place_clip(s, track, Clip::audio(cid, stem, src, 0, at, frames));
     Ok(json!({"track": track, "clip": cid, "source": src, "frames": frames, "channels": channels}))
+}
+
+/// Resample decoded audio before constructing its waveform. May run on a worker thread.
+pub fn prepare_import_buffer(name: &str, buf: AudioBuffer, sample_rate: u32) -> Result<AudioBuffer> {
+    prepare_import_buffer_cancellable(name, buf, sample_rate, &AtomicBool::new(false), |_| {})
+}
+
+/// [`prepare_import_buffer`] reporting the conversion's progress and stopping as soon as
+/// `cancelled` is set, so cancelling resamples no more of a long file.
+pub fn prepare_import_buffer_cancellable(
+    name: &str,
+    buf: AudioBuffer,
+    sample_rate: u32,
+    cancelled: &AtomicBool,
+    mut report: impl FnMut(f32),
+) -> Result<AudioBuffer> {
+    let mut stopped = false;
+    let converted = at_rate_reported(buf, sample_rate, MAX_IMPORT_SAMPLES, &mut |fraction| {
+        if cancelled.load(Ordering::Relaxed) {
+            stopped = true;
+            return false;
+        }
+        report(fraction);
+        if cancelled.load(Ordering::Relaxed) {
+            stopped = true;
+            return false;
+        }
+        true
+    });
+    let buf = match converted {
+        Some(buf) => buf,
+        None if stopped => return Err(EngineError::Io(format!("{name}: cancelled"))),
+        None => return Err(EngineError::Io(format!("{name}: file is too large to import"))),
+    };
+    if buf.frames() == 0 {
+        return Err(EngineError::Io(format!("{name}: no audio")));
+    }
+    Ok(buf)
+}
+
+/// Place already converted audio and its waveform without doing sample processing on the caller.
+pub fn import_prepared(
+    e: &mut Engine,
+    name: &str,
+    path: Option<&str>,
+    info: soundcraft_audio_io::AudioInfo,
+    audio: Arc<SourceAudio>,
+    target: Option<TrackId>,
+    at: Samples,
+) -> Result<Value> {
+    if audio.buffer.sample_rate != e.session().sample_rate.hz() {
+        return Err(EngineError::Io("session sample rate changed during import; please import again".into()));
+    }
+    place_import(e, name, &info, audio, path, target, at)
+}
+
+/// A file that has been read and decoded for `file.import_audio` to place: the UI's importer
+/// produces this off the UI thread and offers it to the engine, so a long decode never blocks.
+#[derive(Debug)]
+pub struct PreparedImport {
+    /// The file's path; the command takes the entry naming it.
+    pub path: String,
+    /// The file's own name, which names the source.
+    pub name: String,
+    /// Header information (`bwf` stamps the source's time reference).
+    pub info: soundcraft_audio_io::AudioInfo,
+    /// Audio at the session sample rate with its waveform already built.
+    pub audio: Arc<SourceAudio>,
+}
+
+/// Stores a decoded file until `file.import_audio` names its path. One session's imports
+/// are cleared when the session is replaced.
+pub fn offer_import(e: &mut Engine, p: PreparedImport) {
+    e.prepared_imports.push(p);
+}
+
+/// Dispatch one atomic, undoable import, and discard unused prepared files even on failure.
+pub fn execute_prepared_imports(e: &mut Engine, params: &Value, imports: Vec<PreparedImport>) -> Result<Value> {
+    e.prepared_imports = imports;
+    let result = e.execute("file.import_audio", params);
+    e.prepared_imports.clear();
+    result
+}
+
+/// Takes the prepared import for `path`, if one is waiting.
+pub(crate) fn take_import(e: &mut Engine, path: &str) -> Option<PreparedImport> {
+    let at = e.prepared_imports.iter().position(|p| p.path == path)?;
+    Some(e.prepared_imports.remove(at))
 }
 
 /// Loads an audio file's bytes into an instrument track's Sampler as one undo step ("Load
@@ -1901,6 +2058,116 @@ mod record_tests {
         let punch = Some(Range::new(1_200, 1_400));
         assert_eq!(live_span(1_000, None, punch, 150), None);
         assert_eq!(live_span(1_000, None, punch, 500), Some((1_000, Range::new(1_200, 1_400))));
+    }
+}
+
+#[cfg(test)]
+mod import_read_tests {
+    use super::*;
+
+    /// A file of `bytes` bytes in its own temporary folder.
+    fn temp_file(name: &str, bytes: usize) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("soundcraft-read-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("take.bin");
+        std::fs::write(&path, vec![7u8; bytes]).unwrap();
+        path
+    }
+
+    #[test]
+    fn reading_a_file_reports_its_bytes_and_stops_when_cancelled() {
+        let path = temp_file("bytes", 300_000);
+        let mut fractions = Vec::new();
+        let bytes = read_file_cancellable(&path, &AtomicBool::new(false), |f| fractions.push(f)).unwrap();
+        assert_eq!(bytes.len(), 300_000);
+        assert!(fractions.len() > 1, "the read reports block by block");
+        assert!(fractions.windows(2).all(|w| w[0] <= w[1]), "{fractions:?}");
+        assert_eq!(fractions.last().copied(), Some(1.0));
+
+        let cancelled = AtomicBool::new(true);
+        let error = read_file_cancellable(&path, &cancelled, |_| {}).unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reading_stops_when_cancelled_during_a_progress_report() {
+        let path = temp_file("cancel-during-read", 300_000);
+        for stop_at_end in [false, true] {
+            let cancelled = AtomicBool::new(false);
+            let mut reports = Vec::new();
+            let result = read_file_cancellable(&path, &cancelled, |f| {
+                reports.push(f);
+                if !stop_at_end || f == 1.0 {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+            });
+            assert!(result.unwrap_err().to_string().contains("cancelled"));
+            if !stop_at_end {
+                assert_eq!(reports.len(), 1, "stop after one read block");
+                assert!(reports[0] < 1.0);
+            }
+        }
+        // An empty file reports completion without entering the read loop's progress branch.
+        std::fs::write(&path, []).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let error = read_file_cancellable(&path, &cancelled, |_| cancelled.store(true, Ordering::Relaxed)).unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_rejects_non_regular_files_before_opening_them() {
+        let path = temp_file("non-regular", 0);
+        std::fs::remove_file(&path).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let error = read_file_cancellable(&path, &AtomicBool::new(false), |_| {}).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn converting_reports_progress_and_a_cancel_stops_it_early() {
+        let buf = AudioBuffer { sample_rate: 44_100, channels: vec![vec![0.25; 40_000]; 2] };
+        let mut last = -1.0;
+        let converted = prepare_import_buffer_cancellable("take.wav", buf.clone(), 48_000, &AtomicBool::new(false), |f| last = f).unwrap();
+        assert_eq!(converted.sample_rate, 48_000);
+        assert_eq!(converted.channels[0].len(), (40_000.0 * 48_000.0 / 44_100.0_f64).round() as usize);
+        assert_eq!(last, 1.0, "a finished conversion reports the whole stage");
+
+        let cancel = AtomicBool::new(false);
+        let mut reports = 0;
+        let error = prepare_import_buffer_cancellable("take.wav", buf, 48_000, &cancel, |_| {
+            reports += 1;
+            cancel.store(true, Ordering::Relaxed);
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"), "{error}");
+        assert_eq!(reports, 1, "the resampler stops at the first block after Cancel");
+    }
+
+    #[test]
+    fn an_untouched_rate_needs_no_conversion_and_still_ends_the_stage() {
+        let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 1_000]] };
+        let mut last = -1.0;
+        let converted = prepare_import_buffer_cancellable("take.wav", buf, 48_000, &AtomicBool::new(false), |f| last = f).unwrap();
+        assert_eq!(converted.channels[0].len(), 1_000);
+        assert_eq!(last, 1.0, "an unchanged rate still finishes its stage");
+    }
+
+    #[test]
+    fn an_untouched_rate_still_honours_cancellation() {
+        for cancel_during_report in [false, true] {
+            let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 1_000]] };
+            let cancelled = AtomicBool::new(!cancel_during_report);
+            let error = prepare_import_buffer_cancellable("take.wav", buf, 48_000, &cancelled, |_| {
+                cancelled.store(true, Ordering::Relaxed);
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+        }
     }
 }
 

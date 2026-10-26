@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-25 · **Change:** trivial (G-04: Clip Looping crossfade and loop count; previously trivial: G-08 and G-20: built-in plugin count, the sampler shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (audio import progress, cancellation and faster rate conversion) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -204,6 +204,10 @@ settings command only. Needs an openly licensed local speech model. ≈ 30–50 
 
 ### G-19. UI feel
 
+**Fixed (2026-10-26):** The audio import's bar now moves within the reading and rate-conversion stages instead of holding at 0 % through a long read. Cancel/Esc is checked between 64 KiB reads and 8192-output-sample resample blocks, including the fallback for uncommon rate pairs; same-rate and completion callbacks also honour cancellation. The reader rejects non-regular files before opening them, so a pipe cannot block the worker on open. The polyphase resampler sums taps in eight partial sums. A synthetic ten-minute, 24-bit stereo WAV imported from 44.1 kHz into a 48 kHz demo session took 1.19 s (median of five release CLI runs on the development Mac), compared with the earlier 5.56 s baseline, about 4.7 times faster. Other UI fidelity work and estimates unchanged.
+
+**Fixed (2026-10-24):** Native audio imports report reading, decoding, rate conversion and waveform preparation in a modal while a worker does the sample processing. One cumulative bar covers the batch and reaches 100% after atomic placement. Cancel/Esc discards the batch; a failed file leaves the session unchanged; completed batches use one Undo step. Multi-file drops are grouped. Browser byte imports still process synchronously; full Task Manager parity remains outside this change. Estimates unchanged.
+
 See [`ui-parity.md`](ui-parity.md). ≈ 60–100 h.
 
 ### G-20. MIDI and instrument depth
@@ -225,6 +229,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Native audio imports prepare an atomic batch with cumulative progress, block-wise read/resample cancellation and one-step Undo; ten-minute 44.1 → 48 kHz import improves from 5.56 s to 1.19 s on the development Mac; readiness estimates unchanged |
 | 2026-10-25 | trivial | G-04: Clip Looping (#1030) lacks the loop crossfade option, and Number of Loops stops at 512 while length and fill make up to 1000 loops |
 | 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |
