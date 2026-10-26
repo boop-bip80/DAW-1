@@ -21,13 +21,16 @@ pub(crate) struct BusBuf {
 /// One unstored parameter an automation lane is driving.
 ///
 /// `param` is an index into `plugin.info().params` (those ids are `'static`, so restoring does
-/// not keep the session's `String`). `lane` is that string's address. `last` is the value last
-/// sent. `original` is the plugin's value from before the lane took over; nothing in the session
-/// stores it.
+/// not keep the session's `String`). `lane` is that string's address. `last` is the lane target
+/// last sent, so a steady lane does not write again. `settled` is the value the plugin reported
+/// after that write: a host may clamp or round, and an editor edit is a move away from that
+/// settled value, not away from the raw lane target. `original` is the plugin's value from before
+/// the lane took over; nothing in the session stores it.
 pub(crate) struct LaneHold {
     param: usize,
     pub(crate) lane: usize,
-    last: f32,
+    pub(crate) last: f32,
+    pub(crate) settled: f32,
     original: f32,
 }
 
@@ -655,7 +658,7 @@ fn drive_unstored_lane(slot: &mut PluginSlot, name: &str, lane: &AutomationLane,
         } else {
             // Read the plugin before the first write, so the lane can give the parameter back.
             let original = read_original(slot, name, param);
-            slot.holds.push(LaneHold { param, lane: id, last: f32::NAN, original });
+            slot.holds.push(LaneHold { param, lane: id, last: f32::NAN, settled: f32::NAN, original });
             match slot.holds.len().checked_sub(1) {
                 Some(i) => i,
                 None => return,
@@ -668,15 +671,19 @@ fn drive_unstored_lane(slot: &mut PluginSlot, name: &str, lane: &AutomationLane,
 }
 
 fn drive_hold(slot: &mut PluginSlot, index: usize, lane: &AutomationLane, pos: Samples) {
-    let Some((param, original, last)) = slot.holds.get(index).map(|h| (h.param, h.original, h.last)) else { return };
+    let Some((param, original, last, settled)) = slot.holds.get(index).map(|h| (h.param, h.original, h.last, h.settled)) else { return };
     let value = lane.value_at(pos, original);
     let Some(id) = plugin_param_id(slot, param) else { return };
     let changed = value.to_bits() != last.to_bits();
-    let diverged = slot.plugin.param(id).is_some_and(|live| live_differs_from_lane(live, value));
+    // An editor edit moves the live value off what the plugin settled on. Comparing with the
+    // raw lane target would stay true forever when the plugin clamps or rounds the write.
+    let diverged = slot.plugin.param(id).is_some_and(|live| live_differs_from_lane(live, settled));
     if changed || diverged {
         slot.plugin.set_param(id, value);
+        let settled_now = slot.plugin.param(id).unwrap_or(value);
         if let Some(hold) = slot.holds.get_mut(index) {
             hold.last = value;
+            hold.settled = settled_now;
         }
     }
 }

@@ -171,6 +171,79 @@ fn an_unstored_lane_regains_control_after_an_editor_change() {
     assert_eq!(slot.plugin.param("level"), Some(-30.0));
 }
 
+/// Rounds every write to an integer and counts `set_param` calls.
+struct Rounding {
+    inner: Box<dyn Plugin>,
+    value: f32,
+    sets: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Plugin for Rounding {
+    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+        self.inner.info()
+    }
+    fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+        self.inner.prepare(sr, mb, ch);
+    }
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+    fn set_param(&mut self, id: &str, v: f32) -> bool {
+        if self.inner.info().param(id).is_none() {
+            return false;
+        }
+        self.sets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.value = v.round();
+        true
+    }
+    fn param(&self, id: &str) -> Option<f32> {
+        self.inner.info().param(id).map(|_| self.value)
+    }
+    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        self.inner.process(io, frames);
+    }
+}
+
+#[test]
+fn a_rounding_plugin_is_written_once_while_the_lane_holds_and_an_editor_edit_retakes_it() {
+    let Some(inner) = super::instances::create_plugin("gain") else { return };
+    let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let value = inner.param("gain").unwrap_or(0.0);
+    let rounding = Rounding { inner, value, sets: Arc::clone(&sets) };
+    let mut slot = super::strip::PluginSlot::new("gain".into(), 1, Box::new(rounding));
+    let ins = Insert::new("gain");
+    let mut session = Session::default();
+    let track = session.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+    let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: 0, param: "gain".into() });
+    // 0.4 rounds to 0, so the value the plugin settles on is not the lane target.
+    lane.set_point(0, 0.4);
+    {
+        let tr = session.track_mut(track).unwrap();
+        tr.automation = vec![lane];
+        for _ in 0..32 {
+            super::strip::apply_params(&mut slot, &ins, tr, 0, 0);
+        }
+    }
+    assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 1, "a constant lane writes once");
+    assert_eq!(slot.plugin.param("gain"), Some(0.0));
+    assert_eq!(slot.holds.first().map(|h| h.settled), Some(0.0));
+    assert_eq!(slot.holds.first().map(|h| h.last), Some(0.4));
+
+    // The editor moves the parameter. The lane target is unchanged, so only the live value
+    // differs from what the plugin settled on.
+    assert!(slot.plugin.set_param("gain", 3.2));
+    assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(slot.plugin.param("gain"), Some(3.0));
+    let tr = session.track_mut(track).unwrap();
+    super::strip::apply_params(&mut slot, &ins, tr, 0, 0);
+    assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 3, "the lane takes the parameter back");
+    assert_eq!(slot.plugin.param("gain"), Some(0.0));
+    for _ in 0..16 {
+        super::strip::apply_params(&mut slot, &ins, tr, 0, 0);
+    }
+    assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 3, "the retaken lane holds again");
+}
+
 #[test]
 fn removing_an_unstored_lane_restores_the_plugin_value() {
     let Some((mut slot, ins, mut session, track)) = unstored_synth() else { return };
