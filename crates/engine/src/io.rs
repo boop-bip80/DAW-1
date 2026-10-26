@@ -1397,6 +1397,7 @@ pub(crate) fn open_session_linked(e: &mut Engine, path: &str, links: &Path) -> R
         }
     }
     missing.extend(relink_videos(&mut s, links));
+    missing.extend(crate::cmd::reload_banks(&mut s, links));
     s.folder = Some(dir);
     e.replace_session(s);
     e.path = Some(path.to_string());
@@ -1590,8 +1591,9 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
         }
         decoded.insert(src.path.clone(), audio);
     }
-    // Movies are referenced by path, never copied into a session: none can be found here.
+    // Movies and SoundFonts are referenced by path, never copied into a session: none can be found here.
     missing.extend(s.videos.iter().map(|v| v.path.clone()));
+    missing.extend(s.tracks.iter().filter_map(|t| t.instrument.as_ref()?.soundfont.clone()));
     let stem = Path::new(name).file_stem().and_then(OsStr::to_str).filter(|x| !x.is_empty()).unwrap_or("Untitled").to_string();
     e.replace_session(s);
     e.path = Some(format!("{}.{BUNDLE_EXTENSION}", sanitize_name(&stem)));
