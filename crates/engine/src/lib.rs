@@ -195,6 +195,8 @@ pub struct Engine {
     pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
     /// Audio decoded off the UI thread, waiting for its `file.import_audio` (see `offer_import`).
     imports: Vec<io::DecodedImport>,
+    /// Files prepared by the modal importer before one atomic command.
+    pub(crate) prepared_imports: Vec<io::PreparedImport>,
 }
 
 impl Default for Engine {
@@ -226,6 +228,7 @@ impl Engine {
             messages: Vec::new(),
             last_selection: None,
             imports: Vec::new(),
+            prepared_imports: Vec::new(),
         }
     }
 
@@ -242,6 +245,7 @@ impl Engine {
     /// Drops audio offered for imports that never ran (the command failed or was not sent).
     pub fn drop_offered_imports(&mut self) {
         self.imports.clear();
+        self.prepared_imports.clear();
     }
 
     /// The offered audio of the file at `path`, if it was decoded for the session's current rate.
@@ -283,6 +287,8 @@ impl Engine {
         self.undo.clear();
         self.redo.clear();
         self.last_selection = None;
+        self.imports.clear();
+        self.prepared_imports.clear();
         self.revision = self.revision.wrapping_add(1);
         self.dirty = false;
     }

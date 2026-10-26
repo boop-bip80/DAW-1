@@ -60,7 +60,7 @@ mod panic_probe {
     }
 }
 
-pub use file::bounce_job;
+pub use file::{audio_import_params, bounce_job};
 
 pub(crate) use edit::remember_selection;
 pub use edit::strip_silence_scan;

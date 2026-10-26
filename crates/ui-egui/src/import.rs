@@ -1,235 +1,641 @@
-//! Import Audio reads and decodes on a worker thread, so the app keeps drawing and stays usable
-//! while a long file loads (issue #597). When the audio is ready it is handed to the engine
-//! (`Engine::offer_import`) and `file.import_audio` runs as before, now only placing the clip:
-//! undo, the journal, the CLI, MCP and the control channel see the same command, and calls from
-//! the control channel still run synchronously.
+//! Native audio imports prepare samples and waveforms off the UI thread. The engine commits
+//! the complete batch through `file.import_audio`, preserving atomic failure and one-step Undo.
 
 use crate::SoundApp;
+use crate::theme::bold;
 use serde_json::Value;
-use std::collections::VecDeque;
+use soundcraft_engine::io::PreparedImport;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc::Receiver,
+};
 
-/// Imports waiting and the one decoding now. One file decodes at a time: each can take gigabytes.
-#[derive(Default)]
-pub struct Imports {
-    queue: VecDeque<Value>,
-    #[cfg(not(target_arch = "wasm32"))]
-    running: Option<Running>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct Running {
+pub struct ImportJob {
     params: Value,
-    name: String,
-    /// The session rate the audio is decoded for.
-    rate: u32,
-    rx: std::sync::mpsc::Receiver<Result<soundcraft_engine::io::DecodedImport, String>>,
+    names: Vec<String>,
+    worker: Receiver<Result<Vec<PreparedImport>, String>>,
+    progress: Arc<Mutex<Progress>>,
+    cancelled: Arc<AtomicBool>,
+    shown: bool,
+    displayed_fraction: f32,
+    completed: bool,
 }
 
-impl Imports {
-    /// Whether a file is decoding or waiting.
-    pub fn busy(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.running.is_some() {
-            return true;
-        }
-        !self.queue.is_empty()
-    }
-
-    /// The file decoding now and how many wait after it.
-    fn label(&self) -> Option<(String, usize)> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(r) = &self.running {
-            return Some((r.name.clone(), self.queue.len()));
-        }
-        None
+impl Drop for ImportJob {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
-/// Imports the audio file `params["path"]` names (the `file.import_audio` params) in the
-/// background. Anything else (several `paths`, no path, the browser) runs the command now.
-pub fn start(app: &mut SoundApp, params: Value) {
-    if cfg!(target_arch = "wasm32") || params.get("path").and_then(Value::as_str).is_none() {
-        run_now(app, params);
-        return;
-    }
-    app.imports.queue.push_back(params);
+// The browser has no background import worker to construct these processing stages.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    /// Reading the file from disk, and the fraction of its bytes read.
+    Reading(f32),
+    Decoding(f32),
+    /// Resampling to the session rate, and the fraction converted.
+    Converting(f32),
+    Waveform,
+    Ready,
 }
 
-/// Starts the next import, and places a finished one. Called every frame from `logic`.
-pub fn step(app: &mut SoundApp, ctx: &egui::Context) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        finish(app);
-        if app.imports.running.is_none()
-            && let Some(params) = app.imports.queue.pop_front()
-        {
-            spawn(app, params, ctx);
+#[derive(Debug, Clone, Copy)]
+struct Progress {
+    file: usize,
+    phase: Phase,
+}
+
+/// A stage's own fraction, safe against NaN and out-of-range values from a decoder.
+fn stage_fraction(f: f32) -> f32 {
+    if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 }
+}
+
+impl Progress {
+    /// Four preparation stages per file plus the final atomic placement. This measures work
+    /// stages, not elapsed time. Reading, decoding and converting contribute their measured
+    /// fraction within their stage, so a long read or resample moves the bar.
+    fn fraction(self, files: usize) -> f32 {
+        if files == 0 {
+            return 0.0;
         }
+        let stage = match self.phase {
+            Phase::Reading(f) => stage_fraction(f),
+            Phase::Decoding(f) => 1.0 + stage_fraction(f),
+            Phase::Converting(f) => 2.0 + stage_fraction(f),
+            Phase::Waveform => 3.0,
+            Phase::Ready => 4.0,
+        };
+        let done = self.file.min(files.saturating_sub(1)) as f64 * 4.0 + f64::from(stage);
+        // Only a successful engine commit may display 100%, including for huge file counts.
+        (done / (files as f64 * 4.0 + 1.0)).clamp(0.0, 0.99) as f32
     }
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self { file: 0, phase: Phase::Reading(0.0) }
+    }
+}
+
+/// Start a UI import. Programmatic `SoundApp::run` keeps its synchronous result contract.
+/// Browser byte imports continue to use the browser shell's import path.
+pub fn start(app: &mut SoundApp, params: &Value) -> Result<Value, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = ctx;
-        while let Some(params) = app.imports.queue.pop_front() {
-            run_now(app, params);
+        app.run("file.import_audio", params.clone())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let result = start_native(app, params);
+        if let Err(error) = &result {
+            app.ui.status = error.clone();
         }
+        result
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn(app: &mut SoundApp, params: Value, ctx: &egui::Context) {
-    let path = params.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
-    let name = std::path::Path::new(&path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+fn start_native(app: &mut SoundApp, params: &Value) -> Result<Value, String> {
+    if refuses_session_switch(app) {
+        return Err("Finish or cancel the import first".into());
+    }
+    if app.bounce.is_some() {
+        return Err("Finish or cancel the bounce first".into());
+    }
+    let params = soundcraft_engine::cmd::audio_import_params(&app.engine, params).map_err(|e| e.to_string())?;
+    let paths: Vec<String> =
+        params.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    let names = paths.iter().map(|path| file_name(path)).collect();
+    let progress = Arc::new(Mutex::new(Progress::default()));
+    let cancelled = Arc::new(AtomicBool::new(false));
     let rate = app.engine.session().sample_rate.hz();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let ctx = ctx.clone();
-    let work = move || {
-        let r = soundcraft_engine::io::decode_import(&path, rate).map_err(|e| e.to_string());
-        let _ = tx.send(r);
-        ctx.request_repaint();
-    };
-    match std::thread::Builder::new().name("audio-import".into()).spawn(work) {
-        // No status line here: it may hold the previous file's failure, and the progress note names this file.
-        Ok(_) => app.imports.running = Some(Running { params, name, rate, rx }),
-        // No thread to spare: import the old way rather than not at all.
-        Err(_) => {
-            run_now(app, params);
-        }
-    }
+    let roots = soundcraft_engine::file_access::current();
+    let (tx, worker) = std::sync::mpsc::channel();
+    let (worker_progress, worker_cancelled) = (Arc::clone(&progress), Arc::clone(&cancelled));
+    std::thread::Builder::new()
+        .name("soundcraft-import".into())
+        .spawn(move || {
+            let result = soundcraft_engine::file_access::confine(roots.as_ref(), || prepare_files(paths, rate, &worker_progress, &worker_cancelled));
+            let _ = tx.send(result);
+        })
+        .map_err(|e| format!("Could not start audio import: {e}"))?;
+    app.import = Some(ImportJob { params, names, worker, progress, cancelled, shown: false, displayed_fraction: 0.0, completed: false });
+    app.ui.status = "Importing audio…".into();
+    Ok(Value::Null)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn finish(app: &mut SoundApp) {
-    let Some(r) = &app.imports.running else { return };
-    let done = match r.rx.try_recv() {
-        Ok(done) => done,
-        Err(std::sync::mpsc::TryRecvError::Empty) => return,
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(format!("{}: the import stopped", r.name)),
-    };
-    let Some(Running { params, name, rate, .. }) = app.imports.running.take() else { return };
-    // The session changed rate meanwhile (another session was opened): decode again for it.
-    if rate != app.engine.session().sample_rate.hz() {
-        app.imports.queue.push_front(params);
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into())
+}
+
+/// Why this worker stops: the person pressed Cancel (the status line says so).
+#[cfg(not(target_arch = "wasm32"))]
+fn cancelled_error() -> soundcraft_audio_io::Result<()> {
+    Err(soundcraft_audio_io::AudioError::Cancelled)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_files(paths: Vec<String>, rate: u32, progress: &Mutex<Progress>, cancelled: &AtomicBool) -> Result<Vec<PreparedImport>, String> {
+    let mut prepared = Vec::new();
+    for (file, path) in paths.into_iter().enumerate() {
+        // Report a stage without checking for cancellation; the steps that can be interrupted
+        // check it themselves (the reader and the resampler carry the flag).
+        let report = |phase| {
+            if let Ok(mut state) = progress.lock() {
+                *state = Progress { file, phase };
+            }
+        };
+        let stop = || -> soundcraft_audio_io::Result<()> { if cancelled.load(Ordering::Relaxed) { cancelled_error() } else { Ok(()) } };
+        let name = file_name(&path);
+        let error = |e: soundcraft_audio_io::AudioError| format!("{name}: {e}");
+        report(Phase::Reading(0.0));
+        stop().map_err(error)?;
+        let bytes = soundcraft_engine::io::read_file_cancellable(&path, cancelled, |f| report(Phase::Reading(f))).map_err(|e| e.to_string())?;
+        let ext = std::path::Path::new(&path).extension().and_then(|x| x.to_str()).map(str::to_ascii_lowercase);
+        let (info, buf) = soundcraft_audio_io::decode_with(&bytes, ext.as_deref(), |f| {
+            report(Phase::Decoding(f));
+            stop()
+        })
+        .map_err(error)?;
+        drop(bytes);
+        report(Phase::Converting(0.0));
+        stop().map_err(error)?;
+        let buf = soundcraft_engine::io::prepare_import_buffer_cancellable(&name, buf, rate, cancelled, |f| report(Phase::Converting(f)))
+            .map_err(|e| e.to_string())?;
+        report(Phase::Waveform);
+        stop().map_err(error)?;
+        let audio = Arc::new(soundcraft_model::SourceAudio::new(buf));
+        // Check again after building the waveform, which cannot be interrupted. Keep ownership of
+        // this worker until it exits, so repeated Cancel/Import cannot accumulate workers.
+        stop().map_err(error)?;
+        prepared.push(PreparedImport { path, name, info, audio });
+    }
+    if let Ok(mut state) = progress.lock() {
+        state.phase = Phase::Ready;
+    }
+    Ok(prepared)
+}
+
+/// Poll without blocking; commit only after the loading window has had a chance to draw.
+pub fn step(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some(job) = &mut app.import else { return };
+    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    if job.completed {
+        if job.shown {
+            app.import = None;
+        }
         return;
     }
-    match done {
-        Ok(decoded) => {
-            app.engine.offer_import(decoded);
-            if run_now(app, params) {
-                app.ui.status = format!("Imported {name}");
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        job.cancelled.store(true, Ordering::Relaxed);
+    }
+    if !job.shown {
+        return;
+    }
+    let result = match job.worker.try_recv() {
+        Ok(result) => result,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("Audio import worker stopped unexpectedly; please try again".into()),
+    };
+    let status = if job.cancelled.load(Ordering::Relaxed) {
+        "Import cancelled".into()
+    } else {
+        match result.and_then(|files| soundcraft_engine::io::execute_prepared_imports(&mut app.engine, &job.params, files).map_err(|e| e.to_string()))
+        {
+            Ok(_) => {
+                // Paint the full bar once after the engine has committed, then close next frame.
+                job.completed = true;
+                job.shown = false;
+                if job.names.len() == 1 {
+                    format!("Imported {}", job.names.first().map(String::as_str).unwrap_or("audio"))
+                } else {
+                    format!("Imported {} files", job.names.len())
+                }
             }
-            app.engine.drop_offered_imports();
+            Err(error) => format!("Import failed: {error}"),
         }
-        Err(e) => app.ui.status = e,
+    };
+    if !job.completed {
+        app.import = None;
     }
+    app.ui.status = status;
 }
 
-/// Runs `file.import_audio` on this thread; the status line shows a failure. True on success.
-fn run_now(app: &mut SoundApp, params: Value) -> bool {
-    match app.run("file.import_audio", params) {
-        Ok(_) => true,
-        Err(e) => {
-            app.ui.status = e;
-            false
-        }
+pub fn refuses_session_switch(app: &mut SoundApp) -> bool {
+    // A hidden window may not have painted its final 100% frame. Completed work must not
+    // prevent quitting, replacing the session, or starting another job in that case.
+    if app.import.as_ref().is_some_and(|job| job.completed) {
+        app.import = None;
     }
+    if app.import.is_some() {
+        app.ui.status = "Finish or cancel the import first".into();
+    }
+    app.import.is_some()
 }
 
-/// A small, non-blocking note while files import: the rest of the app stays usable.
-pub fn show(app: &SoundApp, ctx: &egui::Context) {
-    let Some((name, waiting)) = app.imports.label() else { return };
-    egui::Area::new(egui::Id::unique("audio_import_progress")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0)).interactable(false).show(
-        ctx,
-        |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new());
-                    let more = if waiting > 0 { format!(" ({waiting} more)") } else { String::new() };
-                    ui.label(format!("Importing {name}{more}"));
-                });
+/// One accumulating bar for the whole batch, filled by completed stages and measured progress
+/// within them. Interpolation softens transitions without guessing progress from elapsed time.
+pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some(job) = &mut app.import else { return };
+    job.shown = true;
+    let progress = job.progress.lock().map(|p| *p).unwrap_or_default();
+    let cancelling = job.cancelled.load(Ordering::Relaxed);
+    if job.completed {
+        job.displayed_fraction = 1.0;
+    } else if !cancelling {
+        let target = progress.fraction(job.names.len()).max(job.displayed_fraction);
+        let dt = ctx.input(|i| i.stable_dt).clamp(0.0, 0.1);
+        job.displayed_fraction = (job.displayed_fraction + dt * 1.5).min(target);
+    }
+    let name = job.names.get(progress.file).map(String::as_str).unwrap_or("Audio");
+    let mut cancel = false;
+    egui::Modal::new(egui::Id::unique("import_progress")).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+        ui.set_width(360.0_f32.min((ctx.content_rect().width() - 48.0).max(160.0)));
+        ui.label(
+            egui::RichText::new(if job.completed {
+                "Import complete"
+            } else if cancelling {
+                "Cancelling import…"
+            } else {
+                "Importing Audio"
+            })
+            .font(bold(15.0)),
+        );
+        ui.add(egui::Label::new(name).truncate()).on_hover_text(name);
+        let stage: String = if job.completed {
+            "Audio imported successfully".into()
+        } else if cancelling {
+            "Stopping audio processing…".into()
+        } else {
+            match progress.phase {
+                Phase::Reading(_) => "Reading audio…".into(),
+                Phase::Decoding(_) => "Decoding audio…".into(),
+                Phase::Converting(_) => "Converting sample rate…".into(),
+                Phase::Waveform => "Building waveform…".into(),
+                Phase::Ready => "Adding audio to session…".into(),
+            }
+        };
+        ui.add(egui::ProgressBar::new(job.displayed_fraction).desired_height(18.0).corner_radius(9.0));
+        ui.horizontal(|ui| {
+            ui.label(&stage);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!("{:.0}%", (job.displayed_fraction * 100.0).floor()));
             });
-        },
-    );
+        });
+        ui.horizontal(|ui| {
+            ui.label(format!("File {} of {}", progress.file.saturating_add(1), job.names.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                cancel = ui.add_enabled(!cancelling && !job.completed, egui::Button::new("Cancel")).clicked();
+            });
+        });
+    });
+    if cancel {
+        job.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::{Services, SoundApp};
+    use crate::Services;
+    use egui_kittest::{Harness, kittest::Queryable};
     use serde_json::json;
+    use soundcraft_audio_io::{AudioBuffer, EncodeOptions};
+    use soundcraft_engine::Engine;
+    use std::sync::mpsc;
 
-    fn tone_wav(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("sc-ui-import-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let tone: Vec<f32> = (0..9_600).map(|i| (i as f32 * 0.05).sin() * 0.2).collect();
-        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone.clone(), tone] };
-        let bytes = soundcraft_audio_io::encode(&buf, &soundcraft_audio_io::EncodeOptions::default()).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, bytes).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    fn settle(app: &mut SoundApp, ctx: &egui::Context) {
-        for _ in 0..2_000 {
-            step(app, ctx);
-            if !app.imports.busy() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+    struct Fixture(std::path::PathBuf);
+    #[allow(clippy::unwrap_used)]
+    impl Fixture {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("sc-import-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
         }
-        panic!("import never finished");
+        fn wav(&self, name: &str, rate: u32) -> String {
+            let buf = AudioBuffer { sample_rate: rate, channels: vec![vec![0.25; rate as usize / 10]; 2] };
+            let bytes = soundcraft_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path.to_string_lossy().into_owned()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn app() -> SoundApp {
+        SoundApp::new(Engine::default(), None, Services::default())
+    }
+    fn finish(app: &mut SoundApp) {
+        if let Some(job) = &mut app.import {
+            job.shown = true;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.import.is_some() {
+            if let Some(job) = &mut app.import {
+                job.shown = true;
+            }
+            step(app, &egui::Context::default());
+            assert!(std::time::Instant::now() < deadline, "import must terminate");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
-    /// Issue #597: starting an import returns at once; the clip lands, as one undo step, later.
     #[test]
-    fn import_runs_in_the_background_and_places_one_undoable_clip() {
-        let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
-        let wav = tone_wav("bg.wav");
-        start(&mut app, json!({"path": wav, "at": 480}));
-        assert!(app.imports.busy());
-        assert!(app.engine.session().tracks.is_empty(), "nothing is placed before the audio is ready");
-        settle(&mut app, &ctx);
+    fn batch_import_resamples_and_builds_waveforms_with_one_undo() {
+        let f = Fixture::new("batch");
+        let (a, b) = (f.wav("first.wav", 44_100), f.wav("second.wav", 48_000));
+        let mut app = app();
+        // `path` is appended to `paths`, matching the engine command.
+        start(&mut app, &json!({"paths": [a], "path": b, "at": 9600})).unwrap();
+        assert!(app.engine.session().tracks.is_empty());
+        assert!(start(&mut app, &json!({"path": "ignored.wav"})).is_err());
+        assert!(app.run("session.new", json!({})).is_err());
+        assert!(app.run("app.quit", json!({})).is_err());
+        finish(&mut app);
+        assert_eq!(app.ui.status, "Imported 2 files");
         let s = app.engine.session();
-        assert_eq!(s.tracks.len(), 1);
-        assert_eq!(s.tracks[0].clips()[0].start, 480);
-        assert_eq!(s.sources[0].frames, 9_600);
-        assert!(app.ui.status.starts_with("Imported bg.wav"), "{}", app.ui.status);
-        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(s.tracks.len(), 2);
+        for track in &s.tracks {
+            assert_eq!(track.clips()[0].start, 9600);
+            assert_eq!(track.clips()[0].length, 4800);
+        }
+        for source in &s.sources {
+            let audio = s.pool.get(source.id).unwrap();
+            assert_eq!(audio.buffer.sample_rate, 48_000);
+            assert_eq!(audio.peaks.len(), 2);
+            assert!((audio.channel(0).unwrap()[100] - 0.25).abs() < 0.01);
+        }
+        assert_eq!(app.engine.undo_history().len(), 1);
+        assert!(app.engine.undo());
+        assert!(app.engine.session().tracks.is_empty());
+        assert!(app.engine.redo());
+        assert_eq!(app.engine.session().tracks.len(), 2);
+    }
+
+    #[test]
+    fn a_later_file_failure_leaves_no_partial_import() {
+        let f = Fixture::new("failure");
+        let good = f.wav("good.wav", 48_000);
+        let missing = f.0.join("missing.wav");
+        let mut app = app();
+        start(&mut app, &json!({"paths": [good, missing]})).unwrap();
+        finish(&mut app);
+        assert!(app.ui.status.contains("missing.wav"), "{}", app.ui.status);
+        assert!(app.engine.session().tracks.is_empty());
+        assert!(app.engine.session().sources.is_empty());
+        assert!(!app.engine.can_undo());
+    }
+
+    #[test]
+    fn worker_preserves_the_callers_read_authority() {
+        let f = Fixture::new("authority");
+        let outside = f.wav("outside.wav", 48_000);
+        let allowed = f.0.join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let roots = soundcraft_engine::file_access::AutomationRoots::new(&[&allowed], &[]).unwrap();
+        let mut app = app();
+        soundcraft_engine::file_access::confine(roots.as_ref(), || start(&mut app, &json!({"path": outside}))).unwrap();
+        finish(&mut app);
+        assert!(app.ui.status.contains("outside the read root"), "{}", app.ui.status);
         assert!(app.engine.session().tracks.is_empty());
     }
 
     #[test]
-    fn imports_queue_and_a_bad_file_reports_without_stopping_the_rest() {
-        let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
-        let junk = tone_wav("junk.wav");
-        std::fs::write(&junk, b"not audio").unwrap();
-        let good = tone_wav("good.wav");
-        start(&mut app, json!({"path": junk}));
-        start(&mut app, json!({"path": good}));
-        step(&mut app, &ctx);
-        assert_eq!(app.imports.label().map(|l| l.1), Some(1), "the second waits for the first");
-        settle(&mut app, &ctx);
-        assert_eq!(app.engine.session().tracks.len(), 1, "the good file still imports");
+    fn invalid_destination_fails_before_starting_a_worker() {
+        let mut app = app();
+        for params in [json!({}), json!({"path": "anything.wav", "new_tracks": false}), json!({"path": "anything.wav", "track": "Missing"})] {
+            assert!(start(&mut app, &params).is_err());
+            assert!(app.import.is_none());
+        }
     }
 
     #[test]
-    fn a_failed_import_stays_on_the_status_line_while_the_next_one_starts() {
-        let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
-        let junk = tone_wav("junk-status.wav");
-        std::fs::write(&junk, b"not audio").unwrap();
-        start(&mut app, json!({"path": junk}));
-        start(&mut app, json!({"path": tone_wav("next-status.wav")}));
-        for _ in 0..2_000 {
-            step(&mut app, &ctx);
-            if app.imports.label().is_some_and(|(name, _)| name == "next-status.wav") {
-                break;
+    fn selected_destination_is_frozen_when_import_starts() {
+        let f = Fixture::new("destination");
+        let path = f.wav("audio.wav", 48_000);
+        let mut app = app();
+        app.run("track.new", json!({"name": "Target"})).unwrap();
+        let id = app.engine.session().tracks[0].id;
+        app.engine.session_mut().edit.selected_tracks = vec![id];
+        start(&mut app, &json!({"path": path, "new_tracks": false})).unwrap();
+        app.engine.session_mut().edit.selected_tracks.clear();
+        finish(&mut app);
+        assert_eq!(app.engine.session().tracks.len(), 1);
+        assert_eq!(app.engine.session().tracks[0].clips().len(), 1);
+    }
+
+    #[test]
+    fn programmatic_import_remains_synchronous_and_does_not_open_a_modal() {
+        let f = Fixture::new("command");
+        let path = f.wav("audio.wav", 48_000);
+        let mut app = app();
+        let result = app.run("file.import_audio", json!({"path": path})).unwrap();
+        assert_eq!(result["imported"][0]["frames"], 4800);
+        assert!(app.import.is_none());
+        assert_eq!(app.engine.session().tracks.len(), 1);
+    }
+
+    fn pending(app: &mut SoundApp) -> mpsc::Sender<Result<Vec<PreparedImport>, String>> {
+        let (tx, worker) = mpsc::channel();
+        app.import = Some(ImportJob {
+            params: json!({"path": "pending.wav"}),
+            names: vec!["pending.wav".into()],
+            worker,
+            progress: Arc::new(Mutex::new(Progress::default())),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            shown: false,
+            displayed_fraction: 0.0,
+            completed: false,
+        });
+        tx
+    }
+
+    #[test]
+    fn cancellation_discards_even_a_completed_worker_result_and_waits_for_exit() {
+        let mut app = app();
+        let tx = pending(&mut app);
+        let token = Arc::clone(&app.import.as_ref().unwrap().cancelled);
+        token.store(true, Ordering::Relaxed);
+        app.import.as_mut().unwrap().shown = true;
+        step(&mut app, &egui::Context::default());
+        assert!(app.import.is_some(), "keep worker owned until it exits");
+        tx.send(Ok(Vec::new())).unwrap();
+        step(&mut app, &egui::Context::default());
+        assert!(app.import.is_none());
+        assert_eq!(app.ui.status, "Import cancelled");
+        assert!(!app.engine.is_dirty());
+    }
+
+    #[test]
+    fn overall_progress_never_resets_between_stages_or_files() {
+        let mut previous = 0.0;
+        for file in 0..3 {
+            for phase in [
+                Phase::Reading(0.0),
+                Phase::Reading(0.5),
+                Phase::Reading(1.0),
+                Phase::Decoding(0.0),
+                Phase::Decoding(0.25),
+                Phase::Decoding(1.0),
+                Phase::Converting(0.0),
+                Phase::Converting(0.5),
+                Phase::Converting(1.0),
+                Phase::Waveform,
+            ] {
+                let fraction = Progress { file, phase }.fraction(3);
+                assert!(fraction >= previous, "progress went backwards at {file}: {phase:?}");
+                assert!(fraction < 1.0, "only successful placement may complete the bar");
+                previous = fraction;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(app.imports.label().is_some_and(|(name, _)| name == "next-status.wav"), "the second import never started");
-        assert!(!app.ui.status.is_empty() && !app.ui.status.starts_with("Importing"), "the failure was overwritten: {}", app.ui.status);
-        settle(&mut app, &ctx);
+        let ready = Progress { file: 2, phase: Phase::Ready }.fraction(3);
+        assert!(ready > previous && ready < 1.0);
+        assert_eq!(Progress::default().fraction(3), 0.0);
+        assert_eq!(Progress::default().fraction(0), 0.0);
+        // A long read or resample moves the bar within its own stage.
+        assert!(Progress { file: 0, phase: Phase::Reading(0.5) }.fraction(1) > 0.0);
+        assert!(Progress { file: 0, phase: Phase::Converting(0.5) }.fraction(1) > Progress { file: 0, phase: Phase::Converting(0.0) }.fraction(1));
+        for f in [f32::NAN, f32::INFINITY, -1.0, 2.0] {
+            for phase in [Phase::Reading(f), Phase::Decoding(f), Phase::Converting(f)] {
+                let fraction = Progress { file: usize::MAX, phase }.fraction(usize::MAX);
+                assert!(fraction.is_finite() && (0.0..1.0).contains(&fraction), "{phase:?}: {fraction}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_completed_import_does_not_block_quit_while_the_window_is_hidden() {
+        let mut app = app();
+        let _tx = pending(&mut app);
+        app.import.as_mut().unwrap().completed = true;
+        app.run("app.quit", json!({})).unwrap();
+        assert!(app.quit_requested);
+        assert!(app.import.is_none());
+    }
+
+    #[test]
+    fn full_bar_is_painted_after_success_before_the_popup_closes() {
+        let mut app = app();
+        let tx = pending(&mut app);
+        let mut h = Harness::builder().with_size(egui::vec2(900.0, 600.0)).wgpu().build_ui_state(
+            |ui, app: &mut SoundApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        h.input_mut().max_texture_side = Some(8192);
+        for _ in 0..4 {
+            h.step();
+        }
+        assert_eq!(h.state().import.as_ref().unwrap().displayed_fraction, 0.0);
+        let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
+        let bytes = soundcraft_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
+        let (info, buf) = soundcraft_audio_io::decode(&bytes, Some("wav")).unwrap();
+        tx.send(Ok(vec![PreparedImport {
+            path: "pending.wav".into(),
+            name: "pending.wav".into(),
+            info,
+            audio: Arc::new(soundcraft_model::SourceAudio::new(buf)),
+        }]))
+        .unwrap();
+        h.step();
+        assert_eq!(h.state().engine.session().tracks.len(), 1);
+        assert!(h.state().import.as_ref().unwrap().completed);
+        assert_eq!(h.state().import.as_ref().unwrap().displayed_fraction, 1.0);
+        assert!(h.query_by_label("Import complete").is_some());
+        if let Some(dir) = std::env::var_os("SOUNDCRAFT_IMPORT_SHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            h.render().unwrap().save(dir.join("complete.png")).unwrap();
+        }
+        h.step();
+        assert!(h.state().import.is_none());
+        assert_eq!(h.state().ui.status, "Imported pending.wav");
+    }
+
+    #[test]
+    fn disconnected_worker_closes_the_popup_with_an_error() {
+        let mut app = app();
+        drop(pending(&mut app));
+        finish(&mut app);
+        assert!(app.ui.status.contains("worker stopped unexpectedly"));
+        assert!(!app.engine.is_dirty());
+    }
+
+    #[test]
+    fn cancel_button_and_escape_work_and_long_names_fit_the_modal() {
+        let mut app = app();
+        let tx = pending(&mut app);
+        let name = format!("เสียงร้อง_{}final.wav", "long-session-name_".repeat(20));
+        app.import.as_mut().unwrap().names = vec![name, "second.wav".into()];
+        // Filenames can use scripts outside the installed fonts. Match the application's
+        // default fallback policy while exercising layout and cancellation on minimal systems.
+        let mut h = Harness::builder().with_size(egui::vec2(900.0, 600.0)).allow_missing_glyphs().wgpu().build_ui_state(
+            |ui, app: &mut SoundApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        h.input_mut().max_texture_side = Some(8192);
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.get_by_label("Importing Audio").rect().width() < 400.0);
+        let shots = std::env::var_os("SOUNDCRAFT_IMPORT_SHOTS").map(std::path::PathBuf::from);
+        if let Some(dir) = &shots {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for (name, phase) in [
+            ("reading", Phase::Reading(0.42)),
+            ("decoding", Phase::Decoding(0.63)),
+            ("converting", Phase::Converting(0.55)),
+            ("waveform", Phase::Waveform),
+        ] {
+            h.state().import.as_ref().unwrap().progress.lock().unwrap().phase = phase;
+            for _ in 0..15 {
+                h.step();
+            }
+            if let Some(dir) = &shots {
+                h.render().unwrap().save(dir.join(format!("{name}.png"))).unwrap();
+            }
+        }
+        h.state_mut().ui.theme = crate::theme::ThemeMode::Light;
+        h.step();
+        h.step();
+        if let Some(dir) = &shots {
+            h.render().unwrap().save(dir.join("light-waveform.png")).unwrap();
+        }
+        h.state_mut().ui.theme = crate::theme::ThemeMode::Dark;
+        h.step();
+        h.get_by_label("Cancel").click();
+        h.step();
+        assert!(h.state().import.as_ref().unwrap().cancelled.load(Ordering::Relaxed));
+        h.step();
+        assert!(h.query_by_label("Cancelling import…").is_some());
+        if let Some(dir) = &shots {
+            h.render().unwrap().save(dir.join("cancelling.png")).unwrap();
+        }
+        tx.send(Err("cancelled".into())).unwrap();
+        h.step();
+        assert!(h.state().import.is_none());
+        assert_eq!(h.state().ui.status, "Import cancelled");
+
+        let tx = pending(h.state_mut());
+        h.step();
+        h.key_press(egui::Key::Escape);
+        h.step();
+        assert!(h.state().import.as_ref().unwrap().cancelled.load(Ordering::Relaxed));
+        drop(tx);
+        h.step();
+        assert!(h.state().import.is_none());
     }
 }
