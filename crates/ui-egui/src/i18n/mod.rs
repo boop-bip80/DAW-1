@@ -413,7 +413,8 @@ mod tests {
         for tag in ["ko", "ko-KR", "ko_KR.UTF-8", "ko-Kore-KR", "KO"] {
             assert_eq!(lang_from_tag(tag), Some(KO()), "{tag}");
         }
-        assert_eq!(Lang::from_pref("ko"), KO());
+        // The preference resolves to Korean wherever the build can draw Hangul (not the web yet).
+        assert_eq!(Lang::from_pref("ko"), KO().drawable(cfg!(target_arch = "wasm32")));
         assert_eq!(KO().name(), "한국어");
     }
 
