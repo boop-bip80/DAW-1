@@ -11,3 +11,4 @@ plan/
 plans/
 .DS_Store
 /.idea/
+__pycache__/
