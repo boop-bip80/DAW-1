@@ -78,6 +78,11 @@ impl EditLayout {
     pub fn scroll_by(&mut self, dy: f32, view_h: f32) {
         self.scroll_y = (self.scroll_y + dy).clamp(0.0, (self.content_h - view_h + 40.0).max(0.0));
     }
+
+    /// Clears the vertical scroll position Zoom Toggle would restore, so Cancel Zoom Toggle keeps the current scroll.
+    pub(crate) fn forget_zoom_back(&mut self) {
+        self.zoom_back = None;
+    }
 }
 
 pub fn rect([x0, y0, x1, y1]: [f32; 4]) -> Rect {
@@ -469,8 +474,13 @@ fn hscrollbar(app: &mut SoundApp, ui: &mut Ui, sb: Rect, tl: Rect) {
     }
 }
 
-/// Zoom Toggle sized to the track area on screen.
+/// Zoom Toggle sized to the track area on screen. With Alt held (an Alt-click on the button) it cancels Zoom Toggle
+/// instead and keeps the current view.
 pub fn zoom_toggle(app: &mut SoundApp) {
+    if app.docking_context.as_ref().is_some_and(|c| c.input(|i| i.modifiers.alt)) {
+        let _ = app.run("view.zoom_toggle_cancel", json!({}));
+        return;
+    }
     let [x0, y0, x1, y1] = app.edit_layout.timeline;
     let _ = app.run("view.zoom_toggle", json!({"width_px": x1 - x0, "height_px": y1 - y0}));
 }
