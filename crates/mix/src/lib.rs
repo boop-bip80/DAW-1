@@ -148,7 +148,9 @@ pub fn create_instance(id: &str, state: Option<&[u8]>, sample_rate: f32, max_blo
     Some(NewInstance { plugin, refused_state })
 }
 
-/// Peak meter values for one strip (linear, per channel, max over the last block).
+/// Peak meter values for one strip (linear, per channel). [`MixEngine`] measures one block; a
+/// realtime host folds blocks together with [`StripMeter::accumulate`] so a reader polling less
+/// often than blocks arrive sees the highest peak since it last looked, not just the latest block.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StripMeter {
     /// First two channels (mono strips repeat channel 0), for stereo meters.
@@ -186,6 +188,34 @@ impl StripMeter {
         self.plugin_failures = o.plugin_failures;
     }
 
+    /// Fold another (later) measurement in: per-channel peaks and the gain reduction keep their
+    /// maximum, plugin failures take the later value (the count only grows). Allocation-free once
+    /// the channel count is stable, so it can run on the audio thread every block.
+    pub fn accumulate(&mut self, o: &StripMeter) {
+        if self.peaks.len() != o.peaks.len() {
+            // The strip's format changed (a document edit): earlier channels no longer line up.
+            self.peaks.clone_from(&o.peaks);
+            self.peak = o.peak;
+        } else {
+            for (p, q) in self.peaks.iter_mut().zip(&o.peaks) {
+                *p = max_level(*p, *q);
+            }
+            for (p, q) in self.peak.iter_mut().zip(o.peak) {
+                *p = max_level(*p, q);
+            }
+        }
+        self.gain_reduction_db = max_level(self.gain_reduction_db, o.gain_reduction_db);
+        self.plugin_failures = o.plugin_failures;
+    }
+
+    /// Zero the levels (peaks and gain reduction) after a reader took them, keeping the channel
+    /// count and the plugin failure record. Never allocates.
+    pub fn reset_levels(&mut self) {
+        self.peak = [0.0; 2];
+        self.peaks.iter_mut().for_each(|p| *p = 0.0);
+        self.gain_reduction_db = 0.0;
+    }
+
     fn measure(&mut self, bufs: &[Vec<f32>], frames: usize, gr: f32) {
         if self.peaks.len() != bufs.len() {
             self.peaks.resize(bufs.len(), 0.0);
@@ -196,6 +226,16 @@ impl StripMeter {
         let last = self.peaks.len().saturating_sub(1);
         self.peak = [self.peaks.first().copied().unwrap_or(0.0), self.peaks.get(1.min(last)).copied().unwrap_or(0.0)];
         self.gain_reduction_db = gr;
+    }
+}
+
+/// The larger of two meter levels; a NaN (from a misbehaving plugin) never wins or sticks.
+fn max_level(a: f32, b: f32) -> f32 {
+    match (a.is_finite(), b.is_finite()) {
+        (true, true) => a.max(b),
+        (true, false) => a,
+        (false, true) => b,
+        (false, false) => 0.0,
     }
 }
 
@@ -248,21 +288,37 @@ struct Strip {
 /// at most this, whatever its plugins claim, so a bogus value can't stall offline renders.
 const MAX_LATENCY: usize = 1 << 20;
 
-/// A multichannel delay line (samples), resized only when the delay changes.
+/// A multichannel delay line (samples). The rings only grow (keeping their contents), so a delay
+/// change in the callback moves the read offset instead of reallocating and zeroing.
 #[derive(Default)]
 struct DelayLine {
     bufs: Vec<Vec<f32>>,
+    /// Write position in the rings.
     idx: usize,
+    /// Current delay (samples).
     len: usize,
 }
 
 impl DelayLine {
     fn set(&mut self, len: usize, ch: usize) {
         let len = len.min(MAX_LATENCY);
-        if len != self.len || self.bufs.len() != ch {
-            self.len = len;
-            self.idx = 0;
-            self.bufs = vec![vec![0.0; len]; ch];
+        self.len = len;
+        let cap = self.bufs.first().map_or(0, Vec::len);
+        if self.bufs.len() != ch {
+            self.bufs.resize_with(ch, || vec![0.0; cap]);
+        }
+        let need = if len == 0 { 0 } else { len + 1 };
+        if need > cap {
+            let new_cap = need.next_power_of_two().min(MAX_LATENCY + 1);
+            let start = self.idx.min(cap);
+            for ring in &mut self.bufs {
+                let mut grown = Vec::with_capacity(new_cap);
+                grown.extend_from_slice(ring.get(start..).unwrap_or(&[]));
+                grown.extend_from_slice(ring.get(..start).unwrap_or(&[]));
+                grown.resize(new_cap, 0.0);
+                *ring = grown;
+            }
+            self.idx = cap;
         }
     }
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
@@ -270,20 +326,29 @@ impl DelayLine {
             return;
         }
         let start = self.idx;
+        let mut end = start;
         for (c, ch) in io.iter_mut().enumerate() {
             let Some(ring) = self.bufs.get_mut(c) else { continue };
-            let mut i = start;
+            let cap = ring.len();
+            if cap <= self.len {
+                continue;
+            }
+            let mut i = start % cap;
             for x in ch.iter_mut().take(frames) {
-                if let Some(r) = ring.get_mut(i) {
-                    std::mem::swap(r, x);
+                if let Some(w) = ring.get_mut(i) {
+                    *w = *x;
+                }
+                if let Some(r) = ring.get((i + cap - self.len) % cap) {
+                    *x = *r;
                 }
                 i += 1;
-                if i >= self.len {
+                if i >= cap {
                     i = 0;
                 }
             }
+            end = i;
         }
-        self.idx = (start + frames) % self.len.max(1);
+        self.idx = end;
     }
     fn clear(&mut self) {
         self.bufs.iter_mut().for_each(|b| b.fill(0.0));
@@ -515,9 +580,14 @@ impl MixEngine {
             s.align.clear();
             s.align_pre.clear();
             s.out_extra.clear();
+            for fx in s.clip_fx.values_mut() {
+                fx.reset();
+            }
         }
-        self.meters.clear();
-        self.main_meter = StripMeter::default();
+        // Zeroed in place: rebuilding the entries would allocate on the audio thread at every
+        // play, stop and locate.
+        self.meters.values_mut().for_each(StripMeter::reset_levels);
+        self.main_meter.reset_levels();
     }
 
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
@@ -532,6 +602,7 @@ impl MixEngine {
         let mut cx = SlotCtx { sr: self.sample_rate, mb, external: self.external, adopt: &mut self.adopt, retired: &mut self.retired };
         let gone: Vec<TrackId> = self.strips.keys().filter(|id| s.track(**id).is_none()).copied().collect();
         for id in gone {
+            self.meters.remove(&id);
             if let Some(mut st) = self.strips.remove(&id) {
                 for p in st.plugins.drain(..) {
                     cx.retire(p);
@@ -765,12 +836,14 @@ impl MixEngine {
                         }
                     }
                 }
+                // Match track faders: the next block's first sample must not ramp this one.
+                let last = pos.saturating_add(frames.saturating_sub(1) as i64);
                 let v0 = volume_db_at(t, pos);
-                let v1 = volume_db_at(t, pos + frames as i64);
+                let v1 = volume_db_at(t, last);
                 for (ch, src) in strip.buf.iter().enumerate().take(self.main.len()) {
                     if let Some(m) = self.main.get_mut(ch) {
                         for i in 0..frames {
-                            let g = lerp_gain(v0, v1, i, frames);
+                            let g = lerp_gain(v0, v1, i, frames.saturating_sub(1));
                             if let (Some(d), Some(x)) = (m.get_mut(i), src.get(i)) {
                                 *d = x * g;
                             }
@@ -1040,9 +1113,8 @@ fn process_strip(
     }
     strip.gr = gr;
     strip.latency = latency.min(MAX_LATENCY);
-    let auto_mute = t.mixer.automation_mode.reads() && t.lane(&AutoParam::Mute).is_some_and(|l| l.value_at(pos, 0.0) >= 0.5);
     let soloed_out = any_solo && !t.mixer.solo && !t.mixer.solo_safe && !receives_solo(s, t);
-    strip.muted = t.mixer.mute || auto_mute || soloed_out;
+    strip.muted = t.mixer.mute || soloed_out;
     if t.mixer.sends.iter().flatten().any(|x| x.pre_fader) {
         strip.pre.resize_with(strip.buf.len(), Vec::new);
         for (d, src) in strip.pre.iter_mut().zip(strip.buf.iter()) {
@@ -1080,6 +1152,23 @@ fn process_strip(
         for i in 0..frames {
             if let Some(x) = c.get_mut(i) {
                 *x *= lerp_gain(g0, g1, i, frames.saturating_sub(1));
+            }
+        }
+    }
+    // Track mute gates the audio and its pre-fader tap without splitting processor blocks.
+    // Keep the existing curve interpolation, first-lane and mode policy, and render-position
+    // clock. Processor/bus age and Master/VCA automation policy are separate concerns.
+    if t.mixer.automation_mode.reads()
+        && let Some(lane) = t.lane(&AutoParam::Mute).filter(|lane| !lane.points.is_empty())
+    {
+        for i in 0..frames {
+            let at = pos.saturating_add(i64::try_from(i).unwrap_or(i64::MAX));
+            if lane.value_at(at, 0.0) >= 0.5 {
+                for channel in strip.buf.iter_mut().chain(strip.pre.iter_mut()) {
+                    if let Some(sample) = channel.get_mut(i) {
+                        *sample = 0.0;
+                    }
+                }
             }
         }
     }
@@ -1148,6 +1237,12 @@ impl std::fmt::Write for Key {
 impl ClipFx {
     fn new(sr: f32, ch: usize) -> ClipFx {
         ClipFx { eq: None, comp: None, gain_db: 0.0, sr, ch }
+    }
+    /// Clear filter, detector and lookahead history (transport stop / locate).
+    fn reset(&mut self) {
+        for p in self.eq.iter_mut().chain(self.comp.iter_mut()) {
+            p.reset();
+        }
     }
     fn make(&self, id: &str) -> Option<Box<dyn Plugin>> {
         soundcraft_dsp::create(id).map(|mut p| {
@@ -1306,24 +1401,95 @@ fn processing_order(s: &Session) -> Vec<usize> {
         (0..s.tracks.len()).filter(|&i| s.tracks.get(i).is_some_and(|t| !matches!(t.kind, TrackKind::Aux | TrackKind::Folder))).collect();
     let mut auxes: Vec<usize> =
         (0..s.tracks.len()).filter(|&i| s.tracks.get(i).is_some_and(|t| matches!(t.kind, TrackKind::Aux | TrackKind::Folder))).collect();
-    // Depth = how many aux hops feed this aux's input bus (bounded; cycles cap out).
-    let depth = |i: usize| -> usize {
-        let mut d = 0;
-        let mut cur = vec![i];
-        for _ in 0..8 {
-            let inputs: Vec<&Route> = cur.iter().filter_map(|&k| s.tracks.get(k)).map(|t| &t.mixer.input).collect();
-            let feeders: Vec<usize> = auxes_feeding(s, &inputs);
-            if feeders.is_empty() {
-                break;
-            }
-            d += 1;
-            cur = feeders;
-        }
-        d
-    };
-    auxes.sort_by_key(|&i| depth(i));
+    if let Some(depths) = acyclic_aux_depths(s, &auxes) {
+        // Stable sorting preserves session order among auxes at the same longest-path depth.
+        auxes.sort_by_key(|&i| depths.get(i).copied().unwrap_or(0));
+    } else {
+        // A cycle keeps the existing bounded ordering for the entire graph, including any
+        // independent acyclic branches. Feedback does not have a finite longest-path depth.
+        auxes.sort_by_key(|&i| bounded_aux_depth(s, i));
+    }
     order.extend(auxes);
     order
+}
+
+/// Exact aux-hop depths when the whole Aux/Folder graph is acyclic. Bus joins retain only
+/// producer counts and consumers, avoiding a producer-by-consumer adjacency matrix.
+fn acyclic_aux_depths(s: &Session, auxes: &[usize]) -> Option<Vec<usize>> {
+    #[derive(Default)]
+    struct BusDependencies {
+        remaining: usize,
+        depth: usize,
+        last_producer: Option<usize>,
+        last_processed: Option<usize>,
+        consumers: Vec<usize>,
+    }
+    let mut busses = HashMap::<BusId, BusDependencies>::new();
+    for &i in auxes {
+        for bus in aux_output_busses(s.tracks.get(i)?) {
+            let dependency = busses.entry(bus).or_default();
+            // Output and multiple sends from this producer may name the same bus.
+            if dependency.last_producer != Some(i) {
+                dependency.last_producer = Some(i);
+                dependency.remaining = dependency.remaining.checked_add(1)?;
+            }
+        }
+    }
+    let mut depths = vec![0usize; s.tracks.len()];
+    let mut ready = Vec::with_capacity(auxes.len());
+    for &i in auxes {
+        if let Route::Bus(bus) = &s.tracks.get(i)?.mixer.input {
+            let dependency = busses.entry(*bus).or_default();
+            dependency.consumers.push(i);
+            if dependency.remaining > 0 {
+                continue;
+            }
+        }
+        ready.push(i);
+    }
+    let mut processed = 0usize;
+    while let Some(&i) = ready.get(processed) {
+        processed = processed.checked_add(1)?;
+        let next_depth = depths.get(i)?.checked_add(1)?;
+        for bus in aux_output_busses(s.tracks.get(i)?) {
+            let dependency = busses.get_mut(&bus)?;
+            if dependency.last_processed == Some(i) {
+                continue;
+            }
+            dependency.last_processed = Some(i);
+            dependency.depth = dependency.depth.max(next_depth);
+            dependency.remaining = dependency.remaining.checked_sub(1)?;
+            if dependency.remaining == 0 {
+                for &consumer in &dependency.consumers {
+                    *depths.get_mut(consumer)? = dependency.depth;
+                    ready.push(consumer);
+                }
+            }
+        }
+    }
+    (processed == auxes.len()).then_some(depths)
+}
+
+fn aux_output_busses(t: &Track) -> impl Iterator<Item = BusId> + '_ {
+    std::iter::once(&t.mixer.output)
+        .chain(t.mixer.sends.iter().flatten().map(|send| &send.target))
+        .filter_map(|route| if let Route::Bus(bus) = route { Some(*bus) } else { None })
+}
+
+/// The previous bounded depth calculation, retained unchanged for any cyclic graph.
+fn bounded_aux_depth(s: &Session, i: usize) -> usize {
+    let mut d = 0;
+    let mut cur = vec![i];
+    for _ in 0..8 {
+        let inputs: Vec<&Route> = cur.iter().filter_map(|&k| s.tracks.get(k)).map(|t| &t.mixer.input).collect();
+        let feeders: Vec<usize> = auxes_feeding(s, &inputs);
+        if feeders.is_empty() {
+            break;
+        }
+        d += 1;
+        cur = feeders;
+    }
+    d
 }
 
 fn auxes_feeding(s: &Session, inputs: &[&Route]) -> Vec<usize> {
@@ -1338,6 +1504,60 @@ fn auxes_feeding(s: &Session, inputs: &[&Route]) -> Vec<usize> {
         .collect()
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod processing_order_tests {
+    use super::*;
+    use soundcraft_model::SendSlot;
+
+    #[test]
+    fn acyclic_bus_joins_use_longest_depth_and_keep_session_order_for_ties() {
+        let mut s = Session::default();
+        s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        let consumer = s.add_track(TrackKind::Aux, ChannelFormat::Stereo, None);
+        let first_root = s.add_track(TrackKind::Aux, ChannelFormat::Stereo, None);
+        let second_root = s.add_track(TrackKind::Aux, ChannelFormat::Stereo, None);
+        let middle = s.add_track(TrackKind::Folder, ChannelFormat::Stereo, None);
+        let first_bus = s.add_bus("First", ChannelFormat::Stereo);
+        let join = s.add_bus("Join", ChannelFormat::Stereo);
+        s.track_mut(consumer).unwrap().mixer.input = Route::Bus(join);
+        let root = s.track_mut(first_root).unwrap();
+        root.mixer.output = Route::Main;
+        root.mixer.sends[0] = Some(SendSlot::new(Route::Bus(first_bus)));
+        let root = s.track_mut(second_root).unwrap();
+        root.mixer.output = Route::Bus(join);
+        root.mixer.sends[0] = Some(SendSlot::new(Route::Bus(join)));
+        root.mixer.sends[1] = Some(SendSlot::new(Route::Bus(join)));
+        let folder = s.track_mut(middle).unwrap();
+        folder.mixer.input = Route::Bus(first_bus);
+        folder.mixer.output = Route::Bus(join);
+        folder.mixer.sends[0] = Some(SendSlot::new(Route::Bus(join)));
+
+        assert_eq!(processing_order(&s), vec![0, 2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn a_cycle_preserves_bounded_order_for_the_whole_graph() {
+        let mut s = Session::default();
+        let busses: Vec<_> = (0..10).map(|i| s.add_bus(&format!("Chain {i}"), ChannelFormat::Stereo)).collect();
+        let tracks: Vec<_> = (0..10).map(|_| s.add_track(TrackKind::Aux, ChannelFormat::Stereo, None)).collect();
+        for (i, id) in tracks.iter().enumerate() {
+            let track = s.track_mut(*id).unwrap();
+            track.mixer.input = Route::Bus(busses[i]);
+            track.mixer.output = if i == 0 { Route::Main } else { Route::Bus(busses[i - 1]) };
+        }
+        assert_eq!(processing_order(&s), vec![9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+        let cycle_bus = s.add_bus("Feedback", ChannelFormat::Stereo);
+        let cycle = s.add_track(TrackKind::Aux, ChannelFormat::Stereo, None);
+        let track = s.track_mut(cycle).unwrap();
+        track.mixer.input = Route::Bus(cycle_bus);
+        track.mixer.output = Route::Bus(cycle_bus);
+
+        // Both deepest independent returns tie with the cycle at the legacy eight-hop cap.
+        assert_eq!(processing_order(&s), vec![9, 8, 7, 6, 5, 4, 3, 2, 0, 1, 10]);
+    }
+}
+
 /// Implicit solo: an aux is not muted when a soloed track feeds its input bus.
 fn receives_solo(s: &Session, t: &Track) -> bool {
     let Route::Bus(b) = &t.mixer.input else { return false };
@@ -1349,7 +1569,9 @@ fn receives_solo(s: &Session, t: &Track) -> bool {
 /// Metronome: a short synthesized blip on every beat of the tempo map, accented on beat 1 of
 /// each bar. Settings come from `setup.click_countoff` (`click.*` values).
 mod click {
-    use super::*;
+    use super::db_to_gain;
+    use soundcraft_model::Session;
+    use soundcraft_time::Samples;
 
     /// Blip length in seconds.
     const LEN_S: f64 = 0.03;
@@ -1442,7 +1664,7 @@ fn render_clip(s: &Session, clip: &Clip, pos: Samples, frames: usize, buf: &mut 
                     let x0 = f.floor();
                     let fr = (f - x0) as f32;
                     let a = if x0 >= 0.0 { src.get(x0 as usize).copied().unwrap_or(0.0) } else { 0.0 };
-                    let b = if x0 + 1.0 >= 0.0 { src.get((x0 as usize).saturating_add(1)).copied().unwrap_or(0.0) } else { 0.0 };
+                    let b = if x0 + 1.0 >= 0.0 { src.get((x0 + 1.0) as usize).copied().unwrap_or(0.0) } else { 0.0 };
                     a + (b - a) * fr
                 };
                 let t = (k - i) as f32 / n;
@@ -1638,7 +1860,7 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
     let mut latency = 0usize;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
-        if !ins.active || ins.bypass {
+        if !ins.active || ins.bypass || slot.failed {
             continue;
         }
         apply_params(slot, ins, t, i, pos);
@@ -2220,6 +2442,13 @@ pub fn render_track_pre_fader(s: &Session, track: TrackId, range: Range) -> Vec<
 
 /// A built-in plugin, else a hosted CLAP plugin (`clap:<id>`).
 fn create_plugin(id: &str) -> Option<Box<dyn Plugin>> {
+    // Tests never load real plug-ins; adopt a fake instead. Scanning the machine's plug-in folders
+    // loads every installed plug-in in-process, and some never unload, so a test that reached the
+    // real hosts would hang on a developer machine (CI has none installed).
+    #[cfg(test)]
+    if is_third_party(id) {
+        return None;
+    }
     soundcraft_dsp::create(id)
         .or_else(|| soundcraft_clap_host::create(id))
         .or_else(|| soundcraft_vst3_host::create(id))
@@ -2272,6 +2501,10 @@ mod audio_thread_tests {
 
 #[cfg(test)]
 mod tests {
+    //! Rule: tests never call the real plug-in hosts. Third-party ids are not created here
+    //! (create_plugin returns None under cfg(test)); a test that needs a hosted plug-in
+    //! adopts a fake under a clap:test.* id via MixEngine::adopt.
+
     use super::*;
     use soundcraft_audio_io::AudioBuffer;
     use soundcraft_model::{Insert, SourceAudio, SourceId};
@@ -2290,6 +2523,31 @@ mod tests {
         ins.params.insert("level".into(), level_db);
         tr.instrument = Some(ins);
         s
+    }
+
+    #[test]
+    fn delay_line_change_keeps_buffers_and_history() {
+        // #889: a latency change must not reallocate or zero the delay line in the callback.
+        let mut d = DelayLine::default();
+        d.set(480, 2);
+        let ptrs: Vec<_> = d.bufs.iter().map(|b| b.as_ptr()).collect();
+        let mut io = vec![(1..=480).map(|v| v as f32).collect::<Vec<f32>>(); 2];
+        d.process(&mut io, 480);
+        assert!(io.iter().all(|c| c.iter().all(|&x| x == 0.0)));
+        // Shorter delay: the line keeps its storage and outputs what it already holds.
+        d.set(240, 2);
+        let after: Vec<_> = d.bufs.iter().map(|b| b.as_ptr()).collect();
+        assert_eq!(ptrs, after, "delay line reallocated on a shorter delay");
+        let mut io = vec![vec![0.0f32; 240]; 2];
+        d.process(&mut io, 240);
+        let want: Vec<f32> = (241..=480).map(|v| v as f32).collect();
+        for c in &io {
+            assert_eq!(c, &want, "held samples lost on a latency change");
+        }
+        // Back to the longer delay: still the same storage.
+        d.set(480, 2);
+        let after: Vec<_> = d.bufs.iter().map(|b| b.as_ptr()).collect();
+        assert_eq!(ptrs, after, "delay line reallocated going back to its size");
     }
 
     #[test]
@@ -2367,6 +2625,30 @@ mod tests {
         s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
         let out = render_range(&s, Range::new(0, 4800), 256);
         assert!(out[0][100] > 0.49 && out[1][100].abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_stretched_clip_before_its_source_start_reads_from_the_first_sample() {
+        // A clip that extends before its source (a negative offset) plays silence there. When it
+        // is stretched, the read position passes through [-1, 0), which must interpolate from
+        // that silence towards sample 0 of the file -- not towards sample 1.
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![1.0, 0.5, 0.25, 0.125]] };
+        s.pool.insert(SourceId(901), Arc::new(SourceAudio::new(buf)));
+        let id = s.new_clip_id();
+        let mut c = Clip::audio(id, "late", SourceId(901), -1, 0, 4);
+        c.stretch = 2.0;
+        if let Some(pl) = s.track_mut(t).and_then(|t| t.playlist_mut()) {
+            pl.clips.push(c);
+        }
+        let out = render_clips(&s, t, Range::new(0, 4));
+        // rel 0 -> source -1.0: silence; rel 1 -> source -0.5: halfway from silence to sample 0;
+        // rel 2 -> source 0.0: sample 0; rel 3 -> source 0.5: halfway to sample 1.
+        let want = [0.0, 0.5, 1.0, 0.75];
+        for (i, w) in want.iter().enumerate() {
+            assert!((out[0][i] - w).abs() < 1e-6, "frame {i}: {} vs {w}", out[0][i]);
+        }
     }
 
     #[test]
@@ -2471,6 +2753,52 @@ mod tests {
         let out = render_range(&s, Range::new(0, 48_000), 512);
         assert!(out[0][100] > 0.3);
         assert!(out[0][30_000].abs() < 1e-4);
+    }
+
+    #[test]
+    fn master_volume_breakpoint_does_not_ramp_the_previous_block() {
+        for block in [1, 2, 37, 512, 1024] {
+            let start = 37;
+            let boundary = start + block as i64;
+            let end = boundary + block as i64;
+            let (mut s, t) = session_with_dc(0.5, end as usize);
+            s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
+            let master = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+            let lane = s.track_mut(master).unwrap().lane_mut(&AutoParam::Volume);
+            lane.set_point(start, 0.0);
+            lane.set_point(boundary - 1, 0.0);
+            lane.set_point(boundary, -60.0);
+            lane.set_point(end - 1, -60.0);
+
+            let mut mixer = MixEngine::new(48_000.0, block);
+            let mut out = vec![vec![0.0; block]; 2];
+            for (pos, expected) in [(start, 0.5), (boundary, 0.0005)] {
+                mixer.render(&s, pos, block, &mut out);
+                for (i, &sample) in out[0].iter().enumerate() {
+                    assert!((sample - expected).abs() < 1e-6, "block {block}, position {pos}, sample {i}: {sample} vs {expected}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn master_volume_ramp_reaches_the_last_sample_of_the_block() {
+        for block in [2, 37, 512, 1024] {
+            let start = 37;
+            let end = start + block as i64;
+            let (mut s, t) = session_with_dc(0.5, end as usize);
+            s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
+            let master = s.add_track(TrackKind::Master, ChannelFormat::Stereo, None);
+            let lane = s.track_mut(master).unwrap().lane_mut(&AutoParam::Volume);
+            lane.set_point(start, 0.0);
+            lane.set_point(end - 1, -12.0);
+
+            let out = render_range(&s, Range::new(start, end), block);
+            assert_eq!(out[0].len(), block);
+            assert!((out[0][0] - 0.5).abs() < 1e-6);
+            let expected = 0.5 * db_to_gain(-12.0);
+            assert!((out[0][block - 1] - expected).abs() < 1e-6, "block {block}: {} vs {expected}", out[0][block - 1]);
+        }
     }
 
     #[test]
@@ -2740,6 +3068,9 @@ mod tests {
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
             io.iter_mut().for_each(|c| c.iter_mut().take(frames).for_each(|x| *x = f32::NAN));
         }
+        fn latency(&self) -> usize {
+            self.0.latency()
+        }
     }
 
     fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
@@ -2784,6 +3115,71 @@ mod tests {
         assert_eq!(render_block(&mut eng, &s, 512), 0.0);
         assert_eq!(eng.meters[&m].plugin_failures, PluginFailures { count: 1, last: 0 });
         assert_eq!(render_block(&mut eng, &s, 1024), only_b);
+    }
+
+    #[test]
+    fn failed_inserts_stop_contributing_latency_until_reset() {
+        for kind in [TrackKind::Audio, TrackKind::Aux, TrackKind::Folder, TrackKind::Master] {
+            for block in [64, 512] {
+                let mut s = Session::default();
+                s.edit.delay_compensation = true;
+                let source = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+                let mut impulse = vec![0.0; block * 6];
+                for at in [block, block * 2, block * 4] {
+                    impulse[at] = 0.25;
+                }
+                s.pool
+                    .insert(SourceId(900), Arc::new(SourceAudio::new(AudioBuffer { sample_rate: 48_000, channels: vec![impulse.clone(), impulse] })));
+                let cid = s.new_clip_id();
+                s.track_mut(source).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(
+                    cid,
+                    "impulses",
+                    SourceId(900),
+                    0,
+                    0,
+                    (block * 6) as i64,
+                ));
+                let target = if kind == TrackKind::Audio { source } else { s.add_track(kind, ChannelFormat::Stereo, None) };
+                if matches!(kind, TrackKind::Aux | TrackKind::Folder) {
+                    let bus = s.add_bus("Return", ChannelFormat::Stereo);
+                    s.track_mut(source).unwrap().mixer.output = Route::Bus(bus);
+                    s.track_mut(target).unwrap().mixer.input = Route::Bus(bus);
+                }
+                let mut failed = Insert::new("clap:test.nan");
+                failed.params.insert("lookahead".into(), 5.0);
+                let mut healthy = Insert::new("compressor");
+                healthy.params.insert("lookahead".into(), 1.0);
+                healthy.params.insert("ratio".into(), 1.0);
+                let tr = s.track_mut(target).unwrap();
+                tr.mixer.inserts[0] = Some(failed);
+                tr.mixer.inserts[1] = Some(healthy);
+                let mut plugin = soundcraft_dsp::create("compressor").unwrap();
+                plugin.prepare(48_000.0, block, 2);
+                let mut eng = MixEngine::new(48_000.0, block);
+                eng.set_external_instances(true);
+                eng.adopt(vec![PreparedInstance { track: target, slot: 0, id: "clap:test.nan".into(), ch: 2, plugin: Box::new(Nan(plugin)) }]);
+                let mut out = vec![vec![0.0; block]; 2];
+                eng.render(&s, 0, block, &mut out);
+                assert!(out.iter().flatten().all(|x| *x == 0.0));
+                assert_eq!(eng.meters[&target].plugin_failures.count, 1);
+
+                for b in [1, 2, 4] {
+                    if b == 4 {
+                        // Reset retries the failed plugin once; the next block must drop its
+                        // latency again, while keeping the healthy insert's 48-sample delay.
+                        eng.reset();
+                        eng.render(&s, (block * 3) as i64, block, &mut out);
+                        assert_eq!(eng.meters[&target].plugin_failures.count, 2);
+                    }
+                    eng.render(&s, (block * b) as i64, block, &mut out);
+                    assert_eq!(eng.latency, 48, "{kind:?}, block {block}, pass {b}: only the healthy insert delays audio");
+                    for channel in &out {
+                        assert_eq!(impulse_at(channel), vec![48], "{kind:?}, block {block}, pass {b}: no compensation for the failed insert");
+                        assert!((channel[48] - 0.25).abs() < 1e-5);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2832,7 +3228,7 @@ mod tests {
         s.track_mut(t).unwrap().mixer.inserts[0].as_mut().unwrap().params.insert("gain".into(), -12.0);
         render_block(&mut eng, &s, 1024);
         assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 2, "later session edits apply");
-        // Offline (not external): unknown third-party plugins are simply absent.
+        // Offline (not external): third-party plugins are simply absent (tests never load real ones).
         let out = render_range(&s, Range::new(0, 1024), 512);
         assert!(out[0][100] > 0.3);
     }
@@ -2900,6 +3296,29 @@ mod tests {
         eng.reset();
         eng.render(&s, 1_000_000, 512, &mut out);
         assert!(out.iter().flatten().all(|x| *x == 0.0), "old aligned audio after a reset");
+    }
+
+    /// A reset (stop, locate) must clear the cached clip EQ/compressor history too.
+    #[test]
+    fn reset_clears_clip_effect_history() {
+        // Compressor lookahead delay, then EQ high-pass filter state, each primed with DC.
+        for (param, value) in [("comp.lookahead", 5.0), ("eq.hpf_on", 1.0)] {
+            let (mut s, t) = session_with_dc(0.5, 9600);
+            s.edit.click = false;
+            let cid = s.track(t).unwrap().clips()[0].id.0;
+            s.edit.values.insert(format!("clip_fx.{cid}.{param}"), value);
+            let mut out = vec![vec![0.0f32; 512]; 2];
+            let mut eng = MixEngine::new(48_000.0, 512);
+            for b in 0..4 {
+                eng.render(&s, b * 512, 512, &mut out);
+            }
+            eng.reset();
+            eng.render(&s, 4096, 512, &mut out);
+            let mut fresh = MixEngine::new(48_000.0, 512);
+            let mut expect = vec![vec![0.0f32; 512]; 2];
+            fresh.render(&s, 4096, 512, &mut expect);
+            assert_eq!(out, expect, "{param}: clip effect state survived the reset");
+        }
     }
 
     fn impulse_at(ch: &[f32]) -> Vec<usize> {

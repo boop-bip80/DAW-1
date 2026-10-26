@@ -212,10 +212,8 @@ impl Default for View {
     }
 }
 
-/// About ▸ Contributors: a name toggle, a sort, and the list as a grab bag or a table.
-pub fn contributors_ui(ui: &mut egui::Ui) {
-    let id = egui::Id::new("credits_view");
-    let mut v = ui.data_mut(|d| d.get_temp::<View>(id)).unwrap_or_default();
+/// Controls for name style, sort key and sort direction above the contributor table.
+fn contributors_toolbar(ui: &mut egui::Ui, v: &mut View) {
     ui.horizontal_wrapped(|ui| {
         ui.label(tr("Show"));
         for m in NameMode::ALL {
@@ -224,8 +222,8 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
             }
         }
         ui.separator();
-        ui.label(tr("Sort"));
-        egui::ComboBox::from_id_salt("credits_sort").selected_text(v.key.label().0).show_ui(ui, |ui| {
+        let sort = ui.label(tr("Sort"));
+        let combo = egui::ComboBox::from_id_salt("credits_sort").selected_text(tr(v.key.label().0)).show_ui(ui, |ui| {
             for k in SortKey::ALL {
                 if ui.selectable_label(v.key == k, k.label().0).clicked() {
                     v.key = k;
@@ -233,6 +231,7 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
                 }
             }
         });
+        combo.response.labelled_by(sort.id);
         if ui.button(if v.ascending { "⏶" } else { "⏷" }).on_hover_text(tr("Reverse the order")).clicked() {
             v.ascending = !v.ascending;
         }
@@ -244,6 +243,24 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
             v.table = true;
         }
     });
+}
+
+fn contributors_grab_bag(ui: &mut egui::Ui, list: &[&Contributor], names: NameMode) {
+    ui.horizontal_wrapped(|ui| {
+        for (i, c) in list.iter().enumerate() {
+            if i > 0 {
+                ui.label(RichText::new("·").weak());
+            }
+            ui.hyperlink_to(c.name(names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
+        }
+    });
+}
+
+/// About › Contributors: a name toggle, a sort, and the list as a grab bag or a table.
+pub fn contributors_ui(ui: &mut egui::Ui) {
+    let id = egui::Id::unique("credits_view");
+    let mut v = ui.data_mut(|d| d.get_temp::<View>(id)).unwrap_or_default();
+    contributors_toolbar(ui, &mut v);
     let list = sorted(CONTRIBUTORS, v.names, v.key, v.ascending);
     ui.label(RichText::new(crate::i18n::trf("{} contributors · {} commits", &[&list.len(), &group(TOTAL_COMMITS)])).small().weak());
     ui.separator();
@@ -253,14 +270,7 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
         } else if v.table {
             table(ui, &list, &mut v);
         } else {
-            ui.horizontal_wrapped(|ui| {
-                for (i, c) in list.iter().enumerate() {
-                    if i > 0 {
-                        ui.label(RichText::new("·").weak());
-                    }
-                    ui.hyperlink_to(c.name(v.names), format!("https://github.com/{}", c.login)).on_hover_text(c.summary());
-                }
-            });
+            contributors_grab_bag(ui, &list, v.names);
         }
     });
     ui.data_mut(|d| d.insert_temp(id, v));
@@ -296,7 +306,7 @@ fn table(ui: &mut egui::Ui, list: &[&Contributor], v: &mut View) {
     });
 }
 
-/// About ▸ Models: AI models credited in Co-Authored-By trailers.
+/// About › Models: AI models credited in Co-Authored-By trailers.
 pub fn models_ui(ui: &mut egui::Ui) {
     if MODELS.is_empty() {
         ui.label(tr("No model credits were built into this copy."));

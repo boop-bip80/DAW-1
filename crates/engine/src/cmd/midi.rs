@@ -1,8 +1,8 @@
 //! MIDI note editing (MIDI Editor, pencil on MIDI tracks).
+use super::{CommandSpec, always, bad, clip_id, has_tracks, i64_or, range_param, tracks_required};
 
-use super::*;
-use crate::cmd;
-use serde_json::json;
+use crate::{Engine, Result, cmd};
+use serde_json::{Value, json};
 use soundcraft_midi::{Note, Sequence};
 use soundcraft_model::{Clip, ClipContent, ClipId};
 use soundcraft_time::TICKS_PER_QUARTER;
@@ -126,12 +126,23 @@ fn notes_move(e: &mut Engine, p: &Value) -> Result<Value> {
     let seq = seq_mut(e, id, "midi.notes_move")?;
     for (i, n) in seq.notes.iter_mut().enumerate() {
         if idx.contains(&i) {
-            n.start = (n.start + dt).max(0);
-            n.pitch = (i64::from(n.pitch) + ds).clamp(0, 127) as u8;
+            n.start = n.start.saturating_add(dt).max(0);
+            n.pitch = i64::from(n.pitch).saturating_add(ds).clamp(0, 127) as u8;
         }
     }
+    let moved: Vec<Note> = seq.notes.iter().enumerate().filter(|(i, _)| idx.contains(i)).map(|(_, n)| *n).collect();
     seq.sort();
-    Ok(json!({"moved": idx.len()}))
+    // Where the moved notes ended up after sorting, so the editor can keep them selected.
+    let mut taken = vec![false; seq.notes.len()];
+    let mut indices = Vec::with_capacity(moved.len());
+    for m in &moved {
+        if let Some(j) = seq.notes.iter().enumerate().position(|(j, n)| !taken[j] && n == m) {
+            taken[j] = true;
+            indices.push(j);
+        }
+    }
+    indices.sort_unstable();
+    Ok(json!({"moved": idx.len(), "indices": indices}))
 }
 
 #[cfg(test)]
@@ -155,6 +166,35 @@ mod tests {
         e.execute("midi.note_delete", &json!({"clip": clip, "indices": [0]})).unwrap();
         assert_eq!(e.execute("midi.notes", &json!({"clip": clip})).unwrap()["notes"].as_array().map(Vec::len), Some(1));
         assert!(e.execute("midi.note_edit", &json!({"clip": clip, "index": 99})).is_err());
+    }
+
+    #[test]
+    fn notes_move_huge_params_do_not_overflow() {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let r = e.execute("midi.new_clip", &json!({"track": t.0})).unwrap();
+        let clip = r["clip"].as_u64().unwrap();
+        e.execute("midi.note_add", &json!({"clip": clip, "pitch": 60, "start_ticks": 480})).unwrap();
+        e.execute("midi.notes_move", &json!({"clip": clip, "indices": [0], "ticks": i64::MAX})).unwrap();
+        let n = e.execute("midi.notes", &json!({"clip": clip})).unwrap();
+        assert_eq!(n["notes"][0]["start"], i64::MAX);
+        e.execute("midi.notes_move", &json!({"clip": clip, "indices": [0], "semitones": i64::MAX})).unwrap();
+        let n = e.execute("midi.notes", &json!({"clip": clip})).unwrap();
+        assert_eq!(n["notes"][0]["pitch"], 127);
+    }
+
+    #[test]
+    fn notes_move_reports_where_the_moved_notes_went() {
+        let mut e = Engine::default();
+        let t = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let clip = e.execute("midi.new_clip", &json!({"track": t.0})).unwrap()["clip"].as_u64().unwrap();
+        for start in [0, 480, 960] {
+            e.execute("midi.note_add", &json!({"clip": clip, "pitch": 60, "start_ticks": start})).unwrap();
+        }
+        let r = e.execute("midi.notes_move", &json!({"clip": clip, "indices": [0], "ticks": 720})).unwrap();
+        assert_eq!(r["indices"], json!([1]));
+        let notes = e.execute("midi.notes", &json!({"clip": clip})).unwrap();
+        assert_eq!(notes["notes"][1]["start"], 720);
     }
 
     #[test]
