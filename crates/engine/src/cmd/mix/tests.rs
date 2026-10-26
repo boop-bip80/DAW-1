@@ -447,9 +447,9 @@ fn a_hosted_instruments_parameters_are_set_by_numeric_id() {
     let t = e.session().tracks[0].id;
     let v = (pi.min + pi.max) / 2.0;
     e.execute("mix.instrument_param", &json!({"track": t.0, "param": n, "value": v})).unwrap();
-    assert_eq!(instrument_params(&e, t).get(&pi.id), Some(&v));
+    assert_eq!(instrument_params(&e, t).get(pi.id), Some(&v));
     e.execute("mix.insert_param", &json!({"track": t.0, "slot": "instrument", "param": n, "value": pi.max})).unwrap();
-    assert_eq!(instrument_params(&e, t).get(&pi.id), Some(&pi.max));
+    assert_eq!(instrument_params(&e, t).get(pi.id), Some(&pi.max));
     let auto = format!("plugin:instrument:{n}");
     e.execute("automation.set_point", &json!({"tracks": [t.0], "param": auto, "at": 0, "value": pi.min})).unwrap();
 }

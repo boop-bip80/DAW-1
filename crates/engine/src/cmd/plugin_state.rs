@@ -48,11 +48,7 @@ fn stored_insert(e: &Engine, track: soundcraft_model::TrackId, slot: Option<usiz
     }
 }
 
-fn insert_mut(
-    s: &mut soundcraft_model::Session,
-    track: soundcraft_model::TrackId,
-    slot: Option<usize>,
-) -> Option<&mut soundcraft_model::Insert> {
+fn insert_mut(s: &mut soundcraft_model::Session, track: soundcraft_model::TrackId, slot: Option<usize>) -> Option<&mut soundcraft_model::Insert> {
     let tr = s.track_mut(track)?;
     match slot {
         Some(i) => tr.mixer.inserts.get_mut(i).and_then(Option::as_mut),
