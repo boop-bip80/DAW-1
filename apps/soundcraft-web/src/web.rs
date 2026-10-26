@@ -26,7 +26,8 @@ pub fn start() {
         };
         // `?host=parent`: a same-origin page framing SoundCraft opens files in it and stores what
         // it saves (`host`).
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
+        let bridge =
+            if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new(query_param("host_origin").as_deref()) } else { None };
         let app_bridge = bridge.clone();
         let mut options = eframe::WebOptions::default();
         if query().contains("webgl")
@@ -42,19 +43,23 @@ pub fn start() {
                     if let Some(rs) = &cc.wgpu_render_state {
                         log::info!("soundcraft-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                     }
-                    let engine = if app_bridge.is_some() || query().contains("empty") { Engine::default() } else { soundcraft_engine::demo::demo_engine() };
+                    let engine =
+                        if app_bridge.is_some() || query().contains("empty") { Engine::default() } else { soundcraft_engine::demo::demo_engine() };
                     let player = soundcraft_playback::Player::new(Arc::new(engine.session().clone()));
                     let app = SoundApp::new(engine, Some(player), Services::default());
                     if let Some(bridge) = &app_bridge {
                         bridge.connect(cc.egui_ctx.clone());
-                        bridge.post_ready();
                     }
                     Ok(Box::new(WebShell { app, inbox: Rc::default(), samples: Rc::default(), bridge: app_bridge }))
                 }),
             )
             .await;
-        if let (Err(e), Some(bridge)) = (&result, &bridge) {
-            bridge.post_failed(&format!("{e:?}"));
+        // Ready only once the runner started; otherwise the parent hears why it didn't.
+        if let Some(bridge) = &bridge {
+            match &result {
+                Ok(()) => bridge.post_ready(),
+                Err(e) => bridge.post_failed(&format!("{e:?}")),
+            }
         }
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
             match result {
@@ -236,7 +241,7 @@ impl eframe::App for WebShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
         if let Some(bridge) = &self.bridge {
-            bridge.report_dirty(self.app.engine.is_dirty());
+            bridge.report_dirty(ui.ctx(), self.app.engine.is_dirty());
         }
     }
 }
