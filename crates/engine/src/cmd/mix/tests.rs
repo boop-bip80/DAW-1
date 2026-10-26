@@ -1,5 +1,6 @@
 use super::*;
 use soundcraft_audio_io::AudioBuffer;
+use soundcraft_dsp::Plugin;
 use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
 use soundcraft_time::Range;
 use std::sync::Arc;
