@@ -726,7 +726,8 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
     }
 }
 
-fn category_label(c: soundcraft_dsp::Category) -> &'static str {
+/// The menu label of a plugin category, translated.
+pub fn category_label(c: soundcraft_dsp::Category) -> &'static str {
     use soundcraft_dsp::Category;
     match c {
         Category::Eq => tr("EQ"),
