@@ -50,15 +50,17 @@ impl SoundApp {
         for (t, slot, data) in states {
             let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
             let slot = if instrument { json!("instrument") } else { json!(slot) };
+            let mut params = json!({"track": t.0, "slot": slot, "state": soundcraft_model::b64::encode(&data)});
             if instrument {
                 let (edited, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.editor_instrument_params).into_iter().partition(|e| e.0 == t);
                 self.editor_instrument_params = rest;
                 if !edited.is_empty() {
+                    // Same command as the state, so the gesture is one document revision. A value
+                    // that moved is one undo step inside that command.
                     let values: serde_json::Map<String, Value> = edited.into_iter().map(|(_, k, v)| (k, json!(v))).collect();
-                    self.execute_in_gesture("mix.insert_params", &json!({"track": t.0, "slot": "instrument", "params": values}));
+                    params["params"] = json!(values);
                 }
             }
-            let params = json!({"track": t.0, "slot": slot, "state": soundcraft_model::b64::encode(&data)});
             self.execute_in_gesture("mix.insert_state", &params);
         }
     }

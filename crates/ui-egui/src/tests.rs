@@ -309,7 +309,9 @@ fn an_instrument_parameter_the_session_holds_follows_its_editor_with_the_state()
         editor_frame(&mut app, &[keys], &[], &[], now);
     }
     assert_eq!(instrument_param(&app, keys, "cutoff"), Some(1000.0), "mid-gesture the session is left alone");
+    let revision = app.engine.revision;
     editor_frame(&mut app, &[], &[], &[], 44);
+    assert_eq!(app.engine.revision, revision.wrapping_add(1), "the parameter and the state share one document revision");
     let cutoff = soundcraft_dsp::plugin_info("subtractive_synth").and_then(|i| i.param("cutoff")).unwrap();
     assert_eq!(instrument_param(&app, keys, "cutoff"), Some(44f32.clamp(cutoff.min, cutoff.max)), "stored with the state");
     assert_eq!(instrument_state(&app, keys), Some(vec![44, 1]));
@@ -1532,15 +1534,21 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     assert_eq!(instrument_state(&app, keys), Some(vec![2, 1]));
     assert_eq!(app.engine.revision, revision.wrapping_add(1), "the completed gesture persists exactly one document revision");
     assert!(app.engine.is_dirty(), "captured instrument state is unsaved document work");
-    assert_eq!(app.engine.undo_history().len(), undo, "state-only instrument persistence does not create an undo step");
-    assert_eq!(app.engine.undo_history(), history, "state capture does not replace another history entry");
+    // The demo instrument already holds cutoff, so the editor value is stored with the state
+    // as one undo step. The blob itself is not journaled, and nothing earlier is replaced.
+    let mut held = history.clone();
+    held.push("Set Plugin Parameters".to_string());
+    assert_eq!(app.engine.undo_history(), held, "a held parameter is one undo step with the state");
+    assert_eq!(app.engine.undo_history().len(), undo + 1);
     assert_eq!(app.engine.journal, journal, "plugin-state blobs are not journaled");
     let settled_revision = app.engine.revision;
     app.raw_input_hook(&ctx, &mut hidden);
     let _ = ctx.run_logic(&hidden, |ctx| app.logic(ctx));
     assert_eq!(polls.get(), 4, "a fresh empty host iteration is still live");
     assert_eq!(captures.borrow().len(), 1, "the completed gesture is captured once");
-    assert_history_unchanged(&app, settled_revision, undo, &history, &journal);
+    assert_eq!(app.engine.revision, settled_revision);
+    assert_eq!(app.engine.undo_history(), held, "a later empty poll does not store the gesture again");
+    assert_eq!(app.engine.journal, journal);
 }
 
 /// The engine's revision, undo history and journal are as they were.
