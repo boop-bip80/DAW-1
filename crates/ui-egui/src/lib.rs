@@ -63,6 +63,9 @@ pub struct UiState {
     pub docking: docking::Workspace,
     #[serde(default = "docking::mix_default")]
     pub mix_docking: docking::Workspace,
+    /// [`docking::LAYOUT_VERSION`] of `docking` and `mix_docking`; 0 in settings saved before it.
+    #[serde(default)]
+    pub docking_version: u32,
     pub window: MainWindow,
     pub show_tracks_list: bool,
     pub show_clip_list: bool,
@@ -136,6 +139,7 @@ impl Default for UiState {
             recent_sessions: Vec::new(),
             docking: docking::edit_default(),
             mix_docking: docking::mix_default(),
+            docking_version: docking::LAYOUT_VERSION,
             window: MainWindow::Edit,
             show_tracks_list: true,
             show_clip_list: true,
