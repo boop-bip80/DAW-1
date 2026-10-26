@@ -1,6 +1,7 @@
 # Localization
 
-SoundCraft's interface ships in English and 简体中文 (Simplified Chinese). English is the source
+SoundCraft's interface ships in English, 简体中文 (Simplified Chinese) and, on desktop, 한국어
+(Korean; the web build falls back to English until it bundles a Hangul face). English is the source
 language: the strings in the code are the keys, and translations are plain TSV catalogs compiled
 into the binary. A release therefore has no catalog files to install or find at run time, and the
 web build carries its catalogs too. Everything that is *not* display text stays English: command
@@ -58,8 +59,8 @@ not a window action, and `ui.inspect` no longer reports it.
 ### Appearance window
 
 **Setup ▸ Appearance** (command `window.ui_customization`, listed as **UI Customization** under
-**Window**) shows the language row: **Auto (…)** with the detected language's name, English and
-简体中文. Choosing a language previews *the window itself* in it — the preview is scoped to that
+**Window**) shows the language row: **Auto (…)** with the detected language's name, English,
+简体中文 and, on desktop, 한국어. Choosing a language previews *the window itself* in it — the preview is scoped to that
 window through `i18n::language_scope`, so the rest of the app keeps drawing in the committed
 language. **Apply** stores the choice with `prefs.set`; **Cancel** or closing the window discards it.
 **Reset** restores the default interface scale, reduced motion, theme and language (`auto`) in one
@@ -253,8 +254,9 @@ License ([`assets/fonts/NotoSansSC-SoundCraftSubset.ttf`](../assets/fonts/NotoSa
 attributed in [`ATTRIBUTION.md`](../ATTRIBUTION.md)) and adds it as the lowest-priority fallback of
 every family. The subset carries weight 400 and a superset of the UI glyph set, not the whole font:
 printable ASCII and Latin-1, the GB 2312 level-1 common Han characters (3,755), the UI's
-punctuation, arrows and symbols, and every BMP character any shipped catalog uses — about 4,000
-codepoints and 1.1 MiB. A test fails when the Chinese catalog uses a character the subset lacks, so
+punctuation, arrows and symbols, and every BMP character the Chinese catalogs use — about 4,000
+codepoints and 1.1 MiB. It has no Hangul, so the web build doesn't offer Korean yet:
+`Lang::from_pref` resolves it to English there and the Appearance window doesn't list it. A test fails when the Chinese catalog uses a character the subset lacks, so
 the asset is regenerated with the catalog:
 
 ```

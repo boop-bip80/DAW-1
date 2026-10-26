@@ -101,6 +101,9 @@ pub static LANGUAGES: [LangInfo; 3] = [
     },
 ];
 
+/// Languages the web build can't draw yet: its bundled font has no glyphs for their script.
+const WEB_WITHOUT_FONT: [&str; 1] = ["ko"];
+
 /// Inflate one deflated blob, refusing to grow past [`MAX_CATALOG_BYTES`].
 fn inflate(bytes: &[u8], what: &str) -> Option<Vec<u8>> {
     let mut out = Vec::new();
@@ -211,15 +214,24 @@ impl Lang {
     /// Resolve the saved `interface.language` preference: a language code, or `auto` (and anything
     /// unknown, e.g. a code written by a newer version) to follow the desktop locale.
     pub fn from_pref(pref: &str) -> Lang {
-        if pref.trim().eq_ignore_ascii_case("auto") || pref.trim().is_empty() {
-            return system_lang();
-        }
-        Lang::from_code(pref).or_else(|| lang_from_tag(pref)).unwrap_or_else(system_lang)
+        let lang = if pref.trim().eq_ignore_ascii_case("auto") || pref.trim().is_empty() {
+            system_lang()
+        } else {
+            Lang::from_code(pref).or_else(|| lang_from_tag(pref)).unwrap_or_else(system_lang)
+        };
+        lang.drawable(cfg!(target_arch = "wasm32"))
     }
 
-    /// Every registered language.
+    /// Every registered language this build can draw (the Appearance choices).
     pub fn all() -> impl Iterator<Item = Lang> {
-        LANGUAGES.iter().map(Lang)
+        LANGUAGES.iter().map(Lang).filter(|l| l.drawable(cfg!(target_arch = "wasm32")) == *l)
+    }
+
+    /// The language to draw in: English for one whose script the build has no font for. The web
+    /// build bundles only a Han subset (see `fonts.rs`), so Korean falls back there until a Hangul
+    /// face ships; desktop draws Hangul from the system font.
+    fn drawable(self, web: bool) -> Lang {
+        if web && WEB_WITHOUT_FONT.contains(&self.0.code) { Lang::EN } else { self }
     }
 
     pub fn name(self) -> &'static str {
@@ -419,6 +431,15 @@ mod tests {
         let extra: Vec<_> = ko.difference(&zh).collect();
         assert!(missing.is_empty() && extra.is_empty(), "Korean differs from zh-hans: missing {missing:?}, extra {extra:?}");
         assert!(KO().complete_menus(), "Korean participates in the coverage gate");
+    }
+
+    /// The web build has no Hangul face, so Korean falls back to English there; desktop keeps it.
+    #[test]
+    fn korean_falls_back_to_english_on_the_web() {
+        assert_eq!(KO().drawable(true), Lang::EN);
+        assert_eq!(KO().drawable(false), KO());
+        assert_eq!(ZH().drawable(true), ZH(), "the web font carries Han");
+        assert_eq!(Lang::EN.drawable(true), Lang::EN);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Target-app parity: SoundCraft vs Avid Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-24 · **Change:** trivial (built-in plugin counts; the sampler shipped; localization follow-up: remaining UI literals translated, no dimension change; previously minor: hours to ~95 % for each audience; full number confirmed as an additive weighted sum) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
+> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-26 · **Change:** trivial (Korean shipped on desktop) · **Target:** Avid Pro Tools Ultimate 2026.4.1 (bundle 26.4.1.179, macOS)
 
 The authoritative assessment of how close SoundCraft is to Pro Tools. [`ROADMAP.md`](../ROADMAP.md)
 summarizes it, [`gaps.md`](gaps.md) itemizes every shortfall, and the per-dimension docs go deeper:
@@ -88,7 +88,7 @@ post-production, tracking) can switch. "Ready" is depth, correctness and fidelit
 | Performance | 5 % | **~35 %** | estimated (unmeasured) | 40–70 | [hardware-parity.md](hardware-parity.md) | Parallel strip rendering and PDC exist; whole files decoded into RAM, recording into RAM (#84 open), no track-count or latency benchmarks |
 | Ecosystem / plugins | 4 % | **~30 %** | estimated | in Features + Hardware | [plugin-parity.md](plugin-parity.md) | CLAP/VST3/AU hosting; no AAX (Pro Tools' only format), no ARA, no sidechain, no control-surface ecosystem, no content library |
 | Platforms | 3 % | **~65 %** | estimated | 20–40 | [ROADMAP.md](../ROADMAP.md) | Builds for macOS, Windows x64/x86/arm64, Linux, FreeBSD, Web (Pro Tools: macOS, Windows), but only macOS is exercised at runtime; Web lacks file pickers (#63, #64) |
-| Localization | 2 % | **~25 %** | measured (2 of 8 languages, coverage gated by tests) | 30–45 | [localization-parity.md](localization-parity.md) | Catalog + Simplified Chinese shipped (1,160 entries, packed/deflated at build time, every menu path / command label / literal covered; `interface.language` preference; bundled web Han font); 6 Pro Tools languages and RTL open; FR/ES PR #143 open |
+| Localization | 2 % | **~38 %** | measured (3 of 8 languages, coverage gated by tests) | 30–45 | [localization-parity.md](localization-parity.md) | Catalog, Simplified Chinese and Korean (desktop) shipped (1,168 entries each, packed/deflated at build time, every menu path / command label / literal covered; `interface.language` preference; bundled web Han font); 5 Pro Tools languages, a web Hangul face and RTL open; FR/ES PR #143 open |
 | AI features | 1 % | **~5 %** | estimated | 30–50 | [gaps.md](gaps.md) | Pro Tools has speech-to-text transcription (upgraded in 2026.4); we have only an audio-to-MIDI pitch tracker |
 | **Weighted** | 100 % | **~40 %** | | **~950–1,450** (overlaps removed) | | |
 
@@ -246,6 +246,7 @@ serializes more, because it needs hands-on testing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | trivial | Localization 25 % → 38 %: Korean shipped on desktop (3 of 8 languages); the web falls back to English until a Hangul face ships |
 | 2026-10-24 | trivial | Built-in plugin counts: 27 processors + 3 instruments on `main`, and 24 + 2 in the 3bc2d92 code snapshot; the sampler (#108) is no longer listed as missing. Percentages unchanged |
 | 2026-10-22 | trivial | Localization follow-up: the remaining UI literals that bypassed `t()` (toolbar tooltips, send and bounce strings, Memory Locations headers) are now translated, and the coverage test also scans widget-helper tooltips; percentages unchanged |
 | 2026-10-19 | minor | Localization 12 % → 25 %: string catalog, language selector and Simplified Chinese shipped (2 of Pro Tools' 8 languages); dimension hours 70–110 → 30–45 |

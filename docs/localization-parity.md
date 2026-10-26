@@ -70,7 +70,7 @@ layout, IME testing, and native-speaker review of the Chinese wording.
 | Indonesian | id | 0 (0 %) | ❌ | Latin ✅ | no | none | 3–5 | ❌ |
 | Japanese | ja | 0 (0 %) | ❌ | 🟡 Han fallback covers most glyphs; kana need the JIS face set, untested | no | none | 6–10 | ✅ |
 | German | de | 0 (0 %) | ❌ | Latin ✅ | no | none | 3–5 | ✅ |
-| Korean | ko | all (1,168 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Hangul fallback (desktop); ❌ no web Hangul face yet; IME untested | in progress | **full** on desktop (engine diagnostics stay English) | 2–4 (web font) | ✅ |
+| Korean | ko | all (1,168 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Hangul fallback (desktop); ❌ no web Hangul face yet, so the web falls back to English; IME untested | in progress | **full** on desktop (engine diagnostics stay English) | 2–4 (web font) | ✅ |
 | Vietnamese | vi | 0 (0 %) | ❌ | 🟡 Latin with stacked diacritics, untested | no | none | 3–5 | ❌ |
 | Traditional Chinese | zh-hant | 0 (0 %) | ❌ | ✅ Han fallback | no | none | 6–10 | ✅ |
 

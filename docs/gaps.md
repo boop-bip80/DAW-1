@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** trivial (G-04: Clip Looping crossfade and loop count; G-09: localization follow-up — packed catalog, interface-language preference, web Han font landed, docs refreshed; previously G-08 and G-20: built-in plugin count, the sampler shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-26 · **Change:** trivial (G-09: Korean shipped on desktop) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -23,7 +23,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 | G-06 | (Record-to-disk part: alpha blocker for the tracking row) Sources decoded whole into RAM; recording into RAM | Performance | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-07 | Nothing is compared against Pro Tools' output (no fidelity harness) | Features | this file | 20–30 |
 | G-08 | Built-in plugin catalogue thin and unverified | Features | [plugin-parity.md](plugin-parity.md) | 80–120 |
-| G-09 | 6 of Pro Tools' 8 UI languages missing (English and Simplified Chinese done); no RTL or complex-script shaping | Localization | [localization-parity.md](localization-parity.md) | 30–45 |
+| G-09 | 5 of Pro Tools' 8 UI languages missing (English, Simplified Chinese and Korean done; Korean on desktop only); no RTL or complex-script shaping | Localization | [localization-parity.md](localization-parity.md) | 30–45 |
 | G-10 | No control surfaces (HUI/MCU, EUCON) | Hardware | [hardware-parity.md](hardware-parity.md) | 40–70 |
 | G-11 | No external sync (MTC, LTC, MIDI clock, video reference) | Hardware | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-12 | Immersive delivery: no Dolby Atmos/ADM BWF, MPEG-H, binaural | Features | [file-format-parity.md](file-format-parity.md) | 50–80 |
@@ -149,9 +149,10 @@ parametric request #139. ≈ 80–120 h.
 
 See [`localization-parity.md`](localization-parity.md): the packed catalog, the
 `interface.language` preference (the old `ui.language` command is gone), locale detection, the
-language-aware Han/Hangul fallback, a bundled Han subset for the web and complete Simplified
-Chinese exist ([how it works](localization-zh-hans.md)). German, Spanish, French, Japanese, Korean and
-Traditional Chinese are missing (≈ 3–5 h each, ≈ 6–10 h for ja/zh-Hant), and egui still has no
+language-aware Han/Hangul fallback, a bundled Han subset for the web, complete Simplified
+Chinese ([how it works](localization-zh-hans.md)) and complete Korean on desktop
+([localization-ko.md](localization-ko.md); the web falls back to English until a Hangul face
+ships) exist. German, Spanish, French, Japanese and Traditional Chinese are missing (≈ 3–5 h each, ≈ 6–10 h for ja/zh-Hant), and egui still has no
 complex-script shaping or RTL. ≈ 30–45 h plus native-speaker review.
 
 ### G-10. Control surfaces
@@ -228,6 +229,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | trivial | G-09: Korean shipped on desktop; 5 languages and RTL remain; a web Hangul face is open |
 | 2026-10-25 | trivial | G-04: Clip Looping (#1030) lacks the loop crossfade option, and Number of Loops stops at 512 while length and fill make up to 1000 loops |
 | 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
 | 2026-10-22 | trivial | G-09: localization follow-up documented — packed catalogs, `interface.language` preference, web Han font subset; remaining languages/RTL scope unchanged |

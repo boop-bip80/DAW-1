@@ -43,8 +43,9 @@ clips` → `클립 {n}개`.
 
 ## Not covered yet
 
-- **Web build**: the bundled web font is a Noto Sans SC subset with no Hangul, so Korean shows
-  missing-glyph boxes on the web. Desktop draws Hangul from the system font (Apple SD Gothic Neo,
-  Malgun Gothic, Noto Sans CJK KR, NanumGothic). A Hangul subset for the web is a follow-up.
+- **Web build**: the bundled web font is a Noto Sans SC subset with no Hangul, so the web build
+  falls back to English (`Lang::from_pref`) and the Appearance window doesn't offer Korean there.
+  Desktop draws Hangul from the system font (Apple SD Gothic Neo, Malgun Gothic, Noto Sans CJK KR,
+  NanumGothic). A Hangul subset for the web is a follow-up.
 - **IME**: Hangul composition in text fields (track and clip renaming) is untested.
 - Engine diagnostics, the control protocol, MCP and the parity report stay English by design.
