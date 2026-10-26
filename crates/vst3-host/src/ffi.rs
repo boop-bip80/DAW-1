@@ -2319,8 +2319,171 @@ mod window {
     }
 }
 
+/// The Linux (X11) host window: a top-level window whose content area is the plugin view's
+/// `X11EmbedWindowID` parent. The plugin creates its own child window inside it and draws there.
+/// Closing the window unmaps or destroys it; the editor link notices in `idle` and tears the view
+/// down. Window calls run on the UI thread (the crate's threading model), and the one process-wide
+/// X11 connection is opened on first use and shared.
+#[cfg(target_os = "linux")]
+mod window {
+    use std::collections::HashMap;
+    use std::ffi::{c_char, c_void};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{Atom, AtomEnum, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass};
+    use x11rb::rust_connection::RustConnection;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    pub const PLATFORM_TYPE: Option<*const c_char> = Some(vst3::Steinberg::kPlatformTypeX11EmbedWindowID);
+
+    pub fn on_main_thread() -> bool {
+        // On Linux the main thread's kernel TID equals the process PID (gettid() == getpid());
+        // any other thread differs. VST3 drives its controllers and views on one UI thread, and
+        // this is the portable probe for "are we on it".
+        // SAFETY: both are plain libc calls with no preconditions.
+        unsafe { libc::gettid() == libc::getpid() }
+    }
+
+    /// The process-wide X11 display (one connection per app), opened on first use. It owns the
+    /// shared connection and a registry of every editor window's visible flag, so one event drain
+    /// routes a close signal to the right window even when several editors are open at once.
+    struct Display {
+        conn: RustConnection,
+        screen: usize,
+        wm_protocols: Atom,
+        wm_delete_window: Atom,
+        windows: Mutex<HashMap<u32, Arc<AtomicBool>>>,
+    }
+
+    impl Display {
+        /// Drains pending events, routing close signals (WM_DELETE_WINDOW, Unmap, Destroy) to the
+        /// matching window's visible flag. Every editor shares this connection, so any window's
+        /// `is_visible` drains for all of them.
+        fn drain(&self) {
+            let conn = &self.conn;
+            while let Ok(Some(event)) = conn.poll_for_event() {
+                match event {
+                    Event::ClientMessage(e) if e.type_ == self.wm_protocols && e.data.as_data32()[0] == self.wm_delete_window => {
+                        let _ = conn.destroy_window(e.window);
+                        let _ = conn.flush();
+                        self.mark(e.window, false);
+                    }
+                    Event::UnmapNotify(e) => self.mark(e.window, false),
+                    Event::DestroyNotify(e) => self.mark(e.window, false),
+                    _ => {}
+                }
+            }
+        }
+
+        fn mark(&self, window: u32, visible: bool) {
+            let windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(flag) = windows.get(&window) {
+                flag.store(visible, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn display() -> Result<Arc<Display>, String> {
+        static DISPLAY: OnceLock<Result<Arc<Display>, String>> = OnceLock::new();
+        DISPLAY.get_or_init(init_display).clone()
+    }
+
+    fn init_display() -> Result<Arc<Display>, String> {
+        let (conn, screen) = x11rb::connect(None).map_err(|e| format!("cannot open the X11 display: {e}"))?;
+        let wm_protocols = intern(&conn, b"WM_PROTOCOLS")?;
+        let wm_delete_window = intern(&conn, b"WM_DELETE_WINDOW")?;
+        Ok(Arc::new(Display { conn, screen, wm_protocols, wm_delete_window, windows: Mutex::new(HashMap::new()) }))
+    }
+
+    fn intern(conn: &RustConnection, name: &[u8]) -> Result<Atom, String> {
+        conn.intern_atom(false, name).map_err(|e| e.to_string())?.reply().map_err(|e| e.to_string()).map(|r| r.atom)
+    }
+
+    pub struct HostWindow {
+        display: Arc<Display>,
+        window: u32,
+        visible: Arc<AtomicBool>,
+    }
+
+    impl HostWindow {
+        pub fn new(title: &str, w: f64, h: f64) -> Result<HostWindow, String> {
+            let d = display()?;
+            let conn = &d.conn;
+            let root = conn.setup().roots[d.screen].root;
+            let window = conn.generate_id().map_err(|e| e.to_string())?;
+            let (w, h) = (w.max(1.0).round() as u16, h.max(1.0).round() as u16);
+            conn.create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                window,
+                root,
+                0,
+                0,
+                w,
+                h,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                x11rb::COPY_FROM_PARENT,
+                &CreateWindowAux::new(),
+            )
+            .map_err(|e| e.to_string())?;
+            conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME, AtomEnum::STRING, title.as_bytes()).map_err(|e| e.to_string())?;
+            // Ask the window manager for a graceful close (WM_DELETE_WINDOW) instead of a kill.
+            conn.change_property32(PropMode::REPLACE, window, d.wm_protocols, AtomEnum::ATOM, &[d.wm_delete_window]).map_err(|e| e.to_string())?;
+            conn.map_window(window).map_err(|e| e.to_string())?;
+            conn.flush().map_err(|e| e.to_string())?;
+            let visible = Arc::new(AtomicBool::new(true));
+            d.windows.lock().unwrap_or_else(PoisonError::into_inner).insert(window, visible.clone());
+            Ok(HostWindow { display: d, window, visible })
+        }
+
+        /// The raw window id (for the plug frame's resizes).
+        pub fn raw(&self) -> *mut c_void {
+            self.window as usize as *mut c_void
+        }
+
+        /// The window id the plugin view attaches to (its child window's parent).
+        pub fn parent(&self) -> *mut c_void {
+            self.raw()
+        }
+
+        pub fn raise(&self) {
+            let _ = self.display.conn.map_window(self.window);
+            let _ = self.display.conn.flush();
+        }
+
+        /// Whether the window is still shown. The flag is set on map and cleared only by a close
+        /// signal (WM_DELETE_WINDOW, Unmap or Destroy), never by a map that a window manager has
+        /// not finished yet.
+        pub fn is_visible(&self) -> bool {
+            self.display.drain();
+            self.visible.load(Ordering::Relaxed)
+        }
+
+        pub fn close(self) {
+            let _ = self.display.conn.destroy_window(self.window);
+            let _ = self.display.conn.flush();
+            self.visible.store(false, Ordering::Relaxed);
+            self.display.windows.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.window);
+        }
+    }
+
+    /// Resizes a host window (`window` from [`HostWindow::raw`]).
+    pub fn resize(window: *mut c_void, w: f64, h: f64) {
+        let Ok(d) = display() else { return };
+        let window = window as usize as u32;
+        if window == 0 {
+            return;
+        }
+        let values = ConfigureWindowAux::new().width(w.max(1.0).round() as u32).height(h.max(1.0).round() as u32);
+        let _ = d.conn.configure_window(window, &values);
+        let _ = d.conn.flush();
+    }
+}
+
 /// Other platforms: no editor windows yet (opening reports "unsupported").
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod window {
     use std::ffi::{c_char, c_void};
 

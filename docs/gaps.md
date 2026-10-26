@@ -119,8 +119,9 @@ launch #142; Linux #45, #107.
 - **Missing:** the `com.apple.security.cs.disable-library-validation` entitlement in the signed
   build, so hardened runtime refuses third-party VST3 bundles (#153, #149). AU editor views
   (`crates/au-host/src/lib.rs` header: "Not hosted yet: Audio Unit editor views"). Embedded CLAP
-  GUIs; VST3 editors on Windows/Linux.
-- **Estimate:** ≈ 15–25 h (entitlement ≈ 1 h; AU Cocoa views and VST3 HWND/X11 views most of it).
+  GUIs (macOS/Linux); VST3 editors on Windows/Linux were completed later (Windows 2026-10-12,
+  Linux 2026-10-27).
+- **Estimate:** ≈ 15–25 h (entitlement ≈ 1 h; AU Cocoa views most of it).
 
 ### G-06. Memory-bound media
 
