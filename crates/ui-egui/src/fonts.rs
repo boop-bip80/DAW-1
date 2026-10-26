@@ -364,11 +364,8 @@ mod tests {
             // The family's charmap union, not `has_glyphs`: epaint's `has_glyph` reports a false
             // negative for characters owned by the face that also draws the replacement glyph (all
             // characters of `Hack` in Monospace, all emoji of `NotoEmoji-Regular` in Proportional).
-            let missing: Vec<char> = ctx.fonts_mut(|fonts| {
-                let mut font = fonts.fonts.font(&family);
-                let characters = font.characters();
-                sample.chars().filter(|c| !characters.contains_key(c)).collect()
-            });
+            let font_id = egui::FontId::new(13.0, family.clone());
+            let missing: Vec<char> = sample.chars().filter(|c| !ctx.fonts_mut(|fonts| fonts.has_glyphs(&font_id, &c.to_string()))).collect();
             assert!(missing.is_empty(), "{family:?} cannot draw {missing:?} of the zh-Hans catalog even with the bundled web font");
         }
     }

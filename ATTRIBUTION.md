@@ -22,16 +22,26 @@ are bundled.
 ## Fonts
 
 SoundCraft uses the default fonts shipped inside the `egui` crate (Ubuntu-Light: Ubuntu Font
-Licence 1.0; Hack: MIT; Noto Emoji: OFL-1.1; emoji-icon-font: OFL-1.1/MIT) and, at runtime, the
-operating system's own UI fonts when available (never redistributed; native builds only).
+Licence 1.0; Hack: MIT; Noto Emoji: OFL-1.1; emoji-icon-font: MIT) and, at runtime, the operating
+system's own UI fonts when available (never redistributed; native builds only).
 
 The web build has no operating-system fonts, and egui's bundled fonts carry no Han glyphs. It alone
 bundles `assets/fonts/NotoSansSC-SoundCraftSubset.ttf`: a subset of the Noto Sans SC variable font,
-pinned at weight 400 and reduced with fontTools to the UI glyph set (the zh-Hans catalog, the
+pinned at weight 400 and reduced with fontTools to the UI glyph set (the zh-hans catalog, the
 GB 2312 level-1 common characters, ASCII, Latin-1 letters and the UI's punctuation, arrows and
 triangles; about 1.1 MiB). It is SIL Open Font License 1.1 — see `assets/fonts/OFL.txt`. The full
 font is never bundled, and native builds do not embed the subset (they keep using the system's
 fonts, which also cover user-typed text outside the subset).
+
+## Bundled egui font icons
+
+These dependency fonts are embedded by the pinned egui font definitions; no font file is added
+here. The subset uses default_fonts; the parent face uses monochrome_emoji_fonts.
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `epaint_default_fonts/fonts/egui-icons.ttf` | John Slegers (emoji-icon-font) | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/egui-icons.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in NOTICE) |
+| `epaint_default_fonts/fonts/emoji-icon-font.ttf` | John Slegers | https://github.com/storytold/egui/blob/6d518fc799681571963842f95b55a6b68431b15a/crates/epaint_default_fonts/fonts/emoji-icon-font-mit-license.txt; original https://github.com/jslegers/emoji-icon-font | MIT (complete copyright and permission text in NOTICE) |
 
 ## Files
 

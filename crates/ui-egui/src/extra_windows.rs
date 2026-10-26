@@ -93,7 +93,7 @@ fn renderer(app: &mut SoundApp, ctx: &egui::Context) {
     }
     let t = Tokens::current();
     let fmt = app.engine.session().main_format();
-    let peaks: Vec<f32> = app.player.as_ref().map(|p| p.meters().main.peaks).unwrap_or_default();
+    let peaks: Vec<f32> = if app.player.is_some() { app.meter_snapshot.main.peaks.clone() } else { Vec::new() };
     let objects: Vec<(String, f32, f32, f32)> = app
         .engine
         .session()
@@ -162,6 +162,7 @@ fn canonical_language(preference: &str) -> String {
     crate::i18n::Lang::from_code(preference).map_or_else(|| preference.to_owned(), |lang| lang.code().to_owned())
 }
 
+/// Appearance window: interface scale, reduce-motion, theme, auto-update configuration and Reset.
 fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.extra.show_ui_customization;
     if !open {
@@ -177,57 +178,53 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
     let mut cancel = false;
     let mut reset = false;
     egui::Window::new(egui::RichText::new(crate::i18n::t("Appearance")).font(bold(13.0)))
-        .id(egui::Id::new("Appearance"))
+        .id(egui::Id::unique("Appearance"))
         .open(&mut open)
         .default_size(vec2(380.0, 250.0))
         .resizable(false)
         .show(ctx, |ui| {
             // The window previews a pending language; the rest of the app keeps the committed one.
             let _preview = crate::i18n::language_scope(preview);
-            egui::Grid::new("ui_custom").num_columns(2).spacing(vec2(12.0, 8.0)).show(ui, |ui| {
-                ui.label(crate::i18n::t("Interface scale"));
-                ui.add(egui::Slider::new(&mut app.extra.ui_scale, 0.75..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
-                ui.end_row();
-                ui.label(crate::i18n::t("Reduce motion"));
-                crate::widgets::checkbox(ui, &mut app.extra.reduce_motion, "");
-                ui.end_row();
-                ui.label(crate::i18n::t("Theme"));
-                let mut chosen = None;
-                egui::ComboBox::from_id_salt("theme_mode").selected_text(crate::i18n::t(app.ui.theme.label())).show_ui(ui, |ui| {
-                    for mode in crate::theme::ThemeMode::ALL {
-                        if ui.selectable_label(app.ui.theme == mode, crate::i18n::t(mode.label())).clicked() {
-                            chosen = Some(mode);
-                        }
+            // Each control carries its own visible label, which is also its accessible name: a
+            // label in a neighbouring grid cell is only painted text, and a screen reader (with
+            // the kittest accessibility check) would see an unnamed slider, checkbox or combo box.
+            ui.add(
+                egui::Slider::new(&mut app.extra.ui_scale, 0.75..=1.5)
+                    .step_by(0.05)
+                    .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+                    .text(crate::i18n::t("Interface scale")),
+            );
+            crate::widgets::checkbox(ui, &mut app.extra.reduce_motion, crate::i18n::t("Reduce motion"));
+            let mut chosen = None;
+            egui::ComboBox::from_label(crate::i18n::t("Theme")).selected_text(crate::i18n::t(app.ui.theme.label())).show_ui(ui, |ui| {
+                for mode in crate::theme::ThemeMode::ALL {
+                    if ui.selectable_label(app.ui.theme == mode, crate::i18n::t(mode.label())).clicked() {
+                        chosen = Some(mode);
                     }
-                });
-                if let Some(mode) = chosen {
-                    let _ = app.run("ui.theme", json!({"mode": mode.id()}));
                 }
-                ui.end_row();
-                ui.label(crate::i18n::t("Auto-update configuration"));
-                crate::widgets::checkbox(ui, &mut app.extra.auto_update_config, "");
-                ui.end_row();
-                ui.label(crate::i18n::t("Language"));
-                let automatic = draft.eq_ignore_ascii_case("auto");
-                let mut chosen: Option<String> = None;
-                let auto_label = crate::i18n::fmt(crate::i18n::t("Auto ({name})"), &[("name", crate::i18n::system_lang().name())]);
-                let selected = if automatic { auto_label.clone() } else { crate::i18n::Lang::from_pref(&draft).name().to_string() };
-                egui::ComboBox::from_id_salt("interface_language").selected_text(selected).show_ui(ui, |ui| {
-                    if ui.selectable_label(automatic, &auto_label).clicked() {
-                        chosen = Some("auto".to_string());
-                    }
-                    for lang in crate::i18n::Lang::all() {
-                        if ui.selectable_label(draft.eq_ignore_ascii_case(lang.code()), lang.name()).clicked() {
-                            chosen = Some(lang.code().to_string());
-                        }
-                    }
-                });
-                if let Some(code) = chosen {
-                    // Choosing the committed value again means there is nothing left to apply.
-                    app.extra.language_draft = (code != committed).then_some(code);
-                }
-                ui.end_row();
             });
+            if let Some(mode) = chosen {
+                let _ = app.run("ui.theme", json!({"mode": mode.id()}));
+            }
+            crate::widgets::checkbox(ui, &mut app.extra.auto_update_config, crate::i18n::t("Auto-update configuration"));
+            let automatic = draft.eq_ignore_ascii_case("auto");
+            let mut chosen: Option<String> = None;
+            let auto_label = crate::i18n::fmt(crate::i18n::t("Auto ({name})"), &[("name", crate::i18n::system_lang().name())]);
+            let selected = if automatic { auto_label.clone() } else { crate::i18n::Lang::from_pref(&draft).name().to_string() };
+            egui::ComboBox::from_label(crate::i18n::t("Language")).selected_text(selected).show_ui(ui, |ui| {
+                if ui.selectable_label(automatic, &auto_label).clicked() {
+                    chosen = Some("auto".to_string());
+                }
+                for lang in crate::i18n::Lang::all() {
+                    if ui.selectable_label(draft.eq_ignore_ascii_case(lang.code()), lang.name()).clicked() {
+                        chosen = Some(lang.code().to_string());
+                    }
+                }
+            });
+            if let Some(code) = chosen {
+                // Choosing the committed value again means there is nothing left to apply.
+                app.extra.language_draft = (code != committed).then_some(code);
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 // Nothing to apply until a different language is chosen; both buttons stay greyed.

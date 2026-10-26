@@ -96,6 +96,7 @@
 	Channel Name	通道名称
 	Channel Strip	通道条
 	Chord Symbols	和弦符号
+	Check for Updates…	检查更新…
 	Clear	清除
 	Clear All Clip Indicators	清除全部片段指示
 	Clear Special	特殊清除
@@ -651,6 +652,7 @@
 	Operation	操作
 	Output	输出
 	Output device	输出设备
+	Output for {name}	输出：{name}
 	Outputs	输出
 	Pan	声像
 	Parent folder	父文件夹
@@ -661,16 +663,17 @@
 	Play	播放
 	Playback stopped: {cause}. {then}	播放已停止：{cause}。{then}
 	Playlists	播放列表
-	Plug it back in, then use Reconnect audio device in Setup ▸ Playback Engine.	请重新连接，然后使用“设置 ▸ 播放引擎”中的“重新连接音频设备”。
+	Plug it back in, then use Reconnect audio device in Setup › Playback Engine.	请重新连接，然后使用“设置 › 播放引擎”中的“重新连接音频设备”。
 	Post-roll	后卷
 	Pre-roll	预卷
+	Preset name	预置名称
 	Presets ▾	预设 ▾
 	Processes selected clips offline	离线处理所选片段
 	Quantize to the grid	量化到网格
 	Quit	退出
 	Recall	调取
 	Reconnect audio device	重新连接音频设备
-	Reconnect it, then use Reconnect audio device in Setup ▸ Playback Engine.	请重新连接，然后使用“设置 ▸ 播放引擎”中的“重新连接音频设备”。
+	Reconnect it, then use Reconnect audio device in Setup › Playback Engine.	请重新连接，然后使用“设置 › 播放引擎”中的“重新连接音频设备”。
 	Record (Cmd+Space)	录音（Cmd+Space）
 	Recording stopped: {cause}. The take is kept up to there. {then}	录音已停止：{cause}。此前的录音已保留。{then}
 	Recover	恢复
@@ -738,12 +741,13 @@
 	Tracks	轨道
 	Transpose	移调
 	Use	使用
-	Use Reconnect audio device in Setup ▸ Playback Engine, or restart SoundCraft.	请使用“设置 ▸ 播放引擎”中的“重新连接音频设备”，或重新启动 SoundCraft。
-	Use Reconnect audio device in Setup ▸ Playback Engine.	请使用“设置 ▸ 播放引擎”中的“重新连接音频设备”。
+	Use Reconnect audio device in Setup › Playback Engine, or restart SoundCraft.	请使用“设置 › 播放引擎”中的“重新连接音频设备”，或重新启动 SoundCraft。
+	Use Reconnect audio device in Setup › Playback Engine.	请使用“设置 › 播放引擎”中的“重新连接音频设备”。
 	User presets need the desktop app.	用户预设需要桌面版。
 	Uses the edit selection.	使用编辑选区。
 	VST3	VST3
 	Velocity +	力度 +
+	Voice for {name}	声部：{name}
 	Voice: dyn plays the track, off makes it inactive	声部：dyn 播放该轨道，off 使其变为非活动
 	Workspace	工作区
 	Write automation for the selected tracks:	为所选轨道写入自动化：
@@ -1020,6 +1024,7 @@ automation	trim	微调
 	Assign to VCA	分配到 VCA
 	AudioSuite Process	AudioSuite 处理
 	Automation Mode	自动化模式
+	Automation mode for {name}	自动化模式：{name}
 	Bounce Stems...	导出分轨...
 	Bypass Insert	旁通插入
 	Clear All Mutes	取消全部静音
@@ -1166,6 +1171,7 @@ automation	trim	微调
 	Finish or cancel the bounce first	请先完成或取消当前导出
 	Go to End (End)	到结尾 (End)
 	Input monitoring	输入监听
+	Input for {name}	输入：{name}
 	Legato	连奏
 	Location	位置
 	Loop Playback (Cmd+Shift+L)	循环播放 (Cmd+Shift+L)
@@ -1180,6 +1186,8 @@ automation	trim	微调
 	Send {which} · Choose destination	发送 {which} · 选择目标
 	Send {which} · {name}	发送 {which} · {name}
 	Send {which} to {name}: {db} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options	发送 {which} 至 {name}：{db} dB\n点击打开发送推子 · 垂直拖动调整 · Shift 拖动微调 · Alt 点击归零 · 右键打开选项
+	Send {which} for {name}	发送 {which}（{name}）
+	Send {which} level for {name}	发送 {which} 电平（{name}）
 	Type	类型
 	Unfreeze	解冻
 	Vel +10	力度 +10
