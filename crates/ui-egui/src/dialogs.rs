@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
     NewSession { name: String, sample_rate: u32, demo: bool },
-    Bounce { path: String, format: String, bit_depth: String, normalize: bool, dither: bool },
+    Bounce { path: String, format: String, bit_depth: String, sample_rate: u32, normalize: bool, dither: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
@@ -194,6 +194,7 @@ impl Dialogs {
                     path: format!("{dir}/{name} Bounce.wav"),
                     format: "wav".into(),
                     bit_depth: "24".into(),
+                    sample_rate: e.session().sample_rate.hz(),
                     normalize: false,
                     dither: false,
                 }
@@ -506,7 +507,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ));
                     }
                 }
-                Dialog::Bounce { path, format, bit_depth, normalize, dither } => {
+                Dialog::Bounce { path, format, bit_depth, sample_rate, normalize, dither } => {
                     ui.horizontal(|ui| {
                         ui.label("File");
                         crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), "File");
@@ -535,6 +536,18 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             }
                         });
                     });
+                    ui.horizontal(|ui| {
+                        let label = ui.label("Sample Rate");
+                        let presets =
+                            egui::ComboBox::from_id_salt("bounce_sample_rate").selected_text(format!("{sample_rate} Hz")).show_ui(ui, |ui| {
+                                for rate in soundcraft_time::SampleRate::COMMON {
+                                    ui.selectable_value(sample_rate, rate, format!("{rate} Hz"));
+                                }
+                            });
+                        presets.response.labelled_by(label.id);
+                        let custom = ui.label("Custom");
+                        ui.add(egui::DragValue::new(sample_rate).range(8_000..=768_000).suffix(" Hz")).labelled_by(custom.id);
+                    });
                     crate::widgets::checkbox(ui, normalize, "Normalize to -0.1 dBFS");
                     // 32-bit float keeps every sample as it is: there is nothing to dither.
                     ui.add_enabled_ui(bit_depth.as_str() != "32f", |ui| {
@@ -548,10 +561,11 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     );
                     if buttons(ui, "Bounce", enter) {
                         let p = std::path::Path::new(path.as_str()).with_extension(if format == "aiff" { "aif" } else { format.as_str() });
-                        crate::bounce::start(
-                            app,
-                            &json!({"path": p.to_string_lossy(), "format": format, "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"}),
-                        );
+                        let mut params = json!({"path": p.to_string_lossy(), "format": format, "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"});
+                        if *sample_rate != app.engine.session().sample_rate.hz() {
+                            params["sample_rate"] = json!(sample_rate);
+                        }
+                        crate::bounce::start(app, &params);
                         keep = false;
                     }
                 }
