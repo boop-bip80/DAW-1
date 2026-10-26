@@ -20,10 +20,11 @@ pub enum Language {
     En,
     Fr,
     Es,
+    Ru,
 }
 
 impl Language {
-    pub const ALL: [Self; 3] = [Self::En, Self::Fr, Self::Es];
+    pub const ALL: [Self; 4] = [Self::En, Self::Fr, Self::Es, Self::Ru];
 
     /// The language's own name, shown untranslated so anyone can find theirs.
     pub const fn native_name(self) -> &'static str {
@@ -31,6 +32,7 @@ impl Language {
             Self::En => "English",
             Self::Fr => "Français",
             Self::Es => "Español",
+            Self::Ru => "Русский",
         }
     }
 
@@ -40,6 +42,7 @@ impl Language {
             Self::En => "en",
             Self::Fr => "fr",
             Self::Es => "es",
+            Self::Ru => "ru",
         }
     }
 
@@ -66,10 +69,12 @@ pub fn current() -> Language {
 fn table(lang: Language) -> Option<&'static HashMap<&'static str, &'static str>> {
     static FR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     static ES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    let (cell, pick): (_, fn(&(&'static str, &'static str, &'static str)) -> &'static str) = match lang {
+    static RU: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let (cell, pick): (_, fn(&(&'static str, &'static str, &'static str, &'static str)) -> &'static str) = match lang {
         Language::En => return None,
         Language::Fr => (&FR, |r| r.1),
         Language::Es => (&ES, |r| r.2),
+        Language::Ru => (&RU, |r| r.3),
     };
     Some(cell.get_or_init(|| strings::STRINGS.iter().map(|r| (r.0, pick(r))).collect()))
 }

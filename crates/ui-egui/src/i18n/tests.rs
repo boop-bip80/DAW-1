@@ -236,23 +236,24 @@ fn all_keys() -> BTreeSet<String> {
 }
 
 #[test]
-fn every_visible_string_has_a_french_and_a_spanish_translation() {
+fn every_visible_string_has_a_translation_in_every_language() {
     let mut rows = BTreeSet::new();
     for r in strings::STRINGS {
         assert!(rows.insert(r.0), "duplicate row `{}`", r.0);
     }
     let missing: Vec<String> = all_keys().into_iter().filter(|k| !rows.contains(k.as_str())).collect();
     assert!(missing.is_empty(), "{} strings have no translation row:\n{}", missing.len(), missing.join("\n"));
-    let empty: Vec<&str> = strings::STRINGS.iter().filter(|r| r.1.is_empty() || r.2.is_empty()).map(|r| r.0).collect();
-    assert!(empty.is_empty(), "rows missing French or Spanish:\n{}", empty.join("\n"));
+    let empty: Vec<&str> = strings::STRINGS.iter().filter(|r| r.1.is_empty() || r.2.is_empty() || r.3.is_empty()).map(|r| r.0).collect();
+    assert!(empty.is_empty(), "rows missing French, Spanish or Russian:\n{}", empty.join("\n"));
 }
 
 #[test]
 fn translations_keep_their_placeholders() {
-    for (en, fr, es) in strings::STRINGS {
+    for (en, fr, es, ru) in strings::STRINGS {
         let n = en.matches("{}").count();
         assert_eq!(fr.matches("{}").count(), n, "fr: {en} → {fr}");
         assert_eq!(es.matches("{}").count(), n, "es: {en} → {es}");
+        assert_eq!(ru.matches("{}").count(), n, "ru: {en} → {ru}");
     }
 }
 
@@ -264,6 +265,9 @@ fn tr_follows_the_language_and_falls_back_to_english() {
     set(Language::Es);
     assert_eq!(tr("File"), "Archivo");
     assert_eq!(trf("{} tracks", &[&3]), "3 pistas");
+    set(Language::Ru);
+    assert_eq!(tr("File"), "Файл");
+    assert_eq!(trf("{} tracks", &[&3]), "3 дорожек");
     set(Language::En);
     assert_eq!(tr("File"), "File");
     assert_eq!(fill("{} of {} {{x}}", &[&1, &"two"]), "1 of two {x}");
@@ -281,6 +285,10 @@ fn language_command_sets_reports_and_persists() {
     assert_eq!(app.ui.language, Language::Es);
     let back: UiState = serde_json::from_value(serde_json::to_value(&app.ui).unwrap_or_default()).unwrap_or_default();
     assert_eq!(back.language, Language::Es);
+    // Russian matches by its native name and persists like any other language.
+    assert_eq!(app.run("ui.language", json!({"lang": "Русский"})), Ok(json!({"lang": "ru"})));
+    assert_eq!(current(), Language::Ru);
+    assert_eq!(app.ui.language, Language::Ru);
     // Prefs saved before the setting existed load as English.
     let old: UiState = serde_json::from_value(json!({"show_tracks_list": true})).unwrap_or_default();
     assert_eq!(old.language, Language::En);
@@ -298,5 +306,13 @@ fn the_menu_bar_draws_in_french_and_still_dispatches_english_paths() {
     }
     assert_eq!(crate::menus::command_for_path("Window > Mix", &crate::menus::ui_aliases()).as_deref(), Some("window.mix"));
     assert_eq!(tr("Window"), "Fenêtre");
+    // The same in Russian: Cyrillic text renders through the system fonts and dispatch stays English.
+    let _ = app.run("ui.language", json!({"lang": "ru"}));
+    for _ in 0..2 {
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui));
+        out.textures_delta.clear();
+    }
+    assert_eq!(crate::menus::command_for_path("Window > Mix", &crate::menus::ui_aliases()).as_deref(), Some("window.mix"));
+    assert_eq!(tr("Window"), "Окно");
     set(Language::En);
 }

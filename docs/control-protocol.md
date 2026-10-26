@@ -95,7 +95,7 @@ System to Dark, or on Linux to the desktop's portal setting when one is availabl
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as
 Scroll Into View in the track name menu. A window not on screen catches up when it is next shown.
 
-The interface language defaults to English. `ui.language {"lang":"fr"}` (or `"es"`, `"en"`) switches
+The interface language defaults to English. `ui.language {"lang":"fr"}` (or `"es"`, `"ru"`, `"en"`) switches
 it, and `ui.language {}` reports the current one; the choice is saved with the UI prefs and is also
 offered under Setup › Appearance. Only what is drawn is translated: command ids, menu paths
 (`ui.menu.invoke`), parameters, results and error messages stay in English in every language.

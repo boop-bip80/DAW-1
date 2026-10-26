@@ -1447,7 +1447,15 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let row = |y: f32, h: f32| (r.height() >= y + h + 1.0).then_some(Rect::from_min_size(r.min + vec2(7.0, y), vec2(r.width() - 14.0, h)));
     if let Some(input) = row(4.0, 15.0) {
         let input_name = crate::mix_window::input_name(app, track);
-        let resp = header_selector(&ui, input, ui.scope_id().with(("in", id.0)), &input_name, t.text, true, &crate::i18n::trf("Input for {}", &[&track.name]));
+        let resp = header_selector(
+            &ui,
+            input,
+            ui.scope_id().with(("in", id.0)),
+            &input_name,
+            t.text,
+            true,
+            &crate::i18n::trf("Input for {}", &[&track.name]),
+        );
         crate::mix_window::route_popup(app, &resp.on_hover_text(tr("Input")), id, true);
     }
     if let Some(out) = row(21.0, 17.0) {
