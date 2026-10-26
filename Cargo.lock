@@ -4068,8 +4068,10 @@ dependencies = [
  "craft-docpath",
  "log",
  "proptest",
+ "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "soundcraft-au-host",
  "soundcraft-audio-io",
  "soundcraft-clap-host",
@@ -4740,6 +4742,12 @@ name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
+
+[[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "typenum"

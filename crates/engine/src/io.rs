@@ -163,6 +163,7 @@ pub struct DecodedImport {
     pub(crate) rate: u32,
     info: soundcraft_audio_io::AudioInfo,
     audio: Arc<SourceAudio>,
+    original: Option<(soundcraft_model::OriginalProvenance, Arc<soundcraft_model::OriginalAssetLease>)>,
 }
 
 impl DecodedImport {
@@ -178,7 +179,15 @@ pub fn decode_import(path: &str, rate: u32) -> Result<DecodedImport> {
     let bytes = read_file(path)?;
     let name = Path::new(path).file_name().and_then(OsStr::to_str).unwrap_or("Audio");
     let (info, audio) = decode_import_bytes(name, &bytes, rate)?;
-    Ok(DecodedImport { key: file_key(Path::new(path)), rate, info, audio })
+    let original = if cfg!(target_arch = "wasm32") {
+        None
+    } else {
+        let mut store = crate::original_audio::OriginalStore::new();
+        let original = store.capture(&bytes)?;
+        store.close();
+        Some(original)
+    };
+    Ok(DecodedImport { key: file_key(Path::new(path)), rate, info, audio, original })
 }
 
 fn decode_import_bytes(name: &str, bytes: &[u8], rate: u32) -> Result<(soundcraft_audio_io::AudioInfo, Arc<SourceAudio>)> {
@@ -194,12 +203,17 @@ fn decode_import_bytes(name: &str, bytes: &[u8], rate: u32) -> Result<(soundcraf
 /// Decode and place an audio file. With no target track, a new track of matching width is made.
 pub fn import_audio_bytes(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
     let (info, audio) = decode_import_bytes(name, bytes, e.session().sample_rate.hz())?;
-    place_import(e, name, &info, audio, path, target, at)
+    let original = if cfg!(target_arch = "wasm32") {
+        None
+    } else {
+        Some(e.original_store.get_or_insert_with(crate::original_audio::OriginalStore::new).capture(bytes)?)
+    };
+    place_import(e, name, &info, audio, path, target, at, original)
 }
 
 /// Place audio from [`decode_import`] (made for this session's rate) as `import_audio_bytes` does.
 pub(crate) fn place_decoded(e: &mut Engine, name: &str, d: DecodedImport, path: Option<&str>, target: Option<TrackId>, at: Samples) -> Result<Value> {
-    place_import(e, name, &d.info, d.audio, path, target, at)
+    place_import(e, name, &d.info, d.audio, path, target, at, d.original)
 }
 
 fn place_import(
@@ -210,12 +224,26 @@ fn place_import(
     path: Option<&str>,
     target: Option<TrackId>,
     at: Samples,
+    original: Option<(soundcraft_model::OriginalProvenance, Arc<soundcraft_model::OriginalAssetLease>)>,
 ) -> Result<Value> {
     let channels = audio.buffer.num_channels();
     let file_rate = info.sample_rate;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some((provenance, _)) = &original {
+        let total = e.session().originals.values().try_fold(provenance.bytes, |sum, p| sum.checked_add(p.bytes));
+        if e.session().originals.len() >= crate::original_audio::MAX_ORIGINAL_ASSETS
+            || total.is_none_or(|total| total > crate::original_audio::MAX_ORIGINAL_BYTES)
+        {
+            return Err(EngineError::Io("original staging limit reached".into()));
+        }
+    }
     let s = e.session_mut();
     let session_rate = s.sample_rate.hz();
     let src = add_source_audio(s, name, audio, path, info.format);
+    if let Some((provenance, lease)) = original {
+        s.originals.insert(src, provenance);
+        s.pool.insert_original(src, lease);
+    }
     if let (Some(bwf), Some(sx)) = (info.bwf.as_ref(), s.sources.last_mut()) {
         sx.time_reference = stamp_at_rate(bwf.time_reference, file_rate, session_rate);
     }
@@ -1164,6 +1192,10 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let dir = p.parent().map(Path::to_path_buf).unwrap_or_default();
     let audio_dir = dir.join("Audio Files");
     let mut s = session.clone();
+    if !s.originals.is_empty() {
+        make_dir(&dir)?;
+    }
+    crate::original_audio::persist_originals(&mut s, &dir)?;
     let from = s.folder.clone();
     let same_dir = from.as_deref().is_some_and(|f| same_path(f, &dir));
     let mut written = 0;
@@ -1396,6 +1428,7 @@ pub(crate) fn open_session_linked(e: &mut Engine, path: &str, links: &Path) -> R
             Err(err) => missing.push(err),
         }
     }
+    missing.extend(crate::original_audio::load_originals(&mut s, &dir)?);
     missing.extend(relink_videos(&mut s, links));
     s.folder = Some(dir);
     e.replace_session(s);
@@ -1484,6 +1517,9 @@ pub fn session_bundle(session: &Session) -> Result<(Vec<u8>, Session)> {
 
 /// [`session_bundle`], refused when it would hold more than `limits` allows.
 fn session_bundle_within(session: &Session, limits: BundleLimits) -> Result<(Vec<u8>, Session)> {
+    if !session.originals.is_empty() {
+        return Err(EngineError::Unsupported("encoded originals require a native session folder; bundle retention is not yet supported".into()));
+    }
     use std::io::Write as _;
     let zerr = |err: zip::result::ZipError| EngineError::Io(format!("bundle: {err}"));
     let ioerr = |err: std::io::Error| EngineError::Io(format!("bundle: {err}"));
@@ -1562,6 +1598,11 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
         )
     };
     let mut s = Session::from_json(&text).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
+    if !s.originals.is_empty() {
+        return Err(EngineError::Unsupported(
+            "encoded originals require a native session folder; opening them from bytes is not yet supported".into(),
+        ));
+    }
     let mut missing = Vec::new();
     // Several sources may share one file (native sessions do): decode each path once and share the result.
     let mut decoded: std::collections::HashMap<String, Option<Arc<SourceAudio>>> = std::collections::HashMap::new();
@@ -1770,6 +1811,70 @@ pub fn live_span(start: Samples, pass: Option<Samples>, punch: Option<Range>, le
     let origin = start.saturating_sub(pass.filter(|p| *p > 0).map_or(0, |p| len / p * p));
     let span = Range::new(start, origin.saturating_add(len));
     Some((origin, span.intersect(&punch.unwrap_or(span))?))
+}
+
+// The encoded-originals module is the other IO client of this checked gateway. It checks
+// automation authority for permanent paths; its private scratch directory is app-owned.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod original_files {
+    pub(crate) use std::fs::{File, Metadata};
+    use std::path::Path;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Kind {
+        File,
+        Directory,
+        Symlink,
+        Other,
+    }
+    pub(crate) fn kind(metadata: &Metadata) -> Kind {
+        let ty = metadata.file_type();
+        if ty.is_symlink() {
+            Kind::Symlink
+        } else if ty.is_file() {
+            Kind::File
+        } else if ty.is_dir() {
+            Kind::Directory
+        } else {
+            Kind::Other
+        }
+    }
+    pub(crate) fn inspect(path: &Path) -> std::io::Result<Metadata> {
+        std::fs::symlink_metadata(path)
+    }
+    pub(crate) fn open(path: &Path) -> std::io::Result<File> {
+        File::open(path)
+    }
+    pub(crate) fn exclusive(path: &Path) -> std::io::Result<File> {
+        std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(path)
+    }
+    pub(crate) fn exclusive_private(path: &Path) -> std::io::Result<File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+    pub(crate) fn make_private_dir(path: &Path) -> std::io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)
+    }
+    pub(crate) fn make_dir(path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir(path)
+    }
+    pub(crate) fn remove_file(path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+    pub(crate) fn remove_dir(path: &Path) -> std::io::Result<()> {
+        std::fs::remove_dir(path)
+    }
 }
 
 #[cfg(test)]
