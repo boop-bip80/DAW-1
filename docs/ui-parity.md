@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns; fine adjustment on the Strip Silence sliders and plugin parameter sliders) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns; fine adjustment on the Strip Silence sliders and plugin parameter sliders; Alt-click returns a plugin parameter to its default) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -50,7 +50,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
 | Preferences | 🟡 | Many settings stored, fewer honoured |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
-| Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
+| Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6); Alt/Option-click returns a parameter to its default |
 | A plugin opens when it's inserted | ✅ | #486; a hosted plugin's own editor, else its plugin window |
 | Command palette (Search) | ✅ | Over every command |
 
@@ -70,6 +70,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-25 | minor | Edit and Mix windows: Tracks and Groups and Clips in full-height dock columns. Readiness estimate unchanged |
+| 2026-10-24 | minor | Plugin parameters: Alt/Option-click returns one to its default. Readiness estimate unchanged |
 | 2026-10-24 | minor | Plugin parameter sliders: Ctrl/Cmd-drag moves them a tenth as far. Readiness estimate unchanged |
 | 2026-10-24 | minor | Strip Silence sliders: Ctrl/Cmd-drag moves them a tenth as far. Readiness estimate unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
