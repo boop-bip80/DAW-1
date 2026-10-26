@@ -115,6 +115,7 @@ pub enum BitDepth {
     Int16,
     Int24,
     Int32,
+    /// Preserve finite samples, including values above full scale; map NaN to 0 and infinities to ±1.
     Float32,
 }
 
@@ -136,14 +137,17 @@ impl Default for EncodeOptions {
     }
 }
 
-/// Size of an ID3v2 tag at the start of `b`, if there is one.
+/// Size of an ID3v2 tag at the start of `b`, if there is one. The 10-byte footer flag (`0x10`)
+/// exists only in ID3v2.4; in v2.2/v2.3 that bit is reserved and must not extend the skip.
 fn id3v2_len(b: &[u8]) -> Option<usize> {
     if b.get(..3)? != b"ID3" {
         return None;
     }
+    let version = *b.get(3)?;
     let flags = *b.get(5)?;
     let size = b.get(6..10)?.iter().fold(0usize, |acc, &x| (acc << 7) | usize::from(x & 0x7F));
-    Some(10 + size + if flags & 0x10 != 0 { 10 } else { 0 })
+    let footer = version == 4 && flags & 0x10 != 0;
+    Some(10 + size + if footer { 10 } else { 0 })
 }
 
 fn detect_by_magic(b: &[u8], depth: u32) -> Option<FileFormat> {
@@ -294,6 +298,13 @@ pub fn encode_with_channel_mask(buf: &AudioBuffer, opts: &EncodeOptions, mask: u
     }
 }
 
+/// The error a stream encoder returns for every call after one of its writes has failed: the
+/// sink may already hold a prefix of the failed block, so the encoder's counters can no longer
+/// describe the bytes on the sink, and later writes or `finish` must not claim success.
+pub(crate) fn failed_write_error() -> AudioError {
+    AudioError::Encode("the stream encoder already failed on an earlier write; its output is incomplete".into())
+}
+
 /// Writes WAV/BWF (RF64 above 4 GiB), AIFF / AIFF-C `fl32` or FLAC block by block, producing
 /// the same bytes [`encode_with_channel_mask`] would for the whole buffer.
 pub struct FileEncoder<W: Write + Seek>(Writer<W>);
@@ -310,7 +321,14 @@ impl<W: Write + Seek> FileEncoder<W> {
     pub fn new(out: W, opts: &EncodeOptions, channels: usize, sample_rate: u32, mask: Option<u32>) -> Result<Self> {
         let (depth, dither) = (opts.bit_depth, opts.dither);
         Ok(FileEncoder(match opts.format {
-            FileFormat::Wav => Writer::Wav(wav::Writer::new(out, channels, sample_rate, depth, dither, opts.bwf.as_ref(), mask, false)?),
+            FileFormat::Wav => Writer::Wav(wav::Writer::new(
+                out,
+                channels,
+                sample_rate,
+                depth,
+                dither,
+                wav::HeaderExtras { bwf: opts.bwf.as_ref(), mask, force_rf64: false },
+            )?),
             FileFormat::Aiff => Writer::Aiff(aiff::Writer::new(out, channels, sample_rate, depth, dither)?),
             FileFormat::Flac => Writer::Flac(flac::Writer::new(out, channels, sample_rate, depth, dither)?),
             other => return Err(AudioError::Unsupported(format!("encoding {other:?} is not supported"))),
@@ -329,7 +347,9 @@ impl<W: Write + Seek> FileEncoder<W> {
     }
 
     /// Appends the first `frames` frames of `block`, one `Vec` per channel (missing samples are
-    /// silence), unless they don't fit (see [`FileEncoder::check_room`]).
+    /// silence), unless they don't fit (see [`FileEncoder::check_room`]). Once a write has
+    /// failed, the encoder is unusable: the sink may hold a prefix of the failed block, so
+    /// every later `write` and `finish` fails instead of completing an inconsistent file.
     pub fn write(&mut self, block: &[Vec<f32>], frames: usize) -> Result<()> {
         match &mut self.0 {
             Writer::Wav(w) => w.write(block, frames),

@@ -2,18 +2,22 @@
 //!
 //! ```text
 //! soundcraft-cli info FILE                       audio file or .scraft summary
-//! soundcraft-cli convert IN OUT [--bit-depth 16|24|32f] [--rate HZ] [--normalize]
+//! soundcraft-cli convert IN OUT [--bit-depth 16|24|32f] [--rate HZ] [--normalize] [--dither | --no-dither]
+//!                                                 dithers only when the output loses resolution, unless told
 //! soundcraft-cli run [--in S.scraft | --demo] [--cmd ID[=JSON]]… [--bounce OUT] [--start T --end T] [--save S.scraft] [--inspect]
-//! soundcraft-cli script FILE [--in S | --demo] [--save S] [--bounce OUT]   (one `ID JSON` per line)
+//! soundcraft-cli script FILE [--in S | --demo] [--save S] [--bounce OUT [--start T --end T]]   (one `ID JSON` per line;
+//!                                                 without --start/--end, --bounce covers the whole session)
 //! soundcraft-cli commands [FILTER]               list commands
 //! soundcraft-cli describe ID                     one command's details
 //! soundcraft-cli app [--port P] METHOD [JSON]     call a running app's control channel
-//! soundcraft-cli mcp [--connect PORT] [--demo] [--automation-read-root DIR] [--automation-write-root DIR]
-//!                                                 MCP server on stdio. The two roots confine every file the
+//! soundcraft-cli mcp [--connect PORT] [--demo] [--automation-read-root DIR]... [--automation-write-root DIR]...
+//!                                                 MCP server on stdio. The roots confine every file the
 //!                                                 agent's commands read (open, import, presets) and write
 //!                                                 (save, bounce, export) to those folders, links followed;
-//!                                                 a root left out grants none of its access. They run the
-//!                                                 in-process server, so they conflict with --connect.
+//!                                                 each flag may be given more than once, a path inside any
+//!                                                 of its folders being allowed, and a kind left out grants
+//!                                                 none of its access. They run the in-process server, so
+//!                                                 they conflict with --connect.
 //! soundcraft-cli parity [--write PATH]            parity report (markdown)
 //! soundcraft-cli plugins                          list built-in plugins
 //! ```
@@ -38,8 +42,56 @@ macro_rules! outln {
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter().enumerate().find_map(|(i, a)| {
+        if a == flag { args.get(i + 1).cloned() } else { a.strip_prefix(flag).and_then(|rest| rest.strip_prefix('=')).map(str::to_owned) }
+    })
 }
+
+/// Every option a subcommand accepts, with whether it carries a value.
+type Options = [(&'static str, bool)];
+
+/// A misspelled option, or one whose value is missing, reads as absent through `arg_value`, so the
+/// subcommand would run without what was asked for and still report success. Reject both instead.
+fn check_options(args: &[String], allowed: &Options) -> Result<(), String> {
+    let mut i = 0;
+    while i < args.len() {
+        let Some(name) = args[i].strip_prefix("--") else {
+            i += 1;
+            continue;
+        };
+        let (name, inline) = name.split_once('=').map_or((name, None), |(n, v)| (n, Some(v)));
+        let flag = format!("--{name}");
+        let Some(&(_, takes_value)) = allowed.iter().find(|(f, _)| f == &flag) else {
+            return Err(format!("unknown option {flag}"));
+        };
+        match (takes_value, inline) {
+            (false, Some(_)) => return Err(format!("{flag} takes no value")),
+            (true, None) => {
+                // A following option is the next flag, not this one's value.
+                if args.get(i + 1).is_none_or(|v| v.starts_with("--")) {
+                    return Err(format!("{flag} needs a value"));
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// `--in`, `--demo`/`--sample`, `--bounce`, `--start`, `--end`, `--save` and `--inspect`, read by
+/// `load_engine` and `finish` and so shared by `run` and `script`.
+const ENGINE_OPTIONS: &Options = &[
+    ("--in", true),
+    ("--demo", false),
+    ("--sample", false),
+    ("--bounce", true),
+    ("--start", true),
+    ("--end", true),
+    ("--save", true),
+    ("--inspect", false),
+];
 
 fn fail(msg: impl std::fmt::Display) -> ExitCode {
     eprintln!("soundcraft-cli: {msg}");
@@ -110,7 +162,7 @@ fn info(args: &[String]) -> ExitCode {
         Ok(b) => b,
         Err(e) => return fail(format!("{path}: {e}")),
     };
-    let ext = std::path::Path::new(path).extension().and_then(|x| x.to_str());
+    let ext = std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str);
     match soundcraft_audio_io::probe(&bytes, ext) {
         Ok(i) => {
             outln!("{}", serde_json::to_string_pretty(&json!({"format": i.format, "sample_format": i.sample_format, "sample_rate": i.sample_rate, "channels": i.channels, "frames": i.frames, "seconds": i.duration_secs(), "bwf": i.bwf})).unwrap_or_default());
@@ -120,63 +172,30 @@ fn info(args: &[String]) -> ExitCode {
     }
 }
 
-fn option_value(args: &[String], index: &mut usize, flag: &str, inline: Option<&str>) -> Result<String, String> {
-    let value = match inline {
-        Some(value) => value,
-        None => {
-            let value = args.get(*index + 1).ok_or_else(|| format!("{flag} needs a value"))?;
-            if value.starts_with("--") {
-                return Err(format!("{flag} needs a value"));
-            }
-            *index += 1;
-            value
-        }
-    };
-    if value.is_empty() {
-        return Err(format!("{flag} needs a value"));
-    }
-    Ok(value.to_owned())
-}
-
-struct ConvertArgs {
-    input: String,
-    output: String,
-    rate: Option<u32>,
-    bit_depth: soundcraft_audio_io::BitDepth,
-    normalize: bool,
-}
-
-fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, String> {
-    let (Some(input), Some(output)) = (args.first(), args.get(1)) else { return Err("convert IN OUT".into()) };
-    let mut rate = None;
-    let mut bit_depth = soundcraft_audio_io::BitDepth::Int24;
-    let mut normalize = false;
-    let mut i = 2;
-    while let Some(arg) = args.get(i) {
-        let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
-        match flag {
-            "--rate" => rate = parse_rate(Some(&option_value(args, &mut i, flag, inline)?))?,
-            "--bit-depth" => bit_depth = parse_bit_depth(Some(&option_value(args, &mut i, flag, inline)?))?,
-            "--normalize" if inline.is_none() => normalize = true,
-            other if other.starts_with("--") => return Err(format!("unknown convert option `{arg}`")),
-            _ => return Err(format!("unexpected convert argument `{arg}`")),
-        }
-        i += 1;
-    }
-    Ok(ConvertArgs { input: input.clone(), output: output.clone(), rate, bit_depth, normalize })
-}
-
 fn convert(args: &[String]) -> ExitCode {
-    let ConvertArgs { input, output, rate, bit_depth, normalize } = match parse_convert_args(args) {
-        Ok(args) => args,
-        Err(err) => return fail(err),
+    let (Some(input), Some(output)) = (args.first(), args.get(1)) else { return fail("convert IN OUT") };
+    const OPTIONS: &Options = &[("--rate", true), ("--bit-depth", true), ("--normalize", false), ("--dither", false), ("--no-dither", false)];
+    if let Err(e) = check_options(&args[2..], OPTIONS) {
+        return fail(e);
+    }
+    let rate = match parse_rate(arg_value(args, "--rate").as_deref()) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
     };
-    let bytes = match std::fs::read(&input) {
+    let bit_depth = match parse_bit_depth(arg_value(args, "--bit-depth").as_deref()) {
+        Ok(b) => b,
+        Err(e) => return fail(e),
+    };
+    let dither_flag = match parse_dither(args) {
+        Ok(d) => d,
+        Err(e) => return fail(e),
+    };
+    let bytes = match std::fs::read(input) {
         Ok(b) => b,
         Err(e) => return fail(format!("{input}: {e}")),
     };
-    let ext = std::path::Path::new(&input).extension().and_then(|x| x.to_str());
-    let (_, mut buf) = match soundcraft_audio_io::decode(&bytes, ext) {
+    let ext = std::path::Path::new(input).extension().and_then(std::ffi::OsStr::to_str);
+    let (info, mut buf) = match soundcraft_audio_io::decode(&bytes, ext) {
         Ok(x) => x,
         Err(e) => return fail(format!("{input}: {e}")),
     };
@@ -184,15 +203,18 @@ fn convert(args: &[String]) -> ExitCode {
         buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, rate);
         buf.sample_rate = rate;
     }
+    let normalize = args.iter().any(|a| a == "--normalize");
     if normalize {
         soundcraft_dsp::offline::normalize(&mut buf.channels, -0.1, false);
     }
-    let out_ext = std::path::Path::new(&output).extension().and_then(|x| x.to_str()).unwrap_or("wav").to_ascii_lowercase();
+    let processed = rate.is_some_and(|r| r != info.sample_rate) || normalize;
+    let dither = dither_flag.unwrap_or_else(|| auto_dither(info.sample_format, bit_depth, processed));
+    let out_ext = std::path::Path::new(output).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("wav").to_ascii_lowercase();
     let Some(format) = soundcraft_audio_io::encode_format_for(&out_ext) else {
         return fail(format!("{output}: cannot write `.{out_ext}` files (supported: {})", soundcraft_audio_io::ENCODE_EXTENSIONS));
     };
-    let opts = soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: true, bwf: None };
-    match soundcraft_audio_io::encode(&buf, &opts).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&output, b).map_err(|e| e.to_string())) {
+    let opts = soundcraft_audio_io::EncodeOptions { format, bit_depth, dither, bwf: None };
+    match soundcraft_audio_io::encode(&buf, &opts).map_err(|e| e.to_string()).and_then(|b| std::fs::write(output, b).map_err(|e| e.to_string())) {
         Ok(()) => {
             outln!("wrote {output} ({} ch, {} Hz, {:.2} s)", buf.num_channels(), buf.sample_rate, buf.duration_secs());
             ExitCode::SUCCESS
@@ -217,6 +239,41 @@ fn parse_bit_depth(v: Option<&str>) -> Result<soundcraft_audio_io::BitDepth, Str
         Some("16") => Ok(soundcraft_audio_io::BitDepth::Int16),
         Some("32") | Some("32f") => Ok(soundcraft_audio_io::BitDepth::Float32),
         Some(b) => Err(format!("--bit-depth: expected 16, 24 or 32f, got `{b}`")),
+    }
+}
+
+/// `--dither` / `--no-dither`: `Some` when the caller chose, `None` to decide from the depths.
+fn parse_dither(args: &[String]) -> Result<Option<bool>, String> {
+    match (args.iter().any(|a| a == "--dither"), args.iter().any(|a| a == "--no-dither")) {
+        (true, true) => Err("--dither and --no-dither: choose one".into()),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
+/// Whether `convert` dithers when not told: only when writing integer samples that cannot hold the
+/// source exactly, i.e. the output has fewer bits than the source, the source is float or lossy, or
+/// resampling/normalizing produced new sample values. A 16-bit file written as 16 or 24-bit, or
+/// anything written as 32-bit float, is copied sample for sample (digital silence stays silent).
+fn auto_dither(source: soundcraft_audio_io::SampleFormat, target: soundcraft_audio_io::BitDepth, processed: bool) -> bool {
+    use soundcraft_audio_io::{BitDepth, SampleFormat};
+    let target_bits = match target {
+        BitDepth::Float32 => return false,
+        BitDepth::Int16 => 16,
+        BitDepth::Int24 => 24,
+        BitDepth::Int32 => 32,
+    };
+    if processed {
+        return true;
+    }
+    match source {
+        SampleFormat::Int8 => target_bits < 8,
+        SampleFormat::Int16 => target_bits < 16,
+        SampleFormat::Int24 => target_bits < 24,
+        // Decoded through f32, which holds 24 bits: a 32-bit integer source has already lost
+        // resolution, so treat it like float.
+        SampleFormat::Int32 | SampleFormat::Float32 | SampleFormat::Float64 | SampleFormat::Compressed => true,
     }
 }
 
@@ -253,6 +310,11 @@ fn finish(e: &mut Engine, args: &[String]) -> ExitCode {
         if let Some(s) = arg_value(args, "--end") {
             p["end"] = time_arg(&s);
         }
+        // No range given: bounce the whole session, not whatever edit selection the commands left.
+        if p.get("start").is_none() && p.get("end").is_none() {
+            p["start"] = json!(0);
+            p["end"] = json!(e.session().content_end().max(1));
+        }
         match e.execute("file.bounce_mix", &p) {
             Ok(v) => outln!("{v}"),
             Err(err) => return fail(err),
@@ -283,43 +345,26 @@ fn parse_cmd_spec(spec: &str) -> Result<(String, Value), String> {
     }
 }
 
-struct RunArgs {
-    shared: Vec<String>,
-    commands: Vec<String>,
-}
-
-fn parse_run_args(args: &[String]) -> Result<RunArgs, String> {
-    let mut shared = Vec::new();
-    let mut commands = Vec::new();
-    let mut i = 0;
-    while let Some(arg) = args.get(i) {
-        let (flag, inline) = arg.split_once('=').map_or((arg.as_str(), None), |(flag, value)| (flag, Some(value)));
-        match flag {
-            "--in" | "--bounce" | "--start" | "--end" | "--save" => {
-                let value = option_value(args, &mut i, flag, inline)?;
-                shared.extend([flag.to_owned(), value]);
-            }
-            "--cmd" => commands.push(option_value(args, &mut i, flag, inline)?),
-            "--demo" | "--sample" | "--inspect" if inline.is_none() => shared.push(flag.to_owned()),
-            other if other.starts_with("--") => return Err(format!("unknown run option `{arg}`")),
-            _ => return Err(format!("unexpected run argument `{arg}`")),
-        }
-        i += 1;
-    }
-    Ok(RunArgs { shared, commands })
-}
-
 fn run(args: &[String]) -> ExitCode {
-    let RunArgs { shared, commands } = match parse_run_args(args) {
-        Ok(args) => args,
-        Err(err) => return fail(err),
-    };
-    let mut e = match load_engine(&shared) {
+    let options: Vec<(&str, bool)> = ENGINE_OPTIONS.iter().copied().chain([("--cmd", true)]).collect();
+    if let Err(e) = check_options(args, &options) {
+        return fail(e);
+    }
+    let mut e = match load_engine(args) {
         Ok(e) => e,
         Err(err) => return fail(err),
     };
-    for spec in commands {
-        let (id, params) = match parse_cmd_spec(&spec) {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let spec = match a.strip_prefix("--cmd=") {
+            Some(inline) => inline,
+            None if a == "--cmd" => match it.next() {
+                Some(next) => next,
+                None => continue,
+            },
+            None => continue,
+        };
+        let (id, params) = match parse_cmd_spec(spec) {
             Ok(v) => v,
             Err(err) => return fail(err),
         };
@@ -328,11 +373,15 @@ fn run(args: &[String]) -> ExitCode {
             Err(err) => return fail(format!("{id}: {err}")),
         }
     }
-    finish(&mut e, &shared)
+    finish(&mut e, args)
 }
 
 fn script(args: &[String]) -> ExitCode {
     let Some(path) = args.first() else { return fail("script FILE") };
+    let options: Vec<(&str, bool)> = ENGINE_OPTIONS.iter().copied().chain([("--keep-going", false)]).collect();
+    if let Err(e) = check_options(&args[1..], &options) {
+        return fail(e);
+    }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => return fail(format!("{path}: {e}")),
@@ -462,7 +511,7 @@ struct McpArgs {
 fn parse_mcp_args(args: &[String]) -> Result<McpArgs, String> {
     let mut connect = None;
     let mut demo = false;
-    let mut roots_args = automation_args::AutomationArgs::new(None, None);
+    let mut roots_args = automation_args::AutomationArgs::default();
     let mut it = args.iter().cloned();
     while let Some(a) = it.next() {
         if roots_args.consume(&a, &mut it)? {
@@ -475,7 +524,9 @@ fn parse_mcp_args(args: &[String]) -> Result<McpArgs, String> {
             _ => {}
         }
     }
-    let roots = AutomationRoots::new(roots_args.read_root.as_deref(), roots_args.write_root.as_deref())?;
+    let read: Vec<&std::path::Path> = roots_args.read_roots.iter().map(std::path::PathBuf::as_path).collect();
+    let write: Vec<&std::path::Path> = roots_args.write_roots.iter().map(std::path::PathBuf::as_path).collect();
+    let roots = AutomationRoots::new(&read, &write)?;
     if roots.is_some() && connect.is_some() {
         return Err("--automation-read-root and --automation-write-root confine the in-process server; a running app is not confined by them, \
 so drop --connect (or use --connect without the roots)"
@@ -501,8 +552,7 @@ fn mcp(args: &[String]) -> ExitCode {
         if let Some(roots) = roots {
             // Every thread of this process, not only the server's: nothing reaches past the roots.
             file_access::confine_process(roots.clone());
-            let show = |root: Option<&std::path::Path>| root.map_or_else(|| "none".to_string(), |r| r.display().to_string());
-            eprintln!("soundcraft-cli: files confined: read root {}, write root {}", show(roots.read_root()), show(roots.write_root()));
+            eprintln!("soundcraft-cli: files confined: {}", roots.describe());
             h = h.with_automation_roots(Some(roots));
         }
         let mut s = Server::new(h);
@@ -546,24 +596,6 @@ fn parity(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn convert_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!("soundcraft-cli-{tag}-{}", std::process::id()));
-        let input = base.with_extension("input.wav");
-        let output = base.with_extension("output.wav");
-        let audio = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 16]] };
-        let bytes = soundcraft_audio_io::encode(&audio, &soundcraft_audio_io::EncodeOptions::default()).unwrap();
-        std::fs::write(&input, bytes).unwrap();
-        let _ = std::fs::remove_file(&output);
-        (input, output)
-    }
-
-    fn convert_args(input: &std::path::Path, output: &std::path::Path, options: &[&str]) -> Vec<String> {
-        [input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()]
-            .into_iter()
-            .chain(options.iter().map(|s| (*s).to_owned()))
-            .collect()
-    }
-
     #[test]
     fn command_ids_are_execute_shorthand_and_control_methods_stay_methods() {
         let (m, p) = app_request("engine.history", json!({}));
@@ -594,52 +626,31 @@ mod tests {
     }
 
     #[test]
-    fn convert_rejects_unknown_and_misspelled_options() {
-        let (input, output) = convert_fixture("unknown-options");
-        let bogus = convert_args(&input, &output, &["--bogus"]);
-        assert_eq!(parse_convert_args(&bogus).err().as_deref(), Some("unknown convert option `--bogus`"));
-        assert_eq!(convert(&bogus), ExitCode::FAILURE);
-        let normalise = convert_args(&input, &output, &["--normalise"]);
-        assert_eq!(parse_convert_args(&normalise).err().as_deref(), Some("unknown convert option `--normalise`"));
-        assert_eq!(convert(&normalise), ExitCode::FAILURE);
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
+    fn convert_dither_flags() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_dither(&args(&["in.wav", "out.wav"])), Ok(None));
+        assert_eq!(parse_dither(&args(&["in.wav", "out.wav", "--dither"])), Ok(Some(true)));
+        assert_eq!(parse_dither(&args(&["in.wav", "out.wav", "--no-dither"])), Ok(Some(false)));
+        assert!(parse_dither(&args(&["in.wav", "out.wav", "--dither", "--no-dither"])).is_err());
     }
 
     #[test]
-    fn convert_rejects_option_without_value() {
-        let (input, output) = convert_fixture("missing-value");
-        let args = convert_args(&input, &output, &["--rate"]);
-        assert_eq!(parse_convert_args(&args).err().as_deref(), Some("--rate needs a value"));
-        assert_eq!(convert(&args), ExitCode::FAILURE);
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
-    }
-
-    #[test]
-    fn convert_accepts_equals_options() {
-        let (input, output) = convert_fixture("equals-options");
-        assert_eq!(convert(&convert_args(&input, &output, &["--rate=24000", "--bit-depth=16"])), ExitCode::SUCCESS);
-        let bytes = std::fs::read(&output).unwrap();
-        let info = soundcraft_audio_io::probe(&bytes, Some("wav")).unwrap();
-        assert_eq!(info.sample_rate, 24_000);
-        let _ = std::fs::remove_file(input);
-        let _ = std::fs::remove_file(output);
-    }
-
-    #[test]
-    fn run_rejects_bad_options_and_accepts_equals_values() {
-        let bogus = ["--bogus".into()];
-        assert_eq!(parse_run_args(&bogus).err().as_deref(), Some("unknown run option `--bogus`"));
-        assert_eq!(run(&bogus), ExitCode::FAILURE);
-        let missing = ["--bounce".into()];
-        assert_eq!(parse_run_args(&missing).err().as_deref(), Some("--bounce needs a value"));
-        assert_eq!(run(&missing), ExitCode::FAILURE);
-        let path = std::env::temp_dir().join(format!("soundcraft-cli-run-equals-{}.scraft", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        assert_eq!(run(&[format!("--save={}", path.display())]), ExitCode::SUCCESS);
-        assert!(path.exists());
-        let _ = std::fs::remove_file(path);
+    fn convert_dithers_only_when_resolution_is_lost() {
+        use soundcraft_audio_io::{BitDepth, SampleFormat};
+        // Same depth or wider: the samples fit exactly.
+        assert!(!auto_dither(SampleFormat::Int16, BitDepth::Int16, false));
+        assert!(!auto_dither(SampleFormat::Int16, BitDepth::Int24, false));
+        assert!(!auto_dither(SampleFormat::Int24, BitDepth::Int24, false));
+        assert!(!auto_dither(SampleFormat::Int8, BitDepth::Int16, false));
+        // Float output never dithers.
+        assert!(!auto_dither(SampleFormat::Float32, BitDepth::Float32, true));
+        assert!(!auto_dither(SampleFormat::Int24, BitDepth::Float32, false));
+        // Fewer bits, a float or lossy source, or processed samples: dither.
+        assert!(auto_dither(SampleFormat::Int24, BitDepth::Int16, false));
+        assert!(auto_dither(SampleFormat::Float32, BitDepth::Int24, false));
+        assert!(auto_dither(SampleFormat::Compressed, BitDepth::Int16, false));
+        assert!(auto_dither(SampleFormat::Int32, BitDepth::Int24, false));
+        assert!(auto_dither(SampleFormat::Int16, BitDepth::Int16, true));
     }
 
     #[test]
