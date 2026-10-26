@@ -27,7 +27,7 @@ fn mute(s: &mut Session, t: TrackId, start: i64, end: i64) {
     }
 }
 fn rendered(s: &Session, block: usize) -> Vec<Vec<f32>> {
-    render_range(s, Range::new(0, LEN as i64), block)
+    render_range(s, Range::new(0, LEN as i64), block).unwrap()
 }
 fn gated(actual: &[Vec<f32>], reference: &[Vec<f32>], start: usize, end: usize) {
     assert_eq!(actual.len(), reference.len());

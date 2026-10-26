@@ -469,9 +469,12 @@ impl Bounce {
         normalize: bool,
         fold_stereo: bool,
     ) -> Result<Bounce> {
+        crate::file_access::check_write(path).map_err(EngineError::Io)?;
+        soundcraft_mix::validate_render_window(&s, bus, r).map_err(|err| crate::cmd::bad("file.bounce_mix", err.to_string()))?;
         if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
             return Err(EngineError::BadParams("file.bounce_mix".into(), "bounces are limited to 4 hours".into()));
         }
+        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024).map_err(|err| crate::cmd::bad("file.bounce_mix", err.to_string()))?;
         let (fmt, channels, fold) = bounce_layout(&s, bus, fold_stereo);
         let name = path.file_name().map_or_else(|| "bounce".into(), |n| n.to_string_lossy().into_owned());
         let part = path.with_file_name(format!("{name}.part"));
@@ -486,7 +489,6 @@ impl Bounce {
             let _ = std::fs::remove_file(&part);
             EngineError::Io(format!("{}: {err}", path.display()))
         })?;
-        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
         let meter = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
         Ok(Bounce {
             session: s,
@@ -529,7 +531,7 @@ impl Bounce {
     /// bounce once its file is complete.
     pub fn step(&mut self, mut more: impl FnMut() -> bool) -> Result<Option<Bounced>> {
         loop {
-            match self.render.next_block(&self.session) {
+            match self.render.next_block(&self.session).map_err(|err| crate::cmd::bad("file.bounce_mix", err.to_string()))? {
                 Some((chunk, n)) => {
                     fill(&mut self.block, chunk, n, self.fold, self.gain);
                     self.done += n;
@@ -546,7 +548,8 @@ impl Bounce {
                     self.peak = 0.0;
                     self.done = 0;
                     self.measuring = false;
-                    self.render = soundcraft_mix::RangeRender::new(&self.session, self.bus, self.range, 1024);
+                    self.render = soundcraft_mix::RangeRender::new(&self.session, self.bus, self.range, 1024)
+                        .map_err(|err| crate::cmd::bad("file.bounce_mix", err.to_string()))?;
                 }
                 None => return self.finish().map(Some),
             }
@@ -1037,9 +1040,9 @@ pub fn render_clip_gain(e: &mut Engine, cmd: &str, id: soundcraft_model::ClipId)
     Ok(true)
 }
 
-/// Commit a track's inserts into a new audio track (Track › Commit).
-pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
-    let s = e.session();
+/// Validate a Commit target without rendering or changing the document.
+/// Unsupported targets and tracks without material retain their ordinary no-op behavior.
+pub(crate) fn commit_range(s: &Session, t: TrackId) -> Result<Option<Range>> {
     let Some(tr) = s.track(t) else { return Ok(None) };
     if !tr.kind.is_audio_path() || tr.kind == TrackKind::Master {
         return Ok(None);
@@ -1055,16 +1058,22 @@ pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
             format!("track commit supports at most {} channels; cannot render {}", soundcraft_mix::MAX_CHANNELS, fmt.label()),
         ));
     }
-    let too_long = || EngineError::BadParams("track.commit".into(), format!("`{}` is too long to commit within the offline render limit", tr.name));
-    let end = end.checked_add(s.sample_rate.samples(2.0)).ok_or_else(too_long)?;
-    let frames = usize::try_from(end).map_err(|_| too_long())?;
-    // The shared renderer uses a stereo main mix for mono, then folds it back to mono.
-    // Reject requests it would truncate before rendering or replacing the source track.
-    if frames > soundcraft_mix::MAX_RENDER_SAMPLES / fmt.channels().max(2) {
-        return Err(too_long());
-    }
+    let end = end.checked_add(s.sample_rate.samples(2.0)).ok_or_else(|| crate::cmd::bad("track.commit", "commit tail exceeds the timeline range"))?;
     let range = Range::new(0, end);
-    let audio = soundcraft_mix::render_track_pre_fader(s, t, range);
+    // Retain the command-specific duration diagnostic before the shared checked plan.
+    refuse_longer(s, "track.commit", &tr.name, "commit", range.len(), render_limit(tr.channels().max(2)))?;
+    soundcraft_mix::validate_track_render_window(s, t, range).map_err(|err| crate::cmd::bad("track.commit", err.to_string()))?;
+    Ok(Some(range))
+}
+
+/// Commit a track's inserts into a new audio track (Track › Commit).
+pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
+    let s = e.session();
+    let Some(range) = commit_range(s, t)? else { return Ok(None) };
+    let Some(tr) = s.track(t) else { return Ok(None) };
+    let fmt = tr.format;
+    let audio = soundcraft_mix::render_track_pre_fader(s, t, range).map_err(|err| crate::cmd::bad("track.commit", err.to_string()))?;
+    let frames = usize::try_from(range.len()).map_err(|_| crate::cmd::bad("track.commit", "commit window cannot be represented"))?;
     if audio.len() != fmt.channels() || audio.iter().any(|channel| channel.len() != frames) {
         return Err(EngineError::Io("track commit did not render the complete channel format and range".into()));
     }

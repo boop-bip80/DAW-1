@@ -96,7 +96,7 @@ fn assert_pcm(actual: &[Vec<f32>], expected: &[Vec<f32>], context: &str) {
 }
 
 fn render(session: &Session, block: usize) -> Vec<Vec<f32>> {
-    render_range(session, Range::new(0, FRAMES as i64), block)
+    render_range(session, Range::new(0, FRAMES as i64), block).unwrap()
 }
 
 fn engine_block(engine: &mut MixEngine, session: &Session) -> Vec<Vec<f32>> {

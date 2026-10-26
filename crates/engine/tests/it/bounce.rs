@@ -18,7 +18,7 @@ fn float_bounce_preserves_headroom_and_reports_the_written_levels() {
     let source = soundcraft_engine::io::add_source(s, "headroom", audio, None, FileFormat::Wav);
     let clip = soundcraft_model::Clip::audio(s.new_clip_id(), "headroom", source, 0, 0, frames as i64);
     soundcraft_engine::edit::place_clip(s, track, clip);
-    let mix = soundcraft_mix::render_range(e.session(), Range::new(0, frames as i64), 1024);
+    let mix = soundcraft_mix::render_range(e.session(), Range::new(0, frames as i64), 1024).unwrap();
     assert!(soundcraft_dsp::offline::peak(&mix) > 1.0);
     let dir = scratch("bounce-float-headroom");
     for extension in ["wav", "aiff"] {
@@ -75,8 +75,8 @@ fn bounces_write_exactly_the_mix_and_report_its_levels() {
     let verb = s.bus_by_name("Verb").unwrap().id;
     for bus in [None, Some(verb)] {
         let mut mix = match bus {
-            Some(b) => soundcraft_mix::render_bus(s, b, r, 1024),
-            None => soundcraft_mix::render_range(s, r, 1024),
+            Some(b) => soundcraft_mix::render_bus(s, b, r, 1024).unwrap(),
+            None => soundcraft_mix::render_range(s, r, 1024).unwrap(),
         };
         assert!(mix.iter().flatten().any(|v| v.abs() > 1e-3), "{bus:?}");
         for normalize in [false, true] {

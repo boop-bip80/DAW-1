@@ -82,18 +82,18 @@ fn commit_preserves_bus_and_send_audio_after_undo_reopen_and_wav_export() {
         tr.mixer.sends[0] = Some(send);
         let mixer = tr.mixer.clone();
         let range = Range::new(0, SIGNAL_FRAMES as i64);
-        let before = soundcraft_mix::render_range(e.session(), range, 64);
+        let before = soundcraft_mix::render_range(e.session(), range, 64).unwrap();
         let committed = commit(&mut e, track);
         let tr = e.session().track(committed).unwrap();
         assert_eq!(tr.mixer.output, mixer.output);
         assert_eq!(tr.mixer.sends, mixer.sends);
         assert_eq!(tr.mixer.volume_db, mixer.volume_db);
         assert!(tr.mixer.inserts.iter().all(Option::is_none), "processing is baked once");
-        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64), &before);
+        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64).unwrap(), &before);
         assert!(e.undo());
         assert!(e.session().track(committed).is_none());
         assert!(!e.session().track(track).unwrap().inactive);
-        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64), &before);
+        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64).unwrap(), &before);
         assert!(e.redo());
 
         let dir = std::env::temp_dir().join(format!("soundcraft-commit-layout-{}-{}", std::process::id(), format.channels()));
@@ -104,7 +104,7 @@ fn commit_preserves_bus_and_send_audio_after_undo_reopen_and_wav_export() {
         assert!(io::open_session(&mut reopened, &path).unwrap().is_empty());
         assert_eq!(reopened.session().track(committed).unwrap().format, format);
         assert_audio_eq(&committed_audio(&reopened, committed).channels, &committed_audio(&e, committed).channels);
-        assert_audio_eq(&soundcraft_mix::render_range(reopened.session(), range, 64), &before);
+        assert_audio_eq(&soundcraft_mix::render_range(reopened.session(), range, 64).unwrap(), &before);
 
         let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Float32, dither: false, bwf: None };
         let wav_path = dir.join("mix.wav");
@@ -138,7 +138,9 @@ fn oversized_or_overflowing_commit_rolls_back_all_selected_tracks() {
         let before = e.session_arc();
         let dirty = e.is_dirty();
         let result = e.execute("track.commit", &json!({"tracks": [first.0, second.0]}));
-        assert!(result.unwrap_err().to_string().contains("offline render limit"));
+        let error = result.unwrap_err().to_string();
+        let diagnostic = if length == i64::MAX { "commit tail exceeds the timeline range" } else { "is too long to commit" };
+        assert!(error.contains(diagnostic), "{error}");
         assert!(Arc::ptr_eq(&before, &e.session_arc()), "no hidden track, truncated source or partially committed first track");
         assert_eq!(e.is_dirty(), dirty);
         assert!(!e.can_undo(), "failed commit must not add an undo step");

@@ -79,8 +79,8 @@ fn split_stereo_matches_the_original_mix_in_playback_and_bounce_blocks() {
     assert_eq!(e.session().track(tracks[1]).unwrap().name, "Original.R");
     e.session_mut().track_mut(track).unwrap().inactive = true;
     for block in [37, 512, 1024] {
-        let expected = soundcraft_mix::render_range(&original, Range::new(0, 192), block);
-        let actual = soundcraft_mix::render_range(e.session(), Range::new(0, 192), block);
+        let expected = soundcraft_mix::render_range(&original, Range::new(0, 192), block).unwrap();
+        let actual = soundcraft_mix::render_range(e.session(), Range::new(0, 192), block).unwrap();
         assert_eq!(actual, expected, "block {block}");
     }
 }
@@ -94,7 +94,7 @@ fn split_stereo_preserves_distinct_left_and_right_levels() {
     s.track_mut(track).unwrap().playlist_mut().unwrap().clips = vec![clip];
     split(&mut e, track);
     e.session_mut().track_mut(track).unwrap().inactive = true;
-    let audio = soundcraft_mix::render_range(e.session(), Range::new(0, 128), 64);
+    let audio = soundcraft_mix::render_range(e.session(), Range::new(0, 128), 64).unwrap();
     eprintln!("Split into Mono output: L={}, R={}", audio[0][64], audio[1][64]);
     assert_eq!(audio[0][64], 0.2);
     assert_eq!(audio[1][64], 0.7);
