@@ -64,11 +64,8 @@ fn identity_mapped_param_text_is_read_on_the_main_thread_only() {
     assert_eq!((level.min, level.max, level.unit), (0.0, 1.0, Unit::Db));
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id).unwrap();
     let mut ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
-    if cfg!(any(target_os = "macos", windows)) {
-        assert_eq!(ed.value_text("13", 0.375), None, "test threads are not the main thread");
-    } else {
-        assert_eq!(ed.value_text("13", 0.375).as_deref(), Some("\u{2212}6.0 dB"));
-    }
+    // Test threads are not the process main thread, so the controller is not read.
+    assert_eq!(ed.value_text("13", 0.375), None, "test threads are not the main thread");
 }
 
 #[test]
@@ -315,21 +312,14 @@ fn host_set_controller_param_survives_state_round_trip() {
 fn editor_view_is_probed_and_edits_come_back_as_plain_values() {
     let id = id_of("Fixture Gain");
     let mut p = soundcraft_vst3_host::instantiate_plugin(&id).unwrap();
-    // Editor windows are hosted on macOS and Windows; elsewhere the probe reports "unsupported".
-    if cfg!(any(target_os = "macos", windows)) {
-        assert_eq!(p.editor_size(), Ok((320, 240)));
-    } else {
-        assert!(p.editor_size().is_err());
-    }
+    // Editor windows are hosted on macOS, Windows and Linux; the probe reads the size without
+    // opening a window, so it needs no display on any of them.
+    assert_eq!(p.editor_size(), Ok((320, 240)));
     let mut ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
     // The fixture "edits" Gain to 0.9 (normalized) when it gets the component handler.
     assert_eq!(ed.idle(), vec![("7".to_string(), 1.8)]);
     assert!(ed.idle().is_empty());
-    if cfg!(any(target_os = "macos", windows)) {
-        assert!(ed.open().unwrap_err().contains("main thread"), "test threads are not the main thread");
-    } else {
-        assert!(ed.open().is_err(), "unsupported elsewhere");
-    }
+    assert!(ed.open().unwrap_err().contains("main thread"), "test threads are not the main thread");
     assert!(!ed.is_open());
     // The synth's controller has no view.
     let synth = soundcraft_vst3_host::instantiate_plugin(&id_of("Fixture Synth")).unwrap();

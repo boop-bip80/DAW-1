@@ -14,12 +14,9 @@ fn main() {
     let dir = common::fixture_dir();
     let gain = soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]).into_iter().find(|d| d.name == "Fixture Gain").expect("fixture").id;
     let mut p = soundcraft_vst3_host::instantiate_plugin(&gain).expect("instantiate");
-    // Editor windows are hosted on macOS and Windows; elsewhere the probe reports "unsupported".
-    if cfg!(any(target_os = "macos", windows)) {
-        assert_eq!(p.editor_size(), Ok((320, 240)));
-    } else {
-        assert!(p.editor_size().is_err());
-    }
+    // Editor windows are hosted on macOS, Windows and Linux; the probe reads the size without
+    // opening a window, so it needs no display.
+    assert_eq!(p.editor_size(), Ok((320, 240)));
     let mut ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
     assert!(!ed.is_open());
     assert_eq!(ed.idle().len(), 1, "the fixture's setup edit");
@@ -36,6 +33,23 @@ fn main() {
     assert_eq!(ed.value_text("7", 1.5), None);
     assert_eq!(ed.value_text("3", 1.0), None);
     assert_eq!(ed.value_text("nope", 0.5), None);
+    // On Linux with a live X server, actually open the editor window and check it maps and tears
+    // down. Skipped headlessly, or when `DISPLAY` is set but not connectable (e.g. over SSH);
+    // other platforms are exercised manually.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some() {
+        match ed.open() {
+            Ok(()) => {
+                assert!(ed.is_open(), "the editor window is mapped");
+                ed.open().expect("opening again just raises it");
+                assert!(ed.is_open());
+                ed.close();
+                assert!(!ed.is_open(), "closing unmaps the editor window");
+            }
+            Err(e) if e.starts_with("cannot open the X11 display") => eprintln!("skipped the editor window check: {e}"),
+            Err(e) => panic!("open the editor on X11: {e}"),
+        }
+    }
     drop(p);
     assert_eq!(ed.value_text("13", 0.375), None, "the plugin is gone");
     assert!(!ed.is_open());

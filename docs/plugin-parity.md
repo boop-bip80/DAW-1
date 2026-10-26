@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-25 · **Change:** trivial (Auto Pan stereo balance; previously minor: AudioSuite speed ramps (speed_ramp); Auto Pan; Subharmonic; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-27 · **Change:** minor (VST3 editors on Linux; previously trivial: Auto Pan stereo balance; previously minor: AudioSuite speed ramps (speed_ramp); Auto Pan; Subharmonic; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -45,7 +45,7 @@ User report #152: a saved instrument level does not reach the bounce.
 | State saved in sessions, presets | ✅ | ✅ | |
 | Create/destroy off the audio thread | ✅ | ✅ | |
 | Editors: CLAP | — | 🟡 floating windows; embedded editors on Windows | Embedded on macOS/Linux missing |
-| Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | Linux views missing |
+| Editors: VST3 | — | 🟡 macOS (verified with a commercial pitch editor) and Windows (verified with a free JUCE compressor) | 🟡 Linux: a floating X11 window the plugin view attaches to (`X11EmbedWindowID`), verified with the test fixture; not yet against a commercial plugin |
 | Editors: AU | — | ❌ | Cocoa view hosting missing |
 | Multiple editor pages | ✅ | 🟡 | #6 |
 | macOS hardened-runtime entitlement for third-party code | ✅ | ❌ | #153, #149 — signed builds refuse third-party VST3 |
@@ -67,4 +67,5 @@ User report #152: a saved instrument level does not reach the bounce.
 | 2026-10-13 | trivial | Sampler ping-pong loop phase (#463) |
 | 2026-10-13 | trivial | mix.instrument sets built-in instrument parameters in params (#265) |
 | 2026-10-12 | minor | Editors: VST3 and embedded CLAP editors on Windows |
+| 2026-10-27 | minor | Editors: VST3 on Linux — a floating X11 window the plugin view attaches to (`X11EmbedWindowID`), verified with the test fixture |
 | 2026-10-10 | major | Created: built-in processor inventory by category and third-party hosting checklist |

@@ -32,8 +32,8 @@
 //! main thread while the instance processes on the audio thread (VST3's own threading model:
 //! the controller and its views live on the UI thread). Parameter edits made in the editor
 //! (`IComponentHandler::performEdit`) are reported by the handle's `idle` so the host can write
-//! them into the session. Linux (X11) editor windows are not hosted yet: opening reports
-//! "unsupported".
+//! them into the session. On Linux the editor is a floating X11 window (`X11EmbedWindowID`) that
+//! the plugin's view attaches to.
 //!
 //! Not hosted yet: `IMessage`/`IAttributeList` creation through the host (plugins that need it
 //! for processor ↔ controller messaging may lose those messages), sidechain (aux buses are kept
