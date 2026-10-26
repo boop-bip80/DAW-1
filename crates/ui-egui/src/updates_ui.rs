@@ -77,7 +77,7 @@ pub(crate) fn show(app: &mut SoundApp, ctx: &egui::Context) {
             Action::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::None => {}
         }
-        // The window answers Help ▸ Check for Updates, so it follows the updater's status.
+        // The window answers Help › Check for Updates, so it follows the updater's status.
         let rt = &mut app.updates_rt;
         (rt.manual_window_open, rt.status_message) = match rt.updater.status() {
             Status::Idle => (false, None),

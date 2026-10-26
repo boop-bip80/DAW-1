@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-25 · **Change:** trivial (side panels in dock columns, Auto Pan stereo balance, Clip List Auto Rename, Strip Silence rectangles, Strip Silence Rename, Strip Silence Extract and Separate, Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-26 · **Change:** trivial (Korean shipped on desktop) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -50,7 +50,7 @@ measures readiness and adds hardware, localization and field bug reports.
 | UI/UX fidelity | ~55 % | 60–100 | [ui-parity.md](docs/ui-parity.md) |
 | File formats | ~40 % | 70–120 | [file-format-parity.md](docs/file-format-parity.md) |
 | Hardware (interfaces, MIDI, surfaces, sync) | ~12 % | 110–180 | [hardware-parity.md](docs/hardware-parity.md) |
-| Localization | ~12 % (1 of Pro Tools' 8 languages) | 70–110 | [localization-parity.md](docs/localization-parity.md) |
+| Localization | ~38 % (3 of Pro Tools' 8 languages: English, 简体中文, 한국어) | 30–45 | [localization-parity.md](docs/localization-parity.md) |
 | Performance | ~35 % (unmeasured) | 40–70 | [hardware-parity.md](docs/hardware-parity.md#performance) |
 | Stability | ~45 % | 50–80 | [gaps.md](docs/gaps.md) |
 | Platforms | ~65 % (5 platforms built, macOS exercised) | 20–40 | [gaps.md](docs/gaps.md) |
@@ -84,7 +84,7 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#f
 | Language | Code | Status | Translated |
 |---|---|---|---:|
 | English | en | full | 100 % |
-| Simplified Chinese | zh-Hans | none | 0 % |
+| Simplified Chinese | zh-hans | full (engine diagnostics stay English) | 100 % |
 | Spanish | es | none (PR #143 open) | 0 % |
 | Hindi | hi | none | 0 % |
 | Arabic | ar | none | 0 % |
@@ -93,10 +93,11 @@ Weights and evidence per row: [target-app-parity.md](docs/target-app-parity.md#f
 | Indonesian | id | none | 0 % |
 | Japanese | ja | none | 0 % |
 | German | de | none | 0 % |
-| Korean | ko | none | 0 % |
+| Korean | ko | full on desktop (web falls back to English until a Hangul face ships) | 100 % |
 | Vietnamese | vi | none | 0 % |
 
-Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-parity.md).
+Other languages shipped: 2 (Simplified Chinese, Korean). Detail: [localization-parity.md](docs/localization-parity.md);
+the mechanism is in [localization.md](docs/localization.md).
 
 ## Upcoming
 
@@ -176,6 +177,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | trivial | Localization 25 % → 38 %: Korean (`ko.tsv`) shipped on desktop, 3 of Pro Tools' 8 languages; the web falls back to English until a Hangul face ships |
 | 2026-10-25 | trivial | Progress log: side panels in dock columns; readiness estimates unchanged |
 | 2026-10-25 | trivial | Progress log: Auto Pan stereo balance; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Clip List Auto Rename; readiness estimates unchanged |
@@ -187,6 +189,8 @@ mutated and truncated movies. Field reports from the first public week are track
 | 2026-10-24 | trivial | Progress log: Auto Pan plugin; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Subharmonic plugin; readiness estimates unchanged |
 | 2026-10-23 | trivial | Progress log: Ring Modulator plugin; readiness estimates unchanged |
+| 2026-10-22 | trivial | Localization follow-up: remaining UI literals (toolbar tooltips, send/bounce/status strings, Memory Locations headers) translated, so the "100 %" claim now covers them; languages table uses the registry's zh-hans spelling; catalog packing-format doc corrected |
+| 2026-10-19 | minor | Localization 12 % → 25 %: string catalog, language selector and Simplified Chinese shipped (2 of Pro Tools' 8 languages); languages table marks zh-Hans full |
 | 2026-10-19 | trivial | Float32 file encoding preserves finite headroom (#791); readiness estimates unchanged |
 | 2026-10-18 | trivial | Mono device playback retains both stereo sides and surround fold-down channels; readiness estimates unchanged |
 | 2026-10-16 | trivial | Master volume automation block boundaries corrected; readiness estimates unchanged |

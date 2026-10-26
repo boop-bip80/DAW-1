@@ -4156,6 +4156,7 @@ dependencies = [
  "craft-update",
  "egui",
  "egui_kittest",
+ "flate2",
  "image",
  "log",
  "serde",
@@ -4172,7 +4173,9 @@ dependencies = [
  "soundcraft-time",
  "soundcraft-video",
  "soundcraft-vst3-host",
+ "sys-locale",
  "toml",
+ "ttf-parser",
  "web-time",
  "zbus",
 ]
@@ -4488,6 +4491,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "tar"
 version = "0.4.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4725,6 +4737,12 @@ dependencies = [
  "nom 8.0.0",
  "petgraph",
 ]
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "type-map"
