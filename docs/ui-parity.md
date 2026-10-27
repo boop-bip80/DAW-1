@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns; fine adjustment on the Strip Silence sliders and plugin parameter sliders; Alt-click returns a plugin parameter to its default; fine adjustment of sends; Peak Hold and Clip Indication options; Cancel Zoom Toggle) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-27 · **Change:** minor (Tracks and Groups and Clips in dock columns; fine adjustment on the Strip Silence sliders and plugin parameter sliders; Alt-click returns a plugin parameter to its default; fine adjustment of sends; Peak Hold and Clip Indication options; Cancel Zoom Toggle) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -71,6 +71,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Clip Effects gain supports Alt/Option-click reset to 0 dB and Ctrl/Cmd fine adjustment. Readiness estimate unchanged |
 | 2026-10-25 | minor | Edit and Mix windows: Tracks and Groups and Clips in full-height dock columns. Readiness estimate unchanged |
 | 2026-10-25 | minor | Zoom Toggle row: Alt+Shift+E and Alt-click cancel Zoom Toggle and keep the view. Readiness estimate unchanged |
 | 2026-10-25 | minor | Sends and pan knobs: Ctrl/Cmd-drag on a send's level, its options menu's Level and Pan sliders and the pan knobs gives fine adjustment. Readiness estimate unchanged |

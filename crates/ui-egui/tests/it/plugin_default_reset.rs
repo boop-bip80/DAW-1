@@ -180,3 +180,32 @@ fn alt_click_returns_audiosuite_parameter_sliders_to_their_defaults() {
     alt_press(&mut h, near_left(rail), 0.0);
     assert_eq!(read(&h)["threshold"], threshold.default, "Alt-click did not return Threshold to its default");
 }
+
+#[test]
+fn clip_effects_gain_resets_with_alt_click_and_undo_restores_the_value() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let clip = app.engine.session().track_by_name("Kick").unwrap().clips().iter().find(|c| c.is_audio()).unwrap().id;
+    app.run("edit.select", json!({"clips": [clip.0]})).unwrap();
+    app.run("clip.effects_set", json!({"clips": [clip.0], "params": {"gain": 6.0}})).unwrap();
+    app.engine.end_merge();
+    app.ui.show_clip_effects = true;
+    let mut h = harness(app);
+    let key = format!("clip_fx.{}.gain", clip.0);
+    let input = h.get_by_role_and_label(Role::Slider, "Input").rect();
+    move_to(&mut h, input.center());
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, -2000.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+    });
+    h.run_steps(30);
+    let rail = h.get_by_role_and_label(Role::Slider, "Clip effects gain (dB)").rect();
+    let steps = undo_steps(&h);
+    alt_press(&mut h, near_left(rail), 0.0);
+    assert_eq!(h.state().engine.session().edit.values.get(&key), Some(&0.0));
+    assert_eq!(undo_steps(&h), steps + 1);
+    h.state_mut().engine.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(h.state().engine.session().edit.values.get(&key), Some(&6.0));
+}

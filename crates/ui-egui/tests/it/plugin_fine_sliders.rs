@@ -150,7 +150,19 @@ fn clip_effects_sliders_move_a_tenth_as_far_with_ctrl_held() {
     app.run("edit.select", json!({"clips": [clip.0]})).unwrap();
     app.ui.show_clip_effects = true;
     let mut h = harness(app);
-    for (label, key, default) in [("Input", "eq.input_gain", 0.0), ("Threshold", "comp.threshold", -20.0)] {
+    for (label, key, default) in [("Input", "eq.input_gain", 0.0), ("Threshold", "comp.threshold", -20.0), ("Clip effects gain (dB)", "gain", 0.0)] {
+        if key == "gain" {
+            let input = h.get_by_role_and_label(Role::Slider, "Input").rect();
+            move_to(&mut h, input.center());
+            h.event(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -2000.0),
+                modifiers: Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+            });
+            h.run_steps(30);
+        }
         let key = format!("clip_fx.{}.{key}", clip.0);
         let read = move |h: &Harness<'_, SoundApp>| h.state().engine.session().edit.values.get(&key).copied().unwrap_or(default);
         let rail = h.get_by_role_and_label(Role::Slider, label).rect();

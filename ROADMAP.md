@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-25 · **Change:** trivial (side panels in dock columns, Cancel Zoom Toggle, Auto Pan stereo balance, fine adjustment of sends, Alt-click returns a plugin parameter to its default, fine adjustment on plugin parameter sliders, Strip Silence fine adjustment, Unloop dialog, Peak Hold and Clip Indication options, Clip List Auto Rename, Strip Silence rectangles, Strip Silence Rename, Strip Silence Extract and Separate, Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-24 · **Last updated:** 2026-10-27 · **Change:** trivial (side panels in dock columns, Cancel Zoom Toggle, Auto Pan stereo balance, fine adjustment of sends, Alt-click returns a plugin parameter to its default, fine adjustment on plugin parameter sliders, Strip Silence fine adjustment, Unloop dialog, Peak Hold and Clip Indication options, Clip List Auto Rename, Strip Silence rectangles, Strip Silence Rename, Strip Silence Extract and Separate, Clip Looping dialog, AudioSuite Vari-Fi speed ramps, Auto Pan plugin, Subharmonic plugin, Ring Modulator plugin, Float32 file headroom) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
