@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-16 · **Last updated:** 2026-10-24 · **Change:** minor (Alt-click returns a plugin parameter to its default) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-27 · **Change:** minor (Tracks and Groups and Clips in dock columns; Alt-click returns a plugin parameter to its default) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -42,7 +42,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Window | Status | Notes |
 |---|---|---|
-| Edit window: rulers, track headers, view columns, Clip List, Groups, Tracks list | ✅ | Track Pin (new in 2026.4) ✅ (`track.pin`) |
+| Edit window: rulers, track headers, view columns, Clip List, Groups, Tracks list | ✅ | Track Pin (new in 2026.4) ✅ (`track.pin`); Tracks and Groups and the Clip List sit in full-height dock columns at the window's sides |
 | Mix window: strips, views (inserts, sends, I/O, comments, EQ curve, preamps, instruments, object) | ✅ | Narrow Mix ✅; Mix and Edit on screen at once (Window › Mix in Separate Window, its own native window) ✅; Delay Compensation view and HEAT missing |
 | MIDI Editor, Score Editor, Event List | 🟡 | Dock height bug fixed (#113); notation editing shallow |
 | Transport, Big Counter, Memory Locations, Automation, Video, Universe, Renderer, UI Customization | ✅ present | |
@@ -69,6 +69,8 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-27 | minor | Clip Effects gain supports Alt/Option-click reset to 0 dB and Ctrl/Cmd fine adjustment. Readiness estimate unchanged |
+| 2026-10-25 | minor | Edit and Mix windows: Tracks and Groups and Clips in full-height dock columns. Readiness estimate unchanged |
 | 2026-10-24 | minor | Plugin parameters: Alt/Option-click returns one to its default. Readiness estimate unchanged |
 | 2026-10-24 | minor | Plugin parameter sliders: Ctrl/Cmd-drag moves them a tenth as far. Readiness estimate unchanged |
 | 2026-10-24 | minor | Strip Silence sliders: Ctrl/Cmd-drag moves them a tenth as far. Readiness estimate unchanged |
