@@ -224,7 +224,7 @@ mod tests {
     fn strings_are_bounded() {
         let mut b = [0u16; 4];
         write_c16("LiVi Wave", &mut b);
-        assert_eq!(read_c16(&b), "Sou");
+        assert_eq!(read_c16(&b), "LiV");
         let full: Vec<u16> = "abcd".encode_utf16().collect();
         assert_eq!(read_c16(&full), "abcd");
         let c: Vec<c_char> = b"Fx|EQ\0junk".iter().map(|&x| x as c_char).collect();
