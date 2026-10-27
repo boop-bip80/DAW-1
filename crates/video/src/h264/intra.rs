@@ -65,8 +65,8 @@ fn pred_nxn(mode: u8, e: &Edge, n: i32, a: Avail, out: &mut [u8], stride: usize)
         0 => pred_vertical(e, n, out, stride),
         1 => pred_horizontal(e, n, out, stride),
         2 => pred_dc(e, n, a, out, stride),
-        3 => pred_down_right(e, n, out, stride),
-        4 => pred_down_left(e, n, out, stride),
+        3 => pred_down_left(e, n, out, stride),
+        4 => pred_down_right(e, n, out, stride),
         5 => pred_vertical_right(e, n, out, stride),
         6 => pred_horizontal_down(e, n, out, stride),
         7 => pred_vertical_left(e, n, out, stride),
@@ -111,7 +111,7 @@ fn pred_dc(e: &Edge, n: i32, a: Avail, out: &mut [u8], stride: usize) {
     }
 }
 
-fn pred_down_right(e: &Edge, n: i32, out: &mut [u8], stride: usize) {
+fn pred_down_left(e: &Edge, n: i32, out: &mut [u8], stride: usize) {
     for y in 0..n {
         for x in 0..n {
             let value = if x == n - 1 && y == n - 1 {
@@ -124,7 +124,7 @@ fn pred_down_right(e: &Edge, n: i32, out: &mut [u8], stride: usize) {
     }
 }
 
-fn pred_down_left(e: &Edge, n: i32, out: &mut [u8], stride: usize) {
+fn pred_down_right(e: &Edge, n: i32, out: &mut [u8], stride: usize) {
     for y in 0..n {
         for x in 0..n {
             let value = if x > y {

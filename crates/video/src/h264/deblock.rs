@@ -314,10 +314,8 @@ pub fn deblock_mb(pic: &mut PicState, addr: usize, mb_w: usize) {
         let tc = |b: u8| if (1..4).contains(&b) { TC0[index_a][b as usize - 1] as i32 } else { 0 };
         EdgeParams { bs: b, tc0: [tc(b[0]), tc(b[1]), tc(b[2]), tc(b[3])], alpha: ALPHA[index_a] as i32, beta: BETA[index_b] as i32 }
     };
-    let width = pic.planes.width;
-    let cwidth = pic.planes.cwidth;
-    filter_luma(pic, mx, my, width, &bs, q_qp, p_qp, &params);
-    filter_chroma(pic, mx, my, cwidth, &bs, q_qpc, p_qp, &params);
+    filter_luma(pic, (mx, my), &bs, q_qp, p_qp, &params);
+    filter_chroma(pic, (mx, my), &bs, q_qpc, p_qp, &params);
 }
 
 fn boundary_strengths(pic: &PicState, q: &MbState, sq: &SliceInfo, left: Option<usize>, top: Option<usize>, t8: bool) -> [[[u8; 4]; 4]; 2] {
@@ -379,14 +377,13 @@ fn boundary_strengths(pic: &PicState, q: &MbState, sq: &SliceInfo, left: Option<
 
 fn filter_luma(
     pic: &mut PicState,
-    mx: usize,
-    my: usize,
-    width: usize,
+    (mx, my): (usize, usize),
     bs: &[[[u8; 4]; 4]; 2],
     q_qp: i32,
     p_qp: [Option<(i32, [u8; 2])>; 2],
     params: &impl Fn(i32, i32, [u8; 4]) -> EdgeParams,
 ) {
+    let width = pic.planes.width;
     for dir in 0..2 {
         for e in 0..4 {
             if bs[dir][e] == [0; 4] {
@@ -410,14 +407,13 @@ fn filter_luma(
 
 fn filter_chroma(
     pic: &mut PicState,
-    mx: usize,
-    my: usize,
-    cwidth: usize,
+    (mx, my): (usize, usize),
     bs: &[[[u8; 4]; 4]; 2],
     q_qpc: [u8; 2],
     p_qp: [Option<(i32, [u8; 2])>; 2],
     params: &impl Fn(i32, i32, [u8; 4]) -> EdgeParams,
 ) {
+    let cwidth = pic.planes.cwidth;
     // chroma (4:2:0): edges at chroma samples 0 and 4 use the bS of luma edges 0 and 2
     for c in 0..2 {
         for dir in 0..2 {
