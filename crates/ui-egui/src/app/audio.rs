@@ -106,7 +106,7 @@ impl SoundApp {
             Trouble::Device(what) => {
                 self.recorder = None;
                 self.recorder_failed = true;
-                (what, "Reconnect it, then use Reconnect audio device in Setup › Playback Engine.")
+                (what, crate::i18n::t("Reconnect it, then use Reconnect audio device in Setup › Playback Engine."))
             }
             Trouble::Disk(what) => (what, crate::i18n::t("Check the disk, then record again.")),
         };

@@ -474,25 +474,33 @@ fn chosen_device<'a>(devices: &'a [DeviceInfo], name: Option<&str>) -> Option<&'
     name.and_then(|n| devices.iter().find(|d| d.name == n)).or_else(|| devices.iter().find(|d| d.is_default))
 }
 
-fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, devices: &[DeviceInfo]) {
+fn device_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<String>, devices: &[DeviceInfo]) -> egui::Response {
     let default = devices.iter().find(|d| d.is_default).map_or("none".to_string(), |d| d.name.clone());
     let shown = value.clone().unwrap_or_else(|| format!("Default ({default})"));
-    egui::ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
-        ui.selectable_value(value, None, format!("Default ({default})"));
-        for d in devices {
-            ui.selectable_value(value, Some(d.name.clone()), format!("{} ({} ch)", d.name, d.max_channels));
-        }
-    });
+    egui::ComboBox::from_id_salt(id)
+        .width(300.0)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, format!("Default ({default})"));
+            for d in devices {
+                ui.selectable_value(value, Some(d.name.clone()), format!("{} ({} ch)", d.name, d.max_channels));
+            }
+        })
+        .response
 }
 
-fn number_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<u32>, options: &[u32], unit: &str) {
+fn number_combo(ui: &mut egui::Ui, id: &str, value: &mut Option<u32>, options: &[u32], unit: &str) -> egui::Response {
     let shown = value.map_or_else(|| crate::i18n::t("Device default").to_string(), |v| format!("{v} {unit}"));
-    egui::ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
-        ui.selectable_value(value, None, crate::i18n::t("Device default"));
-        for v in options {
-            ui.selectable_value(value, Some(*v), format!("{v} {unit}"));
-        }
-    });
+    egui::ComboBox::from_id_salt(id)
+        .width(300.0)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(value, None, crate::i18n::t("Device default"));
+            for v in options {
+                ui.selectable_value(value, Some(*v), format!("{v} {unit}"));
+            }
+        })
+        .response
 }
 
 /// Setup › Playback Engine / Hardware: choose the audio system, devices, rate and buffer size.
@@ -527,19 +535,19 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             system.response.labelled_by(system_label.id);
             ui.end_row();
             let sys = chosen_system(&systems, &draft);
-            ui.label(crate::i18n::t("Output device"));
-            device_combo(ui, "pe-out", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs));
+            let out_label = ui.label(crate::i18n::t("Output device"));
+            device_combo(ui, "pe-out", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs)).labelled_by(out_label.id);
             ui.end_row();
-            ui.label(crate::i18n::t("Input device"));
-            device_combo(ui, "pe-in", &mut draft.input, sys.map_or(&[][..], |s| &s.inputs));
+            let in_label = ui.label(crate::i18n::t("Input device"));
+            device_combo(ui, "pe-in", &mut draft.input, sys.map_or(&[][..], |s| &s.inputs)).labelled_by(in_label.id);
             ui.end_row();
             let out = sys.and_then(|s| chosen_device(&s.outputs, draft.output.as_deref()));
-            ui.label(crate::i18n::t("Sample rate"));
-            number_combo(ui, "pe-rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz");
+            let rate_label = ui.label(crate::i18n::t("Sample rate"));
+            number_combo(ui, "pe-rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz").labelled_by(rate_label.id);
             ui.end_row();
-            ui.label(crate::i18n::t("Buffer size"));
+            let buffer_label = ui.label(crate::i18n::t("Buffer size"));
             let buffers = out.map(DeviceInfo::buffer_sizes).unwrap_or_else(|| soundcraft_playback::devices::STANDARD_BUFFERS.to_vec());
-            number_combo(ui, "pe-buffer", &mut draft.buffer_size, &buffers, "samples");
+            number_combo(ui, "pe-buffer", &mut draft.buffer_size, &buffers, "samples").labelled_by(buffer_label.id);
             ui.end_row();
         });
         ui.add_space(4.0);

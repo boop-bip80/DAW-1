@@ -98,7 +98,7 @@ Two details worth knowing:
 | `crates/engine/src/prefs.rs`, `crates/engine/src/cmd/prefs.rs` | `interface.language` preference and `prefs.get/set/reset` |
 | `apps/soundcraft/src/{config,main}.rs` | desktop persistence (`preferences.json`, one-time legacy migration) |
 | `apps/soundcraft-web/src/web.rs` | web persistence (`localStorage`, `navigator.languages`) |
-| `crates/ui-egui/src/extra_windows.rs` | the Appearance window (language dropdown and preview) |
+| `crates/ui-egui/src/panels/extra_windows.rs` | the Appearance window (language dropdown and preview) |
 | `crates/ui-egui/src/fonts.rs` | CJK font fallback (`system-han`, `system-hangul`; bundled Han subset on the web) |
 
 Lookups, in order of preference (the full API is in [`localization.md`](localization.md#runtime)):

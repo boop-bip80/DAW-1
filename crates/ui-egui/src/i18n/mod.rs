@@ -592,18 +592,20 @@ mod tests {
     /// this test.
     #[test]
     fn every_looked_up_literal_has_a_translation() {
-        let Ok(entries) = std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) else {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        if !root.is_dir() {
             return; // packaged source without the tree: nothing to scan
-        };
+        }
         let zh = ZH();
-        let mut files: Vec<std::path::PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        rust_sources(&root, &mut files);
         files.sort();
         let mut missing = Vec::new();
-        for path in files.iter().filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs")) {
+        for path in &files {
             let Ok(text) = std::fs::read_to_string(path) else { continue };
             for key in looked_up_literals(&text).into_iter().chain(helper_tip_literals(&text)) {
                 if !has(zh, &key) {
-                    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    let name = path.strip_prefix(&root).unwrap_or(path).display().to_string();
                     missing.push(format!("{name}: {key}"));
                 }
             }
@@ -611,6 +613,25 @@ mod tests {
         missing.sort_unstable();
         missing.dedup();
         assert!(missing.is_empty(), "{} literal(s) are looked up but untranslated: {missing:#?}", missing.len());
+    }
+
+    /// Every Rust source under a directory, the crate root included: the UI moved into
+    /// subdirectories (`panels/`, `dialogs/`, `edit_window/`), and a file in one of them must be
+    /// gated exactly like the ones beside `lib.rs`.
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                // The catalog module documents lookups with examples like `t("…")`; it draws no UI.
+                let in_i18n = path.components().any(|c| c.as_os_str() == "i18n");
+                if !in_i18n {
+                    out.push(path);
+                }
+            }
+        }
     }
 
     /// The literal first arguments of plain lookups — `i18n::t("…")` and a `t("…")` imported into

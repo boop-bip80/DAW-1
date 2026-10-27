@@ -96,6 +96,9 @@ mod save_tests {
         let mut e = crate::demo::demo_engine();
         e.execute("mix.volume", &serde_json::json!({"track": "Kick", "db": -7.0})).unwrap();
         let dir = crate::test_scratch::root().join(format!("soundcraft-autosave-{}", std::process::id()));
+        // A run killed mid-save leaves its audio behind; a later run reusing the process id would
+        // otherwise reuse those files and write none of its own.
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Midnight Groove.scraft");
         let p = path.to_string_lossy().into_owned();
         let n1 = save_copy(&e, &p).unwrap();

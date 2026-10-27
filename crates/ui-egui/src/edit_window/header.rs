@@ -441,6 +441,14 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
         raised_key(ui.painter(), out, t.slot_face, resp.hovered() || fresp.hovered());
         groove(ui.painter(), fader.min.x - 0.5, out.min.y + 1.0..=out.max.y - 1.0, t.slot_face[0]);
         let name = crate::mix_window::route_name(app, &track.mixer.output);
+        // The input selector goes through header_selector, which publishes a ComboBox; this one is
+        // painted, so it registers the same node itself.
+        let output_label = crate::i18n::fmt(crate::i18n::t("Output for {name}"), &[("name", &track.name)]);
+        resp.widget_info(|| {
+            let mut info = egui::WidgetInfo::labeled(egui::accesskit::Role::ComboBox, ui.is_enabled(), &output_label);
+            info.current_text_value = Some(name.clone());
+            info
+        });
         ui.painter().with_clip_rect(sel.shrink(1.0)).text(sel.center(), Align2::CENTER_CENTER, name, bold(10.0), t.text);
         let c = fader.center() + vec2(0.5, 0.0);
         ui.painter().vline(c.x, c.y - 5.0..=c.y + 5.0, Stroke::new(1.0, t.text));

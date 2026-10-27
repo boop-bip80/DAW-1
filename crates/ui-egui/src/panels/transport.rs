@@ -94,7 +94,7 @@ pub(super) fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    crate::windows::keyed(crate::i18n::t("Big Counter")).open(&mut open).default_size(vec2(520.0, 110.0)).show(ctx, |ui| {
+    crate::windows::keyed("Big Counter").open(&mut open).default_size(vec2(520.0, 110.0)).show(ctx, |ui| {
         let s = app.engine.session();
         let txt = s.format_position(app.position(), s.edit.main_counter);
         let r = ui.available_rect_before_wrap();
