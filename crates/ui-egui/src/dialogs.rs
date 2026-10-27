@@ -10,6 +10,23 @@ use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
 use soundcraft_time::Samples;
 use std::sync::Arc;
 
+mod audiosuite;
+mod files;
+mod strip_silence;
+
+#[cfg(test)]
+use audiosuite::SPEED_RAMP_CHOICES;
+use audiosuite::audiosuite_window;
+use files::{OPEN_PENDING, default_dir, open_pending_session, path_dialog};
+pub use files::{ask_to_save, open_session_bytes, run_or_ask, takes_path};
+use strip_silence::{AUTO_NAME_LABELS, STRIP_NAME_LABELS, StripRectangles, auto_rename_action, strip_name_fields, strip_silence_action};
+pub use strip_silence::{StripRects, strip_silence_rectangles};
+
+pub mod ops_windows;
+pub(super) mod recent;
+pub mod recovery;
+pub mod spot;
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
@@ -61,37 +78,6 @@ pub struct Dialogs {
     pub strip_names: StripNames,
     /// The Strip Silence rectangles the Edit window draws while Strip Silence is open.
     strip_rectangles: StripRectangles,
-}
-
-/// What Strip keeps on each track: the Strip Silence rectangles.
-pub type StripRects = Arc<Vec<(TrackId, Vec<soundcraft_time::Range>)>>;
-
-/// The session revision and the Strip Silence values (as bits) that rectangles were found for.
-type StripKey = (u64, [u64; 4]);
-
-/// The Strip Silence rectangles last found, and the scan running for newer values.
-#[derive(Default)]
-struct StripRectangles {
-    shown: Option<(StripKey, StripRects)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    running: Option<StripScanning>,
-}
-
-/// A Strip Silence scan on a worker thread: what it was started for, where its result arrives, and
-/// the flag that stops it.
-#[cfg(not(target_arch = "wasm32"))]
-struct StripScanning {
-    key: StripKey,
-    rx: std::sync::mpsc::Receiver<StripRects>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
-}
-
-/// A scan whose rectangles nobody will draw stops before its next window of audio.
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for StripScanning {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
 }
 
 impl Dialogs {
@@ -259,102 +245,6 @@ impl Dialogs {
     }
 }
 
-/// When `id` would close a session with unsaved changes, ask first; true when the question is
-/// open instead. A take in progress is stopped first, so it counts as a change.
-pub fn ask_to_save(app: &mut SoundApp, id: &str, params: &Value) -> bool {
-    if !matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit" | OPEN_PENDING)
-        || soundcraft_engine::find_command(id).is_some_and(|c| (c.enabled)(&app.engine).is_err())
-    {
-        return false;
-    }
-    if app.engine.transport.recording {
-        app.stop_play();
-    }
-    if !app.engine.is_dirty() {
-        return false;
-    }
-    app.dialogs.open = Some(Dialog::SaveChanges { then: (id.into(), params.clone()) });
-    true
-}
-
-/// Runs `id`, unless it asks to save first (`ask_to_save`).
-pub fn run_or_ask(app: &mut SoundApp, id: &str, params: Value) -> Result<Value, String> {
-    if ask_to_save(app, id, &params) {
-        return Ok(Value::Null);
-    }
-    app.run(id, params)
-}
-
-/// What `SaveChanges` carries on with to open the session the browser read.
-const OPEN_PENDING: &str = "ui.open_pending_session";
-
-/// Opens a session the browser read as bytes (picked or dropped), asking first when the open one
-/// has changes. The read finishes later than the pick, so the question is asked only now.
-pub fn open_session_bytes(app: &mut SoundApp, name: String, bytes: Vec<u8>) {
-    if crate::bounce::refuses_session_switch(app) {
-        return;
-    }
-    app.dialogs.pending_session = Some((name, bytes));
-    if !ask_to_save(app, OPEN_PENDING, &json!({})) {
-        open_pending_session(app);
-    }
-}
-
-/// Open the session bytes read by the browser after the save prompt, stopping transport first. A successful open
-/// marks the document replaced so pending captures cancel and reports any missing media.
-fn open_pending_session(app: &mut SoundApp) {
-    let Some((name, bytes)) = app.dialogs.pending_session.take() else { return };
-    if crate::bounce::refuses_session_switch(app) {
-        return;
-    }
-    let _ = app.run("transport.stop", json!({}));
-    app.ui.status = match soundcraft_engine::io::open_session_bytes(&mut app.engine, &name, &bytes) {
-        Ok(missing) => {
-            // This path replaces the document without going through `SoundApp::run`.
-            app.document_replaced();
-            if missing.is_empty() { format!("Opened {name}") } else { format!("Opened {name} ({} missing media)", missing.len()) }
-        }
-        Err(e) => e.to_string(),
-    };
-}
-
-/// A path prompt for any command whose parameters start with a required `path` or `dir` (plus
-/// Print Score, whose path is optional), with a default file name from the command.
-pub fn takes_path(id: &str) -> bool {
-    path_key(id).is_some()
-}
-
-fn path_key(id: &str) -> Option<&'static str> {
-    let spec = soundcraft_engine::command_specs().iter().find(|c| c.id == id)?;
-    if spec.params.starts_with("{path?") && id != "file.print_score" {
-        None
-    } else if spec.params.starts_with("{path") {
-        Some("path")
-    } else if spec.params.starts_with("{dir") {
-        Some("dir")
-    } else {
-        None
-    }
-}
-
-fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
-    let spec = soundcraft_engine::command_specs().iter().find(|c| c.id == id)?;
-    let key = path_key(id)?;
-    let importing = id.contains("import") || id.contains("open");
-    let ext = match id {
-        "file.export_midi" => ".mid",
-        "file.export_sibelius" => ".musicxml",
-        "file.print_score" => ".svg",
-        "file.export_clip_groups" => ".scgrp",
-        "file.export_session_text" => ".txt",
-        _ if id.contains("session") => ".scraft",
-        _ => "",
-    };
-    let path = if importing || key == "dir" { format!("{home}/") } else { format!("{home}/{name}{ext}") };
-    let title = format!("{} — {}", spec.menu.last().copied().unwrap_or("File"), spec.label.trim_end_matches("..."));
-    Some(Dialog::PathPrompt { cmd: id.into(), title, path, key: key.into() })
-}
-
 fn clear_message(s: &Session, clips: &[ClipId], sources: &[SourceId]) -> Option<String> {
     let listed: std::collections::BTreeSet<ClipId> = clips.iter().copied().collect();
     let names: Vec<&str> = s.tracks.iter().flat_map(|t| t.clips()).filter(|c| listed.contains(&c.id)).map(|c| c.name.as_str()).collect();
@@ -388,17 +278,6 @@ fn clear_message(s: &Session, clips: &[ClipId], sources: &[SourceId]) -> Option<
         text += if files.len() == 1 { " The file stays on disk." } else { " The files stay on disk." };
     }
     Some(text)
-}
-
-fn default_dir() -> String {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into())
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        String::new()
-    }
 }
 
 /// Show the open dialog, if any.
@@ -903,137 +782,6 @@ fn run_then(app: &mut SoundApp, cmd: &str, params: Value) -> Result<Value, Strin
     app.run(cmd, params)
 }
 
-/// The ranges Strip keeps on each selected track, found by the scan of `edit.strip_silence_preview`
-/// with the values of the open Strip Silence window (or of the one Rename Selected Clips goes back
-/// to). The Edit window draws them as the Strip Silence rectangles. Empty when neither window is
-/// open. A scan runs again only when the session or a value changes. Off the web it runs on a worker
-/// thread, one at a time, and the rectangles last found stay until it ends. On the web it runs on the
-/// frame thread once no pointer button is down, so a slider drag scans once, on release. A scan for
-/// older values, or one that runs on after the window closes, stops before its next window of audio.
-pub fn strip_silence_rectangles(app: &mut SoundApp, ctx: &egui::Context) -> StripRects {
-    let values = match &app.dialogs.open {
-        Some(Dialog::StripSilence { threshold, min_ms, pre_ms, post_ms }) => [*threshold, *min_ms, *pre_ms, *post_ms],
-        Some(Dialog::StripSilenceRename { strip, .. }) => *strip,
-        _ => {
-            app.dialogs.strip_rectangles = StripRectangles::default();
-            return Arc::default();
-        }
-    };
-    let key: StripKey = (app.engine.revision, values.map(f64::to_bits));
-    let r = &mut app.dialogs.strip_rectangles;
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(job) = &r.running {
-        match job.rx.try_recv() {
-            Ok(rects) => {
-                r.shown = Some((job.key, rects));
-                r.running = None;
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => r.running = None,
-            // Values changed since it started: stop it, and the next scan starts when it has ended.
-            Err(std::sync::mpsc::TryRecvError::Empty) if job.key != key => job.stop.store(true, std::sync::atomic::Ordering::Relaxed),
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
-        }
-    }
-    let shown = r.shown.as_ref().map(|(k, rects)| (*k == key, Arc::clone(rects)));
-    #[cfg(not(target_arch = "wasm32"))]
-    let busy = r.running.is_some();
-    // The browser's scan blocks the frame, so it waits for the release that ends a slider drag.
-    #[cfg(target_arch = "wasm32")]
-    let busy = ctx.input(|i| i.pointer.any_down());
-    if let Some((true, rects)) = shown {
-        return rects;
-    }
-    if busy {
-        return shown.map(|(_, rects)| rects).unwrap_or_default();
-    }
-    let [threshold, min_ms, pre_ms, post_ms] = values;
-    let params = json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms});
-    let Ok(scan) = soundcraft_engine::cmd::strip_silence_scan(&app.engine, &params) else {
-        app.dialogs.strip_rectangles.shown = Some((key, Arc::default()));
-        return Arc::default();
-    };
-    let scan = Arc::new(scan);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (ctx, job) = (ctx.clone(), Arc::clone(&scan));
-        let work = move || {
-            let found = job.run();
-            // A stopped scan sends nothing: its sender drops, and the rectangles last found stay.
-            if !job.stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = tx.send(Arc::new(found.unwrap_or_default()));
-            }
-            ctx.request_repaint();
-        };
-        if std::thread::Builder::new().name("strip-silence-scan".into()).spawn(work).is_ok() {
-            app.dialogs.strip_rectangles.running = Some(StripScanning { key, rx, stop: Arc::clone(&scan.stop) });
-            return shown.map(|(_, rects)| rects).unwrap_or_default();
-        }
-    }
-    // The browser has no threads, and without a thread to spare the scan runs on this one.
-    let rects: StripRects = Arc::new(scan.run().unwrap_or_default());
-    app.dialogs.strip_rectangles.shown = Some((key, Arc::clone(&rects)));
-    rects
-}
-
-/// The command a Strip Silence button runs: `mode` is strip, extract or separate, and `values` holds
-/// the threshold in dB, the minimum strip duration and the clip start and end pads in milliseconds.
-/// `names` names the clips it leaves when its name is not blank.
-fn strip_silence_action(mode: &str, values: [f64; 4], names: &StripNames) -> (String, Value) {
-    let [threshold, min_ms, pre_ms, post_ms] = values;
-    let mut params = json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms, "mode": mode});
-    if !names.name.trim().is_empty() {
-        params["name"] = json!(names.name);
-        params["number"] = json!(names.number);
-        params["zeros"] = json!(names.zeros);
-        params["suffix"] = json!(names.suffix);
-    }
-    ("edit.strip_silence".into(), params)
-}
-
-/// The command Auto Rename's OK runs: the scheme for `clips`, or no scheme when the name is blank.
-fn auto_rename_action(clips: &[ClipId], names: &StripNames) -> (String, Value) {
-    let mut params = json!({"clips": clips});
-    if !names.name.trim().is_empty() {
-        params["name"] = json!(names.name);
-        params["number"] = json!(names.number);
-        params["zeros"] = json!(names.zeros);
-        params["suffix"] = json!(names.suffix);
-    }
-    ("clip.auto_rename".into(), params)
-}
-
-/// The labels of the number and zeros fields in Strip Silence's Rename Selected Clips.
-const STRIP_NAME_LABELS: [&str; 2] = ["Number", "Zeros"];
-/// The labels of the number and zeros fields in Auto Rename's Rename Selected Clips.
-const AUTO_NAME_LABELS: [&str; 2] = ["Starting Number", "Number of Places"];
-
-/// The Name, number, zeros and Suffix fields of Rename Selected Clips, with the first name they
-/// give. `labels` names the number and zeros fields.
-fn strip_name_fields(ui: &mut egui::Ui, names: &mut StripNames, labels: [&str; 2]) {
-    let [number, zeros] = labels;
-    egui::Grid::new("strip_names").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
-        let name = ui.label("Name");
-        ui.text_edit_singleline(&mut names.name).labelled_by(name.id);
-        ui.end_row();
-        let number = ui.label(number);
-        ui.add(egui::DragValue::new(&mut names.number).range(0..=StripNames::MAX_NUMBER)).labelled_by(number.id);
-        ui.end_row();
-        let zeros = ui.label(zeros);
-        ui.add(egui::DragValue::new(&mut names.zeros).range(0..=StripNames::MAX_ZEROS)).labelled_by(zeros.id);
-        ui.end_row();
-        let suffix = ui.label("Suffix");
-        ui.text_edit_singleline(&mut names.suffix).labelled_by(suffix.id);
-        ui.end_row();
-    });
-    let example = if names.name.trim().is_empty() {
-        "Without a name, the clips keep their names.".to_string()
-    } else {
-        format!("First clip: {}", names.clip_name(0))
-    };
-    ui.label(egui::RichText::new(example).small().color(Tokens::current().text_dim));
-}
-
 /// Cancel/OK row; returns true when OK was pressed (or Enter).
 fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> bool {
     buttons_enabled(ui, ok, enter, true)
@@ -1070,73 +818,6 @@ fn name_field(ui: &mut egui::Ui, name: &mut String) {
 /// The command the tempo-change dialog runs on OK.
 fn tempo_change_action(at: Samples, bpm: f64) -> (String, Value) {
     ("event.tempo".into(), json!({"bpm": bpm, "at": at}))
-}
-
-/// The speed ramp's choices in the AudioSuite window: param id, label, default, and (value, name) pairs.
-const SPEED_RAMP_CHOICES: [(&str, &str, f32, &[(f32, &str)]); 3] = [
-    ("change", "Change", 0.0, &[(0.0, "Slow Down"), (1.0, "Speed Up")]),
-    ("selection", "Selection", 0.0, &[(0.0, "Fit To"), (1.0, "Extend")]),
-    ("fades", "Fades", 1.0, &[(1.0, "On"), (0.0, "Off")]),
-];
-
-/// Process-parameter window for the chosen AudioSuite process, with its controls and Render action.
-fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
-    let Some(process) = app.ui.audiosuite.clone() else { return };
-    let mut open = true;
-    let title = soundcraft_dsp::plugin_info(&process).map_or_else(|| process.replace('_', " "), |p| p.name.to_string());
-    egui::Window::new(format!("AudioSuite · {title}")).open(&mut open).default_width(360.0).show(ctx, |ui| {
-        let key = egui::Id::unique(("as_params", process.clone()));
-        let mut params: std::collections::BTreeMap<String, f32> = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_default();
-        if let Some(info) = soundcraft_dsp::plugin_info(&process) {
-            for p in info.params {
-                let v = params.entry(p.id.to_string()).or_insert(p.default);
-                ui.add(egui::Slider::new(v, p.min..=p.max).text(p.name));
-            }
-        } else {
-            match process.as_str() {
-                "normalize" => {
-                    let v = params.entry("target_db".into()).or_insert(-0.1);
-                    ui.add(egui::Slider::new(v, -24.0..=0.0).text("Peak dB"));
-                }
-                "time_stretch" => {
-                    let v = params.entry("ratio".into()).or_insert(1.0);
-                    ui.add(egui::Slider::new(v, 0.25..=4.0).text("Length ratio"));
-                }
-                "pitch_shift" => {
-                    let v = params.entry("semitones".into()).or_insert(0.0);
-                    ui.add(egui::Slider::new(v, -24.0..=24.0).text("Semitones"));
-                }
-                "speed_ramp" => {
-                    for (id, label, default, choices) in SPEED_RAMP_CHOICES {
-                        let v = params.entry(id.to_string()).or_insert(default);
-                        ui.horizontal(|ui| {
-                            ui.label(label);
-                            for &(value, name) in choices {
-                                ui.radio_value(v, value, name);
-                            }
-                        });
-                    }
-                }
-                _ => {
-                    ui.label("No parameters.");
-                }
-            }
-        }
-        ui.ctx().memory_mut(|m| m.data.insert_temp(key, params.clone()));
-        let hint = if soundcraft_dsp::is_generator(&process) {
-            "Fills the selection on the selected tracks with a new clip."
-        } else {
-            "Processes the selected clips and replaces them with rendered audio."
-        };
-        ui.label(egui::RichText::new(hint).small());
-        if ui.button(egui::RichText::new("Render").strong()).clicked() {
-            let p: serde_json::Map<String, Value> = params.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
-            let _ = app.run("audiosuite.process", json!({"process": process, "params": p}));
-        }
-    });
-    if !open {
-        app.ui.audiosuite = None;
-    }
 }
 
 /// The `clip.loop` params the Clip Looping dialog's OK sends; None while the typed length does not
