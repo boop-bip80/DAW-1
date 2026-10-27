@@ -44,12 +44,15 @@ const HANGUL: &[(&str, u32)] = &[
 ];
 /// Chinese fallback, appended after every family like [`HANGUL`], so Chinese session, track and
 /// clip names draw whatever the interface language. Candidates are Simplified-Chinese faces: macOS
-/// ships PingFang, Heiti SC (STHeiti) and Hiragino Sans GB, Windows Microsoft YaHei and SimSun, and
-/// the Noto Sans CJK collection's face 2 is its Simplified-Chinese face (face 0 is Japanese).
+/// ships Hiragino Sans GB, PingFang and Heiti SC (STHeiti), Windows Microsoft YaHei and SimSun, and
+/// the Noto Sans CJK collection's face 2 is its Simplified-Chinese face (face 0 is Japanese). The
+/// macOS collections list Traditional faces first (`PingFang.ttc` face 0 is PingFang HK, `STHeiti
+/// Light.ttc` face 0 is Heiti TC), so the unambiguously Simplified Hiragino Sans GB leads and
+/// STHeiti is read at its Heiti SC face, index 1.
 const CJK: &[(&str, u32)] = &[
-    ("/System/Library/Fonts/PingFang.ttc", 0),
-    ("/System/Library/Fonts/STHeiti Light.ttc", 0),
     ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+    ("/System/Library/Fonts/PingFang.ttc", 0),
+    ("/System/Library/Fonts/STHeiti Light.ttc", 1),
     ("/System/Library/Fonts/Supplemental/Songti.ttc", 0),
     ("C:\\Windows\\Fonts\\msyh.ttc", 0),
     ("C:\\Windows\\Fonts\\msyh.ttf", 0),
@@ -184,6 +187,17 @@ mod tests {
         }
         // Face 0 of the Noto Sans CJK collection is Japanese; the Simplified-Chinese face is 2.
         assert!(CJK.iter().filter(|(p, _)| p.ends_with("NotoSansCJK-Regular.ttc")).all(|(_, i)| *i == 2));
+    }
+
+    /// The macOS collections list Traditional faces first (`PingFang.ttc` face 0 is PingFang HK and
+    /// `STHeiti Light.ttc` face 0 is Heiti TC), so the unambiguously Simplified Hiragino Sans GB
+    /// must lead and STHeiti must be read at its Heiti SC face, index 1.
+    #[test]
+    fn cjk_candidates_pick_simplified_chinese_faces_on_macos() {
+        let index = |suffix: &str| CJK.iter().position(|(p, _)| p.ends_with(suffix)).unwrap();
+        let hiragino = index("Hiragino Sans GB.ttc");
+        assert!(hiragino < index("PingFang.ttc") && hiragino < index("STHeiti Light.ttc"));
+        assert!(CJK.iter().filter(|(p, _)| p.ends_with("STHeiti Light.ttc")).all(|(_, i)| *i == 1));
     }
 
     /// Every literal glyph the UI fixtures paint is covered by the bundled faces in every family,
