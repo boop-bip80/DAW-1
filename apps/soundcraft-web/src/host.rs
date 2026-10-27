@@ -5,16 +5,13 @@
 //! - `soundcraft:open` (from the parent): `{ name, bytes }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It is handled like a file dropped on the window: a session (`.scraftz` bundle
 //!   or bare `.scraft`) opens, MIDI and audio import.
-//! - `soundcraft:save` (to the parent): `{ id, name, bytes }` (a transferred `ArrayBuffer`) for every
+//! - `soundcraft:save` (to the parent): `{ name, bytes }` (a transferred `ArrayBuffer`) for every
 //!   file SoundCraft would otherwise download: Save (the `<name>.scraftz` bundle, which marks the
 //!   session saved), Save As, Save a Copy, bounces and the exports.
-//! - `soundcraft:saved` (from the parent): `{ id }`, the file from that `soundcraft:save` is
-//!   stored. Until it arrives a session save keeps the session reported dirty; if it doesn't come
-//!   within 30 s the app posts `soundcraft:failed { id, error }` and the session stays dirty.
 //! - `soundcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `soundcraft:failed` (to the parent): `{ error }` when the app couldn't start, or when a
 //!   `soundcraft:open` document (or the documents waiting to open) is over `MAX_OPEN_BYTES` (1 GiB,
-//!   the session-bundle cap), or a save went unconfirmed.
+//!   the session-bundle cap).
 //!
 //! The bridge is installed only for a same-origin parent, or for a parent on the origin named by
 //! `?host_origin=` (a bare `scheme://host[:port]` origin); messages go to that exact origin and only
@@ -29,8 +26,6 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-
-use crate::bridge::SaveAcks;
 
 thread_local! {
     /// The bridge the engine's delivery hook posts to (a plain `fn` can't capture it).
@@ -47,8 +42,6 @@ pub struct Bridge {
     origin: String,
     /// The unsaved-changes state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
-    /// Saves waiting for `soundcraft:saved`.
-    acks: Rc<RefCell<SaveAcks>>,
     pub received: Received,
 }
 
@@ -65,7 +58,7 @@ impl Bridge {
         // Reading a cross-origin parent's location throws: treat that as cross-origin.
         let parent_origin = parent.location().origin().ok();
         let origin = crate::bridge::target_origin(&own, parent_origin.as_deref(), host_origin)?;
-        Some(Self { window, parent, origin, reported: Rc::default(), acks: Rc::default(), received: Rc::default() })
+        Some(Self { window, parent, origin, reported: Rc::default(), received: Rc::default() })
     }
 
     /// Hear files from the parent and make [`deliver`] post to it.
@@ -74,24 +67,8 @@ impl Bridge {
         BRIDGE.with(|b| *b.borrow_mut() = Some(self.clone()));
     }
 
-    /// Report unsaved changes (once a frame), held dirty while a session save is unconfirmed, and
-    /// fail saves the parent didn't confirm in time.
-    pub fn report_dirty(&self, ctx: &egui::Context, engine_dirty: bool) {
-        let expired = self.acks.borrow_mut().expire(js_sys::Date::now());
-        for (id, name) in expired {
-            self.send(&[
-                ("type", "soundcraft:failed".into()),
-                ("id", JsValue::from_f64(id as f64)),
-                ("error", format!("{name}: the host page didn't confirm the save").into()),
-            ]);
-        }
-        let (dirty, waiting) = {
-            let acks = self.acks.borrow();
-            (acks.dirty(engine_dirty), acks.waiting())
-        };
-        if waiting {
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
-        }
+    /// Report unsaved changes (once a frame).
+    pub fn report_dirty(&self, dirty: bool) {
         if self.reported.get() != Some(dirty) && self.send(&[("type", "soundcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));
         }
@@ -107,47 +84,24 @@ impl Bridge {
 
     fn post_save(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
-        let session = name.ends_with(&format!(".{}", soundcraft_engine::io::BUNDLE_EXTENSION));
-        let id = self.acks.borrow_mut().posted(name, session, js_sys::Date::now());
-        let message = message(&[
-            ("type", "soundcraft:save".into()),
-            ("id", JsValue::from_f64(id as f64)),
-            ("name", name.into()),
-            ("bytes", buffer.clone().into()),
-        ])
-        .ok_or_else(|| "couldn't build the message".to_string());
-        let sent = message.and_then(|m| {
-            self.parent
-                .post_message_with_transfer(&m, &self.origin, &js_sys::Array::of1(&buffer))
-                .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
-        });
-        if sent.is_err() {
-            self.acks.borrow_mut().failed(id);
-        }
-        sent
+        let message = message(&[("type", "soundcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())])
+            .ok_or_else(|| "couldn't build the message".to_string())?;
+        self.parent
+            .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
+            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
     }
 
     fn listen(&self, ctx: egui::Context) {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
         let received = self.received.clone();
-        let acks = self.acks.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
             }
             let data = event.data();
-            match string(&data, "type").as_deref() {
-                Some("soundcraft:open") => {}
-                Some("soundcraft:saved") => {
-                    let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).ok().and_then(|v| v.as_f64());
-                    if let Some(id) = id.filter(|id| id.is_finite() && *id >= 0.0 && id.fract() == 0.0) {
-                        acks.borrow_mut().saved(id as u64);
-                        ctx.request_repaint();
-                    }
-                    return;
-                }
-                _ => return,
+            if string(&data, "type").as_deref() != Some("soundcraft:open") {
+                return;
             }
             let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Session.scraftz".to_string());
             let Some(array) = byte_array(&data) else { return };

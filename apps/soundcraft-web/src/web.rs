@@ -244,7 +244,7 @@ impl eframe::App for WebShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
         if let Some(bridge) = &self.bridge {
-            bridge.report_dirty(ui.ctx(), self.app.engine.is_dirty());
+            bridge.report_dirty(self.app.engine.is_dirty());
         }
     }
 }

@@ -1,10 +1,5 @@
 //! The host bridge's decisions, kept free of `web_sys` so they are tested natively: which parent
-//! origin the bridge may talk to, and which saves the parent has confirmed.
-
-use std::collections::BTreeMap;
-
-/// How long the parent has to answer `soundcraft:save` with `soundcraft:saved` (milliseconds).
-pub const SAVE_ACK_TIMEOUT_MS: f64 = 30_000.0;
+//! origin the bridge may talk to, and whether an opened document fits.
 
 /// The origin the bridge posts to and hears from, or `None` for no bridge (saves download).
 ///
@@ -77,68 +72,6 @@ pub fn is_origin(s: &str) -> bool {
     match port {
         Some(p) => p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u16>().is_ok(),
         None => true,
-    }
-}
-
-/// Saves posted to the parent and not yet confirmed.
-#[derive(Debug, Default)]
-pub struct SaveAcks {
-    next_id: u64,
-    /// Request id → (file name, deadline in ms, whether it is the session itself).
-    pending: BTreeMap<u64, (String, f64, bool)>,
-    /// A session save failed or went unanswered: the session stays dirty until one is confirmed.
-    unconfirmed: bool,
-}
-
-impl SaveAcks {
-    /// Record a save posted at `now`; returns its request id.
-    pub fn posted(&mut self, name: &str, session: bool, now: f64) -> u64 {
-        self.next_id = self.next_id.wrapping_add(1);
-        self.pending.insert(self.next_id, (name.to_string(), now + SAVE_ACK_TIMEOUT_MS, session));
-        self.next_id
-    }
-
-    /// The parent confirmed request `id`. False when no such save is waiting.
-    pub fn saved(&mut self, id: u64) -> bool {
-        match self.pending.remove(&id) {
-            Some((_, _, session)) => {
-                if session {
-                    self.unconfirmed = false;
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// The parent reported request `id` failed; returns its name.
-    pub fn failed(&mut self, id: u64) -> Option<String> {
-        let (name, _, session) = self.pending.remove(&id)?;
-        self.unconfirmed |= session;
-        Some(name)
-    }
-
-    /// Saves past their deadline at `now`, removed and returned as `(id, name)`.
-    pub fn expire(&mut self, now: f64) -> Vec<(u64, String)> {
-        let late: Vec<u64> = self.pending.iter().filter(|(_, (_, deadline, _))| now >= *deadline).map(|(id, _)| *id).collect();
-        late.into_iter()
-            .filter_map(|id| {
-                let (name, _, session) = self.pending.remove(&id)?;
-                self.unconfirmed |= session;
-                Some((id, name))
-            })
-            .collect()
-    }
-
-    /// Whether any save is still waiting for the parent.
-    pub fn waiting(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    /// The unsaved-changes state to report: the engine's, held dirty while a session save is
-    /// unconfirmed.
-    pub fn dirty(&self, engine_dirty: bool) -> bool {
-        engine_dirty || self.unconfirmed || self.pending.values().any(|(_, _, session)| *session)
     }
 }
 
@@ -215,41 +148,6 @@ mod tests {
         ] {
             assert_eq!(target_origin(OWN, None, Some(bad)), None, "{bad}");
         }
-    }
-
-    #[test]
-    fn save_stays_dirty_until_the_parent_confirms() {
-        let mut acks = SaveAcks::default();
-        let id = acks.posted("a.scraftz", true, 0.0);
-        // The engine marked the session saved, but the parent hasn't confirmed.
-        assert!(acks.dirty(false));
-        assert!(!acks.saved(id + 1), "an unknown id confirms nothing");
-        assert!(acks.dirty(false));
-        assert!(acks.saved(id));
-        assert!(!acks.dirty(false));
-        assert!(!acks.waiting());
-    }
-
-    #[test]
-    fn unanswered_save_times_out_as_failed_and_stays_dirty() {
-        let mut acks = SaveAcks::default();
-        let id = acks.posted("a.scraftz", true, 1_000.0);
-        assert!(acks.expire(1_000.0 + SAVE_ACK_TIMEOUT_MS - 1.0).is_empty());
-        assert_eq!(acks.expire(1_000.0 + SAVE_ACK_TIMEOUT_MS), vec![(id, "a.scraftz".to_string())]);
-        assert!(acks.dirty(false));
-        // A later confirmed save clears it.
-        let next = acks.posted("a.scraftz", true, 50_000.0);
-        assert!(acks.saved(next));
-        assert!(!acks.dirty(false));
-    }
-
-    #[test]
-    fn export_acks_do_not_hold_the_session_dirty() {
-        let mut acks = SaveAcks::default();
-        let id = acks.posted("mix.wav", false, 0.0);
-        assert!(!acks.dirty(false));
-        assert_eq!(acks.failed(id).as_deref(), Some("mix.wav"));
-        assert!(!acks.dirty(false));
     }
 
     #[test]
