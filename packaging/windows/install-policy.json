@@ -1,0 +1,141 @@
+{
+  "id": "liviwave",
+  "name": "LiVi Wave",
+  "upgradeCode": "EE53D3E5-D0AE-40F9-808D-9417FDEBF61A",
+  "sources": [
+    "liviwave.wxs"
+  ],
+  "icon": "assets/app-icon/liviwave.ico",
+  "localization": [],
+  "extensions": [
+    "UI"
+  ],
+  "payloads": [
+    "NOTICE",
+    "liviwave-cli.exe",
+    "liviwave.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Classes\\LiViWave.Audio\\shell\\open\\command",
+      "",
+      "\"[#LiviWaveExe]\" \"%1\""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\LiViWave.Midi\\shell\\open\\command",
+      "",
+      "\"[#LiviWaveExe]\" \"%1\""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.wav\\OpenWithProgids",
+      "LiViWave.Audio",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.aif\\OpenWithProgids",
+      "LiViWave.Audio",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.aiff\\OpenWithProgids",
+      "LiViWave.Audio",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.flac\\OpenWithProgids",
+      "LiViWave.Audio",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.mp3\\OpenWithProgids",
+      "LiViWave.Audio",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.mid\\OpenWithProgids",
+      "LiViWave.Midi",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.midi\\OpenWithProgids",
+      "LiViWave.Midi",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe",
+      "FriendlyAppName",
+      "LiVi Wave"
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\shell\\open\\command",
+      "",
+      "\"[#LiviWaveExe]\" \"%1\""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".scraft",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".wav",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".aif",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".aiff",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".flac",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".mp3",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".mid",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\liviwave.exe\\SupportedTypes",
+      ".midi",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\liviwave.exe",
+      "",
+      "[#LiviWaveExe]"
+    ]
+  ],
+  "mode": "dualScope"
+}
