@@ -35,6 +35,12 @@ pub(super) fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
     if app.gesture.is_none() || matches!(app.gesture, Some(Gesture::Fader { .. })) {
         return;
     }
+    if matches!(app.gesture, Some(Gesture::ZoomBox { .. } | Gesture::ZoomOut))
+        && (ctx.input(|i| i.key_pressed(egui::Key::Escape)) || app.engine.session().edit.tool != Tool::Zoom)
+    {
+        app.gesture = None;
+        return;
+    }
     let (s, tl) = (app.engine.session_arc(), rect(app.edit_layout.timeline));
     let p = ctx.pointer_latest_pos();
     if !ctx.input(|i| i.pointer.any_down()) {
@@ -130,6 +136,10 @@ pub(super) fn drive_drag(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         }
+        Some(Gesture::ZoomBox { current, .. }) => {
+            *current = inside.x;
+            ctx.request_repaint();
+        }
         _ => {}
     }
     if invalid_fade {
@@ -188,18 +198,28 @@ fn finish_drag(app: &mut SoundApp, s: &Session, tl: Rect, p: Option<Pos2>) {
                 }
             }
         }
-        Some(Gesture::ZoomBox { start }) => {
-            let Some(p) = p else { return };
-            let a = sample_at(s, tl, start.min(p.x));
-            let b = sample_at(s, tl, start.max(p.x));
+        Some(Gesture::ZoomBox { start, current, .. }) => {
+            let release_x = p.map_or(current, |point| point.x.clamp(tl.min.x, tl.max.x));
+            let (a, b) = zoom_drag_samples(s, tl, start, release_x);
             if b > a {
                 let spp = ((b - a) as f64 / f64::from(tl.width())).max(0.25);
                 let _ = app.run("view.zoom_set", json!({"samples_per_px": spp}));
                 let _ = app.run("view.scroll", json!({"to": a}));
+                let _ = app.run("edit.zoom_complete", json!({}));
             }
+        }
+        Some(Gesture::ZoomOut) => {
+            let _ = app.run("view.zoom_out", json!({}));
+            let _ = app.run("edit.zoom_complete", json!({}));
         }
         _ => {}
     }
+}
+
+/// Converts the clamped drag rectangle used by the preview into its committed sample range.
+pub(super) fn zoom_drag_samples(s: &Session, timeline: Rect, start_x: f32, release_x: f32) -> (Samples, Samples) {
+    let x = release_x.clamp(timeline.min.x, timeline.max.x);
+    (sample_at(s, timeline, start_x.min(x)), sample_at(s, timeline, start_x.max(x)))
 }
 
 /// Grid snapping while dragging; holding Cmd/Ctrl swaps Grid and Slip.
