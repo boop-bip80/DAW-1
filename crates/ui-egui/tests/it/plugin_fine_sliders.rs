@@ -171,6 +171,23 @@ fn clip_effects_sliders_move_a_tenth_as_far_with_ctrl_held() {
 }
 
 #[test]
+fn fallback_audiosuite_sliders_move_a_tenth_as_far_with_ctrl_held() {
+    for (process, label, id) in
+        [("normalize", "Peak dB", "target_db"), ("time_stretch", "Length ratio", "ratio"), ("pitch_shift", "Semitones", "semitones")]
+    {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.ui.audiosuite = Some(process.into());
+        let mut h = harness(app);
+        let read = |h: &Harness<'_, SoundApp>| {
+            let params: BTreeMap<String, f32> = h.ctx.data(|d| d.get_temp(Id::unique(("as_params", process.to_string())))).unwrap_or_default();
+            f64::from(params[id])
+        };
+        let rail = h.get_by_role_and_label(Role::Slider, label).rect();
+        assert_tenth(label, plain_and_fine(&mut h, rail, &read), 0.08..=0.12);
+    }
+}
+
+#[test]
 fn audiosuite_parameter_sliders_move_a_tenth_as_far_with_ctrl_held() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     app.ui.audiosuite = Some("compressor".into());
