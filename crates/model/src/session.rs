@@ -5,7 +5,7 @@ use crate::{
     Bus, BusId, ChannelFormat, Clip, ClipId, Group, GroupId, MarkerId, MarkerKind, MemoryLocation, OutputPath, Source, SourceId, SourcePool,
     TRACK_COLORS, Track, TrackId, TrackKind, VideoSource,
 };
-use soundcraft_time::{FrameRate, GridValue, Range, SampleRate, Samples, TempoMap, TimeFormat};
+use liviwave_time::{FrameRate, GridValue, Range, SampleRate, Samples, TempoMap, TimeFormat};
 
 /// Native session file extension.
 pub const SESSION_EXTENSION: &str = "scraft";
@@ -15,9 +15,9 @@ pub const FEET_FRAMES_START: &str = "feet_frames.start";
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SessionError {
-    #[error("not a SoundCraft session: {0}")]
+    #[error("not a LiVi Wave session: {0}")]
     Format(String),
-    #[error("session file version {0} is newer than this SoundCraft supports")]
+    #[error("session file version {0} is newer than this LiVi Wave supports")]
     Version(u32),
     #[error("{0}")]
     Invalid(String),
@@ -362,7 +362,7 @@ pub struct Session {
     /// Original MIDI performances keyed by clip id (Event › MIDI Operations › Restore/Flatten
     /// Performance). Independent of undo so a restore survives later edits.
     #[serde(default)]
-    pub midi_originals: std::collections::BTreeMap<u64, soundcraft_midi::Sequence>,
+    pub midi_originals: std::collections::BTreeMap<u64, liviwave_midi::Sequence>,
     #[serde(skip)]
     pub pool: SourcePool,
     /// The folder relative source paths point into: where the session was opened or last saved.
@@ -482,12 +482,12 @@ impl Session {
 
     /// Format a position against this session's timecode and feet+frames references.
     pub fn format_position(&self, at: Samples, fmt: TimeFormat) -> String {
-        soundcraft_time::format_position(at, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
+        liviwave_time::format_position(at, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
     }
 
     /// Parse a position typed in `fmt` against this session's references.
-    pub fn parse_position(&self, text: &str, fmt: TimeFormat) -> Result<Samples, soundcraft_time::TimeError> {
-        soundcraft_time::parse_position(text, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
+    pub fn parse_position(&self, text: &str, fmt: TimeFormat) -> Result<Samples, liviwave_time::TimeError> {
+        liviwave_time::parse_position(text, fmt, self.sample_rate, &self.tempo, self.frame_rate, self.timecode_start, self.feet_frames_start())
     }
 
     pub fn next_track_color(&self) -> [u8; 3] {

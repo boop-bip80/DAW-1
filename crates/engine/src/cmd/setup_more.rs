@@ -4,9 +4,9 @@ use super::{CommandSpec, always, bad, command_specs, i64_or, str_param, track_pa
 
 use super::more_util::{set_text, store_value, text, toggle_flag, values_with_prefix};
 use crate::{Engine, EngineError, Result, cmd};
+use liviwave_model::{BusId, ChannelFormat, ClipContent, OutputPath, Route, Session, SourceId, TrackId, TrackKind};
+use liviwave_time::Timecode;
 use serde_json::{Value, json};
-use soundcraft_model::{BusId, ChannelFormat, ClipContent, OutputPath, Route, Session, SourceId, TrackId, TrackKind};
-use soundcraft_time::Timecode;
 use std::path::Path;
 
 macro_rules! option {
@@ -143,7 +143,7 @@ fn prepare_dpe(e: &mut Engine, p: &Value) -> Result<Value> {
     if end <= 0 {
         return Err(bad(id, "there is no audio to prepare"));
     }
-    let r = soundcraft_time::Range::new(0, end);
+    let r = liviwave_time::Range::new(0, end);
     let mut n = 0;
     for t in tracks {
         // Each track keeps its own length (its material plus a second), as before.
@@ -324,7 +324,7 @@ fn current_feet_frames(e: &mut Engine, p: &Value) -> Result<Value> {
     let at = s.edit.selection.start.max(0);
     let frames_at = s.frame_rate.frames_at(at, s.sample_rate);
     let start = ft * 16 + fr - frames_at;
-    s.edit.values.insert(soundcraft_model::FEET_FRAMES_START.into(), start as f64);
+    s.edit.values.insert(liviwave_model::FEET_FRAMES_START.into(), start as f64);
     Ok(json!({"feet_frames_start": start}))
 }
 
@@ -414,7 +414,7 @@ fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
     let other = Session::from_json(&text_v).map_err(|err| EngineError::Io(format!("{path}: {err}")))?;
     let names: Option<Vec<String>> =
         p.get("tracks").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect());
-    let picked: Vec<soundcraft_model::Track> = match &names {
+    let picked: Vec<liviwave_model::Track> = match &names {
         Some(ns) => {
             let mut v = Vec::new();
             for n in ns {
@@ -485,7 +485,7 @@ fn import_session_data(e: &mut Engine, p: &Value) -> Result<Value> {
                     let scheme = other.auto_names.get(&k)?;
                     Some(*names.entry(k).or_insert_with(|| {
                         let (key, id) = (s.alloc(), crate::new_scheme_id(s));
-                        s.auto_names.insert(key, soundcraft_model::AutoName { id, ..scheme.clone() });
+                        s.auto_names.insert(key, liviwave_model::AutoName { id, ..scheme.clone() });
                         key
                     }))
                 });
@@ -563,7 +563,7 @@ mod tests {
         e.execute("edit.select", &json!({"start": 48_000})).unwrap();
         e.execute("setup.current_timecode", &json!({"timecode": "01:00:00:00"})).unwrap();
         let s = e.session();
-        let shown = s.format_position(48_000, soundcraft_time::TimeFormat::Timecode);
+        let shown = s.format_position(48_000, liviwave_time::TimeFormat::Timecode);
         assert_eq!(shown, "01:00:00:00");
     }
 
@@ -645,8 +645,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let wav = dir.join("hit.wav");
-        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4_800]] };
-        std::fs::write(&wav, soundcraft_audio_io::encode(&buf, &soundcraft_audio_io::EncodeOptions::default()).unwrap()).unwrap();
+        let buf = liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4_800]] };
+        std::fs::write(&wav, liviwave_audio_io::encode(&buf, &liviwave_audio_io::EncodeOptions::default()).unwrap()).unwrap();
         let mut donor = Engine::default();
         donor.execute("track.new", &json!({"count": 1, "name": "Pads", "kind": "instrument"})).unwrap();
         donor.execute("mix.sampler_load", &json!({"track": "Pads", "path": wav.to_string_lossy()})).unwrap();

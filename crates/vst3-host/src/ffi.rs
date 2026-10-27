@@ -7,7 +7,7 @@
 //!
 //! Soundness rests on the VST3 contract (the plugin honours the COM vtable signatures and the
 //! documented pointer lifetimes). A plugin that violates it can still crash the process: hosting
-//! in-process can't prevent that. What this module guarantees is that *SoundCraft* never hands
+//! in-process can't prevent that. What this module guarantees is that *LiVi Wave* never hands
 //! the plugin dangling or mis-sized pointers and never reads plugin strings beyond their bounds.
 
 // VST3 enum constants are `c_int` on Windows and `c_uint` elsewhere, so casts that are no-ops on
@@ -15,7 +15,7 @@
 #![allow(clippy::unnecessary_cast)]
 
 use crate::{Vst3Error, scan};
-use soundcraft_dsp::Transport;
+use liviwave_dsp::Transport;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ pub(crate) const PARAM_QUEUE_CAP: usize = 1024;
 const MAX_STATE_BYTES: usize = 64 << 20;
 /// Most editor parameter edits buffered between two UI frames.
 const EDIT_CAP: usize = 256;
-/// Magic of SoundCraft's state container: `SCV3` + u32 LE component length + component state +
+/// Magic of LiVi Wave's state container: `SCV3` + u32 LE component length + component state +
 /// u32 LE controller length + controller state.
 const STATE_MAGIC: &[u8; 4] = b"SCV3";
 
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn strings_are_bounded() {
         let mut b = [0u16; 4];
-        write_c16("SoundCraft", &mut b);
+        write_c16("LiVi Wave", &mut b);
         assert_eq!(read_c16(&b), "Sou");
         let full: Vec<u16> = "abcd".encode_utf16().collect();
         assert_eq!(read_c16(&full), "abcd");
@@ -287,7 +287,7 @@ mod tests {
             assert_eq!(h.getName(&mut name), sb::kResultOk);
             assert_eq!(h.restartComponent(sv::RestartFlags_::kLatencyChanged as i32), sb::kResultOk);
         }
-        assert_eq!(read_c16(&name), "SoundCraft");
+        assert_eq!(read_c16(&name), "LiVi Wave");
         assert!(h.latency_changed.load(Ordering::Relaxed));
         assert_eq!(hex(&[0xAB; 16]), "AB".repeat(16));
     }

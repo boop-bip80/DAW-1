@@ -15,7 +15,7 @@
 //! Plugins and threads: hosted third-party plugins (CLAP/VST3) are created, given their stored
 //! state and prepared on the thread that calls [`Player::update_session`] (the UI thread), and
 //! travel to the audio thread together with the session snapshot that needs them; the mix
-//! engine adopts them (see `soundcraft_mix`'s crate docs). Instances the engine retires, and the
+//! engine adopts them (see `liviwave_mix`'s crate docs). Instances the engine retires, and the
 //! session snapshots the callback replaces, come back on return channels and are dropped on the UI
 //! thread ([`Player::idle`]). Plugin editors are driven, and plugin states for saving read
 //! ([`Player::capture_states`]), on the UI thread
@@ -27,10 +27,10 @@ pub mod record;
 
 pub use devices::AudioConfig;
 
-use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
-use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
-use soundcraft_model::{Session, TrackId};
-use soundcraft_time::{Range, Samples};
+use liviwave_dsp::{Plugin, PluginEditor, PluginStateReader};
+use liviwave_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
+use liviwave_model::{Session, TrackId};
+use liviwave_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
@@ -43,7 +43,7 @@ const OLD_SESSIONS: usize = 16;
 
 /// The realtime audio thread marker lives in the mix engine, which carries it into the strips it
 /// renders on worker threads; the cpal callbacks here set it.
-pub use soundcraft_mix::{mark_audio_thread, on_audio_thread};
+pub use liviwave_mix::{mark_audio_thread, on_audio_thread};
 
 mod callback;
 mod stream;
@@ -300,7 +300,7 @@ impl Player {
         side: Mutex<Side>,
         gtx: Sender<Vec<Box<dyn Plugin>>>,
     ) -> Player {
-        let s = Arc::new(Session::new("Untitled", soundcraft_time::SampleRate::new(rate).unwrap_or_default()));
+        let s = Arc::new(Session::new("Untitled", liviwave_time::SampleRate::new(rate).unwrap_or_default()));
         Player::silent_clock_with(shared, tx, rx, s, side, gtx)
     }
 
@@ -317,7 +317,7 @@ impl Player {
         let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
         let fault = Arc::new(Fault::default());
         let failed = Arc::clone(&fault);
-        let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || {
+        let spawn = std::thread::Builder::new().name("liviwave-clock".into()).spawn(move || {
             let mut buf = vec![0.0f32; 4096];
             let mut last = std::time::Instant::now();
             loop {
@@ -458,7 +458,7 @@ impl Player {
         }
     }
 
-    /// The plugin's own text for a parameter value when SoundCraft's format would be wrong for it
+    /// The plugin's own text for a parameter value when LiVi Wave's format would be wrong for it
     /// (see `PluginEditor::value_text`). Main thread only.
     pub fn editor_value_text(&self, track: TrackId, slot: usize, id: &str, value: f32) -> Option<String> {
         self.side().editors.get_mut(&(track, slot))?.value_text(id, value)

@@ -67,7 +67,7 @@ impl ClipFx {
         }
     }
     fn make(&self, id: &str) -> Option<Box<dyn Plugin>> {
-        soundcraft_dsp::create(id).map(|mut p| {
+        liviwave_dsp::create(id).map(|mut p| {
             p.prepare(self.sr, 16_384, self.ch.max(1));
             p
         })

@@ -33,7 +33,7 @@ impl SoundApp {
     /// Autosave a modified session within a second of every change, also while recording. The
     /// plugins' own state reaches the session every two minutes (`autosave`).
     pub(super) fn autosave_changes(&mut self) {
-        if let Some(e) = self.autosaver.as_ref().and_then(soundcraft_engine::autosave::Autosaver::failure) {
+        if let Some(e) = self.autosaver.as_ref().and_then(liviwave_engine::autosave::Autosaver::failure) {
             self.ui.status = format!("Autosave failed: {e}");
         }
         if self.autosave_dir.is_none() || self.engine.revision == self.autosaved_rev {
@@ -50,7 +50,7 @@ impl SoundApp {
     /// Hand the session to the autosaver for its folder under `root`.
     pub(super) fn queue_autosave(&mut self, root: std::path::PathBuf) {
         self.autosaved_rev = self.engine.revision;
-        let w = self.autosaver.get_or_insert_with(|| soundcraft_engine::autosave::Autosaver::new(root));
+        let w = self.autosaver.get_or_insert_with(|| liviwave_engine::autosave::Autosaver::new(root));
         w.write(self.engine.session_arc(), self.engine.path.clone(), self.take_plan.clone());
     }
 
@@ -78,7 +78,7 @@ impl SoundApp {
     }
 
     /// Done with the open session. Unsaved changes stay in its autosave folder for the next
-    /// launch, unless the user quit with SoundCraft's Quit; a take still recording is finished
+    /// launch, unless the user quit with LiVi Wave's Quit; a take still recording is finished
     /// and always stays.
     pub fn close_autosave(&mut self) {
         let recording = self.engine.transport.recording;
@@ -105,24 +105,24 @@ impl SoundApp {
         self.panic_rev = self.engine.revision;
         let saved = self.engine.is_dirty() && self.write_autosave();
         self.ui.status = if saved {
-            "SoundCraft hit an internal error (see the log). Your changes were autosaved: save them, then restart SoundCraft.".into()
+            "LiVi Wave hit an internal error (see the log). Your changes were autosaved: save them, then restart LiVi Wave.".into()
         } else {
-            "SoundCraft hit an internal error (see the log). Restart SoundCraft to be safe.".into()
+            "LiVi Wave hit an internal error (see the log). Restart LiVi Wave to be safe.".into()
         };
     }
 
     /// Replace the open session with unsaved work an earlier run left behind.
-    pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
+    pub fn recover(&mut self, left: &liviwave_engine::autosave::Leftover) {
         if self.engine.transport.recording {
             self.ui.status = "Stop recording before recovering other work.".into();
             return;
         }
         self.close_autosave();
-        match soundcraft_engine::autosave::recover(&mut self.engine, left) {
+        match liviwave_engine::autosave::recover(&mut self.engine, left) {
             Ok(missing) => {
                 self.document_replaced();
                 if self.write_autosave() {
-                    soundcraft_engine::autosave::discard(left);
+                    liviwave_engine::autosave::discard(left);
                 }
                 self.ui.status = match missing.len() {
                     0 => format!("Recovered “{}”. Save it to keep the changes.", left.name),

@@ -3,11 +3,11 @@
 use crate::SoundApp;
 use crate::theme::{Tokens, bold};
 use egui::{Align2, vec2};
+use liviwave_engine::Engine;
+use liviwave_engine::io::StripNames;
+use liviwave_model::{ClipId, GroupId, Session, SourceId, TrackId};
+use liviwave_time::Samples;
 use serde_json::{Value, json};
-use soundcraft_engine::Engine;
-use soundcraft_engine::io::StripNames;
-use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
-use soundcraft_time::Samples;
 use std::sync::Arc;
 
 mod audiosuite;
@@ -34,7 +34,7 @@ pub enum Dialog {
     Bounce { path: String, format: String, bit_depth: String, normalize: bool, dither: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
-    RenameMarker { id: soundcraft_model::MarkerId, name: String },
+    RenameMarker { id: liviwave_model::MarkerId, name: String },
     ClearClips { clips: Vec<ClipId>, sources: Vec<SourceId>, message: String },
     PathPrompt { cmd: String, title: String, path: String, key: String },
     Number { cmd: String, title: String, key: String, value: f64, suffix: String },
@@ -51,7 +51,7 @@ pub enum Dialog {
     Session { frame_rate: String, bit_depth: String },
     // Clip › Loop…: `length` is typed in `format`, measured from `start` (the first selected clip's).
     // `filled` is the text the field opened with and the exact length it stands for.
-    Loop { by: LoopBy, count: u32, length: String, format: soundcraft_time::TimeFormat, start: Samples, filled: (String, Samples) },
+    Loop { by: LoopBy, count: u32, length: String, format: liviwave_time::TimeFormat, start: Samples, filled: (String, Samples) },
     ScoreSetup { title: String, composer: String, bars_per_system: u32, show_track_names: bool },
     SaveChanges { then: (String, Value) },
 }
@@ -124,7 +124,7 @@ impl Dialogs {
         self.open = Some(Dialog::RenameClip { id, name: name.to_string() });
     }
 
-    pub fn open_rename_marker(&mut self, id: soundcraft_model::MarkerId, name: &str) {
+    pub fn open_rename_marker(&mut self, id: liviwave_model::MarkerId, name: &str) {
         self.open = Some(Dialog::RenameMarker { id, name: name.to_string() });
     }
 
@@ -193,7 +193,7 @@ impl Dialogs {
                 title: "Save Session As".into(),
                 // The browser has no folders: the name becomes the bundle file's name.
                 path: if home.is_empty() {
-                    format!("{name}.{}", soundcraft_engine::io::BUNDLE_EXTENSION)
+                    format!("{name}.{}", liviwave_engine::io::BUNDLE_EXTENSION)
                 } else {
                     format!("{home}/{name}/{name}.scraft")
                 },
@@ -218,22 +218,22 @@ impl Dialogs {
             }
             "setup.session" => Dialog::Session { frame_rate: e.session().frame_rate.label().into(), bit_depth: "24".into() },
             "file.score_setup" => {
-                let s = soundcraft_engine::score::ScoreSetup::from_session(e.session());
+                let s = liviwave_engine::score::ScoreSetup::from_session(e.session());
                 Dialog::ScoreSetup { title: s.title, composer: s.composer, bars_per_system: s.bars_per_system, show_track_names: s.show_track_names }
             }
             "clip.auto_rename" => return self.open_auto_rename(e, e.session().edit.selected_clips.clone()),
             "clip.rename" => {
-                let target = soundcraft_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
+                let target = liviwave_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
                 let Some((_, clip)) = target else { return false };
                 Dialog::RenameClip { id: clip.id, name: clip.name.clone() }
             }
             "clip.loop" => {
-                let target = soundcraft_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
+                let target = liviwave_engine::cmd::clip_ids_param(e, &json!({})).first().and_then(|id| e.session().find_clip(*id));
                 let Some((_, clip)) = target else { return false };
                 let s = e.session();
                 let format = s.edit.main_counter;
                 let exact = clip.length.saturating_mul(4);
-                let length = soundcraft_time::format_length(clip.start, exact, format, s.sample_rate, &s.tempo, s.frame_rate);
+                let length = liviwave_time::format_length(clip.start, exact, format, s.sample_rate, &s.tempo, s.frame_rate);
                 Dialog::Loop { by: LoopBy::Count, count: 4, length: length.clone(), format, start: clip.start, filled: (length, exact) }
             }
             _ => match path_dialog(id, &home, &name) {
@@ -332,15 +332,15 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         ui.add(egui::DragValue::new(count).range(1..=128)).labelled_by(create.id);
                         ui.label("new");
                         let fmt = craft_ui::ComboBox::from_id_salt("nt_fmt").selected_text(format.as_str()).show_ui(ui, |ui| {
-                            for f in soundcraft_model::ChannelFormat::ALL {
+                            for f in liviwave_model::ChannelFormat::ALL {
                                 ui.selectable_value(format, f.label().to_string(), f.label());
                             }
                         });
                         fmt.response.accessible_name("Channel format");
                         let kind_combo = craft_ui::ComboBox::from_id_salt("nt_kind")
-                            .selected_text(soundcraft_model::TrackKind::from_id(kind).map_or("Audio Track", |k| k.label()))
+                            .selected_text(liviwave_model::TrackKind::from_id(kind).map_or("Audio Track", |k| k.label()))
                             .show_ui(ui, |ui| {
-                                for k in soundcraft_model::TrackKind::ALL {
+                                for k in liviwave_model::TrackKind::ALL {
                                     if ui.selectable_label(kind == k.id(), k.label()).clicked() {
                                         *kind = k.id().to_string();
                                         *name = k.default_name().to_string();
@@ -373,7 +373,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         crate::widgets::named_text_field(ui.text_edit_singleline(name), "Name");
                     });
                     craft_ui::ComboBox::from_label("Sample Rate").selected_text(format!("{sample_rate} Hz")).show_ui(ui, |ui| {
-                        for r in soundcraft_time::SampleRate::COMMON {
+                        for r in liviwave_time::SampleRate::COMMON {
                             ui.selectable_value(sample_rate, r, format!("{r} Hz"));
                         }
                     });
@@ -484,8 +484,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     {
                         *path = p;
                     }
-                    let file = soundcraft_engine::io::session_file(path);
-                    let replaces = soundcraft_engine::io::replaces(&app.engine, cmd, &file);
+                    let file = liviwave_engine::io::session_file(path);
+                    let replaces = liviwave_engine::io::replaces(&app.engine, cmd, &file);
                     if replaces {
                         ui.label(format!("“{}” already exists. Do you want to replace it?", file.file_name().unwrap_or_default().to_string_lossy()));
                     }
@@ -526,7 +526,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::Fades { shape } => {
-                    for s in soundcraft_model::FadeShape::ALL {
+                    for s in liviwave_model::FadeShape::ALL {
                         ui.radio_value(shape, s.label().to_lowercase(), s.label());
                     }
                     if buttons(ui, "OK", enter) {
@@ -622,7 +622,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
                 Dialog::Session { frame_rate, bit_depth } => {
                     craft_ui::ComboBox::from_label("Timecode Rate").selected_text(frame_rate.as_str()).show_ui(ui, |ui| {
-                        for r in soundcraft_time::FrameRate::ALL {
+                        for r in liviwave_time::FrameRate::ALL {
                             ui.selectable_value(frame_rate, r.label().to_string(), r.label());
                         }
                     });
@@ -828,7 +828,7 @@ fn loop_params(
     by: LoopBy,
     count: u32,
     length: &str,
-    format: soundcraft_time::TimeFormat,
+    format: liviwave_time::TimeFormat,
     start: Samples,
     filled: &(String, Samples),
 ) -> Option<Value> {
@@ -841,9 +841,9 @@ fn loop_params(
 }
 
 /// A duration typed in `format`, the way `format_length` writes it, for a span that starts at `start`.
-fn loop_length(s: &Session, text: &str, format: soundcraft_time::TimeFormat, start: Samples) -> Option<Samples> {
-    if format != soundcraft_time::TimeFormat::BarsBeats {
-        return soundcraft_time::parse_position(text, format, s.sample_rate, &s.tempo, s.frame_rate, 0, 0).ok();
+fn loop_length(s: &Session, text: &str, format: liviwave_time::TimeFormat, start: Samples) -> Option<Samples> {
+    if format != liviwave_time::TimeFormat::BarsBeats {
+        return liviwave_time::parse_position(text, format, s.sample_rate, &s.tempo, s.frame_rate, 0, 0).ok();
     }
     let parts: Vec<i64> = text.split(['|', '.', ' ']).filter(|p| !p.is_empty()).map(str::parse::<i64>).collect::<Result<_, _>>().ok()?;
     if parts.is_empty() || parts.len() > 3 || parts.iter().any(|p| *p < 0) {
@@ -862,7 +862,7 @@ mod tests {
 
     #[test]
     fn file_commands_get_path_prompts_with_sensible_names() {
-        let e = soundcraft_engine::demo::demo_engine();
+        let e = liviwave_engine::demo::demo_engine();
         let mut d = Dialogs::default();
         for (id, ext) in [("file.export_sibelius", ".musicxml"), ("file.print_score", ".svg"), ("file.export_clip_groups", ".scgrp")] {
             assert!(takes_path(id), "{id}");
@@ -885,7 +885,7 @@ mod tests {
 
     #[test]
     fn clip_rename_opens_the_rename_dialog_for_the_selected_clip() {
-        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut e = liviwave_engine::demo::demo_engine();
         let mut d = Dialogs::default();
         e.execute("edit.select_none", &json!({})).unwrap();
         assert!(!d.open_for_command(&e, "clip.rename"));
@@ -902,7 +902,7 @@ mod tests {
         assert_eq!(app.ui.audiosuite.as_deref(), Some("speed_ramp"));
         // Renders the Kick clip with `params` and returns its new length and samples.
         let render = |params: Value| {
-            let mut e = soundcraft_engine::demo::demo_engine();
+            let mut e = liviwave_engine::demo::demo_engine();
             let clip = e.session().track_by_name("Kick").unwrap().clips()[0].id;
             e.execute("audiosuite.process", &json!({"process": "speed_ramp", "params": params, "clips": [clip.0]})).unwrap();
             let c = e.session().track_by_name("Kick").unwrap().clips()[0].clone();
@@ -922,14 +922,14 @@ mod tests {
     #[test]
     fn tempo_change_dialog_runs_a_real_command_at_its_position() {
         let (cmd, params) = tempo_change_action(96_000, 133.5);
-        assert!(soundcraft_engine::command_specs().iter().any(|c| c.id == cmd), "{cmd} is not a command");
+        assert!(liviwave_engine::command_specs().iter().any(|c| c.id == cmd), "{cmd} is not a command");
         assert_eq!(params["at"], 96_000);
         assert_eq!(params["bpm"], 133.5);
     }
 
     #[test]
     fn strip_silence_buttons_send_strip_extract_and_separate() {
-        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut e = liviwave_engine::demo::demo_engine();
         let kick = e.session().track_by_name("Kick").unwrap().id;
         let end = e.session().content_end();
         e.execute("edit.select", &json!({"tracks": [kick.0], "start": 0, "end": end})).unwrap();
@@ -966,7 +966,7 @@ mod tests {
         let (cmd, params) = strip_silence_action("separate", values, &names);
         assert_eq!((params["name"].clone(), params["number"].clone(), params["zeros"].clone()), (json!("SFX"), json!(23), json!(1)));
         assert_eq!(params["suffix"], ".Reel1");
-        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut e = liviwave_engine::demo::demo_engine();
         let kick = e.session().track_by_name("Kick").unwrap().id;
         let end = e.session().content_end();
         e.execute("edit.select", &json!({"tracks": [kick.0], "start": 0, "end": end})).unwrap();
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn clear_always_asks_and_names_the_timeline_clips_that_go_too() {
-        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut e = liviwave_engine::demo::demo_engine();
         let file = |e: &Engine, name: &str| e.session().sources.iter().find(|f| f.name == name).map(|f| f.id).unwrap();
         let (kick, hats) = (file(&e, "Kick"), file(&e, "Hats"));
         let kick_clips: Vec<ClipId> = e.session().clips_using(kick).map(|c| c.id).collect();
@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn clip_loop_opens_clip_looping_for_the_selected_clip() {
-        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut e = liviwave_engine::demo::demo_engine();
         let mut d = Dialogs::default();
         e.execute("edit.select_none", &json!({})).unwrap();
         assert!(!d.open_for_command(&e, "clip.loop"));
@@ -1028,16 +1028,16 @@ mod tests {
 
     #[test]
     fn loop_length_reads_a_duration_in_every_time_format() {
-        let e = soundcraft_engine::demo::demo_engine();
+        let e = liviwave_engine::demo::demo_engine();
         let s = e.session();
         let start = s.sample_rate.samples(3.0);
-        for format in soundcraft_time::TimeFormat::ALL {
+        for format in liviwave_time::TimeFormat::ALL {
             for len in [s.sample_rate.samples(2.0), s.sample_rate.samples(7.5)] {
-                let text = soundcraft_time::format_length(start, len, format, s.sample_rate, &s.tempo, s.frame_rate);
+                let text = liviwave_time::format_length(start, len, format, s.sample_rate, &s.tempo, s.frame_rate);
                 assert_eq!(loop_length(s, &text, format, start), Some(len), "{format:?} {text}");
             }
         }
-        let bars = soundcraft_time::TimeFormat::BarsBeats;
+        let bars = liviwave_time::TimeFormat::BarsBeats;
         assert_eq!(loop_length(s, "1| 0| 000", bars, start), loop_length(s, "1", bars, start));
         assert_eq!(loop_length(s, "-1| 0| 000", bars, start), None);
         assert_eq!(loop_length(s, "two bars", bars, start), None);
@@ -1045,9 +1045,9 @@ mod tests {
 
     #[test]
     fn clip_looping_sends_the_chosen_option() {
-        let e = soundcraft_engine::demo::demo_engine();
+        let e = liviwave_engine::demo::demo_engine();
         let s = e.session();
-        let samples = soundcraft_time::TimeFormat::Samples;
+        let samples = liviwave_time::TimeFormat::Samples;
         let filled = ("0:01.000".to_string(), 48_001);
         let send = |by, length: &str| loop_params(s, by, 3, length, samples, 0, &filled);
         assert_eq!(send(LoopBy::Count, ""), Some(json!({"count": 3})));
@@ -1056,6 +1056,6 @@ mod tests {
         assert_eq!(send(LoopBy::Length, "0"), None);
         assert_eq!(send(LoopBy::Length, "soon"), None);
         assert_eq!(send(LoopBy::Fill, "soon"), Some(json!({"fill": true})));
-        assert!(soundcraft_engine::command_specs().iter().any(|c| c.id == "clip.loop"));
+        assert!(liviwave_engine::command_specs().iter().any(|c| c.id == "clip.loop"));
     }
 }

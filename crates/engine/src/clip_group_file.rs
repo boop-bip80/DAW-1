@@ -5,15 +5,15 @@
 //! as 32-bit float WAVs in a `<name> Audio/` folder next to it.
 
 use crate::{Engine, EngineError, Result};
+use liviwave_audio_io::{EncodeOptions, FileFormat};
+use liviwave_model::{Clip, ClipContent, ClipId, SourceId, TrackId};
+use liviwave_time::Samples;
 use serde::{Deserialize, Serialize};
-use soundcraft_audio_io::{EncodeOptions, FileFormat};
-use soundcraft_model::{Clip, ClipContent, ClipId, SourceId, TrackId};
-use soundcraft_time::Samples;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const EXTENSION: &str = "scgrp";
-const FORMAT: &str = "soundcraft.clipgroup";
+const FORMAT: &str = "liviwave.clipgroup";
 /// Refuse files that would place absurd numbers of clips, tracks or audio files.
 const MAX_CLIPS: usize = 10_000;
 
@@ -65,8 +65,8 @@ pub fn export(e: &Engine, ids: &[ClipId], path: &str) -> Result<usize> {
             {
                 let rel = format!("{audio_dir_name}/{}_{}.wav", crate::io::sanitize_name(&src.name), source.0);
                 crate::io::make_dir(dir.join(&audio_dir_name))?;
-                let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
-                let bytes = soundcraft_audio_io::encode(&buf.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
+                let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: liviwave_audio_io::BitDepth::Float32, dither: false, bwf: None };
+                let bytes = liviwave_audio_io::encode(&buf.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
                 crate::io::write_path(dir.join(&rel), bytes)?;
                 slot.insert(rel);
             }
@@ -85,7 +85,7 @@ fn decode_group_audio(
     dir: &Path,
     rate: u32,
     cmd_id: &str,
-) -> Result<(Vec<(String, soundcraft_audio_io::AudioBuffer)>, BTreeMap<u64, usize>)> {
+) -> Result<(Vec<(String, liviwave_audio_io::AudioBuffer)>, BTreeMap<u64, usize>)> {
     let (mut decoded, mut index, mut file_of) = (Vec::new(), BTreeMap::new(), BTreeMap::new());
     for (old, rel) in audio_entries {
         let full = dir.join(rel);
@@ -97,7 +97,7 @@ fn decode_group_audio(
             Some(n) => *n,
             None => {
                 let bytes = crate::io::read_file(&full)?;
-                let (_, buf) = soundcraft_audio_io::decode(&bytes, Some("wav")).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
+                let (_, buf) = liviwave_audio_io::decode(&bytes, Some("wav")).map_err(|err| EngineError::Io(format!("{rel}: {err}")))?;
                 let buf = crate::io::at_rate(buf, rate, crate::io::MAX_IMPORT_SAMPLES)
                     .ok_or_else(|| EngineError::Io(format!("{rel}: too large to import")))?;
                 decoded.push((rel.clone(), buf));
@@ -117,7 +117,7 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
     let text = crate::io::read_text(path)?;
     let file: GroupFile = serde_json::from_str(&text).map_err(|err| EngineError::BadParams(id.into(), format!("not a clip group file: {err}")))?;
     if file.format != FORMAT {
-        return Err(EngineError::BadParams(id.into(), "not a SoundCraft clip group file".into()));
+        return Err(EngineError::BadParams(id.into(), "not a LiVi Wave clip group file".into()));
     }
     if file.lanes.iter().map(|l| l.len().max(1)).sum::<usize>() > MAX_CLIPS || file.audio.len() > MAX_CLIPS {
         return Err(EngineError::BadParams(id.into(), "clip group file has too many clips".into()));
@@ -154,8 +154,8 @@ pub fn import(e: &mut Engine, path: &str, first: Option<TrackId>, at: Samples) -
                         _ => None,
                     })
                     .unwrap_or(2);
-                let kind = if audio_lane { soundcraft_model::TrackKind::Audio } else { soundcraft_model::TrackKind::Midi };
-                let fmt = if channels == 1 { soundcraft_model::ChannelFormat::Mono } else { soundcraft_model::ChannelFormat::Stereo };
+                let kind = if audio_lane { liviwave_model::TrackKind::Audio } else { liviwave_model::TrackKind::Midi };
+                let fmt = if channels == 1 { liviwave_model::ChannelFormat::Mono } else { liviwave_model::ChannelFormat::Stereo };
                 s.add_track(kind, fmt, Some("Clip Group"))
             }
         };
@@ -222,14 +222,14 @@ mod tests {
         assert_eq!(placed.len(), 2);
         let bass = e.session().tracks.iter().find(|t| t.name == "Bass").map(|t| t.id).unwrap();
         for id in &placed {
-            let (t, c) = e.session().find_clip(soundcraft_model::ClipId(*id)).unwrap();
+            let (t, c) = e.session().find_clip(liviwave_model::ClipId(*id)).unwrap();
             assert_eq!(t, bass);
             assert!(c.start >= at && c.group.is_some());
-            assert!(matches!(c.content, soundcraft_model::ClipContent::Audio { source, .. } if e.session().pool.contains(source)));
+            assert!(matches!(c.content, liviwave_model::ClipContent::Audio { source, .. } if e.session().pool.contains(source)));
         }
         e.undo();
         assert_eq!(e.session().tracks.len(), before);
-        assert!(e.session().find_clip(soundcraft_model::ClipId(placed[0])).is_none());
+        assert!(e.session().find_clip(liviwave_model::ClipId(placed[0])).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -243,7 +243,7 @@ mod tests {
         e.execute("clip.auto_rename", &json!({"clips": [kick], "name": "Hit"})).unwrap();
         e.execute("file.export_clip_groups", &json!({"path": path, "clips": [kick]})).unwrap();
         let r = e.execute("file.import_clip_groups", &json!({"path": path, "at": 30_000_000, "track": "Bass"})).unwrap();
-        let placed = soundcraft_model::ClipId(r["clips"][0].as_u64().unwrap());
+        let placed = liviwave_model::ClipId(r["clips"][0].as_u64().unwrap());
         assert_eq!(e.session().find_clip(placed).unwrap().1.auto_name, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -256,11 +256,11 @@ mod tests {
         let note = json!({"pitch": 60, "velocity": 100, "release_velocity": 64, "channel": 0, "start": i64::MAX, "length": i64::MAX});
         let clip =
             json!({"id": 1, "name": "far", "start": i64::MAX, "length": i64::MAX, "content": {"Midi": {"sequence": {"notes": [note], "ctrls": []}}}});
-        let file = json!({"format": "soundcraft.clipgroup", "version": 1, "sample_rate": 48000, "length": 1, "lanes": [[clip]], "audio": {}});
+        let file = json!({"format": "liviwave.clipgroup", "version": 1, "sample_rate": 48000, "length": 1, "lanes": [[clip]], "audio": {}});
         std::fs::write(&p, file.to_string()).unwrap();
         let mut e = crate::demo::demo_engine();
         let r = e.execute("file.import_clip_groups", &json!({"path": p.to_string_lossy()})).unwrap();
-        let id = soundcraft_model::ClipId(r["clips"][0].as_u64().unwrap());
+        let id = liviwave_model::ClipId(r["clips"][0].as_u64().unwrap());
         let c = e.session().find_clip(id).unwrap().1;
         assert!(c.start <= crate::cmd::MAX_POSITION && c.length <= crate::cmd::MAX_POSITION);
         e.execute("edit.select_all", &json!({})).unwrap();
@@ -279,14 +279,14 @@ mod tests {
         let content = json!({"Midi": {"sequence": {"notes": [note], "ctrls": []}}});
         let a = json!({"id": 1, "name": "a", "start": 0, "length": 1000, "content": content});
         let b = json!({"id": 2, "name": "b", "start": 600, "length": 1000, "content": content});
-        let file = json!({"format": "soundcraft.clipgroup", "version": 1, "sample_rate": 48000, "length": 1600, "lanes": [[a, b]], "audio": {}});
+        let file = json!({"format": "liviwave.clipgroup", "version": 1, "sample_rate": 48000, "length": 1600, "lanes": [[a, b]], "audio": {}});
         std::fs::write(&p, file.to_string()).unwrap();
         let mut e = crate::demo::demo_engine();
         let r = e.execute("file.import_clip_groups", &json!({"path": p.to_string_lossy()})).unwrap();
         let ids: Vec<_> = r["clips"].as_array().unwrap().iter().filter_map(serde_json::Value::as_u64).collect();
         assert_eq!(ids.len(), 2);
         let spans: Vec<_> =
-            ids.iter().filter_map(|id| e.session().find_clip(soundcraft_model::ClipId(*id)).map(|(_, c)| (c.start, c.length))).collect();
+            ids.iter().filter_map(|id| e.session().find_clip(liviwave_model::ClipId(*id)).map(|(_, c)| (c.start, c.length))).collect();
         // The group lands at the insertion point; its clips keep their relative positions and overlap.
         let at = spans.first().map_or(0, |s| s.0);
         assert_eq!(spans, vec![(at, 1000), (at + 600, 1000)]);
@@ -306,10 +306,10 @@ mod tests {
             "id": 1, "name": "m", "start": 0, "length": 10_000, "content": {"Midi": {"sequence": {"notes": [], "ctrls": []}}},
             "fade_in": fade(1000), "fade_out": fade(2000), "sync_point": 500, "gain_env": [[100, -6.0], [4000, 0.0]]
         });
-        let file = json!({"format": "soundcraft.clipgroup", "version": 1, "sample_rate": src_rate, "length": 10_000, "lanes": [[clip]], "audio": {}});
+        let file = json!({"format": "liviwave.clipgroup", "version": 1, "sample_rate": src_rate, "length": 10_000, "lanes": [[clip]], "audio": {}});
         std::fs::write(&p, file.to_string()).unwrap();
         let r = e.execute("file.import_clip_groups", &json!({"path": p.to_string_lossy()})).unwrap();
-        let c = e.session().find_clip(soundcraft_model::ClipId(r["clips"][0].as_u64().unwrap())).unwrap().1;
+        let c = e.session().find_clip(liviwave_model::ClipId(r["clips"][0].as_u64().unwrap())).unwrap().1;
         assert_eq!((c.length, c.fade_in.len, c.fade_out.len, c.sync_point), (20_000, 2000, 4000, 1000));
         assert_eq!(c.gain_env.iter().map(|&(at, _)| at).collect::<Vec<_>>(), vec![200, 8000]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -319,11 +319,11 @@ mod tests {
     fn a_file_named_by_many_ids_becomes_one_source() {
         let dir = std::env::temp_dir().join(format!("sc-grp-shared-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let audio = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
-        std::fs::write(dir.join("k.wav"), soundcraft_audio_io::encode(&audio, &soundcraft_audio_io::EncodeOptions::default()).unwrap()).unwrap();
+        let audio = liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
+        std::fs::write(dir.join("k.wav"), liviwave_audio_io::encode(&audio, &liviwave_audio_io::EncodeOptions::default()).unwrap()).unwrap();
         let clip = |id: u64| json!({"id": id, "name": "k", "start": id * 1000, "length": 480, "content": {"Audio": {"source": id, "offset": 0}}});
         let audio_paths = json!({"1": "k.wav", "2": "./k.wav", "3": "k.wav"});
-        let file = json!({"format": "soundcraft.clipgroup", "version": 1, "sample_rate": 48000, "length": 4000, "lanes": [[clip(1), clip(2), clip(3)]], "audio": audio_paths});
+        let file = json!({"format": "liviwave.clipgroup", "version": 1, "sample_rate": 48000, "length": 4000, "lanes": [[clip(1), clip(2), clip(3)]], "audio": audio_paths});
         let p = dir.join("k.scgrp");
         std::fs::write(&p, file.to_string()).unwrap();
         let mut e = crate::demo::demo_engine();
@@ -340,7 +340,7 @@ mod tests {
         let p = dir.join("x.scgrp");
         std::fs::write(
             &p,
-            r#"{"format":"soundcraft.clipgroup","version":1,"sample_rate":48000,"length":1,"lanes":[],"audio":{"1":"../../etc/passwd"}}"#,
+            r#"{"format":"liviwave.clipgroup","version":1,"sample_rate":48000,"length":1,"lanes":[],"audio":{"1":"../../etc/passwd"}}"#,
         )
         .unwrap();
         let mut e = crate::demo::demo_engine();

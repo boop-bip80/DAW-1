@@ -1,6 +1,6 @@
-# SoundCraft — instructions for agents
+# LiVi Wave — instructions for agents
 
-SoundCraft is a clean-room, open-source, pure-Rust digital audio workstation targeting Avid Pro Tools parity — and superiority (speed, openness, agent control). It runs natively on macOS, Windows, Linux and FreeBSD, and on the web via WASM. Siblings with the same conventions: `../photocraft` (Photoshop), `../vectorcraft` (Illustrator), `../filmcraft` (Premiere), `../lightcraft` (Lightroom), `../pdfcraft` (Acrobat), `../effectcraft` (After Effects), `../designcraft` (InDesign).
+LiVi Wave is a clean-room, open-source, pure-Rust digital audio workstation targeting Avid Pro Tools parity — and superiority (speed, openness, agent control). It runs natively on macOS, Windows, Linux and FreeBSD, and on the web via WASM. Siblings with the same conventions: `../photocraft` (Photoshop), `../vectorcraft` (Illustrator), `../filmcraft` (Premiere), `../lightcraft` (Lightroom), `../pdfcraft` (Acrobat), `../effectcraft` (After Effects), `../designcraft` (InDesign).
 
 Standards and learnings shared across the crafting apps live in `../../craftrules` (checked out next to the craft-apps folder, or `storytold/craftrules`). Read its `AGENTS.md` at the start of a session, follow its standards, and contribute reusable learnings back there. Never code: repos don't share code.
 
@@ -11,7 +11,7 @@ Standards and learnings shared across the crafting apps live in `../../craftrule
 
 ## ⚠️ Assets: the absolute rule
 **No Avid, Pro Tools, Adobe or other proprietary iconography, images, sounds, presets or artwork — ever.** This is not negotiable.
-- Every icon in SoundCraft is drawn in code (`crates/ui-egui/src/icons.rs`) or is an original/open asset.
+- Every icon in LiVi Wave is drawn in code (`crates/ui-egui/src/icons.rs`) or is an original/open asset.
 - Every bundled asset (image, icon, sound, font, preset) must be original, public domain (CC0), or under a permissive open license (MIT, Apache-2.0, BSD, OFL, CC-BY with attribution), or contributed by someone who made it and licenses it openly.
 - **Every bundled asset gets a row in [`ATTRIBUTION.md`](ATTRIBUTION.md)** (path, author, source, license) in the same commit that adds it. `cargo xtask assets` enforces this; CI fails otherwise.
 - Never copy files out of the Pro Tools bundle (`/Applications/Pro Tools.app`): no plugins, presets, icons, sounds, session templates or text. Observing the running app (screenshots kept under `plan/`, menu names) is fine; copying its resources is not.
@@ -22,11 +22,11 @@ Standards and learnings shared across the crafting apps live in `../../craftrule
 Pro Tools is installed on the dev machine and may be *observed* black-box: run it, use its UI with synthetic sessions, take screenshots by window id (`screencapture -l <id>`), stored only under `plan/protools/screenshots/`. Never read, disassemble or copy anything inside the Pro Tools bundle; never copy Avid icons, artwork, plugin names, presets, or wording beyond feature names. Never copy GPL/AGPL/LGPL code (Ardour, Audacity, LMMS, Freeverb sources…). Our plugins have our own names.
 
 ## Never crash
-People trust SoundCraft with their recordings; a crash loses takes. **This outranks feature work.** Standard: [`craftrules/standards/never-crash.md`](https://github.com/storytold/craftrules/blob/main/standards/never-crash.md).
+People trust LiVi Wave with their recordings; a crash loses takes. **This outranks feature work.** Standard: [`craftrules/standards/never-crash.md`](https://github.com/storytold/craftrules/blob/main/standards/never-crash.md).
 - No panics in non-test code: no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`; no `unsafe` (`unsafe_code = "forbid"`).
-- The one named exception is `soundcraft-clap-host` (`crates/clap-host`), the isolated unsafe helper crate for CLAP plugin FFI: `unsafe_code = "deny"` crate-wide, allowed only in `src/ffi.rs` with a `// SAFETY:` comment on every block, safe `Result` API.
-- The same exception, same rules, for `soundcraft-vst3-host` (`crates/vst3-host`), the isolated unsafe helper crate for VST3 plugin FFI (COM vtables via the `vst3` bindings, module loading, host-side COM objects).
-- And for `soundcraft-au-host` (`crates/au-host`), the isolated unsafe helper crate for Audio Unit FFI (hand-written AudioToolbox/CoreFoundation declarations, macOS only; a safe stub elsewhere).
+- The one named exception is `liviwave-clap-host` (`crates/clap-host`), the isolated unsafe helper crate for CLAP plugin FFI: `unsafe_code = "deny"` crate-wide, allowed only in `src/ffi.rs` with a `// SAFETY:` comment on every block, safe `Result` API.
+- The same exception, same rules, for `liviwave-vst3-host` (`crates/vst3-host`), the isolated unsafe helper crate for VST3 plugin FFI (COM vtables via the `vst3` bindings, module loading, host-side COM objects).
+- And for `liviwave-au-host` (`crates/au-host`), the isolated unsafe helper crate for Audio Unit FFI (hand-written AudioToolbox/CoreFoundation declarations, macOS only; a safe stub elsewhere).
 - Errors are `Result<T, E>` + `?`. An unfinished feature returns an "unsupported" error.
 - Input-derived numbers are hostile (files, commands, MCP/control params): `get()` not `[i]`, checked/saturating arithmetic, no NaN casts, cap allocations.
 - The audio callback never blocks, allocates in steady state, or panics.
@@ -38,14 +38,14 @@ People trust SoundCraft with their recordings; a crash loses takes. **This outra
 ## Architecture (layers enforced by `cargo xtask layers`)
 | Layer | Crate | Role |
 |---|---|---|
-| L0 | `soundcraft-time`, `soundcraft-audio-io`, `soundcraft-midi` | Timebases/tempo/grid; audio file formats + peaks; Standard MIDI Files + MIDI ops |
-| L1 | `soundcraft-dsp` | Plugins (EQ, dynamics, reverb, delay, modulation, harmonic, pitch, utility, instruments), offline processing, meters, FFT |
-| L2 | `soundcraft-model` | The session document (tracks, playlists, clips, mixer, routing, automation, markers, groups) |
-| L3 | `soundcraft-mix` | Mix engine shared by realtime playback and offline bounce |
-| L4 | `soundcraft-engine`, `soundcraft-playback` | Command registry, undo, editing, import/export/bounce, parity catalog; audio device I/O (cpal) |
-| L5 | `soundcraft-automation` | MCP server + control-channel client |
-| L6 | `soundcraft-ui-egui` | The swappable UI (egui) |
-| apps | `soundcraft`, `soundcraft-cli`, `soundcraft-web` | Entry points |
+| L0 | `liviwave-time`, `liviwave-audio-io`, `liviwave-midi` | Timebases/tempo/grid; audio file formats + peaks; Standard MIDI Files + MIDI ops |
+| L1 | `liviwave-dsp` | Plugins (EQ, dynamics, reverb, delay, modulation, harmonic, pitch, utility, instruments), offline processing, meters, FFT |
+| L2 | `liviwave-model` | The session document (tracks, playlists, clips, mixer, routing, automation, markers, groups) |
+| L3 | `liviwave-mix` | Mix engine shared by realtime playback and offline bounce |
+| L4 | `liviwave-engine`, `liviwave-playback` | Command registry, undo, editing, import/export/bounce, parity catalog; audio device I/O (cpal) |
+| L5 | `liviwave-automation` | MCP server + control-channel client |
+| L6 | `liviwave-ui-egui` | The swappable UI (egui) |
+| apps | `liviwave`, `liviwave-cli`, `liviwave-web` | Entry points |
 
 Nothing below L6 depends on egui/eframe/winit/rfd. The UI is thin: panels read engine state and act through `engine.execute(id, params)`.
 
@@ -55,10 +55,10 @@ User-visible behaviour = a command in `crates/engine/src/cmd/*` (id, label, menu
 Parity is measured, not guessed: `crates/engine/catalog/menus.txt` lists the incumbent's menu leaves (names only). `cargo xtask parity` writes `docs/parity-checklist.md` (generated; the hand-written assessment is `docs/target-app-parity.md`); a test enforces a floor that only rises.
 
 ## Running and looking at the app
-- `cargo run --release -p soundcraft -- --demo --control 0` (demo session + control channel on a free port; the port is printed).
+- `cargo run --release -p liviwave -- --demo --control 0` (demo session + control channel on a free port; the port is printed).
 - Drive it: JSON lines over TCP, e.g. `{"id":1,"method":"engine.execute","params":{"command":"track.new","params":{"count":2,"format":"stereo"}}}`, then `{"id":2,"method":"ui.screenshot","params":{"path":"/tmp/shot.png"}}`. Methods: `crates/ui-egui/src/control.rs`, docs: `docs/control-protocol.md`.
-- Offscreen UI render (no window, no focus stealing): `cargo run -p soundcraft-ui-egui --example ui_shot -- out.png [script.jsonl]`.
-- Headless: `soundcraft-cli run --demo --cmd 'mix.volume={"track":"Kick","db":-6}' --bounce out.wav`; MCP: `soundcraft-cli mcp [--connect PORT]`.
+- Offscreen UI render (no window, no focus stealing): `cargo run -p liviwave-ui-egui --example ui_shot -- out.png [script.jsonl]`.
+- Headless: `liviwave-cli run --demo --cmd 'mix.volume={"track":"Kick","db":-6}' --bounce out.wav`; MCP: `liviwave-cli mcp [--connect PORT]`.
 - **For UI work, look at the result** (render, read the PNG) and compare with `plan/protools/screenshots/`.
 - Shell gotcha: `mv`/`cp` are aliased interactive here — use `/bin/mv -f` / `/bin/cp -f`.
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates you own; write manifests atomically; delete your target dir when done (disk).

@@ -1,19 +1,19 @@
-# Releasing SoundCraft
+# Releasing LiVi Wave
 
 Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds
 signed installers for macOS, Windows, Linux, FreeBSD and the web, then creates or updates a
-**draft** GitHub Release named `SoundCraft v<version>`. Nobody sees a draft until a maintainer
+**draft** GitHub Release named `LiVi Wave v<version>`. Nobody sees a draft until a maintainer
 publishes it.
 
-This is SoundCraft's implementation of the shared [release playbook](release-playbook.md).
-User-facing names say **SoundCraft**. Files, binaries and ids stay lowercase
-(`soundcraft-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.soundcraft`).
+This is LiVi Wave's implementation of the shared [release playbook](release-playbook.md).
+User-facing names say **LiVi Wave**. Files, binaries and ids stay lowercase
+(`liviwave-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.liviwave`).
 
 ## Cutting a release
 
 1. **Bump the version** on `main`. The only place it lives is `[workspace.package] version` in
-   the root `Cargo.toml`; the app reads it from `CARGO_PKG_VERSION` (*About SoundCraft*,
-   `soundcraft --version`, `soundcraft-cli --version`).
+   the root `Cargo.toml`; the app reads it from `CARGO_PKG_VERSION` (*About LiVi Wave*,
+   `liviwave --version`, `liviwave-cli --version`).
 
    ```sh
    cargo xtask version                 # prints the current version, e.g. 0.1.0
@@ -23,7 +23,7 @@ User-facing names say **SoundCraft**. Files, binaries and ids stay lowercase
    Commit the change (`Cargo.toml` + `Cargo.lock`) through the normal review flow.
 2. **Merge `main` into `release`** (or fast-forward it) and push. The workflow starts by itself.
 3. **Wait for the draft.** After about 30 to 60 minutes (notarization and the FreeBSD VM are the
-   slow parts), the Releases page has a draft `SoundCraft v0.2.0`, tagged `v0.2.0` on the pushed
+   slow parts), the Releases page has a draft `LiVi Wave v0.2.0`, tagged `v0.2.0` on the pushed
    commit, with every artifact and `SHA256SUMS.txt`. The notes are generated from the merged PRs.
 4. **Check it.** Download an installer or two and look at the job summaries. Any `::warning::`
    there means a signing secret was missing and that artifact is unsigned.
@@ -44,25 +44,25 @@ web build and are checked, the signing jobs are refused, and no release is draft
 
 | Platform | Artifacts | Built on |
 |---|---|---|
-| macOS 11+ (universal: Apple silicon + Intel) | `soundcraft-<v>-macos-universal.dmg`, `soundcraft-cli-<v>-macos-universal.zip` | `macos-15` |
-| Windows 10+ x64 | `soundcraft-<v>-windows-x64.msi`, `soundcraft-<v>-windows-x64-portable.zip` | `windows-latest` |
-| Windows 10+ x86 (32-bit) | `soundcraft-<v>-windows-x86.msi`, `soundcraft-<v>-windows-x86-portable.zip` | `windows-latest` |
-| Windows 11 ARM64 | `soundcraft-<v>-windows-arm64.msi`, `soundcraft-<v>-windows-arm64-portable.zip` | `windows-latest` (cross-compiled; `windows-arm64.yml` installs and runs it on ARM64) |
-| Linux x86_64 | `soundcraft-<v>-linux-x86_64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04` |
-| Linux aarch64 | `soundcraft-<v>-linux-aarch64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04-arm` |
-| Linux riscv64 | `soundcraft-<v>-linux-riscv64.tar.gz` (glibc 2.39+) | `ubuntu-24.04` (cross-compiled; CLI smoke-tested under QEMU) |
-| AppImage updates | `soundcraft-<v>-linux-{x86_64,aarch64}.AppImage.zsync` | with the AppImage |
-| Flatpak x86_64, aarch64 | `soundcraft-<v>-linux-{x86_64,aarch64}.flatpak` | `ubuntu-24.04`, `ubuntu-24.04-arm` (repackages the Linux tarball) |
-| FreeBSD 14 x86_64 | `soundcraft-<v>-freebsd-x86_64.tar.gz` (a `/usr/local` tree) | FreeBSD 14.3 VM on `ubuntu-latest` |
-| Web | `soundcraft-web-<v>.zip` (static site; see [`packaging/web/README.md`](../packaging/web/README.md)) | `ubuntu-latest` |
+| macOS 11+ (universal: Apple silicon + Intel) | `liviwave-<v>-macos-universal.dmg`, `liviwave-cli-<v>-macos-universal.zip` | `macos-15` |
+| Windows 10+ x64 | `liviwave-<v>-windows-x64.msi`, `liviwave-<v>-windows-x64-portable.zip` | `windows-latest` |
+| Windows 10+ x86 (32-bit) | `liviwave-<v>-windows-x86.msi`, `liviwave-<v>-windows-x86-portable.zip` | `windows-latest` |
+| Windows 11 ARM64 | `liviwave-<v>-windows-arm64.msi`, `liviwave-<v>-windows-arm64-portable.zip` | `windows-latest` (cross-compiled; `windows-arm64.yml` installs and runs it on ARM64) |
+| Linux x86_64 | `liviwave-<v>-linux-x86_64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04` |
+| Linux aarch64 | `liviwave-<v>-linux-aarch64.{AppImage,deb,rpm,tar.gz}` | `ubuntu-22.04-arm` |
+| Linux riscv64 | `liviwave-<v>-linux-riscv64.tar.gz` (glibc 2.39+) | `ubuntu-24.04` (cross-compiled; CLI smoke-tested under QEMU) |
+| AppImage updates | `liviwave-<v>-linux-{x86_64,aarch64}.AppImage.zsync` | with the AppImage |
+| Flatpak x86_64, aarch64 | `liviwave-<v>-linux-{x86_64,aarch64}.flatpak` | `ubuntu-24.04`, `ubuntu-24.04-arm` (repackages the Linux tarball) |
+| FreeBSD 14 x86_64 | `liviwave-<v>-freebsd-x86_64.tar.gz` (a `/usr/local` tree) | FreeBSD 14.3 VM on `ubuntu-latest` |
+| Web | `liviwave-web-<v>.zip` (static site; see [`packaging/web/README.md`](../packaging/web/README.md)) | `ubuntu-latest` |
 
-The from-source Flatpak manifest (`packaging/linux/flatpak/ai.storyteller.soundcraft.yml`) is
+The from-source Flatpak manifest (`packaging/linux/flatpak/ai.storyteller.liviwave.yml`) is
 kept ready for a Flathub submission; the release's `.flatpak` bundles come from
-`ai.storyteller.soundcraft.bundle.yml` (see Linux below).
+`ai.storyteller.liviwave.bundle.yml` (see Linux below).
 
 ### Audio libraries
 
-SoundCraft plays and records through [cpal](https://github.com/RustAudio/cpal): CoreAudio on
+LiVi Wave plays and records through [cpal](https://github.com/RustAudio/cpal): CoreAudio on
 macOS, WASAPI on Windows, ALSA on Linux and FreeBSD (PulseAudio and PipeWire through their ALSA
 plugins), and WebAudio in the browser.
 
@@ -74,19 +74,19 @@ plugins), and WebAudio in the browser.
   silent clock, so the transport still runs.
 - **Flatpak**: alsa-lib and its PulseAudio plugin come with the freedesktop runtime; the
   manifests grant `--socket=pulseaudio` (PipeWire's pulse server answers on it). No raw ALSA
-  devices and no JACK: SoundCraft doesn't use either.
+  devices and no JACK: LiVi Wave doesn't use either.
 - **Web**: browsers start audio only after a user gesture, so the first click in the page may be
   needed before sound plays. The web build has no recording.
 
 ### macOS
 
 `packaging/macos/package.sh` builds `aarch64-apple-darwin` and `x86_64-apple-darwin` with
-`MACOSX_DEPLOYMENT_TARGET=11.0`, joins them with `lipo`, and assembles `SoundCraft.app`:
+`MACOSX_DEPLOYMENT_TARGET=11.0`, joins them with `lipo`, and assembles `LiViWave.app`:
 
-- `Info.plist` is generated from `Info.plist.in`. The bundle id is `ai.storyteller.soundcraft`.
-  It declares the `.scraft` session type (`ai.storyteller.soundcraft.session`, MIME
-  `application/x-soundcraft-session`, role Editor, rank Owner) and lists WAV, AIFF/AIFC, FLAC,
-  MP3 and MIDI as Viewer/Alternate, so SoundCraft appears under *Open With* without taking over
+- `Info.plist` is generated from `Info.plist.in`. The bundle id is `ai.storyteller.liviwave`.
+  It declares the `.scraft` session type (`ai.storyteller.liviwave.session`, MIME
+  `application/x-liviwave-session`, role Editor, rank Owner) and lists WAV, AIFF/AIFC, FLAC,
+  MP3 and MIDI as Viewer/Alternate, so LiVi Wave appears under *Open With* without taking over
   the default player. `NSMicrophoneUsageDescription` explains the recording prompt.
 - **Signing** goes inside-out with the hardened runtime and a secure timestamp. The executable is
   signed first, then the bundle. There's no `--deep` on the final signature. `entitlements.plist`
@@ -96,9 +96,9 @@ plugins), and WebAudio in the browser.
   ticket is stapled to the app. The app goes on a DMG (`hdiutil`, with an `Applications` link).
   The DMG is signed, notarized and stapled too.
   Its Finder window (background, icon size and positions) comes from
-  [`packaging/macos/dmg/`](../packaging/macos/dmg/README.md), and its volume is named `SoundCraft`
+  [`packaging/macos/dmg/`](../packaging/macos/dmg/README.md), and its volume is named `LiVi Wave`
   without the version, which the window's background needs; the DMG file name keeps the version.
-- **CLI:** the universal `soundcraft-cli` is signed with the hardened runtime, zipped and
+- **CLI:** the universal `liviwave-cli` is signed with the hardened runtime, zipped and
   notarized.
 
 Locally, without certificates, the script signs ad-hoc (`codesign -s -`) and skips notarization:
@@ -106,7 +106,7 @@ Locally, without certificates, the script signs ad-hoc (`codesign -s -`) and ski
 ```sh
 packaging/macos/package.sh                    # universal; needs both rustup targets
 packaging/macos/package.sh --arch aarch64     # quicker, host-only
-open dist/release/soundcraft-*-macos-*.dmg
+open dist/release/liviwave-*-macos-*.dmg
 ```
 
 ### Windows
@@ -115,15 +115,15 @@ open dist/release/soundcraft-*-macos-*.dmg
 (in `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, so host build scripts aren't affected), so neither the MSI
 nor the portable zip needs the Visual C++ redistributable.
 
-- `apps/soundcraft/build.rs` embeds the icon (`assets/app-icon/soundcraft.ico`) and VERSIONINFO
+- `apps/liviwave/build.rs` embeds the icon (`assets/app-icon/liviwave.ico`) and VERSIONINFO
   with `winresource`, only when targeting Windows. Release packaging sets
-  `SOUNDCRAFT_REQUIRE_WINRES=1` so a missing resource compiler fails the build.
-- The script checks both PE headers: the machine type matches `-Arch`, `soundcraft.exe` is a GUI
-  app (no console window) and `soundcraft-cli.exe` a console app.
-- `soundcraft.wxs` (WiX v5) is a per-machine install into Program Files with an advertised Start
-  Menu shortcut. SoundCraft becomes the default app for `.scraft` and is listed under *Open with*
+  `LIVIWAVE_REQUIRE_WINRES=1` so a missing resource compiler fails the build.
+- The script checks both PE headers: the machine type matches `-Arch`, `liviwave.exe` is a GUI
+  app (no console window) and `liviwave-cli.exe` a console app.
+- `liviwave.wxs` (WiX v5) is a per-machine install into Program Files with an advertised Start
+  Menu shortcut. LiVi Wave becomes the default app for `.scraft` and is listed under *Open with*
   for `.wav`, `.aif`, `.aiff`, `.flac`, `.mp3`, `.mid` and `.midi`. It also registers App Paths
-  (Win+R `soundcraft`). The MSI version is the numeric `X.Y.Z`; same-version upgrades let release
+  (Win+R `liviwave`). The MSI version is the numeric `X.Y.Z`; same-version upgrades let release
   candidates replace each other. The upgrade code `EE53D3E5-D0AE-40F9-808D-9417FDEBF61A` is fixed
   forever.
 - **Signing:** `packaging/windows/sign.ps1` signs both `.exe` files and then the `.msi` with
@@ -136,27 +136,27 @@ Locally on Windows: `dotnet tool install -g wix --version 5.0.2`, then
 ### Linux
 
 `packaging/linux/package.sh` stages one FHS tree and makes every format from it: both binaries,
-`ai.storyteller.soundcraft.desktop` (with `MimeType=` for sessions, WAV, AIFF, FLAC, MP3 and
+`ai.storyteller.liviwave.desktop` (with `MimeType=` for sessions, WAV, AIFF, FLAC, MP3 and
 MIDI), hicolor icons from 16 px to 512 px plus a scalable SVG, AppStream metainfo, and a
-shared-mime-info file declaring `application/x-soundcraft-session` (`*.scraft`).
+shared-mime-info file declaring `application/x-liviwave-session` (`*.scraft`).
 
 - **AppImage** (maintained `AppImage/appimagetool`, static runtime: no libfuse2 needed). Each
   embeds the update information
-  `gh-releases-zsync|storytold|soundcraft|latest|soundcraft-*-linux-<arch>.AppImage.zsync`, and
+  `gh-releases-zsync|storytold|liviwave|latest|liviwave-*-linux-<arch>.AppImage.zsync`, and
   the `.zsync` next to it (written when `zsyncmake` from the `zsync` package is installed, as in
   CI) lets AppImageUpdate fetch only the changed blocks of the newest non-pre-release.
 - **.deb** and **.rpm** by [nfpm](https://nfpm.goreleaser.com/) from one `nfpm.yaml`; the
   `postinst.sh` hook refreshes the desktop, MIME and icon caches.
 - **.tar.gz** for people who manage their own `/opt` or `~/.local`.
 - **Flatpak**: the `flatpak` job runs `packaging/linux/flatpak-bundle.sh` on the Linux job's
-  tarball (no Rust build) with `flatpak/ai.storyteller.soundcraft.bundle.yml`, then installs the
-  bundle and runs `soundcraft-cli --version` in the sandbox. Install with
-  `flatpak install --user soundcraft-<v>-linux-<arch>.flatpak`. Both manifests use the freedesktop
+  tarball (no Rust build) with `flatpak/ai.storyteller.liviwave.bundle.yml`, then installs the
+  bundle and runs `liviwave-cli --version` in the sandbox. Install with
+  `flatpak install --user liviwave-<v>-linux-<arch>.flatpak`. Both manifests use the freedesktop
   25.08 runtime with Wayland/X11, `dri`, PulseAudio and `xdg-music`; other files go through the
   portals. For the VST3 and CLAP hosts they grant `~/.vst3` and `~/.clap` read-only and mount
   Flathub's `org.freedesktop.LinuxAudio.Plugins` extensions (pointed to by `VST3_PATH` and
   `CLAP_PATH`); system plugin folders aren't visible in the sandbox.
-  `ai.storyteller.soundcraft.yml` builds from source for Flathub and needs vendored crates
+  `ai.storyteller.liviwave.yml` builds from source for Flathub and needs vendored crates
   (`cargo-sources.json` from `flatpak-cargo-generator.py`); the commands are in its header.
 
 Binaries are built on Ubuntu 22.04 and need **glibc ≥ 2.35**. X11, Wayland, xkbcommon, Vulkan
@@ -169,14 +169,14 @@ Locally (on Linux): install nfpm, then `packaging/linux/package.sh` (or `--forma
 GitHub has no FreeBSD runners, so the `freebsd` job builds inside a FreeBSD 14.3 VM
 (`vmactions/freebsd-vm`, pinned by commit) and runs `packaging/freebsd/package.sh`, which stages
 a `/usr/local`-style tree (binaries, desktop entry, MIME type, metainfo, icons, docs) as a
-`.tar.gz`. Install with `tar -xzf soundcraft-*-freebsd-x86_64.tar.gz --strip-components 1 -C /usr/local`.
+`.tar.gz`. Install with `tar -xzf liviwave-*-freebsd-x86_64.tar.gz --strip-components 1 -C /usr/local`.
 `.github/workflows/freebsd.yml` builds and tests the workspace there on every push to `main`.
 
 ### Web
 
-`packaging/web/package.sh` runs `trunk build --release` in `apps/soundcraft-web` (output in
+`packaging/web/package.sh` runs `trunk build --release` in `apps/liviwave-web` (output in
 `dist/web`, `public_url = "./"`) and zips the site with sample `_headers` and `.htaccess` files and
-the hosting guide. `apps/soundcraft-web` runs the same `SoundApp` as the desktop app on the
+the hosting guide. `apps/liviwave-web` runs the same `SoundApp` as the desktop app on the
 synthesised demo session, rendering with wgpu (WebGPU, or WebGL2 with `?webgl`) and playing
 through WebAudio.
 
@@ -205,12 +205,12 @@ environment, ruleset and secrets for a new repo: craftrules `release/signing-set
 
 ## Icons
 
-`assets/app-icon/icon.svg` is the canonical icon: a **placeholder** singing nightingale, drawn as
-original SVG in the three-colour icon palette (ink, paper, SoundCraft teal `#14a9c4`); see
+`assets/app-icon/source/liviwave-icon-source.png` is the canonical icon art: an AI-generated glass tile with a waveform,
+supplied by the owner (`icon.svg` wraps a 512 px crop of it); see
 `assets/app-icon/README.md`. `packaging/icons.sh` regenerates the 1024 px PNG, the macOS 512 px
 window icon, the `.icns`, the `.ico` (packed by `cargo xtask ico`) and the hicolor PNGs from it.
 It needs `resvg`, plus `iconutil` on macOS. The outputs are committed, so packaging never needs
-those tools. `apps/soundcraft/src/main.rs` sets the runtime window/Dock/taskbar icon from them.
+those tools. `apps/liviwave/src/main.rs` sets the runtime window/Dock/taskbar icon from them.
 
 ## Checks
 

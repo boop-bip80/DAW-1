@@ -111,14 +111,14 @@ pub(super) fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, l
     {
         let s = app.engine.session();
         let at = drag_snap(s, sample_at(s, tl, p.x).max(0), ui.input(|i| i.modifiers.command));
-        let spot = Spot::source(s, soundcraft_model::SourceId(src.0), track.id, at);
+        let spot = Spot::source(s, liviwave_model::SourceId(src.0), track.id, at);
         spot_or_run(app, spot);
     }
     if resp.dnd_hover_payload::<crate::DragSource>().is_some() {
         ui.painter().rect_stroke(lane, 0.0, Stroke::new(2.0, Tokens::current().accent), StrokeKind::Inside);
     }
     // Audio files dropped from outside onto an instrument track load its sampler.
-    if track.kind == soundcraft_model::TrackKind::Instrument {
+    if track.kind == liviwave_model::TrackKind::Instrument {
         crate::sampler_window::drop_target(app, ui.ctx(), lane, track.id);
     }
     let s = app.engine.session_arc();

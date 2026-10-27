@@ -5,7 +5,7 @@
 use egui::{Event, Modifiers, PointerButton, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use soundcraft_ui_egui::{Services, SoundApp};
+use liviwave_ui_egui::{Services, SoundApp};
 
 /// One UI frame, with queued synthetic pointer input applied first (as the control channel does).
 fn step(h: &mut Harness<'_, SoundApp>) {
@@ -33,7 +33,7 @@ fn kick_clip_count(h: &Harness<'_, SoundApp>) -> usize {
 /// removes one Kick clip.
 #[test]
 fn clip_menu_stays_open_while_moving_onto_delete() {
-    let engine = soundcraft_engine::demo::demo_engine();
+    let engine = liviwave_engine::demo::demo_engine();
     let app = SoundApp::new(engine, None, Services::default());
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_pixels_per_point(2.0).build_ui_state(
         |ui, app: &mut SoundApp| {

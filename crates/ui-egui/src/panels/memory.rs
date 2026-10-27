@@ -40,11 +40,11 @@ pub(crate) fn memory_locations(app: &mut SoundApp, ui: &mut Ui) {
             .iter()
             .map(|m| {
                 let kind = match m.kind {
-                    soundcraft_model::MarkerKind::Marker => "marker",
-                    soundcraft_model::MarkerKind::Selection => "selection",
-                    soundcraft_model::MarkerKind::None => "none",
+                    liviwave_model::MarkerKind::Marker => "marker",
+                    liviwave_model::MarkerKind::Selection => "selection",
+                    liviwave_model::MarkerKind::None => "none",
                 };
-                let len = if m.kind == soundcraft_model::MarkerKind::Selection { f(m.end - m.start) } else { String::new() };
+                let len = if m.kind == liviwave_model::MarkerKind::Selection { f(m.end - m.start) } else { String::new() };
                 (m.number, m.name.clone(), f(m.start), len, kind.to_string())
             })
             .collect()

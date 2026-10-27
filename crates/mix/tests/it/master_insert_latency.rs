@@ -1,10 +1,10 @@
 //! Delay compensation covers the inserts of the master faders: a bounce of the main mix lines up
 //! with the same mix without them.
 
-use soundcraft_audio_io::AudioBuffer;
-use soundcraft_mix::{MixEngine, render_range};
-use soundcraft_model::{ChannelFormat, Clip, Insert, Route, Session, SourceAudio, SourceId, TrackKind};
-use soundcraft_time::Range;
+use liviwave_audio_io::AudioBuffer;
+use liviwave_mix::{MixEngine, render_range};
+use liviwave_model::{ChannelFormat, Clip, Insert, Route, Session, SourceAudio, SourceId, TrackKind};
+use liviwave_time::Range;
 use std::sync::Arc;
 
 const AT: usize = 2000;

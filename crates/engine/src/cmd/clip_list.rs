@@ -2,8 +2,8 @@
 use super::{CommandSpec, bad, bool_or};
 
 use crate::{Engine, Result, cmd};
+use liviwave_model::{ClipId, SourceId};
 use serde_json::{Value, json};
-use soundcraft_model::{ClipId, SourceId};
 use std::collections::BTreeSet;
 
 const CLEAR: &str = "clip.clear";
@@ -66,7 +66,7 @@ fn clear(e: &mut Engine, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_audio_io::{AudioBuffer, FileFormat};
+    use liviwave_audio_io::{AudioBuffer, FileFormat};
 
     fn kick(e: &Engine) -> (SourceId, Vec<ClipId>) {
         let s = e.session();

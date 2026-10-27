@@ -13,13 +13,13 @@ pub fn consolidate(e: &mut Engine, cmd: &str, t: TrackId, r: Range) -> Result<bo
     if len <= 0 {
         return Ok(false);
     }
-    let max = soundcraft_mix::MAX_RENDER_SAMPLES / tr.channels().max(1);
+    let max = liviwave_mix::MAX_RENDER_SAMPLES / tr.channels().max(1);
     if usize::try_from(len).map_or(true, |n| n > max) {
         let secs = max as f64 / s.sample_rate.as_f64();
         return Err(crate::cmd::bad(cmd, format!("selection is too long to consolidate on `{}` (at most {secs:.0} s)", tr.name)));
     }
     let r = Range::new(start, start + len);
-    let audio = soundcraft_mix::render_clips(s, t, r);
+    let audio = liviwave_mix::render_clips(s, t, r);
     if audio.iter().any(|ch| ch.len() as i64 != len) {
         return Err(EngineError::Internal(cmd.to_string(), "consolidate rendered the wrong length".into()));
     }
@@ -35,7 +35,7 @@ pub fn consolidate(e: &mut Engine, cmd: &str, t: TrackId, r: Range) -> Result<bo
 
 /// The most frames of `channels`-channel audio one offline render holds.
 pub fn render_limit(channels: usize) -> usize {
-    soundcraft_mix::MAX_RENDER_SAMPLES / channels.max(1)
+    liviwave_mix::MAX_RENDER_SAMPLES / channels.max(1)
 }
 
 /// Refuses `len` frames of `name` past `max`, where a render would cut the audio short.
@@ -48,7 +48,7 @@ pub fn refuse_longer(s: &Session, cmd: &str, name: &str, verb: &str, len: Sample
 }
 
 /// Render clip gain into a new source and reset the clip's gain.
-pub fn render_clip_gain(e: &mut Engine, cmd: &str, id: soundcraft_model::ClipId) -> Result<bool> {
+pub fn render_clip_gain(e: &mut Engine, cmd: &str, id: liviwave_model::ClipId) -> Result<bool> {
     let s = e.session();
     let Some((t, c)) = s.find_clip(id).map(|(t, c)| (t, c.clone())) else { return Ok(false) };
     if !c.is_audio() {
@@ -62,7 +62,7 @@ pub fn render_clip_gain(e: &mut Engine, cmd: &str, id: soundcraft_model::ClipId)
     if let Some(pl) = tmp.track_mut(t).and_then(|x| x.playlist_mut()) {
         pl.clips = vec![c2];
     }
-    let audio = soundcraft_mix::render_clips(&tmp, t, c.range());
+    let audio = liviwave_mix::render_clips(&tmp, t, c.range());
     let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: audio };
     let s = e.session_mut();
     let src = add_source(s, &format!("{}_gain", c.name), buf, None, FileFormat::Wav);
@@ -89,10 +89,10 @@ pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
         return Ok(None);
     }
     let fmt = tr.format;
-    if fmt.channels() > soundcraft_mix::MAX_CHANNELS {
+    if fmt.channels() > liviwave_mix::MAX_CHANNELS {
         return Err(EngineError::BadParams(
             "track.commit".into(),
-            format!("track commit supports at most {} channels; cannot render {}", soundcraft_mix::MAX_CHANNELS, fmt.label()),
+            format!("track commit supports at most {} channels; cannot render {}", liviwave_mix::MAX_CHANNELS, fmt.label()),
         ));
     }
     let too_long = || EngineError::BadParams("track.commit".into(), format!("`{}` is too long to commit within the offline render limit", tr.name));
@@ -100,11 +100,11 @@ pub fn commit_track(e: &mut Engine, t: TrackId) -> Result<Option<TrackId>> {
     let frames = usize::try_from(end).map_err(|_| too_long())?;
     // The shared renderer uses a stereo main mix for mono, then folds it back to mono.
     // Reject requests it would truncate before rendering or replacing the source track.
-    if frames > soundcraft_mix::MAX_RENDER_SAMPLES / fmt.channels().max(2) {
+    if frames > liviwave_mix::MAX_RENDER_SAMPLES / fmt.channels().max(2) {
         return Err(too_long());
     }
     let range = Range::new(0, end);
-    let audio = soundcraft_mix::render_track_pre_fader(s, t, range);
+    let audio = liviwave_mix::render_track_pre_fader(s, t, range);
     if audio.len() != fmt.channels() || audio.iter().any(|channel| channel.len() != frames) {
         return Err(EngineError::Io("track commit did not render the complete channel format and range".into()));
     }
@@ -146,26 +146,26 @@ mod name_tests {
 
     #[test]
     fn a_midi_track_name_is_cut_to_a_length_that_can_be_drawn() {
-        let note = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 };
-        let sequence = soundcraft_midi::Sequence { notes: vec![note], ..Default::default() };
-        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: "n".repeat(1_000_000), sequence }], ..Default::default() };
+        let note = liviwave_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 };
+        let sequence = liviwave_midi::Sequence { notes: vec![note], ..Default::default() };
+        let smf = liviwave_midi::Smf { tracks: vec![liviwave_midi::SmfTrack { name: "n".repeat(1_000_000), sequence }], ..Default::default() };
         let mut e = Engine::default();
-        let ids = import_midi_bytes(&mut e, &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
+        let ids = import_midi_bytes(&mut e, &liviwave_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
         let track = e.session().track(ids[0]).unwrap();
-        assert_eq!((track.name.len(), track.clips()[0].name.len()), (soundcraft_model::MAX_NAME_CHARS, soundcraft_model::MAX_NAME_CHARS));
+        assert_eq!((track.name.len(), track.clips()[0].name.len()), (liviwave_model::MAX_NAME_CHARS, liviwave_model::MAX_NAME_CHARS));
     }
 
     #[test]
     fn a_controller_only_midi_track_is_imported_with_its_events() {
         let ctrls = vec![
-            soundcraft_midi::CtrlEvent { tick: 0, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 100 },
-            soundcraft_midi::CtrlEvent { tick: 480, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 64 },
-            soundcraft_midi::CtrlEvent { tick: 960, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(7), value: 20 },
+            liviwave_midi::CtrlEvent { tick: 0, channel: 0, kind: liviwave_midi::CtrlKind::Cc(7), value: 100 },
+            liviwave_midi::CtrlEvent { tick: 480, channel: 0, kind: liviwave_midi::CtrlKind::Cc(7), value: 64 },
+            liviwave_midi::CtrlEvent { tick: 960, channel: 0, kind: liviwave_midi::CtrlKind::Cc(7), value: 20 },
         ];
-        let sequence = soundcraft_midi::Sequence { ctrls: ctrls.clone(), ..Default::default() };
-        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: "Vol".into(), sequence }], ..Default::default() };
+        let sequence = liviwave_midi::Sequence { ctrls: ctrls.clone(), ..Default::default() };
+        let smf = liviwave_midi::Smf { tracks: vec![liviwave_midi::SmfTrack { name: "Vol".into(), sequence }], ..Default::default() };
         let mut e = Engine::default();
-        let ids = import_midi_bytes(&mut e, &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
+        let ids = import_midi_bytes(&mut e, &liviwave_midi::write_smf(&smf).unwrap(), 0, false).unwrap();
         assert_eq!(ids.len(), 1);
         let track = e.session().track(ids[0]).unwrap();
         assert_eq!(track.instrument.as_ref().map(|i| i.plugin.as_str()), Some("subtractive_synth"));
@@ -179,20 +179,20 @@ mod name_tests {
 
     #[test]
     fn midi_longer_than_a_day_is_refused() {
-        let held = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: (1 << 28) - 1 };
-        let sequence = soundcraft_midi::Sequence { notes: vec![held], ..Default::default() };
-        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: String::new(), sequence }], ..Default::default() };
-        let err = import_midi_bytes(&mut Engine::default(), &soundcraft_midi::write_smf(&smf).unwrap(), 0, false).unwrap_err();
+        let held = liviwave_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: (1 << 28) - 1 };
+        let sequence = liviwave_midi::Sequence { notes: vec![held], ..Default::default() };
+        let smf = liviwave_midi::Smf { tracks: vec![liviwave_midi::SmfTrack { name: String::new(), sequence }], ..Default::default() };
+        let err = import_midi_bytes(&mut Engine::default(), &liviwave_midi::write_smf(&smf).unwrap(), 0, false).unwrap_err();
         assert!(err.to_string().contains("longer than 24 hours"), "{err}");
     }
 
     #[test]
     fn midi_with_more_meter_changes_than_scores_have_is_refused() {
-        let note = soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 };
-        let sequence = soundcraft_midi::Sequence { notes: vec![note], ..Default::default() };
+        let note = liviwave_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 960 };
+        let sequence = liviwave_midi::Sequence { notes: vec![note], ..Default::default() };
         let meters = (0..=MAX_MIDI_METERS as i64).map(|bar| (bar * 3840, 4, 4)).collect();
-        let smf = soundcraft_midi::Smf { tracks: vec![soundcraft_midi::SmfTrack { name: String::new(), sequence }], meters, ..Default::default() };
-        let err = import_midi_bytes(&mut Engine::default(), &soundcraft_midi::write_smf(&smf).unwrap(), 0, true).unwrap_err();
+        let smf = liviwave_midi::Smf { tracks: vec![liviwave_midi::SmfTrack { name: String::new(), sequence }], meters, ..Default::default() };
+        let err = import_midi_bytes(&mut Engine::default(), &liviwave_midi::write_smf(&smf).unwrap(), 0, true).unwrap_err();
         assert!(err.to_string().contains("meter changes"), "{err}");
     }
 

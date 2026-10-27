@@ -16,17 +16,17 @@ pub(super) fn fade_drag_range(clip: &Clip, fade_in: bool, to: Samples) -> Option
     })
 }
 
-pub(super) fn fade_drag_preview(clip: &Clip, fade_in: bool, to: Samples) -> Option<soundcraft_model::Fade> {
+pub(super) fn fade_drag_preview(clip: &Clip, fade_in: bool, to: Samples) -> Option<liviwave_model::Fade> {
     let range = fade_drag_range(clip, fade_in, to)?;
     let original = if fade_in { clip.fade_in } else { clip.fade_out };
-    Some(soundcraft_model::Fade {
+    Some(liviwave_model::Fade {
         len: range.end.saturating_sub(range.start),
-        shape: if original.len > 0 { original.shape } else { soundcraft_model::FadeShape::SCurve },
+        shape: if original.len > 0 { original.shape } else { liviwave_model::FadeShape::SCurve },
         curvature: if original.len > 0 { original.curvature } else { 0.0 },
     })
 }
 
-pub(super) fn fade_curve_drag_value(fade: soundcraft_model::Fade, anchor: (f32, f32), height: f32, y: f32) -> f32 {
+pub(super) fn fade_curve_drag_value(fade: liviwave_model::Fade, anchor: (f32, f32), height: f32, y: f32) -> f32 {
     fade.curvature_for_midpoint_gain(anchor.1 + (anchor.0 - y) / height.max(1.0))
 }
 

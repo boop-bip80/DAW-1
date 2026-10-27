@@ -1,4 +1,4 @@
-use soundcraft_dsp::offline::{normalize, peak};
+use liviwave_dsp::offline::{normalize, peak};
 
 #[test]
 fn normalize_subnormal_peak_stays_finite() {

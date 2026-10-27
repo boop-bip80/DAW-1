@@ -1,4 +1,4 @@
-use soundcraft_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileEncoder, FileFormat, SampleFormat, decode, encode};
+use liviwave_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileEncoder, FileFormat, SampleFormat, decode, encode};
 use std::io::Cursor;
 
 fn encoded(audio: &AudioBuffer, options: &EncodeOptions, streaming: bool) -> Vec<u8> {

@@ -1,15 +1,15 @@
 use egui::accesskit::Role;
 use egui::{Event, Key, Modifiers, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_engine::io::StripNames;
+use liviwave_model::{ClipId, TrackId};
+use liviwave_ui_egui::dialogs::Dialog;
+use liviwave_ui_egui::{Services, SoundApp, menus};
 use serde_json::json;
-use soundcraft_engine::io::StripNames;
-use soundcraft_model::{ClipId, TrackId};
-use soundcraft_ui_egui::dialogs::Dialog;
-use soundcraft_ui_egui::{Services, SoundApp, menus};
 
 /// Selects the first Kick clip in the Clip List and opens Auto Rename for it.
 fn auto_rename_dialog() -> (Harness<'static, SoundApp>, TrackId, ClipId) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap();
     let (track, clip) = (kick.id, kick.clips()[0].id);
     app.run("edit.select", json!({"clips": [clip.0]})).unwrap();

@@ -7,9 +7,9 @@ use crate::widgets::{
     raised_key, rec_toggle, selector_box_named, shade, surround_panner, text_toggle, vgradient,
 };
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use liviwave_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
+use liviwave_playback::MeterSnapshot;
 use serde_json::json;
-use soundcraft_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
-use soundcraft_playback::MeterSnapshot;
 
 mod plugin_menu;
 mod routing;
@@ -38,7 +38,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
 pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
     let title = format!("{}  —  Mix", app.engine.session().name);
     let builder = egui::ViewportBuilder::default().with_title(title).with_inner_size([1100.0, 720.0]).with_min_inner_size([480.0, 320.0]);
-    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("soundcraft.mix"), builder, |ui, _class| {
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("liviwave.mix"), builder, |ui, _class| {
         ui.set_style(ui.ctx().global_style());
         if std::mem::take(&mut app.focus_mix) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -93,12 +93,12 @@ fn output_format(app: &SoundApp, track: &Track) -> ChannelFormat {
 /// Speaker dots of a format, placed on the panner square.
 fn panner_speakers(fmt: ChannelFormat) -> Vec<PannerSpeaker> {
     let sp = fmt.speakers();
-    let layout: Vec<soundcraft_dsp::pan::SpeakerPos> =
-        sp.iter().map(|s| soundcraft_dsp::pan::SpeakerPos { az: s.azimuth(), el: s.elevation(), lfe: s.is_lfe() }).collect();
+    let layout: Vec<liviwave_dsp::pan::SpeakerPos> =
+        sp.iter().map(|s| liviwave_dsp::pan::SpeakerPos { az: s.azimuth(), el: s.elevation(), lfe: s.is_lfe() }).collect();
     sp.iter()
         .filter(|s| !s.is_lfe())
         .map(|s| {
-            let (x, y) = soundcraft_dsp::pan::azimuth_to_puck(&layout, s.azimuth());
+            let (x, y) = liviwave_dsp::pan::azimuth_to_puck(&layout, s.azimuth());
             PannerSpeaker { label: s.label(), x, y, height: s.is_height() }
         })
         .collect()
@@ -258,9 +258,9 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             let freqs: Vec<f32> = (0..n).map(|i| 20.0 * 1000f32.powf(i as f32 / (n - 1) as f32)).collect();
             let params: Vec<(&str, f32)> = ins.params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
             let resp = if ins.plugin == "eq_7band" {
-                soundcraft_dsp::eq7_response(&params, &freqs, 48_000.0)
+                liviwave_dsp::eq7_response(&params, &freqs, 48_000.0)
             } else {
-                soundcraft_dsp::eq1_response(&params, &freqs, 48_000.0)
+                liviwave_dsp::eq1_response(&params, &freqs, 48_000.0)
             };
             let pts: Vec<egui::Pos2> = resp
                 .iter()
@@ -325,15 +325,15 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         ui.painter().text(pos2(am_r.center().x, am_r.min.y - 1.0), Align2::CENTER_BOTTOM, "", regular(9.0), t.text_dim);
         let mut c = ui.new_child(egui::UiBuilder::new().max_rect(am_r));
         let mode = track.mixer.automation_mode;
-        let col = if mode == soundcraft_model::AutomationMode::Read {
+        let col = if mode == liviwave_model::AutomationMode::Read {
             t.auto_read
-        } else if mode == soundcraft_model::AutomationMode::Off {
+        } else if mode == liviwave_model::AutomationMode::Off {
             t.text_dim
         } else {
             t.auto_write
         };
         let full_label = format!("auto {}", mode.label());
-        let label = if mode == soundcraft_model::AutomationMode::TouchLatch {
+        let label = if mode == liviwave_model::AutomationMode::TouchLatch {
             if narrow { "t/l" } else { mode.label() }
         } else if narrow {
             mode.label()
@@ -349,7 +349,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             SelectorLabels { name: &format!("Automation mode for {}", track.name), value: &full_label, tooltip: &full_label },
         );
         egui::Popup::menu(&resp).show(|ui| {
-            for m in soundcraft_model::AutomationMode::ALL {
+            for m in liviwave_model::AutomationMode::ALL {
                 if ui.selectable_label(m == mode, m.label()).clicked() {
                     let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
                 }
@@ -477,7 +477,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         meter_scale(ui.painter(), mr, mr.min.x - 1.0);
     }
     let strip_fmt = if track.kind == TrackKind::Master { app.engine.session().main_format() } else { track.format };
-    let all_chans = strip_fmt.channels().min(soundcraft_mix::MAX_CHANNELS);
+    let all_chans = strip_fmt.channels().min(liviwave_mix::MAX_CHANNELS);
     let chans = if track.kind == TrackKind::Master { 2 } else { track.channels().min(2) };
     if all_chans > 2 {
         // One bar per channel, labelled (L R C LFE …).

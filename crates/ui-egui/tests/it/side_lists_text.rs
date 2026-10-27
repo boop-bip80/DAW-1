@@ -3,11 +3,11 @@
 
 use egui::{Shape, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_ui_egui::{Services, SoundApp};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp};
 
 fn harness() -> Harness<'static, SoundApp> {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let first = app.engine.session().tracks.first().map(|t| t.id.0).unwrap_or_default();
     app.run("track.rename", json!({"track": first, "name": LONG_TRACK})).unwrap();
     app.run("track.group", json!({"name": LONG_GROUP, "tracks": [first]})).unwrap();

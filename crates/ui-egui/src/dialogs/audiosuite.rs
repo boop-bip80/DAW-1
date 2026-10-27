@@ -11,11 +11,11 @@ pub(super) const SPEED_RAMP_CHOICES: [(&str, &str, f32, &[(f32, &str)]); 3] = [
 pub(super) fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
     let Some(process) = app.ui.audiosuite.clone() else { return };
     let mut open = true;
-    let title = soundcraft_dsp::plugin_info(&process).map_or_else(|| process.replace('_', " "), |p| p.name.to_string());
+    let title = liviwave_dsp::plugin_info(&process).map_or_else(|| process.replace('_', " "), |p| p.name.to_string());
     egui::Window::new(format!("AudioSuite · {title}")).open(&mut open).default_width(360.0).show(ctx, |ui| {
         let key = egui::Id::unique(("as_params", process.clone()));
         let mut params: std::collections::BTreeMap<String, f32> = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_default();
-        if let Some(info) = soundcraft_dsp::plugin_info(&process) {
+        if let Some(info) = liviwave_dsp::plugin_info(&process) {
             for p in info.params {
                 let v = params.entry(p.id.to_string()).or_insert(p.default);
                 ui.add(egui::Slider::new(v, p.min..=p.max).text(p.name));
@@ -51,7 +51,7 @@ pub(super) fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
             }
         }
         ui.ctx().memory_mut(|m| m.data.insert_temp(key, params.clone()));
-        let hint = if soundcraft_dsp::is_generator(&process) {
+        let hint = if liviwave_dsp::is_generator(&process) {
             "Fills the selection on the selected tracks with a new clip."
         } else {
             "Processes the selected clips and replaces them with rendered audio."

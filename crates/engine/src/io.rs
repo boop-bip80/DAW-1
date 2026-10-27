@@ -1,10 +1,10 @@
 //! Import, export, save/load, rendering helpers (bounce, consolidate, commit) and analysis.
 
 use crate::{Engine, EngineError, Result};
+use liviwave_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
+use liviwave_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
+use liviwave_time::{Range, Samples};
 use serde_json::{Value, json};
-use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
-use soundcraft_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
-use soundcraft_time::{Range, Samples};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,7 +32,7 @@ pub use strip::{StripMode, StripNames, StripScan, bounded_to_track, name_strippe
 // ─── Checked file access ──────────────────────────────────────────────────────────────────────
 //
 // Every file a command names by path is read and written through the helpers below, so the
-// automation roots (`crate::file_access`, `soundcraft-cli mcp --automation-read-root` and
+// automation roots (`crate::file_access`, `liviwave-cli mcp --automation-read-root` and
 // `--automation-write-root`) are checked in one place. A test in `file_access` keeps the rest of
 // the engine from calling `std::fs` itself. Audio is decoded into the session's pool the moment it
 // enters it (import, open, sampler load), so playback and bounce read nothing from disk and
@@ -99,7 +99,7 @@ pub fn import_video_bytes(e: &mut Engine, path: &str, bytes: Vec<u8>, at: Sample
     let stem = Path::new(path).file_stem().and_then(OsStr::to_str).unwrap_or("Video").to_string();
     let ext = Path::new(path).extension().and_then(OsStr::to_str).unwrap_or("mp4").to_ascii_lowercase();
     let bytes: Arc<[u8]> = bytes.into();
-    let movie = soundcraft_video::Movie::open(Arc::clone(&bytes)).map(|m| m.info().clone());
+    let movie = liviwave_video::Movie::open(Arc::clone(&bytes)).map(|m| m.info().clone());
     let audio_name = format!("{stem} audio.{}", if ext == "mov" { "mp4" } else { ext.as_str() });
     let audio = import_audio_bytes(e, &audio_name, &bytes, Some(path), None, at);
     let info = match (movie, &audio) {
@@ -116,7 +116,7 @@ pub fn import_video_bytes(e: &mut Engine, path: &str, bytes: Vec<u8>, at: Sample
     let len = (info.duration * sr).round();
     let len = if len.is_finite() { (len as Samples).clamp(1, sr as Samples * 3600 * 48) } else { 1 };
     let vid = SourceId(s.alloc());
-    s.videos.push(soundcraft_model::VideoSource {
+    s.videos.push(liviwave_model::VideoSource {
         id: vid,
         name: Path::new(path).file_name().and_then(OsStr::to_str).unwrap_or("movie").to_string(),
         path: abs,
@@ -169,13 +169,13 @@ pub struct Bounce {
     normalize: bool,
     /// Measuring the peak to normalize to, the first of two passes.
     measuring: bool,
-    render: soundcraft_mix::RangeRender,
+    render: liviwave_mix::RangeRender,
     block: Vec<Vec<f32>>,
     done: usize,
     gain: f32,
     peak: f32,
-    meter: soundcraft_dsp::meter::LoudnessMeter,
-    enc: Option<soundcraft_audio_io::FileEncoder<Out>>,
+    meter: liviwave_dsp::meter::LoudnessMeter,
+    enc: Option<liviwave_audio_io::FileEncoder<Out>>,
 }
 
 /// A finished bounce: the size of its file and its levels.
@@ -208,8 +208,8 @@ impl Bounce {
         let part = path.with_file_name(format!("{name}.part"));
         crate::file_access::check_write(path).map_err(EngineError::Io)?;
         crate::file_access::check_write(&part).map_err(EngineError::Io)?;
-        let enc = (|| -> std::result::Result<_, soundcraft_audio_io::AudioError> {
-            let enc = soundcraft_audio_io::FileEncoder::new(Out::create(&part)?, opts, channels, s.sample_rate.hz(), Some(fmt.channel_mask()))?;
+        let enc = (|| -> std::result::Result<_, liviwave_audio_io::AudioError> {
+            let enc = liviwave_audio_io::FileEncoder::new(Out::create(&part)?, opts, channels, s.sample_rate.hz(), Some(fmt.channel_mask()))?;
             enc.check_room(u64::try_from(r.len()).unwrap_or(0))?;
             Ok(enc)
         })()
@@ -217,8 +217,8 @@ impl Bounce {
             let _ = std::fs::remove_file(&part);
             EngineError::Io(format!("{}: {err}", path.display()))
         })?;
-        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
-        let meter = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
+        let render = liviwave_mix::RangeRender::new(&s, bus, r, 1024);
+        let meter = liviwave_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
         Ok(Bounce {
             session: s,
             path: path.to_path_buf(),
@@ -264,7 +264,7 @@ impl Bounce {
                 Some((chunk, n)) => {
                     fill(&mut self.block, chunk, n, self.fold, self.gain);
                     self.done += n;
-                    self.peak = self.peak.max(soundcraft_dsp::offline::peak(&self.block));
+                    self.peak = self.peak.max(liviwave_dsp::offline::peak(&self.block));
                     if !self.measuring {
                         self.meter.process(&self.block, n);
                         if let Some(enc) = &mut self.enc {
@@ -273,11 +273,11 @@ impl Bounce {
                     }
                 }
                 None if self.measuring => {
-                    self.gain = if self.peak > 0.0 { soundcraft_dsp::db_to_gain(-0.1) / self.peak } else { 1.0 };
+                    self.gain = if self.peak > 0.0 { liviwave_dsp::db_to_gain(-0.1) / self.peak } else { 1.0 };
                     self.peak = 0.0;
                     self.done = 0;
                     self.measuring = false;
-                    self.render = soundcraft_mix::RangeRender::new(&self.session, self.bus, self.range, 1024);
+                    self.render = liviwave_mix::RangeRender::new(&self.session, self.bus, self.range, 1024);
                 }
                 None => return self.finish().map(Some),
             }
@@ -303,7 +303,7 @@ impl Bounce {
         };
         Ok(Bounced {
             bytes,
-            peak_db: soundcraft_dsp::gain_to_db(self.peak),
+            peak_db: liviwave_dsp::gain_to_db(self.peak),
             lufs: self.meter.integrated_lufs(),
             true_peak_db: self.meter.true_peak_db(),
         })
@@ -391,7 +391,7 @@ const MAX_BOUNCE_SECS: f64 = 4.0 * 3600.0;
 /// channel (a mono or stereo main mix as stereo), or an ITU stereo fold-down of a surround source
 /// when `fold_stereo`.
 fn bounce_layout(s: &Session, bus: Option<BusId>, fold_stereo: bool) -> (ChannelFormat, usize, Option<ChannelFormat>) {
-    let nch = soundcraft_mix::source_channels(s, bus);
+    let nch = liviwave_mix::source_channels(s, bus);
     let fmt = match bus {
         Some(id) => s.bus(id).map_or(ChannelFormat::Stereo, |b| b.format),
         None if nch <= 2 => ChannelFormat::Stereo,
@@ -402,7 +402,7 @@ fn bounce_layout(s: &Session, bus: Option<BusId>, fold_stereo: bool) -> (Channel
 
 /// The first `n` frames of `chunk`, folded down from `fold` when set and scaled by `gain`.
 fn fill(block: &mut Vec<Vec<f32>>, chunk: &[Vec<f32>], n: usize, fold: Option<ChannelFormat>, gain: f32) {
-    let folded = fold.map(|from| soundcraft_mix::fold_down_stereo(from, chunk));
+    let folded = fold.map(|from| liviwave_mix::fold_down_stereo(from, chunk));
     let src = folded.as_deref().unwrap_or(chunk);
     block.resize_with(src.len(), Vec::new);
     for (d, c) in block.iter_mut().zip(src) {
@@ -448,21 +448,21 @@ pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, 
     Ok(out)
 }
 
-impl From<StripNames> for soundcraft_model::AutoName {
+impl From<StripNames> for liviwave_model::AutoName {
     fn from(n: StripNames) -> Self {
         Self { name: n.name, number: n.number, zeros: n.zeros, suffix: n.suffix, id: 0 }
     }
 }
 
-pub fn export_clips(e: &Engine, ids: &[soundcraft_model::ClipId], dir: &str) -> Result<usize> {
+pub fn export_clips(e: &Engine, ids: &[liviwave_model::ClipId], dir: &str) -> Result<usize> {
     let s = e.session();
     make_dir(dir)?;
     let mut n = 0;
     for id in ids {
         let Some((t, c)) = s.find_clip(*id) else { continue };
-        let audio = soundcraft_mix::render_clips(s, t, c.range());
+        let audio = liviwave_mix::render_clips(s, t, c.range());
         let buf = AudioBuffer { sample_rate: s.sample_rate.hz(), channels: audio };
-        let bytes = soundcraft_audio_io::encode(&buf, &EncodeOptions::default()).map_err(|err| EngineError::Io(err.to_string()))?;
+        let bytes = liviwave_audio_io::encode(&buf, &EncodeOptions::default()).map_err(|err| EngineError::Io(err.to_string()))?;
         let stem = sanitize_name(&c.name);
         let mut path = Path::new(dir).join(format!("{stem}.wav"));
         let mut k = 2u32;
@@ -539,8 +539,8 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
                 continue;
             }
         }
-        let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
-        let bytes = soundcraft_audio_io::encode(&audio.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
+        let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: liviwave_audio_io::BitDepth::Float32, dither: false, bwf: None };
+        let bytes = liviwave_audio_io::encode(&audio.buffer, &opts).map_err(|err| EngineError::Io(err.to_string()))?;
         let (name, new) = store_wav(&audio_dir, &stem, &bytes)?;
         src.path = format!("Audio Files/{name}");
         src.unsaved = false;
@@ -653,7 +653,7 @@ pub fn session_file(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     // Only a path the write root allows is probed, so a refused one can't be used to test for files.
     let is_file = crate::file_access::check_write(&p).is_ok() && p.is_file();
-    if p.extension().is_none() && !is_file { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p }
+    if p.extension().is_none() && !is_file { p.with_extension(liviwave_model::SESSION_EXTENSION) } else { p }
 }
 
 /// True when `command` would write a session over the existing `file`. Save, Save As and Save
@@ -752,7 +752,7 @@ fn read_bundle(bytes: &[u8], limits: BundleLimits) -> Result<(String, std::colle
         let mut data = Vec::new();
         // The declared size is hostile too: never read past it.
         f.by_ref().take(size).read_to_end(&mut data).map_err(|err| EngineError::Io(format!("bundle: {rel}: {err}")))?;
-        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(OsStr::to_str) == Some(soundcraft_model::SESSION_EXTENSION);
+        let is_session = !rel.contains('/') && Path::new(&rel).extension().and_then(OsStr::to_str) == Some(liviwave_model::SESSION_EXTENSION);
         if is_session && text.is_none() {
             text = Some(String::from_utf8(data).map_err(|_| EngineError::Io(format!("bundle: {rel} is not text")))?);
         } else {
@@ -775,7 +775,7 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<
         .filter(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive)
         .map(|t| {
             let first = match &t.mixer.input {
-                soundcraft_model::Route::Hardware(h) => {
+                liviwave_model::Route::Hardware(h) => {
                     h.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1))
                 }
                 _ => 0,
@@ -793,7 +793,7 @@ mod stem_tests {
     #[test]
     fn stems_one_file_per_track() {
         let mut e = crate::demo::demo_engine();
-        let dir = std::env::temp_dir().join(format!("soundcraft-stems-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-stems-{}", std::process::id()));
         let r = e
             .execute("file.bounce_stems", &serde_json::json!({"dir": dir.to_string_lossy(), "start": {"seconds": 10.0}, "end": {"seconds": 11.0}}))
             .unwrap();
@@ -809,8 +809,8 @@ mod stem_tests {
         names.sort();
         assert!(!names.is_empty());
         for name in names {
-            let (_, float) = soundcraft_audio_io::decode(&std::fs::read(dir32.join(&name)).unwrap(), None).unwrap();
-            let (_, int) = soundcraft_audio_io::decode(&std::fs::read(dir16.join(&name)).unwrap(), None).unwrap();
+            let (_, float) = liviwave_audio_io::decode(&std::fs::read(dir32.join(&name)).unwrap(), None).unwrap();
+            let (_, int) = liviwave_audio_io::decode(&std::fs::read(dir16.join(&name)).unwrap(), None).unwrap();
             for (f, i) in float.channels.iter().zip(&int.channels) {
                 for (a, b) in f.iter().zip(i) {
                     worst = worst.max((f64::from(a.clamp(-1.0, 1.0)) - f64::from(*b)).abs() * 32768.0);
@@ -823,7 +823,7 @@ mod stem_tests {
     #[test]
     fn stems_dither_only_when_asked() {
         let mut e = crate::demo::demo_engine();
-        let root = std::env::temp_dir().join(format!("soundcraft-stems-dither-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("liviwave-stems-dither-{}", std::process::id()));
         let mut bounce = |name: &str, extra: serde_json::Value| {
             let dir = root.join(name);
             let mut p = serde_json::json!({"dir": dir.to_string_lossy(), "start": {"seconds": 10.0}, "end": {"seconds": 10.5}});

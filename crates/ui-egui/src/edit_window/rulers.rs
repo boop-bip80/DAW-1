@@ -165,11 +165,8 @@ pub(super) fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect,
             }
             "timecode2" => {
                 // A second timecode ruler at 25 fps when the session runs at another rate (or 30 otherwise).
-                let alt = if s.frame_rate == soundcraft_time::FrameRate::Fps25 {
-                    soundcraft_time::FrameRate::Fps30
-                } else {
-                    soundcraft_time::FrameRate::Fps25
-                };
+                let alt =
+                    if s.frame_rate == liviwave_time::FrameRate::Fps25 { liviwave_time::FrameRate::Fps30 } else { liviwave_time::FrameRate::Fps25 };
                 timebase_ruler(ui, &painter, &s, tl, row, view, TimeFormat::Timecode, alt, i + 1 == rulers.len());
             }
             "markers" | "markers2" | "markers3" | "markers4" | "markers5" | "chords" => {
@@ -184,7 +181,7 @@ pub(super) fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect,
                 for m in s.markers.iter().filter(|m| m.ruler == lane || (lane == 1 && m.ruler == 0)) {
                     let x = x_of(&s, tl, m.start);
                     let col = m.color.map_or(Color32::from_rgb(232, 200, 64), rgb);
-                    if m.kind == soundcraft_model::MarkerKind::Selection {
+                    if m.kind == liviwave_model::MarkerKind::Selection {
                         let x1 = x_of(&s, tl, m.end);
                         painter.rect_filled(Rect::from_min_max(pos2(x, row.min.y + 3.0), pos2(x1, row.max.y - 3.0)), 2.0, col.gamma_multiply(0.5));
                     }
@@ -255,7 +252,7 @@ fn timebase_ruler(
     row: Rect,
     view: Range,
     f: TimeFormat,
-    rate: soundcraft_time::FrameRate,
+    rate: liviwave_time::FrameRate,
     bottom: bool,
 ) {
     let t = Tokens::current();
@@ -274,7 +271,7 @@ fn timebase_ruler(
             let mut bar = first - (first - 1).rem_euclid(every);
             let mut guard = 0;
             loop {
-                let at = s.tempo.samples_at_bar_beat(soundcraft_time::BarBeat { bar, beat: 1, tick: 0 }, sr);
+                let at = s.tempo.samples_at_bar_beat(liviwave_time::BarBeat { bar, beat: 1, tick: 0 }, sr);
                 if at > view.end || guard > 400 {
                     break;
                 }
@@ -282,7 +279,7 @@ fn timebase_ruler(
                 if bar_px * every as f64 >= 240.0 {
                     let m = s.tempo.meter_at_tick(s.tempo.samples_to_ticks(at, sr));
                     for beat in 2..=i64::from(m.numerator) {
-                        marks.push((s.tempo.samples_at_bar_beat(soundcraft_time::BarBeat { bar, beat, tick: 0 }, sr), false));
+                        marks.push((s.tempo.samples_at_bar_beat(liviwave_time::BarBeat { bar, beat, tick: 0 }, sr), false));
                     }
                 }
                 bar += every;

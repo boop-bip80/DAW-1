@@ -171,7 +171,7 @@ impl SlotCtx<'_> {
     }
 
     /// A new instance for `ins` on track `t`, slot `idx`, prepared for `ch` channels.
-    pub(crate) fn make(&mut self, t: TrackId, idx: usize, ins: &soundcraft_model::Insert, ch: usize) -> Option<PluginSlot> {
+    pub(crate) fn make(&mut self, t: TrackId, idx: usize, ins: &liviwave_model::Insert, ch: usize) -> Option<PluginSlot> {
         let third = is_third_party(&ins.plugin);
         let plugin = if third && self.external {
             match self.adopt.remove(&(t, idx)) {
@@ -447,7 +447,7 @@ pub(crate) fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
     strip.latency = latency.min(MAX_LATENCY);
 }
 
-pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, t: &Track, i: usize, pos: Samples) {
+pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &liviwave_model::Insert, t: &Track, i: usize, pos: Samples) {
     // Automation lanes address insert slots; the instrument (`INSTRUMENT_SLOT`) has none, so it
     // must not pick up slot A's lanes.
     let Ok(slot_u8) = u8::try_from(i) else {
@@ -467,7 +467,7 @@ pub(crate) fn apply_params(slot: &mut PluginSlot, ins: &soundcraft_model::Insert
 }
 
 /// Sends each stored param (as mapped by `value`) to the plugin when it changed since last time.
-fn apply_values(slot: &mut PluginSlot, ins: &soundcraft_model::Insert, value: impl Fn(&str, f32) -> f32) {
+fn apply_values(slot: &mut PluginSlot, ins: &liviwave_model::Insert, value: impl Fn(&str, f32) -> f32) {
     if slot.applied.len() != ins.params.len() {
         slot.applied = vec![f32::NAN; ins.params.len()];
     }

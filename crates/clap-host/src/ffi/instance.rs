@@ -110,7 +110,7 @@ pub(crate) struct Instance {
 }
 
 // SAFETY: an `Instance` is used through `&mut self` only, so calls into the plugin are always
-// serialised. CLAP lets audio-thread functions run on any one thread at a time; SoundCraft creates
+// serialised. CLAP lets audio-thread functions run on any one thread at a time; LiVi Wave creates
 // instances on the engine/UI thread and then moves them into the mix engine (documented
 // limitation: some main-thread calls such as `activate` may then happen on the audio thread).
 unsafe impl Send for Instance {}

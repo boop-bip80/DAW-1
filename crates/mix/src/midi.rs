@@ -163,7 +163,7 @@ impl SampleSource for PoolSample {
 
 /// Hands a strip's instrument the audio of its insert's sample source when it changed (a new
 /// sample, a cleared one, or a new instance). Missing media plays nothing.
-pub(crate) fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &Session) {
+pub(crate) fn sync_sample(strip: &mut Strip, want: Option<&liviwave_model::Insert>, s: &Session) {
     let audio = want.and_then(|i| i.sample).and_then(|id| s.pool.get(id));
     let same = match (strip.sample.as_ref(), audio) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),

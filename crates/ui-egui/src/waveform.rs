@@ -1,8 +1,8 @@
 //! Clip waveforms, drawn per physical pixel, or as a line through the samples at the sample level.
 
 use egui::{Color32, Mesh, Painter, Rect, Shape, Stroke, pos2, vec2};
-use soundcraft_model::{Clip, Session, SourceAudio};
-use soundcraft_time::Samples;
+use liviwave_model::{Clip, Session, SourceAudio};
+use liviwave_time::Samples;
 
 /// Where to draw: the painter, the session and the timeline rect that maps samples to x.
 #[derive(Clone, Copy)]

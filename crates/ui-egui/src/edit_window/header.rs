@@ -204,16 +204,16 @@ pub(super) fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head:
         }
         let mode = m.automation_mode;
         let col = match mode {
-            soundcraft_model::AutomationMode::Read => t.auto_read,
-            soundcraft_model::AutomationMode::Write => t.auto_write,
-            soundcraft_model::AutomationMode::Touch | soundcraft_model::AutomationMode::TouchLatch => t.auto_touch,
-            soundcraft_model::AutomationMode::Latch => t.auto_latch,
+            liviwave_model::AutomationMode::Read => t.auto_read,
+            liviwave_model::AutomationMode::Write => t.auto_write,
+            liviwave_model::AutomationMode::Touch | liviwave_model::AutomationMode::TouchLatch => t.auto_touch,
+            liviwave_model::AutomationMode::Latch => t.auto_latch,
             _ => t.text_dim,
         };
         let mode_name = format!("Automation mode for {}", track.name);
         let aresp = header_selector(ui, at(63.0, 57.0, 59.0, 17.0), ui.scope_id().with(("auto_mode", id.0)), mode.label(), col, true, &mode_name);
         egui::Popup::menu(&aresp).show(|ui| {
-            for m in soundcraft_model::AutomationMode::ALL {
+            for m in liviwave_model::AutomationMode::ALL {
                 if ui.selectable_label(m == mode, m.label()).clicked() {
                     let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
                 }

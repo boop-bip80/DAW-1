@@ -1,7 +1,7 @@
 use super::*;
 
 /// What Strip keeps on each track: the Strip Silence rectangles.
-pub type StripRects = Arc<Vec<(TrackId, Vec<soundcraft_time::Range>)>>;
+pub type StripRects = Arc<Vec<(TrackId, Vec<liviwave_time::Range>)>>;
 
 /// The session revision and the Strip Silence values (as bits) that rectangles were found for.
 type StripKey = (u64, [u64; 4]);
@@ -76,7 +76,7 @@ pub fn strip_silence_rectangles(app: &mut SoundApp, ctx: &egui::Context) -> Stri
     }
     let [threshold, min_ms, pre_ms, post_ms] = values;
     let params = json!({"threshold_db": threshold, "min_length_ms": min_ms, "pad_before_ms": pre_ms, "pad_after_ms": post_ms});
-    let Ok(scan) = soundcraft_engine::cmd::strip_silence_scan(&app.engine, &params) else {
+    let Ok(scan) = liviwave_engine::cmd::strip_silence_scan(&app.engine, &params) else {
         app.dialogs.strip_rectangles.shown = Some((key, Arc::default()));
         return Arc::default();
     };

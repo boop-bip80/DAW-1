@@ -1,6 +1,6 @@
 use super::{Services, SoundApp, automation_step_due};
+use liviwave_model::TrackId;
 use serde_json::json;
-use soundcraft_model::TrackId;
 
 #[test]
 fn new_session_stops_playback_and_the_old_clock() {
@@ -9,7 +9,7 @@ fn new_session_stops_playback_and_the_old_clock() {
         ("session.new", json!({"template": "demo"})),
         ("session.close", json!({})),
     ] {
-        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
         app.run("transport.play", json!({"from": 48_000})).unwrap();
         app.handle_transport(0.25);
         assert!(app.is_playing());
@@ -31,22 +31,22 @@ fn new_session_stops_playback_and_the_old_clock() {
 
 #[test]
 fn the_status_names_a_plugin_the_engine_took_out() {
-    use soundcraft_model::{ChannelFormat, Insert, TrackKind};
-    let mut s = soundcraft_model::Session::default();
+    use liviwave_model::{ChannelFormat, Insert, TrackKind};
+    let mut s = liviwave_model::Session::default();
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Vox"));
     s.track_mut(t).unwrap().mixer.inserts[3] = Some(Insert::new("gain"));
     let msg = super::failed_plugin_status(&s, t, 3).unwrap();
     assert!(msg.starts_with("Gain on Vox put out invalid audio"), "{msg}");
     assert_eq!(super::failed_plugin_status(&s, t, 0), None);
-    assert_eq!(super::failed_plugin_status(&s, t, soundcraft_mix::INSTRUMENT_SLOT), None);
+    assert_eq!(super::failed_plugin_status(&s, t, liviwave_mix::INSTRUMENT_SLOT), None);
 }
 
 #[test]
 fn replacing_the_session_drops_the_midi_note_selection() {
     for command in ["session.new", "session.close"] {
-        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
         app.midi.selected = vec![0, 1];
-        app.midi.clip = Some(soundcraft_model::ClipId(1));
+        app.midi.clip = Some(liviwave_model::ClipId(1));
         app.run(command, json!({})).unwrap();
         assert!(app.midi.selected.is_empty() && app.midi.clip.is_none(), "{command}");
     }
@@ -54,7 +54,7 @@ fn replacing_the_session_drops_the_midi_note_selection() {
 
 #[test]
 fn new_session_cancels_play_queued_before_the_next_frame() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.run("transport.play", json!({})).unwrap();
     app.run("session.new", json!({})).unwrap();
     app.handle_transport(0.25);
@@ -64,7 +64,7 @@ fn new_session_cancels_play_queued_before_the_next_frame() {
 
 #[test]
 fn record_with_nothing_armed_says_what_to_do() {
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     app.run("transport.record", json!({})).unwrap();
     app.handle_transport(0.25);
     assert!(!app.is_playing() && !app.engine.transport.recording);
@@ -87,8 +87,8 @@ fn record_with_nothing_armed_says_what_to_do() {
 
 #[test]
 fn a_hidden_window_still_autosaves() {
-    let dir = std::env::temp_dir().join(format!("soundcraft-hidden-autosave-{}", std::process::id()));
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let dir = std::env::temp_dir().join(format!("liviwave-hidden-autosave-{}", std::process::id()));
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.autosave_dir = Some(dir.clone());
     app.run("track.new", json!({"count": 1, "format": "mono"})).unwrap();
     app.last_autosave = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(121));
@@ -102,12 +102,12 @@ fn a_hidden_window_still_autosaves() {
 /// A clean demo session with its autosave folder, and an editor gesture still open on Keys
 /// when `gesture` is set (its state hasn't reached the session yet).
 fn app_with_editor_gesture(name: &str, gesture: bool) -> (SoundApp, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!("soundcraft-{name}-{}-{gesture}", std::process::id()));
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let dir = std::env::temp_dir().join(format!("liviwave-{name}-{}-{gesture}", std::process::id()));
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.autosave_dir = Some(dir.clone());
     if gesture {
         let keys = app.engine.session().track_by_name("Keys").unwrap().id;
-        app.editor_states.push((keys, soundcraft_mix::INSTRUMENT_SLOT));
+        app.editor_states.push((keys, liviwave_mix::INSTRUMENT_SLOT));
     }
     assert!(!app.engine.is_dirty());
     (app, dir)
@@ -136,11 +136,11 @@ fn closing_during_a_plugin_editor_gesture_keeps_the_autosave() {
 
 #[test]
 fn session_reset_does_not_apply_old_stop_edits_to_the_new_session() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.run("transport.play", json!({"from": 48_000})).unwrap();
     app.handle_transport(0.25);
-    let mut session = soundcraft_model::Session::default();
-    session.edit.selection = soundcraft_time::Range::new(12_000, 24_000);
+    let mut session = liviwave_model::Session::default();
+    session.edit.selection = liviwave_time::Range::new(12_000, 24_000);
     session.edit.insertion_follows_playback = true;
     session.edit.scrolling = "after_playback".into();
     let selection = session.edit.selection;
@@ -155,7 +155,7 @@ fn session_reset_does_not_apply_old_stop_edits_to_the_new_session() {
 
 #[test]
 fn clear_all_clip_indicators_clears_every_meter() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.meters.entry(kick).or_default().clip = true;
     app.main_meter.clip = true;
@@ -186,7 +186,7 @@ fn automation_write_fires_after_loop_wrap() {
 /// stop writes the last point.
 #[test]
 fn a_write_pass_replaces_the_automation_it_plays_over() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let fader = app.engine.session().track_by_name("Kick").unwrap().mixer.volume_db;
     let q = i64::from(app.engine.session().sample_rate.hz()) / 4;
     // The old ride: a point every 10 ms for 3 s.
@@ -213,7 +213,7 @@ fn a_write_pass_replaces_the_automation_it_plays_over() {
     app.run("transport.stop", json!({})).unwrap();
     app.handle_transport(0.0);
     app.write_automation();
-    let lane = app.engine.session().track_by_name("Kick").unwrap().lane(&soundcraft_model::AutoParam::Volume).unwrap();
+    let lane = app.engine.session().track_by_name("Kick").unwrap().lane(&liviwave_model::AutoParam::Volume).unwrap();
     let values = |from, to| lane.points.iter().filter(|p| (from..=to).contains(&p.at)).map(|p| p.value).collect::<Vec<_>>();
     assert_eq!(values(q, 2 * q), [fader; 2]);
     assert_eq!(lane.value_at(3 * q, 0.0), -30.0);
@@ -226,7 +226,7 @@ fn a_write_pass_replaces_the_automation_it_plays_over() {
 /// Automation pass writes and the fader ride driving them collapse into one undo step.
 #[test]
 fn a_pass_and_the_fader_ride_driving_it_are_one_undo_step() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.run("mix.automation_mode", json!({"tracks": ["Kick"], "mode": "write"})).unwrap();
     app.run("transport.play", json!({})).unwrap();
@@ -246,7 +246,7 @@ fn a_pass_and_the_fader_ride_driving_it_are_one_undo_step() {
 
 #[test]
 fn plugin_states_read_during_a_drag_keep_it_one_undo_step() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.run("mix.insert", json!({"track": kick.0, "plugin": "gain", "slot": 0})).unwrap();
     let steps = app.engine.undo_history().len();
@@ -264,7 +264,7 @@ fn plugin_states_read_during_a_drag_keep_it_one_undo_step() {
 /// their state changed, the editors closed, and the state every plugin has now. Returns the
 /// plugins whose state was read.
 fn editor_frame(app: &mut SoundApp, edited: &[TrackId], changed: &[(TrackId, usize)], closed: &[TrackId], now: u8) -> Vec<(TrackId, usize)> {
-    let slot = soundcraft_mix::INSTRUMENT_SLOT;
+    let slot = liviwave_mix::INSTRUMENT_SLOT;
     let edits: Vec<_> = edited.iter().map(|&t| (t, slot, "cutoff".to_string(), f32::from(now))).collect();
     let due = super::editor_states_due(&mut app.editor_states, &edits, changed.to_vec(), |(t, _)| closed.contains(&t));
     let states = due.iter().map(|&(t, slot)| (t, slot, vec![now, 1])).collect();
@@ -278,7 +278,7 @@ fn instrument_state(app: &SoundApp, t: TrackId) -> Option<Vec<u8>> {
 
 #[test]
 fn an_instrument_editor_drag_reads_and_stores_its_state_once() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let keys = app.engine.session().track_by_name("Keys").unwrap().id;
     let mut reads = Vec::new();
     let mut revisions = Vec::new();
@@ -288,7 +288,7 @@ fn an_instrument_editor_drag_reads_and_stores_its_state_once() {
     }
     reads.extend(editor_frame(&mut app, &[], &[], &[], 59));
     revisions.push(app.engine.revision);
-    assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(reads, [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     // The session goes to the audio thread on each new revision: once, not every frame.
     revisions.dedup();
     assert_eq!(revisions.len(), 2, "{revisions:?}");
@@ -297,7 +297,7 @@ fn an_instrument_editor_drag_reads_and_stores_its_state_once() {
 
 #[test]
 fn two_instrument_editor_drags_store_its_state_twice() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let keys = app.engine.session().track_by_name("Keys").unwrap().id;
     let mut reads = Vec::new();
     for now in 0..10 {
@@ -315,7 +315,7 @@ fn two_instrument_editor_drags_store_its_state_twice() {
 
 #[test]
 fn closing_an_instrument_editor_mid_gesture_still_stores_its_state() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let keys = app.engine.session().track_by_name("Keys").unwrap().id;
     let lead = app.engine.session().track_by_name("Lead").unwrap().id;
     let lead_before = instrument_state(&app, lead);
@@ -324,14 +324,14 @@ fn closing_an_instrument_editor_mid_gesture_still_stores_its_state() {
     }
     // Keys' editor closes on a frame it still reports a change in.
     let reads = editor_frame(&mut app, &[keys, lead], &[], &[keys], 10);
-    assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(reads, [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     assert_eq!(instrument_state(&app, keys), Some(vec![10, 1]));
     assert_eq!(instrument_state(&app, lead), lead_before);
 }
 
 #[test]
 fn a_plugin_that_keeps_changing_does_not_hold_back_another_ones_state() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let keys = app.engine.session().track_by_name("Keys").unwrap().id;
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.run("mix.insert", json!({"track": kick.0, "plugin": "gain", "slot": 0})).unwrap();
@@ -341,14 +341,14 @@ fn a_plugin_that_keeps_changing_does_not_hold_back_another_ones_state() {
         editor_frame(&mut app, &[keys], &[(kick, 0)], &[], now);
     }
     let reads = editor_frame(&mut app, &[], &[(kick, 0)], &[], 10);
-    assert_eq!(reads, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(reads, [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     assert_eq!(instrument_state(&app, keys), Some(vec![10, 1]));
     assert_eq!(app.editor_states, [(kick, 0)]);
 }
 
 #[test]
 fn a_preset_changed_in_an_effect_editor_is_stored_once() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.run("mix.insert", json!({"track": kick.0, "plugin": "gain", "slot": 0})).unwrap();
     // No parameter edits: the plugin only says its state changed, frame after frame.
@@ -394,8 +394,8 @@ fn a_window_bigger_than_its_screen_opens_maximized() {
 #[test]
 fn ordinary_play_after_stop_is_full_speed() {
     use serde_json::json;
-    let engine = soundcraft_engine::Engine::default();
-    let player = soundcraft_playback::Player::new(engine.session_arc());
+    let engine = liviwave_engine::Engine::default();
+    let player = liviwave_playback::Player::new(engine.session_arc());
     let mut app = super::SoundApp::new(engine, Some(player), super::Services::default());
     app.engine.execute("edit.select", &json!({"start": 0, "end": 48000})).unwrap();
     app.engine.execute("options.loop_playback", &json!({"value": true})).unwrap();
@@ -434,7 +434,7 @@ fn ordinary_play_after_stop_is_full_speed() {
 #[test]
 fn one_synthetic_batch_survives_hidden_ticks_and_applies_once() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let raw = |w: f32| {
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, 900.0));
         egui::RawInput { screen_rect: Some(rect), ..Default::default() }
@@ -495,10 +495,10 @@ impl egui::DroppedFile for TestDrop {
 #[test]
 fn a_drop_before_fonts_are_ready_is_imported_once_after_layout() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::Engine::default(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::Engine::default(), None, super::Services::default());
     let mut first =
         egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() };
-    first.dropped_files.push(std::sync::Arc::new(TestDrop(std::path::PathBuf::from("/tmp/soundcraft-drop.scraft"))));
+    first.dropped_files.push(std::sync::Arc::new(TestDrop(std::path::PathBuf::from("/tmp/liviwave-drop.scraft"))));
     let mut out = ctx.run_ui(first, |ui| app.ui(ui));
     out.textures_delta.clear();
     assert!(app.take_dropped_files().is_empty(), "the drop is queued, not dropped on the font gate");
@@ -514,7 +514,7 @@ fn a_drop_before_fonts_are_ready_is_imported_once_after_layout() {
     }
     let dropped = app.take_dropped_files();
     assert_eq!(dropped.len(), 1, "the session file reached the shell once");
-    assert!(dropped.first().is_some_and(|f| f.path().ends_with("soundcraft-drop.scraft")));
+    assert!(dropped.first().is_some_and(|f| f.path().ends_with("liviwave-drop.scraft")));
     assert!(app.take_dropped_files().is_empty(), "later ticks do not replay the drop");
 }
 
@@ -524,7 +524,7 @@ fn a_drop_before_fonts_are_ready_is_imported_once_after_layout() {
 #[test]
 fn a_retained_host_input_holds_one_copy_of_a_pending_batch() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let hidden = egui::ViewportInfo { minimized: Some(true), ..Default::default() };
     let host_input = || egui::RawInput {
@@ -583,7 +583,7 @@ fn a_retained_host_input_holds_one_copy_of_a_pending_batch() {
 #[test]
 fn a_pending_synthetic_batch_asks_a_hidden_window_for_a_paint() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     app.synthetic.push(egui::Event::Text("x".into()));
     let hidden = egui::ViewportInfo { minimized: Some(true), ..Default::default() };
     let mut raw = egui::RawInput {
@@ -604,7 +604,7 @@ fn a_pending_synthetic_batch_asks_a_hidden_window_for_a_paint() {
 #[test]
 fn frame_time_counts_a_multi_pass_frame_once() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -638,7 +638,7 @@ fn frame_time_counts_a_multi_pass_frame_once() {
 #[test]
 fn a_synthetic_pass_does_not_publish_os_clipboard_commands() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -689,7 +689,7 @@ fn a_synthetic_pass_does_not_publish_os_clipboard_commands() {
 #[test]
 fn a_held_key_does_not_turn_a_scripted_press_into_a_repeat() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -752,7 +752,7 @@ fn a_held_key_does_not_turn_a_scripted_press_into_a_repeat() {
 #[test]
 fn a_fresh_host_press_and_a_scripted_press_both_run() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -790,7 +790,7 @@ fn a_fresh_host_press_and_a_scripted_press_both_run() {
 #[test]
 fn a_hidden_logic_tick_after_the_hook_keeps_the_held_key_and_pending_batch() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let visible = egui::ViewportInfo { inner_rect: Some(rect), ..Default::default() };
     let hidden = egui::ViewportInfo { minimized: Some(true), ..Default::default() };
@@ -858,7 +858,7 @@ fn a_hidden_logic_tick_after_the_hook_keeps_the_held_key_and_pending_batch() {
 #[test]
 fn a_multi_pass_frame_keeps_the_held_key_and_applies_the_scripted_press_once() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -915,7 +915,7 @@ fn a_multi_pass_frame_keeps_the_held_key_and_applies_the_scripted_press_once() {
 #[test]
 fn a_focus_loss_clears_a_held_key_with_a_pending_scripted_press() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -973,7 +973,7 @@ fn a_focus_loss_clears_a_held_key_with_a_pending_scripted_press() {
 #[test]
 fn a_host_key_with_the_same_signature_does_not_acknowledge_the_batch() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -1058,7 +1058,7 @@ fn synthetic_key_acknowledgement_ignores_only_the_rewritten_repeat_flag() {
 #[test]
 fn a_discarded_pass_acknowledges_the_synthetic_batch_it_received() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -1119,7 +1119,7 @@ fn real_widgets_apply_a_scripted_edit_navigation_and_cut_once_despite_consuming_
     impl Rig {
         /// A 1600x1000 rig over a one-track session, warmed for four frames.
         fn new() -> Self {
-            let mut engine = soundcraft_engine::Engine::default();
+            let mut engine = liviwave_engine::Engine::default();
             engine.execute("track.new", &json!({})).unwrap();
             let mut rig = Self { ctx: egui::Context::default(), app: SoundApp::new(engine, None, Services::default()), shapes: Vec::new() };
             rig.frames(4);
@@ -1252,7 +1252,7 @@ fn real_widgets_apply_a_scripted_edit_navigation_and_cut_once_despite_consuming_
 #[test]
 fn a_hidden_tick_does_not_write_automation_from_the_last_pass_pointer() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.run("mix.automation_mode", json!({"tracks": ["Kick"], "mode": "touch"})).unwrap();
     app.run("transport.locate", json!({"at": 0})).unwrap();
@@ -1278,7 +1278,7 @@ fn a_hidden_tick_does_not_write_automation_from_the_last_pass_pointer() {
     app.gesture = Some(super::Gesture::Fader { track: kick, start_db });
     app.last_write_at = i64::MIN;
     let points = |app: &super::SoundApp| {
-        app.engine.session().track(kick).and_then(|t| t.lane(&soundcraft_model::AutoParam::Volume)).map_or(0, |l| l.points.len())
+        app.engine.session().track(kick).and_then(|t| t.lane(&liviwave_model::AutoParam::Volume)).map_or(0, |l| l.points.len())
     };
     let before = points(&app);
     let hidden = egui::ViewportInfo { minimized: Some(true), ..Default::default() };
@@ -1294,7 +1294,7 @@ fn a_hidden_tick_does_not_write_automation_from_the_last_pass_pointer() {
 #[test]
 fn a_font_gated_pass_does_not_ack_the_pending_synthetic_batch() {
     let ctx = egui::Context::default();
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     app.synthetic.push(egui::Event::Text("x".into()));
@@ -1335,7 +1335,7 @@ fn a_font_gated_pass_does_not_ack_the_pending_synthetic_batch() {
 #[test]
 fn a_settled_pass_that_did_not_receive_the_batch_does_not_ack_it() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -1369,7 +1369,7 @@ fn a_settled_pass_that_did_not_receive_the_batch_does_not_ack_it() {
 #[test]
 fn transport_simulation_advances_by_monotonic_elapsed_time_only() {
     let ctx = egui::Context::default();
-    let mut app = super::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, super::Services::default());
+    let mut app = super::SoundApp::new(liviwave_engine::demo::demo_engine(), None, super::Services::default());
     app.sim = Some((0, None, None));
     app.engine.transport.playing = true;
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() };
@@ -1396,7 +1396,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     use std::rc::Rc;
 
     let ctx = egui::Context::default();
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
@@ -1414,10 +1414,10 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     let undo = app.engine.undo_history().len();
     let history = app.engine.undo_history();
     let journal = app.engine.journal.clone();
-    let state_command = soundcraft_engine::find_command("mix.insert_state").unwrap();
+    let state_command = liviwave_engine::find_command("mix.insert_state").unwrap();
     assert!(!state_command.undoable && !state_command.journal, "this fixture exercises state-only instrument persistence");
     assert!(!app.engine.is_dirty());
-    let reports = Rc::new(RefCell::new(Vec::<soundcraft_playback::EditorEdit>::new()));
+    let reports = Rc::new(RefCell::new(Vec::<liviwave_playback::EditorEdit>::new()));
     let latest = Rc::new(Cell::new(1u8));
     let polls = Rc::new(Cell::new(0));
     let captures = Rc::new(RefCell::new(Vec::new()));
@@ -1436,7 +1436,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
             },
         )
     }));
-    reports.borrow_mut().push((keys, soundcraft_mix::INSTRUMENT_SLOT, "cutoff".into(), 1.0));
+    reports.borrow_mut().push((keys, liviwave_mix::INSTRUMENT_SLOT, "cutoff".into(), 1.0));
     let mut input = raw();
     app.raw_input_hook(&ctx, &mut input);
     let mut passes = 0;
@@ -1452,7 +1452,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     assert!(passes >= 2, "the regression must actually force a discarded pass");
     assert_eq!(polls.get(), 1, "the rerun cannot drain an empty editor queue");
     assert!(captures.borrow().is_empty(), "the ongoing gesture has not ended");
-    assert_eq!(app.editor_states, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(app.editor_states, [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     assert_eq!(instrument_state(&app, keys), original);
     assert_eq!(app.engine.revision, revision);
     assert_eq!(app.engine.undo_history().len(), undo);
@@ -1461,7 +1461,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     // The next host hook is hidden: it still polls the continuing gesture despite a stale
     // discarded-pass index and without drawing any UI.
     latest.set(2);
-    reports.borrow_mut().push((keys, soundcraft_mix::INSTRUMENT_SLOT, "cutoff".into(), 2.0));
+    reports.borrow_mut().push((keys, liviwave_mix::INSTRUMENT_SLOT, "cutoff".into(), 2.0));
     let mut hidden = raw();
     hidden.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().minimized = Some(true);
     app.raw_input_hook(&ctx, &mut hidden);
@@ -1469,7 +1469,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     let _ = ctx.run_logic(&hidden, |ctx| app.logic(ctx));
     assert_eq!(polls.get(), 2, "hidden hook rearms exactly one poll, not one per logic callback");
     assert!(captures.borrow().is_empty());
-    assert_eq!(app.editor_states, [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(app.editor_states, [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     assert_eq!(instrument_state(&app, keys), original);
     assert_eq!(app.engine.revision, revision);
 
@@ -1477,7 +1477,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     app.raw_input_hook(&ctx, &mut hidden);
     let _ = ctx.run_logic(&hidden, |ctx| app.logic(ctx));
     assert_eq!(polls.get(), 3);
-    assert_eq!(*captures.borrow(), [(keys, soundcraft_mix::INSTRUMENT_SLOT)]);
+    assert_eq!(*captures.borrow(), [(keys, liviwave_mix::INSTRUMENT_SLOT)]);
     assert!(app.editor_states.is_empty());
     assert_eq!(instrument_state(&app, keys), Some(vec![2, 1]));
     assert_eq!(app.engine.revision, revision.wrapping_add(1), "the completed gesture persists exactly one document revision");

@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
-How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
+How LiVi Wave feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
 registry (shortcuts), `crates/ui-egui/src` (windows, gestures) and user issues; compared with
 reference screenshots kept locally under `plan/protools/screenshots/` (16, never committed).

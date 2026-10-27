@@ -5,7 +5,7 @@ pub(super) const MAX_MIDI_METERS: usize = 10_000;
 
 /// Import a Standard MIDI File as MIDI tracks (one per SMF track).
 pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: bool) -> Result<Vec<TrackId>> {
-    let smf = soundcraft_midi::read_smf(bytes).map_err(|err| EngineError::Io(err.to_string()))?;
+    let smf = liviwave_midi::read_smf(bytes).map_err(|err| EngineError::Io(err.to_string()))?;
     let s = e.session_mut();
     if tempo_map {
         // Each meter is placed by walking the ones before it.
@@ -26,11 +26,11 @@ pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: b
             continue;
         }
         let mut name = if tr.name.trim().is_empty() { format!("MIDI {}", i + 1) } else { tr.name.clone() };
-        soundcraft_model::truncate_chars(&mut name, soundcraft_model::MAX_NAME_CHARS);
+        liviwave_model::truncate_chars(&mut name, liviwave_model::MAX_NAME_CHARS);
         let id = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some(&name));
         let drums = !tr.sequence.notes.is_empty() && tr.sequence.notes.iter().all(|n| n.channel == 9);
         if let Some(t) = s.track_mut(id) {
-            t.instrument = Some(soundcraft_model::Insert::new(if drums { "drum_synth" } else { "subtractive_synth" }));
+            t.instrument = Some(liviwave_model::Insert::new(if drums { "drum_synth" } else { "subtractive_synth" }));
         }
         // A controller on the clip's last tick would not play, so the clip runs one tick past the last one.
         let past_ctrls = tr.sequence.ctrls.iter().map(|c| c.tick.saturating_add(1)).max().unwrap_or(0);
@@ -49,7 +49,7 @@ pub fn import_midi_bytes(e: &mut Engine, bytes: &[u8], at: Samples, tempo_map: b
 /// Export MIDI clips as a format-1 SMF. `only` limits the file to those tracks.
 pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
     let s = e.session();
-    let mut smf = soundcraft_midi::Smf {
+    let mut smf = liviwave_midi::Smf {
         format: 1,
         tracks: Vec::new(),
         tempos: s.tempo.tempos().iter().map(|t| (t.tick, t.bpm)).collect(),
@@ -62,7 +62,7 @@ pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
         return Err(EngineError::BadParams("file.export_midi".into(), "none of the requested tracks hold MIDI".into()));
     }
     for t in chosen {
-        let mut seq = soundcraft_midi::Sequence::default();
+        let mut seq = liviwave_midi::Sequence::default();
         for c in t.clips() {
             if let ClipContent::Midi { sequence } = &c.content {
                 let base = s.tempo.samples_to_ticks(c.start, s.sample_rate);
@@ -79,7 +79,7 @@ pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
             }
         }
         seq.sort();
-        smf.tracks.push(soundcraft_midi::SmfTrack { name: t.name.clone(), sequence: seq });
+        smf.tracks.push(liviwave_midi::SmfTrack { name: t.name.clone(), sequence: seq });
     }
-    soundcraft_midi::write_smf(&smf).map_err(|err| EngineError::Io(err.to_string()))
+    liviwave_midi::write_smf(&smf).map_err(|err| EngineError::Io(err.to_string()))
 }

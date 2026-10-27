@@ -1,6 +1,6 @@
 use super::db_to_gain;
-use soundcraft_model::Session;
-use soundcraft_time::Samples;
+use liviwave_model::Session;
+use liviwave_time::Samples;
 
 /// Blip length in seconds.
 const LEN_S: f64 = 0.03;
@@ -54,5 +54,5 @@ fn blip(main: &mut [Vec<f32>], rel: i64, frames: usize, hz: f64, amp: f32, rate:
 
 /// Click pitch for a MIDI note setting (clamped to the MIDI range).
 fn note_hz(note: f64) -> f64 {
-    soundcraft_dsp::midi_to_hz(note.clamp(0.0, 127.0))
+    liviwave_dsp::midi_to_hz(note.clamp(0.0, 127.0))
 }

@@ -7,11 +7,11 @@ use super::*;
 /// state once, not every frame, and a plugin that keeps changing doesn't hold back the others.
 pub(crate) fn editor_states_due(
     pending: &mut Vec<(TrackId, usize)>,
-    edits: &[soundcraft_playback::EditorEdit],
+    edits: &[liviwave_playback::EditorEdit],
     changed: Vec<(TrackId, usize)>,
     closed: impl Fn((TrackId, usize)) -> bool,
 ) -> Vec<(TrackId, usize)> {
-    let instruments = edits.iter().filter(|e| e.1 == soundcraft_mix::INSTRUMENT_SLOT).map(|e| (e.0, e.1));
+    let instruments = edits.iter().filter(|e| e.1 == liviwave_mix::INSTRUMENT_SLOT).map(|e| (e.0, e.1));
     let reported: Vec<(TrackId, usize)> = instruments.chain(changed).collect();
     for k in &reported {
         if !pending.contains(k) {
@@ -27,11 +27,11 @@ pub(crate) fn editor_states_due(
 /// this same gesture scheduler/state-capture route.
 pub(crate) fn editor_changes(
     pending: &mut Vec<(TrackId, usize)>,
-    edits: Vec<soundcraft_playback::EditorEdit>,
+    edits: Vec<liviwave_playback::EditorEdit>,
     changed: Vec<(TrackId, usize)>,
     closed: impl Fn((TrackId, usize)) -> bool,
-    capture: impl FnOnce(&[(TrackId, usize)]) -> soundcraft_playback::PluginStates,
-) -> (Vec<soundcraft_playback::EditorEdit>, soundcraft_playback::PluginStates) {
+    capture: impl FnOnce(&[(TrackId, usize)]) -> liviwave_playback::PluginStates,
+) -> (Vec<liviwave_playback::EditorEdit>, liviwave_playback::PluginStates) {
     let due = editor_states_due(pending, &edits, changed, closed);
     let states = if due.is_empty() { Vec::new() } else { capture(&due) };
     (edits, states)
@@ -46,10 +46,10 @@ impl SoundApp {
         self.store_plugin_states(states);
     }
 
-    pub(crate) fn store_plugin_states(&mut self, states: soundcraft_playback::PluginStates) {
+    pub(crate) fn store_plugin_states(&mut self, states: liviwave_playback::PluginStates) {
         for (t, slot, data) in states {
-            let slot = if slot == soundcraft_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
-            let params = json!({"track": t.0, "slot": slot, "state": soundcraft_model::b64::encode(&data)});
+            let slot = if slot == liviwave_mix::INSTRUMENT_SLOT { json!("instrument") } else { json!(slot) };
+            let params = json!({"track": t.0, "slot": slot, "state": liviwave_model::b64::encode(&data)});
             // A state read while a knob is dragged (or a pass recorded) joins that gesture, so it
             // stays one undo step.
             let stored = match self.engine.merge_key().map(str::to_string) {
@@ -69,7 +69,7 @@ impl SoundApp {
         let Some(plugin) = self.engine.session().track(track).and_then(|t| t.mixer.inserts.get(slot).cloned().flatten()).map(|i| i.plugin) else {
             return;
         };
-        if soundcraft_mix::is_third_party(&plugin)
+        if liviwave_mix::is_third_party(&plugin)
             && let Some(p) = &self.player
             && p.has_editor(track, slot)
         {
@@ -112,9 +112,9 @@ impl SoundApp {
         self.store_editor_changes(edits, states);
     }
 
-    pub(crate) fn store_editor_changes(&mut self, edits: Vec<soundcraft_playback::EditorEdit>, states: soundcraft_playback::PluginStates) {
+    pub(crate) fn store_editor_changes(&mut self, edits: Vec<liviwave_playback::EditorEdit>, states: liviwave_playback::PluginStates) {
         for (t, slot, param, value) in edits {
-            if slot == soundcraft_mix::INSTRUMENT_SLOT {
+            if slot == liviwave_mix::INSTRUMENT_SLOT {
                 continue;
             }
             let key = format!("param:{}:{slot}:{param}", t.0);
@@ -125,10 +125,10 @@ impl SoundApp {
 }
 
 /// The status line naming the plugin in `slot` (an insert index or
-/// [`soundcraft_mix::INSTRUMENT_SLOT`]), which the engine took out of the signal path.
-pub(crate) fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usize) -> Option<String> {
+/// [`liviwave_mix::INSTRUMENT_SLOT`]), which the engine took out of the signal path.
+pub(crate) fn failed_plugin_status(s: &liviwave_model::Session, track: TrackId, slot: usize) -> Option<String> {
     let t = s.track(track)?;
-    let ins = if slot == soundcraft_mix::INSTRUMENT_SLOT { t.instrument.as_ref() } else { t.mixer.inserts.get(slot)?.as_ref() }?;
+    let ins = if slot == liviwave_mix::INSTRUMENT_SLOT { t.instrument.as_ref() } else { t.mixer.inserts.get(slot)?.as_ref() }?;
     let name = crate::mix_window::plugin_info(&ins.plugin).map_or(ins.plugin.as_str(), |p| p.name);
     Some(format!("{name} on {} put out invalid audio, so it is bypassed until playback stops or starts again.", t.name))
 }

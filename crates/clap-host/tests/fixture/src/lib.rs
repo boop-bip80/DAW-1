@@ -1,12 +1,12 @@
-//! Test-only CLAP plugins for soundcraft-clap-host: a gain effect and a "DC synth".
+//! Test-only CLAP plugins for liviwave-clap-host: a gain effect and a "DC synth".
 //!
-//! - `org.soundcraft.test.gain`: stereo in/out, param 7 "Gain" (0..2, default 1), param 3 "Mode"
+//! - `org.liviwave.test.gain`: stereo in/out, param 7 "Gain" (0..2, default 1), param 3 "Mode"
 //!   (stepped enum A/B/C), hidden param 9, latency 3 samples.
-//! - `org.soundcraft.test.synth`: instrument, stereo out, CLAP note port; outputs a constant equal
+//! - `org.liviwave.test.synth`: instrument, stereo out, CLAP note port; outputs a constant equal
 //!   to the velocity of the held note (0 when none), switching at the event's sample offset. A
 //!   MIDI CC 7 (volume) sets the constant to its value / 127.
 //!
-//! - `org.soundcraft.test.wide16`, `.wide17ports`, `.wide65ch`: effects advertising wide layouts
+//! - `org.liviwave.test.wide16`, `.wide17ports`, `.wide65ch`: effects advertising wide layouts
 //!   (16 ports of 64 channels, 17 ports of 2 channels, one port of 65 channels per direction).
 //!   `process` writes 1.0 into every output channel it was given when the host's buffers match the
 //!   advertised layout, -1.0 when they do not.
@@ -48,7 +48,7 @@ const fn wide_desc(id: &'static CStr, name: &'static CStr) -> clap_plugin_descri
         clap_version: CLAP_VERSION,
         id: id.as_ptr(),
         name: name.as_ptr(),
-        vendor: c"SoundCraft tests".as_ptr(),
+        vendor: c"LiVi Wave tests".as_ptr(),
         url: std::ptr::null(),
         manual_url: std::ptr::null(),
         support_url: std::ptr::null(),
@@ -58,15 +58,15 @@ const fn wide_desc(id: &'static CStr, name: &'static CStr) -> clap_plugin_descri
     }
 }
 
-static WIDE16_DESC: clap_plugin_descriptor = wide_desc(c"org.soundcraft.test.wide16", c"Fixture Wide 16x64");
-static WIDE17_DESC: clap_plugin_descriptor = wide_desc(c"org.soundcraft.test.wide17ports", c"Fixture Wide 17 ports");
-static WIDE65_DESC: clap_plugin_descriptor = wide_desc(c"org.soundcraft.test.wide65ch", c"Fixture Wide 65 channels");
+static WIDE16_DESC: clap_plugin_descriptor = wide_desc(c"org.liviwave.test.wide16", c"Fixture Wide 16x64");
+static WIDE17_DESC: clap_plugin_descriptor = wide_desc(c"org.liviwave.test.wide17ports", c"Fixture Wide 17 ports");
+static WIDE65_DESC: clap_plugin_descriptor = wide_desc(c"org.liviwave.test.wide65ch", c"Fixture Wide 65 channels");
 
 static GAIN_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
-    id: c"org.soundcraft.test.gain".as_ptr(),
+    id: c"org.liviwave.test.gain".as_ptr(),
     name: c"Fixture Gain".as_ptr(),
-    vendor: c"SoundCraft tests".as_ptr(),
+    vendor: c"LiVi Wave tests".as_ptr(),
     url: c"".as_ptr(),
     manual_url: c"".as_ptr(),
     support_url: c"".as_ptr(),
@@ -77,9 +77,9 @@ static GAIN_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
 
 static SYNTH_DESC: clap_plugin_descriptor = clap_plugin_descriptor {
     clap_version: CLAP_VERSION,
-    id: c"org.soundcraft.test.synth".as_ptr(),
+    id: c"org.liviwave.test.synth".as_ptr(),
     name: c"Fixture Synth".as_ptr(),
-    vendor: c"SoundCraft tests".as_ptr(),
+    vendor: c"LiVi Wave tests".as_ptr(),
     url: std::ptr::null(),
     manual_url: std::ptr::null(),
     support_url: std::ptr::null(),
@@ -584,15 +584,15 @@ unsafe extern "C" fn factory_desc(_f: *const clap_plugin_factory, i: u32) -> *co
 
 unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const clap_host, id: *const c_char) -> *const clap_plugin {
     let id = unsafe { CStr::from_ptr(id) };
-    let (desc, synth, wide) = if id == c"org.soundcraft.test.gain" {
+    let (desc, synth, wide) = if id == c"org.liviwave.test.gain" {
         (&GAIN_DESC as *const _, false, None)
-    } else if id == c"org.soundcraft.test.synth" {
+    } else if id == c"org.liviwave.test.synth" {
         (&SYNTH_DESC as *const _, true, None)
-    } else if id == c"org.soundcraft.test.wide16" {
+    } else if id == c"org.liviwave.test.wide16" {
         (&WIDE16_DESC as *const _, false, Some((16, 64)))
-    } else if id == c"org.soundcraft.test.wide17ports" {
+    } else if id == c"org.liviwave.test.wide17ports" {
         (&WIDE17_DESC as *const _, false, Some((17, 2)))
-    } else if id == c"org.soundcraft.test.wide65ch" {
+    } else if id == c"org.liviwave.test.wide65ch" {
         (&WIDE65_DESC as *const _, false, Some((1, 65)))
     } else {
         return std::ptr::null();

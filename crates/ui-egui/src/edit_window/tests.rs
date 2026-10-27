@@ -21,7 +21,7 @@ fn track_header_selectors_have_accessible_names() {
 /// value; a screen reader otherwise sees several identical "Solo" or "Track view" controls.
 #[test]
 fn repeated_track_controls_are_named_and_valued_per_track() {
-    let mut h = harness_with(soundcraft_engine::demo::demo_engine());
+    let mut h = harness_with(liviwave_engine::demo::demo_engine());
     for name in ["Kick", "Snare"] {
         let view_label = format!("Track view for {name}");
         let view = h.query_by_role_and_label(Role::ComboBox, &view_label).unwrap_or_else(|| panic!("missing track view for {name}"));
@@ -58,7 +58,7 @@ fn repeated_track_controls_are_named_and_valued_per_track() {
 /// tell two tracks apart instead of seeing several identical "Comments" fields.
 #[test]
 fn every_track_comments_field_is_named_for_its_track() {
-    let engine = soundcraft_engine::demo::demo_engine();
+    let engine = liviwave_engine::demo::demo_engine();
     let tracks: Vec<Track> = engine.session().tracks.iter().take(2).cloned().collect();
     assert_eq!(tracks.len(), 2);
     let names: Vec<String> = tracks.iter().map(|t| format!("Comments for {}", t.name)).collect();
@@ -247,15 +247,15 @@ fn hold_clears_when_playhead_returns_or_transport_stops() {
 }
 
 fn harness(n: usize) -> Harness<'static, SoundApp> {
-    let mut engine = soundcraft_engine::Engine::default();
+    let mut engine = liviwave_engine::Engine::default();
     engine.execute("track.new", &json!({"count": n})).unwrap();
     harness_with(engine)
 }
 
-fn harness_with(engine: soundcraft_engine::Engine) -> Harness<'static, SoundApp> {
+fn harness_with(engine: liviwave_engine::Engine) -> Harness<'static, SoundApp> {
     let app = SoundApp::new(engine, None, crate::Services::default());
     let builder = Harness::builder().with_size(vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0);
-    let builder = if std::env::var_os("SOUNDCRAFT_FADE_SHOTS").is_some() { builder.wgpu() } else { builder };
+    let builder = if std::env::var_os("LIVIWAVE_FADE_SHOTS").is_some() { builder.wgpu() } else { builder };
     let mut h = builder.build_ui_state(
         |ui, app: &mut SoundApp| {
             let ctx = ui.ctx().clone();
@@ -271,7 +271,7 @@ fn harness_with(engine: soundcraft_engine::Engine) -> Harness<'static, SoundApp>
 
 #[test]
 fn a_file_time_stamp_at_the_end_of_the_range_draws() {
-    let mut engine = soundcraft_engine::demo::demo_engine();
+    let mut engine = liviwave_engine::demo::demo_engine();
     let s = engine.session_mut();
     s.edit.flags.insert("view.clip.time.original".into());
     s.sources.iter_mut().for_each(|src| src.time_reference = i64::MAX as u64);
@@ -279,7 +279,7 @@ fn a_file_time_stamp_at_the_end_of_the_range_draws() {
 }
 
 fn smart_demo() -> Harness<'static, SoundApp> {
-    let mut engine = soundcraft_engine::demo::demo_engine();
+    let mut engine = liviwave_engine::demo::demo_engine();
     engine.execute("edit.tool", &json!({"tool": "smart"})).unwrap();
     engine.execute("edit.mode", &json!({"mode": "slip"})).unwrap();
     harness_with(engine)
@@ -532,7 +532,7 @@ fn a_quick_clip_drag_keeps_the_clip_under_the_pointer() {
 
 #[test]
 fn fade_drag_ranges_handle_empty_short_and_saturated_clips() {
-    let mut c = Clip::audio(ClipId(1), "test", soundcraft_model::SourceId(1), 0, 100, 1);
+    let mut c = Clip::audio(ClipId(1), "test", liviwave_model::SourceId(1), 0, 100, 1);
     for side in [true, false] {
         for to in [i64::MIN, 100, 101, i64::MAX] {
             assert_eq!(fade_drag_range(&c, side, to), Some(Range::new(100, 101)));
@@ -554,7 +554,7 @@ fn fade_drag_ranges_handle_empty_short_and_saturated_clips() {
 }
 
 fn fade_shot(h: &mut Harness<SoundApp>, name: &str) {
-    if let Some(dir) = std::env::var_os("SOUNDCRAFT_FADE_SHOTS") {
+    if let Some(dir) = std::env::var_os("LIVIWAVE_FADE_SHOTS") {
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
         h.render().unwrap().save(dir.join(format!("{name}.png"))).unwrap();
@@ -617,13 +617,13 @@ fn waveforms_follow_fade_drags_before_release_and_match_the_committed_waveform()
                         let audio = h.state().engine.session().pool.get(source).unwrap().clone();
                         let left = audio.buffer.channels[0].clone();
                         let right = left.iter().map(|sample| sample * 0.5).collect();
-                        let audio = soundcraft_model::SourceAudio::new(soundcraft_audio_io::AudioBuffer {
+                        let audio = liviwave_model::SourceAudio::new(liviwave_audio_io::AudioBuffer {
                             sample_rate: audio.buffer.sample_rate,
                             channels: vec![left, right],
                         });
                         let s = h.state_mut().engine.session_mut();
                         s.pool.insert(source, std::sync::Arc::new(audio));
-                        s.track_mut(tid).unwrap().format = soundcraft_model::ChannelFormat::Stereo;
+                        s.track_mut(tid).unwrap().format = liviwave_model::ChannelFormat::Stereo;
                     }
                     if mode == "power" {
                         h.state_mut().engine.execute("view.waveform_power", &json!({})).unwrap();
@@ -634,12 +634,12 @@ fn waveforms_follow_fade_drags_before_release_and_match_the_committed_waveform()
                     let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
                     c.gain_db = -3.0;
                     c.gain_env = vec![(0, -3.0), (c.length, 3.0)];
-                    let target = soundcraft_model::Fade {
+                    let target = liviwave_model::Fade {
                         len: if bend { c.length * 2 / 3 } else { c.length / 4 },
-                        shape: soundcraft_model::FadeShape::SCurve,
+                        shape: liviwave_model::FadeShape::SCurve,
                         curvature: 0.0,
                     };
-                    let other = soundcraft_model::Fade { len: c.length / 8, shape: soundcraft_model::FadeShape::Linear, curvature: 0.2 };
+                    let other = liviwave_model::Fade { len: c.length / 8, shape: liviwave_model::FadeShape::Linear, curvature: 0.2 };
                     (c.fade_in, c.fade_out) = if fade_in { (target, other) } else { (other, target) };
                     h.step();
                     let before = h.state().engine.session().clone();
@@ -760,7 +760,7 @@ fn fade_drag_previews_and_commits_stay_inside_the_clip() {
             let range = fade_drag_range(&clip, fade_in, sample_at(&before, tl, release.x)).unwrap();
             let mut expected = before.clone();
             let c = expected.find_clip_mut(clip.id).unwrap();
-            let fade = soundcraft_model::Fade { len: range.end - range.start, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.0 };
+            let fade = liviwave_model::Fade { len: range.end - range.start, shape: liviwave_model::FadeShape::SCurve, curvature: 0.0 };
             if fade_in {
                 c.fade_in = fade;
             } else {
@@ -790,8 +790,8 @@ fn a_fade_drag_replaces_the_old_curve_and_matches_the_released_curve() {
             let tl = timeline(&h);
             let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
             let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-            c.fade_in = soundcraft_model::Fade { len: c.length / 8, shape: soundcraft_model::FadeShape::Linear, curvature: 0.0 };
-            c.fade_out = soundcraft_model::Fade { len: c.length / 8, shape: soundcraft_model::FadeShape::EqualPower, curvature: 0.0 };
+            c.fade_in = liviwave_model::Fade { len: c.length / 8, shape: liviwave_model::FadeShape::Linear, curvature: 0.0 };
+            c.fade_out = liviwave_model::Fade { len: c.length / 8, shape: liviwave_model::FadeShape::EqualPower, curvature: 0.0 };
             h.step();
             let s = h.state().engine.session();
             let (xs, xe) = (x_of(s, tl, clip.start), x_of(s, tl, clip.end()));
@@ -832,10 +832,10 @@ fn fade_curve_sampling_keeps_steep_bends_below_a_quarter_pixel_error() {
     for (width, height) in [(420.0, 180.0), (75.0, 320.0), (10_000.0, 80.0)] {
         let body = Rect::from_min_size(Pos2::ZERO, vec2(width, height));
         for scale in [1.0, 2.0, 4.0] {
-            for shape in soundcraft_model::FadeShape::ALL {
+            for shape in liviwave_model::FadeShape::ALL {
                 for curvature in [-1.0, 1.0] {
                     for fade_in in [true, false] {
-                        let fade = soundcraft_model::Fade { len: 1000, shape, curvature };
+                        let fade = liviwave_model::Fade { len: 1000, shape, curvature };
                         let points = fade_curve_points(fade, fade_in, 0.0, width, body, scale);
                         assert!(points.len() > 17 && points.len() <= 4097);
                         assert_eq!((points.len() - 1) % 2, 0);
@@ -860,7 +860,7 @@ fn fade_curve_sampling_keeps_steep_bends_below_a_quarter_pixel_error() {
     }
     let body = Rect::from_min_size(Pos2::ZERO, vec2(1e20, 1e20));
     for scale in [f32::NAN, f32::INFINITY, 1.0] {
-        let points = fade_curve_points(soundcraft_model::Fade::default(), true, 0.0, 1e20, body, scale);
+        let points = fade_curve_points(liviwave_model::Fade::default(), true, 0.0, 1e20, body, scale);
         assert!(points.len() <= 4097);
     }
 }
@@ -871,9 +871,9 @@ fn narrow_fades_take_few_points_and_stay_within_a_quarter_pixel() {
         for height in [40.0f32, 320.0] {
             let body = Rect::from_min_size(Pos2::ZERO, vec2(width, height));
             for scale in [1.0, 2.0] {
-                for shape in soundcraft_model::FadeShape::ALL {
+                for shape in liviwave_model::FadeShape::ALL {
                     for curvature in [-1.0, 0.0, 1.0] {
-                        let fade = soundcraft_model::Fade { len: 1000, shape, curvature };
+                        let fade = liviwave_model::Fade { len: 1000, shape, curvature };
                         let points = fade_curve_points(fade, true, 0.0, width, body, scale);
                         assert!(points.len() <= ((width * scale * 4.0).ceil() as usize + 4), "{width} wide: {} points", points.len());
                         assert_eq!((points.len() - 1) % 2, 0, "an exact midpoint");
@@ -920,7 +920,7 @@ fn painted_fade_control(h: &Harness<SoundApp>, clip_rect: Rect) -> Pos2 {
 fn fade_midpoint_handles_remain_visible_and_can_be_grabbed_again() {
     for fade_in in [true, false] {
         for show_name in [true, false] {
-            for shape in [soundcraft_model::FadeShape::SCurve, soundcraft_model::FadeShape::Exponential] {
+            for shape in [liviwave_model::FadeShape::SCurve, liviwave_model::FadeShape::Exponential] {
                 for height in ["micro", "jumbo"] {
                     let mut h = smart_demo();
                     let tl = timeline(&h);
@@ -932,7 +932,7 @@ fn fade_midpoint_handles_remain_visible_and_can_be_grabbed_again() {
                     h.state_mut().engine.execute("view.zoom_set", &json!({"samples_per_px": spp})).unwrap();
                     h.state_mut().engine.execute("view.scroll", &json!({"to": clip.start - clip.length / 5})).unwrap();
                     let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-                    let fade = soundcraft_model::Fade { len: c.length * 2 / 3, shape, curvature: 0.0 };
+                    let fade = liviwave_model::Fade { len: c.length * 2 / 3, shape, curvature: 0.0 };
                     if fade_in {
                         c.fade_in = fade;
                     } else {
@@ -956,7 +956,7 @@ fn fade_midpoint_handles_remain_visible_and_can_be_grabbed_again() {
                     assert!(h.state().gesture.is_none());
                     painted_fade_control(&h, clip_rect);
                     let side = if fade_in { "in" } else { "out" };
-                    let screenshot = show_name && height == "jumbo" && shape == soundcraft_model::FadeShape::SCurve;
+                    let screenshot = show_name && height == "jumbo" && shape == liviwave_model::FadeShape::SCurve;
                     if screenshot {
                         fade_shot(&mut h, &format!("fade-{side}-smooth-released"));
                     }
@@ -1009,8 +1009,8 @@ fn fade_midpoints_drag_vertically_without_moving_the_endpoints() {
                 let tl = timeline(&h);
                 let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
                 let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-                let target = soundcraft_model::Fade { len: c.length * 2 / 3, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.0 };
-                let other = soundcraft_model::Fade { len: c.length / 8, shape: soundcraft_model::FadeShape::Linear, curvature: -0.2 };
+                let target = liviwave_model::Fade { len: c.length * 2 / 3, shape: liviwave_model::FadeShape::SCurve, curvature: 0.0 };
+                let other = liviwave_model::Fade { len: c.length / 8, shape: liviwave_model::FadeShape::Linear, curvature: -0.2 };
                 (c.fade_in, c.fade_out) = if fade_in { (target, other) } else { (other, target) };
                 h.step();
                 let before = h.state().engine.session().clone();
@@ -1089,7 +1089,7 @@ fn fade_curve_drags_cancel_safely_or_return_to_the_original_curve() {
         let tl = timeline(&h);
         let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
         let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-        c.fade_out = soundcraft_model::Fade { len: c.length * 2 / 3, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.0 };
+        c.fade_out = liviwave_model::Fade { len: c.length * 2 / 3, shape: liviwave_model::FadeShape::SCurve, curvature: 0.0 };
         h.step();
         let midpoint = fade_midpoint(h.state().engine.session(), tl, lane, h.state().engine.session().find_clip(clip.id).unwrap().1, false).unwrap();
         let before = h.state().engine.session().clone();
@@ -1128,7 +1128,7 @@ fn existing_fades_drag_from_their_upper_curve_endpoints() {
                 let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
                 let len = if full_length { clip.length } else { clip.length * 2 / 3 };
                 let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-                let fade = soundcraft_model::Fade { len, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.35 };
+                let fade = liviwave_model::Fade { len, shape: liviwave_model::FadeShape::SCurve, curvature: 0.35 };
                 if fade_in {
                     c.fade_in = fade;
                 } else {
@@ -1175,7 +1175,7 @@ fn existing_fades_drag_from_their_upper_curve_endpoints() {
                 let range = fade_drag_range(&clip, fade_in, sample_at(&before, tl, to.x)).unwrap();
                 let mut expected = before.clone();
                 let c = expected.find_clip_mut(clip.id).unwrap();
-                let fade = soundcraft_model::Fade { len: range.end - range.start, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.35 };
+                let fade = liviwave_model::Fade { len: range.end - range.start, shape: liviwave_model::FadeShape::SCurve, curvature: 0.35 };
                 assert!(fade.len < len);
                 if fade_in {
                     c.fade_in = fade;
@@ -1197,7 +1197,7 @@ fn existing_fade_handles_preserve_selector_and_other_smart_tool_zones() {
     let tl = timeline(&h);
     let (clip, lane) = clip_on_screen(&h, |xs, xe| xs > tl.min.x + 30.0 && xe < tl.max.x - 100.0 && xe - xs > 100.0);
     let c = h.state_mut().engine.session_mut().find_clip_mut(clip.id).unwrap();
-    c.fade_out = soundcraft_model::Fade { len: c.length / 2, shape: soundcraft_model::FadeShape::SCurve, curvature: 0.0 };
+    c.fade_out = liviwave_model::Fade { len: c.length / 2, shape: liviwave_model::FadeShape::SCurve, curvature: 0.0 };
     h.step();
     let s = h.state().engine.session();
     let rect = Rect::from_min_max(pos2(x_of(s, tl, clip.start), lane.min.y), pos2(x_of(s, tl, clip.end()), lane.max.y));
@@ -1400,7 +1400,7 @@ fn dragging_a_name_plate_down_drops_it_where_released() {
 
 #[test]
 fn a_pencil_click_on_a_plugin_lane_uses_the_plugin_range() {
-    let mut engine = soundcraft_engine::demo::demo_engine();
+    let mut engine = liviwave_engine::demo::demo_engine();
     engine.execute("track.view", &json!({"track": "Kick", "view": "plugin:a:input_gain"})).unwrap();
     engine.execute("edit.tool", &json!({"tool": "pencil"})).unwrap();
     let mut h = harness_with(engine);
@@ -1421,7 +1421,7 @@ fn a_pencil_click_on_a_plugin_lane_uses_the_plugin_range() {
 /// A volume lane over a clip, with two breakpoints low enough that the Smart tool would grab
 /// the clip there: the screen position of each, and the clips as they were.
 fn breakpoints_over_a_clip(tool: &str) -> (Harness<'static, SoundApp>, TrackId, [Pos2; 2], Vec<Clip>) {
-    let mut engine = soundcraft_engine::demo::demo_engine();
+    let mut engine = liviwave_engine::demo::demo_engine();
     engine.execute("edit.tool", &json!({"tool": tool})).unwrap();
     engine.execute("edit.mode", &json!({"mode": "shuffle"})).unwrap();
     let mut h = harness_with(engine);

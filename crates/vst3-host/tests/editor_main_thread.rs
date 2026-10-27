@@ -12,15 +12,15 @@ fn main() {
         return;
     }
     let dir = common::fixture_dir();
-    let gain = soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]).into_iter().find(|d| d.name == "Fixture Gain").expect("fixture").id;
-    let mut p = soundcraft_vst3_host::instantiate_plugin(&gain).expect("instantiate");
+    let gain = liviwave_vst3_host::scan_paths(&[dir.to_path_buf()]).into_iter().find(|d| d.name == "Fixture Gain").expect("fixture").id;
+    let mut p = liviwave_vst3_host::instantiate_plugin(&gain).expect("instantiate");
     // Editor windows are hosted on macOS and Windows; elsewhere the probe reports "unsupported".
     if cfg!(any(target_os = "macos", windows)) {
         assert_eq!(p.editor_size(), Ok((320, 240)));
     } else {
         assert!(p.editor_size().is_err());
     }
-    let mut ed = soundcraft_dsp::Plugin::editor(&mut p).expect("editor handle");
+    let mut ed = liviwave_dsp::Plugin::editor(&mut p).expect("editor handle");
     assert!(!ed.is_open());
     assert_eq!(ed.idle().len(), 1, "the fixture's setup edit");
     // Session → editor: the controller follows (seen through the component handler round trip
@@ -29,7 +29,7 @@ fn main() {
     ed.set_param("nope", 1.0);
     assert!(ed.idle().is_empty(), "set_param is not reported back as an edit");
     // #599: an identity-mapped (JUCE-style) parameter shows the plugin's own text, verbatim, with
-    // its units appended once; correctly mapped parameters and choices keep SoundCraft's format.
+    // its units appended once; correctly mapped parameters and choices keep LiVi Wave's format.
     assert_eq!(ed.value_text("13", 0.375).as_deref(), Some("\u{2212}6.0 dB"));
     assert_eq!(ed.value_text("13", 1.0).as_deref(), Some("24.0 dB"));
     assert_eq!(ed.value_text("14", 0.25).as_deref(), Some("3.0 dB"), "units already in the text");

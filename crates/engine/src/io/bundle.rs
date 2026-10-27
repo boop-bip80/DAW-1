@@ -58,8 +58,8 @@ fn session_bundle_within(session: &Session, limits: BundleLimits) -> Result<(Vec
             target = format!("Audio Files/{base}_{k:02}.wav");
             k += 1;
         }
-        let opts_wav = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
-        let bytes = soundcraft_audio_io::encode(&audio.buffer, &opts_wav).map_err(|err| EngineError::Io(err.to_string()))?;
+        let opts_wav = EncodeOptions { format: FileFormat::Wav, bit_depth: liviwave_audio_io::BitDepth::Float32, dither: false, bwf: None };
+        let bytes = liviwave_audio_io::encode(&audio.buffer, &opts_wav).map_err(|err| EngineError::Io(err.to_string()))?;
         fits(bytes.len())?;
         w.start_file(target.as_str(), opts).map_err(zerr)?;
         w.write_all(&bytes).map_err(ioerr)?;
@@ -70,7 +70,7 @@ fn session_bundle_within(session: &Session, limits: BundleLimits) -> Result<(Vec
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
     fits(text.len())?;
-    w.start_file(format!("{}.{}", sanitize_name(&s.name), soundcraft_model::SESSION_EXTENSION), opts).map_err(zerr)?;
+    w.start_file(format!("{}.{}", sanitize_name(&s.name), liviwave_model::SESSION_EXTENSION), opts).map_err(zerr)?;
     w.write_all(text.as_bytes()).map_err(ioerr)?;
     let bytes = w.finish().map_err(zerr)?.into_inner();
     Ok((bytes, s))
@@ -101,7 +101,7 @@ pub fn open_session_bytes(e: &mut Engine, name: &str, bytes: &[u8]) -> Result<Ve
         read_bundle(bytes, BUNDLE_LIMITS)?
     } else {
         (
-            String::from_utf8(bytes.to_vec()).map_err(|_| EngineError::Io(format!("{name}: not a SoundCraft session")))?,
+            String::from_utf8(bytes.to_vec()).map_err(|_| EngineError::Io(format!("{name}: not a LiVi Wave session")))?,
             std::collections::HashMap::new(),
         )
     };
@@ -250,7 +250,7 @@ mod bundle_tests {
 
     #[test]
     fn write_file_writes_to_disk_natively() {
-        let p = std::env::temp_dir().join(format!("soundcraft-write-file-{}.txt", std::process::id()));
+        let p = std::env::temp_dir().join(format!("liviwave-write-file-{}.txt", std::process::id()));
         write_file(&p.to_string_lossy(), b"hello").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"hello");
         let _ = std::fs::remove_file(&p);

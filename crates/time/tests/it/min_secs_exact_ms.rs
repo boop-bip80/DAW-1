@@ -1,6 +1,6 @@
 //! Min:Secs shows exact millisecond positions exactly (no float-floor off-by-one).
 
-use soundcraft_time::{FrameRate, SampleRate, TempoMap, TimeFormat, format_position};
+use liviwave_time::{FrameRate, SampleRate, TempoMap, TimeFormat, format_position};
 
 fn min_secs(s: i64, sr: SampleRate) -> String {
     format_position(s, TimeFormat::MinSecs, sr, &TempoMap::default(), FrameRate::default(), 0, 0)

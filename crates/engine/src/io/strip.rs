@@ -15,8 +15,8 @@ pub fn bounded_to_track(s: &Session, t: TrackId, r: Range) -> Range {
 pub fn transients_in(s: &Session, t: TrackId, r: Range, sens: f32) -> Vec<Samples> {
     let r = if r.is_empty() { Range::new(0, s.content_end()) } else { r };
     let r = bounded_to_track(s, t, r);
-    let audio = soundcraft_mix::render_clips(s, t, r);
-    soundcraft_dsp::offline::detect_transients(&audio, s.sample_rate.as_f64() as f32, sens).into_iter().map(|i| r.start + i as i64).collect()
+    let audio = liviwave_mix::render_clips(s, t, r);
+    liviwave_dsp::offline::detect_transients(&audio, s.sample_rate.as_f64() as f32, sens).into_iter().map(|i| r.start + i as i64).collect()
 }
 
 /// What Strip Silence does with the clips inside the selection once it has found the silence.
@@ -59,9 +59,9 @@ impl Default for StripNames {
 
 impl StripNames {
     /// The largest first number.
-    pub const MAX_NUMBER: u64 = soundcraft_model::AutoName::MAX_NUMBER;
+    pub const MAX_NUMBER: u64 = liviwave_model::AutoName::MAX_NUMBER;
     /// The most zeros before the number.
-    pub const MAX_ZEROS: usize = soundcraft_model::AutoName::MAX_ZEROS;
+    pub const MAX_ZEROS: usize = liviwave_model::AutoName::MAX_ZEROS;
 
     /// The name of the clip `i` places after the first one.
     pub fn clip_name(&self, i: u64) -> String {
@@ -69,8 +69,8 @@ impl StripNames {
     }
 }
 
-impl From<&soundcraft_model::AutoName> for StripNames {
-    fn from(a: &soundcraft_model::AutoName) -> Self {
+impl From<&liviwave_model::AutoName> for StripNames {
+    fn from(a: &liviwave_model::AutoName) -> Self {
         Self { name: a.name.clone(), number: a.number, zeros: a.zeros, suffix: a.suffix.clone() }
     }
 }
@@ -224,7 +224,7 @@ fn non_silent(
     }
     let window = i64::try_from(STRIP_WINDOW_SAMPLES / tr.channels().max(1)).unwrap_or(i64::MAX);
     let len = |n: Samples| u64::try_from(n).unwrap_or(0);
-    let mut scan = soundcraft_dsp::offline::SilenceScan::new(thr, len(min_len));
+    let mut scan = liviwave_dsp::offline::SilenceScan::new(thr, len(min_len));
     let mut at = r.start;
     for x in spans {
         scan.skip(len(x.start - at));
@@ -234,7 +234,7 @@ fn non_silent(
                 return Err(EngineError::Disabled("edit.strip_silence_preview".into(), "the scan was stopped".into()));
             }
             let end = at.saturating_add(window).min(x.end);
-            scan.push(&soundcraft_mix::render_clips(s, t, Range::new(at, end)));
+            scan.push(&liviwave_mix::render_clips(s, t, Range::new(at, end)));
             at = end;
         }
     }

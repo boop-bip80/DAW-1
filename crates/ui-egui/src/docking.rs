@@ -61,7 +61,7 @@ fn split(axis: SplitAxis, size: SplitSize, first: Node<Panel>, second: Node<Pane
 
 /// The dock area that draws the Edit or Mix workspace.
 pub fn area_id(window: crate::MainWindow) -> egui::Id {
-    egui::Id::unique(("soundcraft-docking", window == crate::MainWindow::Edit))
+    egui::Id::unique(("liviwave-docking", window == crate::MainWindow::Edit))
 }
 
 fn area(edit: bool) -> egui::Id {
@@ -162,7 +162,7 @@ fn canvas_placement(node: &Node<Panel>) -> Option<Result<(), &'static str>> {
     }
 }
 
-/// Check a workspace against craft-ui's rules and SoundCraft's own: saved settings cannot
+/// Check a workspace against craft-ui's rules and LiVi Wave's own: saved settings cannot
 /// float, hide, collapse or share the protected document view.
 pub fn validate(workspace: &Workspace) -> Result<(), String> {
     workspace.validate().map_err(|error| error.to_string())?;
@@ -295,7 +295,7 @@ fn set_visible(workspace: &mut Workspace, panel: Panel, visible: bool) -> Result
 }
 
 /// Run a shared docking command. A hidden panel that is opened or activated comes back with
-/// [`set_visible`], so it gets SoundCraft's default place when it has no recorded one.
+/// [`set_visible`], so it gets LiVi Wave's default place when it has no recorded one.
 fn run(workspace: &mut Workspace, command: &DockCommand<Panel>) -> Result<(), String> {
     if let DockCommand::Activate { panel } | DockCommand::UiDock(UiDock::Operation(DockOperation::Open { panel } | DockOperation::Activate { panel })) =
         command
@@ -303,7 +303,7 @@ fn run(workspace: &mut Workspace, command: &DockCommand<Panel>) -> Result<(), St
     {
         return set_visible(workspace, *panel, true);
     }
-    // Only `window.panel.float` reads the float space, and SoundCraft does not register it.
+    // Only `window.panel.float` reads the float space, and LiVi Wave does not register it.
     checked(workspace, |next| command.apply(next, false, &FloatSpace::new(egui::Rect::NOTHING), permissions).map(drop))
 }
 
@@ -399,7 +399,7 @@ pub(crate) fn cancel_replaced_state(app: &crate::SoundApp, next: &crate::UiState
 fn command_for(app: &mut crate::SoundApp, command: &DockCommand<Panel>, edit: bool) -> Result<Value, String> {
     let mut workspace = if edit { app.ui.docking.clone() } else { app.ui.mix_docking.clone() };
     if command.is_app_owned() {
-        // Reset is the only application-owned command SoundCraft registers.
+        // Reset is the only application-owned command LiVi Wave registers.
         if !matches!(command, DockCommand::ResetWorkspace {}) {
             return Err("Named panel workspaces are not supported".into());
         }
@@ -491,7 +491,7 @@ pub fn show(app: &mut crate::SoundApp, ui: &mut egui::Ui, window: crate::MainWin
             Panel::Tracks => crate::panels::tracks_and_groups(app, ui),
             Panel::Clips => crate::panels::clip_list(app, ui),
             Panel::Midi => {
-                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("soundcraft-midi-body"), ui.max_rect()));
+                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("liviwave-midi-body"), ui.max_rect()));
                 minimum_body(ui, egui::vec2(420.0, 260.0), |ui| crate::midi_editor::show(app, ui));
             }
             Panel::Memory => crate::panels::memory_locations(app, ui),

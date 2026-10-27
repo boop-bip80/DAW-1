@@ -1,5 +1,5 @@
 use super::*;
-use soundcraft_model::{ChannelFormat, Source, SourceId, TrackKind};
+use liviwave_model::{ChannelFormat, Source, SourceId, TrackKind};
 
 fn session_with_clip() -> (Session, TrackId) {
     let mut s = Session::default();
@@ -11,7 +11,7 @@ fn session_with_clip() -> (Session, TrackId) {
         channels: 1,
         frames: 10_000,
         sample_rate: 48_000,
-        format: soundcraft_audio_io::FileFormat::Wav,
+        format: liviwave_audio_io::FileFormat::Wav,
         time_reference: 0,
         unsaved: false,
     });

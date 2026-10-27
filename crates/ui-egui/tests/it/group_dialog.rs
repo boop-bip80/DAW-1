@@ -1,8 +1,8 @@
 use egui::accesskit::Role;
 use egui::{Event, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_ui_egui::{Services, SoundApp, menus};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, menus};
 
 fn press(h: &mut Harness<'_, SoundApp>, pos: Pos2, pressed: bool) {
     h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
@@ -13,7 +13,7 @@ fn press(h: &mut Harness<'_, SoundApp>, pos: Pos2, pressed: bool) {
 /// groups them all.
 #[test]
 fn dragging_down_the_group_dialogs_track_list_adds_each_track() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let tracks: Vec<(u64, String)> = app.engine.session().tracks.iter().map(|t| (t.id.0, t.name.clone())).collect();
     assert!(tracks.len() >= 4);
     app.run("edit.select", json!({"tracks": [tracks[0].0], "exact": true})).unwrap();
@@ -47,15 +47,15 @@ fn dragging_down_the_group_dialogs_track_list_adds_each_track() {
 /// pre-filled, and OK edits that group in place instead of adding a second one.
 #[test]
 fn modify_group_dialog_edits_the_existing_group() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let tracks: Vec<(u64, String)> = app.engine.session().tracks.iter().map(|t| (t.id.0, t.name.clone())).collect();
     assert!(tracks.len() >= 2);
     let g = app.run("track.group", json!({"tracks": [tracks[0].0], "name": "Drums"})).unwrap()["group"].as_u64().unwrap();
 
-    assert!(app.dialogs.open_modify_group(&app.engine, soundcraft_model::GroupId(g)));
+    assert!(app.dialogs.open_modify_group(&app.engine, liviwave_model::GroupId(g)));
     assert_eq!(app.dialogs.open_name(), Some("modify_group"));
     // Pre-filled from the group, not from the track selection.
-    let Some(soundcraft_ui_egui::dialogs::Dialog::Group { id, name, edit, mix, members }) = &app.dialogs.open else {
+    let Some(liviwave_ui_egui::dialogs::Dialog::Group { id, name, edit, mix, members }) = &app.dialogs.open else {
         panic!("Modify Group… did not open the group dialog");
     };
     assert_eq!((id.map(|i| i.0), name.as_str(), *edit, *mix), (Some(g), "Drums", true, true));

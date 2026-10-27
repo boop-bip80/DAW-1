@@ -153,7 +153,7 @@ pub(crate) fn receives_solo(s: &Session, t: &Track) -> bool {
 #[allow(clippy::unwrap_used)]
 mod processing_order_tests {
     use super::*;
-    use soundcraft_model::SendSlot;
+    use liviwave_model::SendSlot;
 
     #[test]
     fn acyclic_bus_joins_use_longest_depth_and_keep_session_order_for_ties() {

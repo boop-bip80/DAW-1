@@ -1,13 +1,13 @@
 use egui::accesskit::Role;
 use egui::{Event, Key, Modifiers, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_model::TrackId;
+use liviwave_ui_egui::{Services, SoundApp, menus};
 use serde_json::json;
-use soundcraft_model::TrackId;
-use soundcraft_ui_egui::{Services, SoundApp, menus};
 
 /// Selects the whole Kick track and opens Edit > Strip Silence from the menu.
 fn strip_silence_dialog() -> (Harness<'static, SoundApp>, TrackId, Vec<(i64, i64)>) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let track = app.engine.session().track_by_name("Kick").unwrap().id;
     let end = app.engine.session().content_end();
     app.run("edit.select", json!({"tracks": [track.0], "start": 0, "end": end})).unwrap();
@@ -36,7 +36,7 @@ fn covered(clips: &[(i64, i64)]) -> i64 {
 
 /// Strip on the same selection, run as a command, for comparison.
 fn stripped(track: TrackId) -> Vec<(i64, i64)> {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let end = app.engine.session().content_end();
     app.run("edit.select", json!({"tracks": [track.0], "start": 0, "end": end})).unwrap();
     app.run("edit.strip_silence", json!({})).unwrap();

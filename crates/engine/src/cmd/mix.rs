@@ -4,8 +4,8 @@ use super::{
 };
 
 use crate::{Engine, EngineError, Result, cmd};
+use liviwave_model::{AutoParam, AutomationMode, INSERT_SLOTS, Insert, SEND_SLOTS, SendSlot, Session, TrackId};
 use serde_json::{Value, json};
-use soundcraft_model::{AutoParam, AutomationMode, INSERT_SLOTS, Insert, SEND_SLOTS, SendSlot, Session, TrackId};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -129,7 +129,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("mix.send_level", "Send Level", [], None, "{track?, slot, db?, pan?, mute?, pre_fader?}", has_selection, send_level),
         cmd!("mix.new_bus", "New Bus", [], None, "{name, format?: stereo}", always, |e, p| {
             let name = str_param(p, "name").filter(|n| !n.trim().is_empty()).ok_or_else(|| bad("mix.new_bus", "`name` required"))?.to_string();
-            let fmt = str_param(p, "format").and_then(soundcraft_model::ChannelFormat::from_id).unwrap_or(soundcraft_model::ChannelFormat::Stereo);
+            let fmt = str_param(p, "format").and_then(liviwave_model::ChannelFormat::from_id).unwrap_or(liviwave_model::ChannelFormat::Stereo);
             let id = e.session_mut().add_bus(&name, fmt);
             Ok(json!({"bus": id}))
         }),
@@ -200,7 +200,7 @@ fn grouped_ids(s: &Session, t: TrackId, attr: &str) -> Vec<TrackId> {
 }
 
 /// Apply a change to `t` and its active mix-group siblings.
-fn set_grouped(s: &mut Session, t: TrackId, attr: &str, f: impl Fn(&mut soundcraft_model::Track)) {
+fn set_grouped(s: &mut Session, t: TrackId, attr: &str, f: impl Fn(&mut liviwave_model::Track)) {
     for id in grouped_ids(s, t, attr) {
         if let Some(tr) = s.track_mut(id) {
             f(tr);
@@ -208,7 +208,7 @@ fn set_grouped(s: &mut Session, t: TrackId, attr: &str, f: impl Fn(&mut soundcra
     }
 }
 
-fn toggle(e: &mut Engine, p: &Value, cmd: &str, set: fn(&mut Session, TrackId, bool), get: fn(&soundcraft_model::Track) -> bool) -> Result<Value> {
+fn toggle(e: &mut Engine, p: &Value, cmd: &str, set: fn(&mut Session, TrackId, bool), get: fn(&liviwave_model::Track) -> bool) -> Result<Value> {
     let tracks = tracks_required(e, cmd, p)?;
     let s = e.session_mut();
     let v = p.get("value").and_then(Value::as_bool).unwrap_or_else(|| !tracks.iter().all(|t| s.track(*t).is_some_and(get)));
@@ -451,8 +451,8 @@ fn send(e: &mut Engine, p: &Value) -> Result<Value> {
     let slot = explicit.or_else(|| tr.mixer.sends.iter().position(Option::is_none)).ok_or_else(|| bad("mix.send", "all send slots are in use"))?;
     // Re-targeting an existing send keeps its level, pan, mute and pre/post setting.
     let mut sl = match tr.mixer.sends.get(slot).cloned().flatten() {
-        Some(old) => SendSlot { target: soundcraft_model::Route::Bus(bid), ..old },
-        None => SendSlot::new(soundcraft_model::Route::Bus(bid)),
+        Some(old) => SendSlot { target: liviwave_model::Route::Bus(bid), ..old },
+        None => SendSlot::new(liviwave_model::Route::Bus(bid)),
     };
     sl.level_db = f32_or(p, "level_db", sl.level_db).clamp(-144.0, 12.0);
     sl.pre_fader = bool_or(p, "pre_fader", sl.pre_fader);
@@ -525,7 +525,7 @@ fn write_range(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 /// The static (non-automated) value of a parameter on a track.
-pub(crate) fn current_value(tr: &soundcraft_model::Track, param: &AutoParam) -> f32 {
+pub(crate) fn current_value(tr: &liviwave_model::Track, param: &AutoParam) -> f32 {
     match param {
         AutoParam::Volume => tr.mixer.volume_db,
         AutoParam::Pan(i) => tr.mixer.pan.get(usize::from(*i)).copied().unwrap_or(0.0),
@@ -613,7 +613,7 @@ fn env_db(env: &[(i64, f32)], at: i64) -> f32 {
 }
 
 /// Fold the volume `lane` into the gain envelope of clip `c` over the selection `r`.
-fn bake_volume_into_clip(c: &mut soundcraft_model::Clip, lane: &soundcraft_model::AutomationLane, base: f32, r: soundcraft_time::Range) {
+fn bake_volume_into_clip(c: &mut liviwave_model::Clip, lane: &liviwave_model::AutomationLane, base: f32, r: liviwave_time::Range) {
     let delta = |at: i64| lane.value_at(at, base) - base;
     let sel0 = r.start.max(c.start);
     let sel1 = r.end.min(c.end());
@@ -657,7 +657,7 @@ fn bake_volume_into_clip(c: &mut soundcraft_model::Clip, lane: &soundcraft_model
 }
 
 /// Clear the volume lane over `r` when the clips all sit inside it, else hold the fader there.
-fn reset_volume_lane(tr: &mut soundcraft_model::Track, lane: &soundcraft_model::AutomationLane, base: f32, r: soundcraft_time::Range) {
+fn reset_volume_lane(tr: &mut liviwave_model::Track, lane: &liviwave_model::AutomationLane, base: f32, r: liviwave_time::Range) {
     // Clearing the lane is only safe when no audio plays outside the selection; otherwise the
     // held edge values outside would fall back to the fader level.
     let clips_inside = tr.clips().iter().all(|c| c.start >= r.start && c.end() <= r.end);

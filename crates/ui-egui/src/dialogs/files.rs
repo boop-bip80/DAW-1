@@ -4,7 +4,7 @@ use super::*;
 /// open instead. A take in progress is stopped first, so it counts as a change.
 pub fn ask_to_save(app: &mut SoundApp, id: &str, params: &Value) -> bool {
     if !matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit" | OPEN_PENDING)
-        || soundcraft_engine::find_command(id).is_some_and(|c| (c.enabled)(&app.engine).is_err())
+        || liviwave_engine::find_command(id).is_some_and(|c| (c.enabled)(&app.engine).is_err())
     {
         return false;
     }
@@ -49,7 +49,7 @@ pub(super) fn open_pending_session(app: &mut SoundApp) {
         return;
     }
     let _ = app.run("transport.stop", json!({}));
-    app.ui.status = match soundcraft_engine::io::open_session_bytes(&mut app.engine, &name, &bytes) {
+    app.ui.status = match liviwave_engine::io::open_session_bytes(&mut app.engine, &name, &bytes) {
         Ok(missing) => {
             // This path replaces the document without going through `SoundApp::run`.
             app.document_replaced();
@@ -66,7 +66,7 @@ pub fn takes_path(id: &str) -> bool {
 }
 
 fn path_key(id: &str) -> Option<&'static str> {
-    let spec = soundcraft_engine::command_specs().iter().find(|c| c.id == id)?;
+    let spec = liviwave_engine::command_specs().iter().find(|c| c.id == id)?;
     if spec.params.starts_with("{path?") && id != "file.print_score" {
         None
     } else if spec.params.starts_with("{path") {
@@ -79,7 +79,7 @@ fn path_key(id: &str) -> Option<&'static str> {
 }
 
 pub(super) fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
-    let spec = soundcraft_engine::command_specs().iter().find(|c| c.id == id)?;
+    let spec = liviwave_engine::command_specs().iter().find(|c| c.id == id)?;
     let key = path_key(id)?;
     let importing = id.contains("import") || id.contains("open");
     let ext = match id {

@@ -32,7 +32,7 @@ pub struct OpsState {
     pub rtp_delay: i64,
     /// The MIDI tracks the Real-Time Properties form was last filled from, and the values it read:
     /// the form re-reads the tracks when either changes (#444).
-    pub rtp_targets: Vec<soundcraft_model::TrackId>,
+    pub rtp_targets: Vec<liviwave_model::TrackId>,
     pub rtp_loaded: Option<RtpValues>,
     pub identify_bars: u32,
 }
@@ -335,7 +335,7 @@ pub type RtpValues = (i64, i64, f64, i64);
 /// Fills the form from the tracks it edits whenever the targets or their stored values change
 /// (selection, undo, a command), so it never shows (and a control change never writes back) stale
 /// values (#444). A slider being dragged keeps its value until it is released.
-fn sync_rtp_form(ops: &mut OpsState, s: &soundcraft_model::Session, targets: Vec<soundcraft_model::TrackId>, dragging: bool) {
+fn sync_rtp_form(ops: &mut OpsState, s: &liviwave_model::Session, targets: Vec<liviwave_model::TrackId>, dragging: bool) {
     let values = rtp_form_values(s, &targets);
     if ops.rtp_targets != targets || (ops.rtp_loaded != Some(values) && !dragging) {
         let (velocity, transpose, duration, delay) = values;
@@ -350,7 +350,7 @@ fn sync_rtp_form(ops: &mut OpsState, s: &soundcraft_model::Session, targets: Vec
 
 /// The values the form shows for `targets`: the first target's own Real-Time Properties, or the
 /// neutral defaults when nothing is selected.
-fn rtp_form_values(s: &soundcraft_model::Session, targets: &[soundcraft_model::TrackId]) -> RtpValues {
+fn rtp_form_values(s: &liviwave_model::Session, targets: &[liviwave_model::TrackId]) -> RtpValues {
     let Some(&t) = targets.first() else { return (0, 0, 100.0, 0) };
     let value = |key: &str, d: f64| s.edit.value(&format!("rtp.{}.{key}", t.0), d);
     (
@@ -397,7 +397,7 @@ mod tests {
     /// The form reads the target's own values when the window opens or the selection changes.
     #[test]
     fn the_rtp_form_shows_the_target_tracks_values() {
-        let mut e = soundcraft_engine::Engine::default();
+        let mut e = liviwave_engine::Engine::default();
         e.execute("track.new", &json!({"kind": "instrument", "name": "Synth"})).unwrap();
         let t = e.session().tracks.last().unwrap().id;
         e.execute("event.midi_rtp", &json!({"track": t.0, "velocity": -12, "transpose": 7, "duration": 50.0, "delay": 480})).unwrap();
@@ -408,7 +408,7 @@ mod tests {
     /// Undo keeps the same targets but changes their stored values: the form follows.
     #[test]
     fn the_rtp_form_follows_an_undo_on_the_same_targets() {
-        let mut e = soundcraft_engine::Engine::default();
+        let mut e = liviwave_engine::Engine::default();
         e.execute("track.new", &json!({"kind": "instrument", "name": "Synth"})).unwrap();
         let t = e.session().tracks.last().unwrap().id;
         let mut ops = OpsState::default();

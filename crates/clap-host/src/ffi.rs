@@ -1,4 +1,4 @@
-//! The FFI boundary: the only module in SoundCraft allowed to use `unsafe`.
+//! The FFI boundary: the only module in LiVi Wave allowed to use `unsafe`.
 //!
 //! It loads CLAP binaries (`libloading`), calls the plugin entry/factory/plugin vtables
 //! (`clap-sys` raw bindings) and implements the host callbacks. Everything it exposes to the rest
@@ -7,7 +7,7 @@
 //! Soundness rests on the CLAP contract (the plugin honours the vtable signatures and the
 //! documented pointer lifetimes). A plugin that violates it (e.g. dereferences garbage) can still
 //! crash the process: hosting in-process can't prevent that. What this module guarantees is that
-//! *SoundCraft* never hands the plugin dangling or mis-sized pointers, never calls a missing
+//! *LiVi Wave* never hands the plugin dangling or mis-sized pointers, never calls a missing
 //! (null) function pointer, and never reads plugin strings beyond their bounds.
 
 use crate::{ClapError, scan};
@@ -36,7 +36,7 @@ use clap_sys::plugin::clap_plugin;
 use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
-use soundcraft_dsp::Transport;
+use liviwave_dsp::Transport;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};

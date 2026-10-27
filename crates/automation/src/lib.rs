@@ -1,17 +1,17 @@
-//! Agent control for SoundCraft.
+//! Agent control for LiVi Wave.
 //!
 //! - [`Backend`]: something that answers control-protocol methods (`engine.execute`,
 //!   `session.inspect`, `ui.*`…). [`Headless`] runs an in-process engine; [`Remote`] talks to a
 //!   running app's `--control` port.
 //! - [`mcp::Server`]: a Model Context Protocol server over stdio (newline-delimited JSON-RPC 2.0)
-//!   exposing SoundCraft as tools and resources.
+//!   exposing LiVi Wave as tools and resources.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod mcp;
 
+use liviwave_engine::Engine;
+use liviwave_engine::file_access::{self, AutomationRoots};
 use serde_json::{Value, json};
-use soundcraft_engine::Engine;
-use soundcraft_engine::file_access::{self, AutomationRoots};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl Headless {
     }
 
     /// Confine every file the session's commands read and write to `roots`
-    /// (`soundcraft-cli mcp --automation-read-root … --automation-write-root …`).
+    /// (`liviwave-cli mcp --automation-read-root … --automation-write-root …`).
     pub fn with_automation_roots(mut self, roots: Option<Arc<AutomationRoots>>) -> Self {
         self.roots = roots;
         self
@@ -54,12 +54,12 @@ impl Headless {
                 r
             }
             "engine.commands" => self.engine.execute("engine.commands", &params).map_err(|e| e.to_string()),
-            "engine.parity" => Ok(soundcraft_engine::catalog::parity_json()),
+            "engine.parity" => Ok(liviwave_engine::catalog::parity_json()),
             "session.inspect" | "document.inspect" => {
-                Ok(soundcraft_engine::inspect::session(&self.engine, params.get("detail").and_then(Value::as_str) == Some("full")))
+                Ok(liviwave_engine::inspect::session(&self.engine, params.get("detail").and_then(Value::as_str) == Some("full")))
             }
             m if m.starts_with("ui.") => {
-                Err(format!("`{m}` needs the desktop app: start `soundcraft --control 0` and use `soundcraft-cli mcp --connect PORT`"))
+                Err(format!("`{m}` needs the desktop app: start `liviwave --control 0` and use `liviwave-cli mcp --connect PORT`"))
             }
             other => Err(format!("unknown method `{other}`")),
         }
@@ -109,7 +109,7 @@ impl Remote {
                 Err(e) => last = e.to_string(),
             }
         }
-        let s = stream.ok_or_else(|| format!("cannot reach SoundCraft at {}: {last}", self.addr))?;
+        let s = stream.ok_or_else(|| format!("cannot reach LiVi Wave at {}: {last}", self.addr))?;
         s.set_read_timeout(Some(Duration::from_secs(120))).map_err(|e| e.to_string())?;
         let r = s.try_clone().map_err(|e| e.to_string())?;
         self.conn = Some((s, BufReader::new(r)));
@@ -164,7 +164,7 @@ impl Backend for Remote {
         true
     }
     fn describe(&self) -> String {
-        format!("SoundCraft app at {}", self.addr)
+        format!("LiVi Wave app at {}", self.addr)
     }
 }
 

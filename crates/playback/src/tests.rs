@@ -126,12 +126,12 @@ fn reusable_meter_snapshot_updates_and_drops_stale_tracks() {
 /// A mono track playing a quiet signal with one short spike in the block starting at
 /// `spike_at`, and an audio thread ready to play it.
 fn spike_session(spike_at: usize) -> (Arc<Shared>, AudioState, std::sync::mpsc::Sender<Cmd>, TrackId) {
-    use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
-    let mut s = soundcraft_model::Session::default();
+    use liviwave_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+    let mut s = liviwave_model::Session::default();
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
     let mut x = vec![0.01f32; 48_000];
     x[spike_at..spike_at + 32].fill(0.9);
-    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![x] })));
+    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![x] })));
     let id = s.new_clip_id();
     s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "x", SourceId(5), 0, 0, 48_000));
     let shared = Arc::new(Shared {
@@ -198,7 +198,7 @@ fn stopping_zeroes_meters_in_place_and_removed_tracks_are_pruned() {
     // The track is deleted: the UI side works out which tracks went and says so.
     let mut side = Side::new(48_000.0, channel().1);
     side.gone_tracks(&st.session);
-    let empty = soundcraft_model::Session::default();
+    let empty = liviwave_model::Session::default();
     let gone = side.gone_tracks(&empty);
     assert_eq!(gone, vec![t]);
     tx.send(Cmd::Session(Arc::new(empty), Vec::new())).unwrap();
@@ -281,7 +281,7 @@ fn a_lost_or_stalled_device_is_reported_once() {
 
 #[test]
 fn audio_state_plays_and_stops_at_end() {
-    let s = Arc::new(soundcraft_model::Session::default());
+    let s = Arc::new(liviwave_model::Session::default());
     let shared = Arc::new(Shared {
         position: AtomicI64::new(0),
         playing: AtomicBool::new(false),
@@ -299,7 +299,7 @@ fn audio_state_plays_and_stops_at_end() {
 
 #[test]
 fn short_device_callbacks_render_short_mix_blocks() {
-    let s = Arc::new(soundcraft_model::Session::default());
+    let s = Arc::new(liviwave_model::Session::default());
     let shared = Arc::new(Shared {
         position: AtomicI64::new(0),
         playing: AtomicBool::new(false),
@@ -314,14 +314,14 @@ fn short_device_callbacks_render_short_mix_blocks() {
     assert_eq!(shared.position.load(Ordering::Relaxed), 64);
 }
 
-fn audio_output_state(format: soundcraft_model::ChannelFormat, channels: Vec<Vec<f32>>) -> AudioState {
-    use soundcraft_model::{Clip, SourceAudio, SourceId, TrackKind};
+fn audio_output_state(format: liviwave_model::ChannelFormat, channels: Vec<Vec<f32>>) -> AudioState {
+    use liviwave_model::{Clip, SourceAudio, SourceId, TrackKind};
     let mut s = Session::default();
     s.edit.click = false;
     s.outputs[0].format = format;
     let t = s.add_track(TrackKind::Audio, format, None);
     let frames = channels[0].len();
-    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels })));
+    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels })));
     let id = s.new_clip_id();
     s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "output", SourceId(5), 0, 0, frames as i64));
     let shared = Arc::new(Shared {
@@ -338,7 +338,7 @@ fn audio_output_state(format: soundcraft_model::ChannelFormat, channels: Vec<Vec
 
 #[test]
 fn mono_device_averages_stereo_before_clipping() {
-    use soundcraft_model::ChannelFormat;
+    use liviwave_model::ChannelFormat;
     // Right only, left only, identical, opposite polarity, and levels that must be averaged
     // before clipping either side to the device's range.
     let left = [0.0, 0.8, 0.8, 0.8, 2.0, -2.0, 2.0];
@@ -360,7 +360,7 @@ fn mono_device_averages_stereo_before_clipping() {
 
 #[test]
 fn resampling_at_a_short_block_edge_does_not_mix_in_stale_frames() {
-    use soundcraft_model::ChannelFormat;
+    use liviwave_model::ChannelFormat;
     // DC for the first long block, then silence. The device runs slower than the session, so
     // reads land between frames; a short block leaves the long block's DC past `pending_len`.
     let mut st = audio_output_state(ChannelFormat::Stereo, vec![vec![0.8; BLOCK]; 2]);
@@ -380,12 +380,12 @@ fn resampling_at_a_short_block_edge_does_not_mix_in_stale_frames() {
 
 #[test]
 fn mono_device_preserves_centered_mono_level_and_includes_surround_right_channels() {
-    use soundcraft_model::ChannelFormat;
+    use liviwave_model::ChannelFormat;
     let h = std::f32::consts::FRAC_1_SQRT_2;
     let mut mono = audio_output_state(ChannelFormat::Mono, vec![vec![0.8; 512]]);
     let mut out = [0.0; 128];
     mono.fill(&mut out, 1);
-    let centered = 0.8 * soundcraft_dsp::db_to_gain(-3.0);
+    let centered = 0.8 * liviwave_dsp::db_to_gain(-3.0);
     assert!(out.iter().all(|x| (*x - centered).abs() < 1e-6), "a centered mono track keeps its rendered level under the -3 dB pan law");
 
     // Independently exercise each SMPTE 5.1 channel: L, R, C, LFE, Ls, Rs.
@@ -400,7 +400,7 @@ fn mono_device_preserves_centered_mono_level_and_includes_surround_right_channel
 
 #[test]
 fn mono_device_contains_overflow_from_opposite_surround_sides() {
-    use soundcraft_model::ChannelFormat;
+    use liviwave_model::ChannelFormat;
     let channels = [f32::MAX, -f32::MAX, 0.0, 0.0, f32::MAX, -f32::MAX].map(|v| vec![v; 128]);
     let mut st = audio_output_state(ChannelFormat::Surround51, channels.into());
     let mut out = [0.5; 128];
@@ -410,7 +410,7 @@ fn mono_device_contains_overflow_from_opposite_surround_sides() {
 
 #[test]
 fn interpolation_overflow_between_huge_samples_never_reaches_the_device() {
-    use soundcraft_model::ChannelFormat;
+    use liviwave_model::ChannelFormat;
     let alternating: Vec<f32> = (0..512).map(|i| if i % 2 == 0 { -3.4e38 } else { 3.4e38 }).collect();
     for (format, nch, device) in [(ChannelFormat::Stereo, 2, 2), (ChannelFormat::Stereo, 2, 8), (ChannelFormat::Mono, 1, 1)] {
         let mut st = audio_output_state(format, vec![alternating.clone(); nch]);
@@ -422,12 +422,12 @@ fn interpolation_overflow_between_huge_samples_never_reaches_the_device() {
 
 #[test]
 fn surround_main_maps_to_device_channels_or_folds_down() {
-    use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
-    let mut s = soundcraft_model::Session::default();
+    use liviwave_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+    let mut s = liviwave_model::Session::default();
     s.outputs[0].format = ChannelFormat::Surround51;
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Surround51, None);
     let chans: Vec<Vec<f32>> = (0..6).map(|c| vec![0.1 * (c + 1) as f32; 48_000]).collect();
-    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: chans })));
+    s.pool.insert(SourceId(5), Arc::new(SourceAudio::new(liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: chans })));
     let id = s.new_clip_id();
     s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(id, "x", SourceId(5), 0, 0, 48_000));
     let s = Arc::new(s);
@@ -459,8 +459,8 @@ fn surround_main_maps_to_device_channels_or_folds_down() {
 
 #[test]
 fn instances_arrive_with_the_session_and_leave_through_the_return_channel() {
-    use soundcraft_model::{ChannelFormat, Insert, TrackKind};
-    let mut s = soundcraft_model::Session::default();
+    use liviwave_model::{ChannelFormat, Insert, TrackKind};
+    let mut s = liviwave_model::Session::default();
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
     s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("clap:test.fake"));
     let s = Arc::new(s);
@@ -472,25 +472,25 @@ fn instances_arrive_with_the_session_and_leave_through_the_return_channel() {
     });
     let (tx, rx) = channel();
     let (gtx, grx) = channel();
-    let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
-    let plugin = soundcraft_dsp::create("gain").unwrap();
+    let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(liviwave_model::Session::default()), 48_000.0, gtx);
+    let plugin = liviwave_dsp::create("gain").unwrap();
     tx.send(Cmd::Session(Arc::clone(&s), vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin }])).unwrap();
     let mut out = vec![0.0f32; 256];
     st.fill(&mut out, 2);
     assert!(grx.try_recv().is_err(), "nothing retired yet");
     // A session without the insert retires the instance to the return channel.
-    tx.send(Cmd::Session(Arc::new(soundcraft_model::Session::default()), Vec::new())).unwrap();
+    tx.send(Cmd::Session(Arc::new(liviwave_model::Session::default()), Vec::new())).unwrap();
     st.fill(&mut out, 2);
     assert_eq!(grx.try_recv().unwrap().len(), 1);
     // A sample-rate change rebuilds the engine without dropping plugins on this thread.
     tx.send(Cmd::Session(
         Arc::clone(&s),
-        vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin: soundcraft_dsp::create("gain").unwrap() }],
+        vec![PreparedInstance { track: t, slot: 1, id: "clap:test.fake".into(), ch: 2, plugin: liviwave_dsp::create("gain").unwrap() }],
     ))
     .unwrap();
     st.fill(&mut out, 2);
     let mut s44 = (*s).clone();
-    s44.sample_rate = soundcraft_time::SampleRate::new(44_100).unwrap();
+    s44.sample_rate = liviwave_time::SampleRate::new(44_100).unwrap();
     tx.send(Cmd::Session(Arc::new(s44), Vec::new())).unwrap();
     st.fill(&mut out, 2);
     assert_eq!(grx.try_recv().unwrap().len(), 1);
@@ -501,10 +501,10 @@ fn plugin_states_are_read_without_the_audio_thread() {
     let mut side = Side::new(48_000.0, channel().1);
     let (a, b) = (TrackId(1), TrackId(2));
     side.states.insert((b, 0), Box::new(|| Some(b"b0".to_vec())));
-    side.states.insert((a, soundcraft_mix::INSTRUMENT_SLOT), Box::new(|| Some(b"synth".to_vec())));
+    side.states.insert((a, liviwave_mix::INSTRUMENT_SLOT), Box::new(|| Some(b"synth".to_vec())));
     side.states.insert((a, 3), Box::new(|| Some(b"a3".to_vec())));
     side.states.insert((a, 4), Box::new(|| None));
-    let want = vec![(a, 3, b"a3".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
+    let want = vec![(a, 3, b"a3".to_vec()), (a, liviwave_mix::INSTRUMENT_SLOT, b"synth".to_vec()), (b, 0, b"b0".to_vec())];
     assert_eq!(side.capture_states(), want);
     side.forget((a, 3));
     assert_eq!(side.capture_states(), want[1..]);
@@ -560,7 +560,7 @@ impl PluginEditor for Dirty {
 fn changed_states_are_reported_once_and_read_for_the_session() {
     let mut side = Side::new(48_000.0, channel().1);
     let (a, b) = (TrackId(1), TrackId(2));
-    let synth = (a, soundcraft_mix::INSTRUMENT_SLOT);
+    let synth = (a, liviwave_mix::INSTRUMENT_SLOT);
     side.states.insert((a, 0), Box::new(|| Some(b"a0".to_vec())));
     side.states.insert((a, 1), Box::new(|| Some(b"a1".to_vec())));
     side.states.insert(synth, Box::new(|| Some(b"synth".to_vec())));
@@ -573,7 +573,7 @@ fn changed_states_are_reported_once_and_read_for_the_session() {
     changed.sort();
     assert_eq!(changed, vec![(a, 0), (b, 0)]);
     assert!(side.changed_states().is_empty(), "each change is reported once");
-    let want = vec![(a, 0, b"a0".to_vec()), (a, soundcraft_mix::INSTRUMENT_SLOT, b"synth".to_vec())];
+    let want = vec![(a, 0, b"a0".to_vec()), (a, liviwave_mix::INSTRUMENT_SLOT, b"synth".to_vec())];
     assert_eq!(side.capture_states_of(&[(a, 0), synth, (b, 0)]), want);
 }
 
@@ -588,9 +588,9 @@ fn a_state_marked_changed_while_loading_is_not_a_change() {
 
 #[test]
 fn side_creates_each_missing_instance_once() {
-    use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+    use liviwave_model::{ChannelFormat, Insert, TrackKind};
     let mut side = Side::new(48_000.0, channel().1);
-    let mut s = soundcraft_model::Session::default();
+    let mut s = liviwave_model::Session::default();
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
     s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:does.not.exist"));
     s.track_mut(t).unwrap().mixer.inserts[1] = Some(Insert::new("gain"));
@@ -613,13 +613,13 @@ fn replaced_sessions_are_freed_on_the_ui_thread() {
     });
     let (tx, rx) = channel();
     let (gtx, grx) = channel();
-    let mut st = AudioState::new(rx, shared, Arc::new(soundcraft_model::Session::default()), 48_000.0, gtx);
+    let mut st = AudioState::new(rx, shared, Arc::new(liviwave_model::Session::default()), 48_000.0, gtx);
     let mut side = Side::new(48_000.0, grx);
     side.return_old_sessions(&tx);
     let mut out = vec![0.0f32; 256];
     let mut watched = Vec::new();
     for _ in 0..3 * OLD_SESSIONS {
-        let s = Arc::new(soundcraft_model::Session::default());
+        let s = Arc::new(liviwave_model::Session::default());
         watched.push(Arc::downgrade(&s));
         side.collect_garbage();
         tx.send(Cmd::Session(s, Vec::new())).unwrap();
@@ -633,7 +633,7 @@ fn replaced_sessions_are_freed_on_the_ui_thread() {
 
 #[test]
 fn looping_wraps() {
-    let s = Arc::new(soundcraft_model::Session::default());
+    let s = Arc::new(liviwave_model::Session::default());
     let shared = Arc::new(Shared {
         position: AtomicI64::new(0),
         playing: AtomicBool::new(false),
@@ -652,15 +652,13 @@ fn looping_wraps() {
 
 #[test]
 fn locate_while_playing_drops_the_old_position_audio() {
-    use soundcraft_model::{ChannelFormat, Clip, Insert, SourceAudio, SourceId, TrackKind};
+    use liviwave_model::{ChannelFormat, Clip, Insert, SourceAudio, SourceId, TrackKind};
     for (plugin, params) in [("compressor", &[("lookahead", 5.0), ("ratio", 1.0)][..]), ("room_reverb", &[][..])] {
-        let mut s = soundcraft_model::Session::default();
+        let mut s = liviwave_model::Session::default();
         s.edit.click = false;
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
-        s.pool.insert(
-            SourceId(5),
-            Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4800]] })),
-        );
+        s.pool
+            .insert(SourceId(5), Arc::new(SourceAudio::new(liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 4800]] })));
         let id = s.new_clip_id();
         let tr = s.track_mut(t).unwrap();
         tr.playlist_mut().unwrap().clips.push(Clip::audio(id, "x", SourceId(5), 0, 0, 4800));
@@ -695,8 +693,8 @@ fn locate_while_playing_drops_the_old_position_audio() {
 
 #[test]
 fn armed_tracks_are_heard_and_metered_after_playback_stops() {
-    use soundcraft_model::{ChannelFormat, TrackKind};
-    let mut s = soundcraft_model::Session::default();
+    use liviwave_model::{ChannelFormat, TrackKind};
+    let mut s = liviwave_model::Session::default();
     let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
     s.track_mut(t).unwrap().mixer.record_arm = true;
     let shared = Arc::new(Shared {

@@ -4,10 +4,10 @@ use crate::theme::{Tokens, bold, mono, regular};
 use crate::widgets::{icon_button, key, key_fill};
 use crate::{SoundApp, icons};
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use liviwave_engine::edit::{SHUFFLE_LOCK, SNAP_TO_GRID};
+use liviwave_model::{EditMode, Tool};
+use liviwave_time::{TimeFormat, format_length};
 use serde_json::json;
-use soundcraft_engine::edit::{SHUFFLE_LOCK, SNAP_TO_GRID};
-use soundcraft_model::{EditMode, Tool};
-use soundcraft_time::{TimeFormat, format_length};
 
 pub const HEIGHT: f32 = 78.0;
 

@@ -25,14 +25,14 @@ pub struct Take {
 }
 
 /// Place recorded take files as `plan` says, as one undo step ("Record").
-pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, PathBuf)>) -> Vec<soundcraft_model::ClipId> {
+pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, PathBuf)>) -> Vec<liviwave_model::ClipId> {
     add_recording_in(e, plan.start, takes, plan.pass, plan.punch)
 }
 
 /// Turn recorded take files into clips at `start`, as one undo step ("Record"); each file is the
 /// source of its clips. With `pass` (loop recording), a take becomes one clip per pass (at most
 /// 1000), each pass after the first on a new playlist.
-pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBuf)>, pass: Option<Samples>) -> Vec<soundcraft_model::ClipId> {
+pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBuf)>, pass: Option<Samples>) -> Vec<liviwave_model::ClipId> {
     add_recording_in(e, start, takes, pass, None)
 }
 
@@ -44,12 +44,12 @@ fn add_recording_in(
     takes: Vec<(TrackId, PathBuf)>,
     pass: Option<Samples>,
     punch: Option<Range>,
-) -> Vec<soundcraft_model::ClipId> {
+) -> Vec<liviwave_model::ClipId> {
     let before = e.session_arc();
     let mut out = Vec::new();
     for (tid, path) in takes {
         let read =
-            read_file(&path).and_then(|b| soundcraft_audio_io::decode(&b, None).map_err(|err| EngineError::Io(format!("{}: {err}", path.display()))));
+            read_file(&path).and_then(|b| liviwave_audio_io::decode(&b, None).map_err(|err| EngineError::Io(format!("{}: {err}", path.display()))));
         let Ok((_, buf)) = read.inspect_err(|err| e.message(err.to_string())) else { continue };
         let s = e.session_mut();
         if s.track(tid).is_none() {
@@ -59,7 +59,7 @@ fn add_recording_in(
         let resampled = buf.sample_rate != hz;
         let mut buf = buf;
         if resampled && buf.sample_rate > 0 {
-            buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, hz);
+            buf.channels = liviwave_dsp::offline::resample(&buf.channels, buf.sample_rate, hz);
             buf.sample_rate = hz;
         }
         let name = path.file_stem().and_then(OsStr::to_str).unwrap_or("Take");
@@ -92,7 +92,7 @@ fn add_recording_in(
             if offset > 0
                 && let Some(t) = s.track_mut(tid)
             {
-                t.playlists.push(soundcraft_model::Playlist::new(format!("{}.{:02}", t.name, t.playlists.len() + 1)));
+                t.playlists.push(liviwave_model::Playlist::new(format!("{}.{:02}", t.name, t.playlists.len() + 1)));
                 t.active_playlist = t.playlists.len() - 1;
             }
             let cid = s.new_clip_id();
@@ -128,7 +128,7 @@ mod record_tests {
     }
 
     fn write_take(path: &Path, frames: usize) {
-        let mut bytes = soundcraft_audio_io::wav_float_header(1, 48_000, frames as u64).unwrap();
+        let mut bytes = liviwave_audio_io::wav_float_header(1, 48_000, frames as u64).unwrap();
         bytes.extend((0..frames).flat_map(|i| (i as f32 / frames as f32 - 0.5).to_le_bytes()));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, bytes).unwrap();
@@ -136,7 +136,7 @@ mod record_tests {
 
     #[test]
     fn armed_tracks_get_new_take_files_used_in_place() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-takes-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-takes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = Engine::default();
         let vox = armed(&mut e, "Vox", "mono", "In 2");
@@ -162,7 +162,7 @@ mod record_tests {
 
     #[test]
     fn a_loop_take_becomes_one_clip_per_pass_and_autosaves_in_place() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-loop-take-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-loop-take-{}", std::process::id()));
         let path = dir.join("Audio Files/Vox_01.wav");
         write_take(&path, 1_050);
         let mut e = Engine::default();
@@ -180,7 +180,7 @@ mod record_tests {
 
     #[test]
     fn punching_in_keeps_the_material_around_the_punch_range() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-punch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-punch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = Engine::default();
         let vox = armed(&mut e, "Vox", "mono", "In 1");
@@ -204,7 +204,7 @@ mod record_tests {
 
     #[test]
     fn a_punch_that_misses_the_take_leaves_the_session_alone() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-punch-miss-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-punch-miss-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = Engine::default();
         let vox = armed(&mut e, "Vox", "mono", "In 1");

@@ -5,9 +5,9 @@ use super::{
 };
 
 use crate::{Engine, EngineError, Result, cmd};
+use liviwave_model::{Session, TrackId, TrackKind};
+use liviwave_time::SampleRate;
 use serde_json::{Value, json};
-use soundcraft_model::{Session, TrackId, TrackKind};
-use soundcraft_time::SampleRate;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -91,19 +91,19 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(noundo "file.bounce_stems", "Bounce Stems...", [], None, "{dir, format?: wav|aiff|flac, bit_depth?: 16|24|32f, start?, end?, dither?: true, fold_down?: stereo}", has_tracks, |e, p| {
             let dir = str_param(p, "dir").ok_or_else(|| bad("file.bounce_stems", "`dir` required"))?.to_string();
             let r = range_param(e, "file.bounce_stems", p)?;
-            let r = if r.is_empty() { soundcraft_time::Range::new(0, e.session().content_end().max(1)) } else { r };
+            let r = if r.is_empty() { liviwave_time::Range::new(0, e.session().content_end().max(1)) } else { r };
             let format = match str_param(p, "format") {
-                Some("aiff") | Some("aif") => soundcraft_audio_io::FileFormat::Aiff,
-                Some("flac") => soundcraft_audio_io::FileFormat::Flac,
-                _ => soundcraft_audio_io::FileFormat::Wav,
+                Some("aiff") | Some("aif") => liviwave_audio_io::FileFormat::Aiff,
+                Some("flac") => liviwave_audio_io::FileFormat::Flac,
+                _ => liviwave_audio_io::FileFormat::Wav,
             };
             let bit_depth = match p.get("bit_depth").map(|b| b.to_string().trim_matches('"').to_string()).as_deref() {
-                Some("16") => soundcraft_audio_io::BitDepth::Int16,
-                Some("32") | Some("32f") => soundcraft_audio_io::BitDepth::Float32,
-                _ => soundcraft_audio_io::BitDepth::Int24,
+                Some("16") => liviwave_audio_io::BitDepth::Int16,
+                Some("32") | Some("32f") => liviwave_audio_io::BitDepth::Float32,
+                _ => liviwave_audio_io::BitDepth::Int24,
             };
             let fold = fold_down_param(p, "file.bounce_stems")?;
-            let files = crate::io::bounce_stems_with(e, &dir, r, &soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: bool_or(p, "dither", true), bwf: None }, fold)?;
+            let files = crate::io::bounce_stems_with(e, &dir, r, &liviwave_audio_io::EncodeOptions { format, bit_depth, dither: bool_or(p, "dither", true), bwf: None }, fold)?;
             Ok(json!({"files": files}))
         }),
         cmd!(noundo "file.export_midi", "MIDI...", ["File", "Export"], None, "{path, tracks?}", always, |e, p| {
@@ -139,7 +139,7 @@ pub fn specs() -> Vec<CommandSpec> {
             refuse_replacing(e, "file.export_selected_tracks_as_session", &crate::io::session_file(&path), p)?;
             let keep = tracks_required(e, "file.export_selected_tracks_as_session", p)?;
             let mut s = e.session().clone();
-            s.tracks.retain(|t| keep.contains(&t.id) || t.kind == soundcraft_model::TrackKind::Master);
+            s.tracks.retain(|t| keep.contains(&t.id) || t.kind == liviwave_model::TrackKind::Master);
             let mut tmp = crate::Engine::new(s);
             crate::io::save_session(&mut tmp, &path)?;
             Ok(json!({"path": path}))
@@ -218,9 +218,9 @@ fn new_session(e: &mut Engine, p: &Value) -> Result<Value> {
     s.name = name;
     if let Some(b) = p.get("bit_depth") {
         s.bit_depth = match b.to_string().trim_matches('"') {
-            "16" => soundcraft_model::BitDepthSetting::Int16,
-            "32" | "32f" => soundcraft_model::BitDepthSetting::Float32,
-            _ => soundcraft_model::BitDepthSetting::Int24,
+            "16" => liviwave_model::BitDepthSetting::Int16,
+            "32" | "32f" => liviwave_model::BitDepthSetting::Float32,
+            _ => liviwave_model::BitDepthSetting::Int24,
         };
     }
     e.replace_session(s);
@@ -273,7 +273,7 @@ fn import_audio_target(e: &Engine, p: &Value) -> Result<Option<TrackId>> {
 }
 
 /// `source` omitted or `main` is the main mix. Any other name is a bus, and an unknown bus is an error.
-fn bounce_bus(e: &Engine, p: &Value) -> Result<Option<soundcraft_model::BusId>> {
+fn bounce_bus(e: &Engine, p: &Value) -> Result<Option<liviwave_model::BusId>> {
     let Some(name) = str_param(p, "source").map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -310,18 +310,17 @@ fn bounce(e: &mut Engine, p: &Value) -> Result<Value> {
 pub fn bounce_job(e: &Engine, p: &Value) -> Result<crate::io::Bounce> {
     let path = str_param(p, "path").ok_or_else(|| bad("file.bounce_mix", "`path` required"))?.to_string();
     let r = range_param(e, "file.bounce_mix", p)?;
-    let r = if r.is_empty() { soundcraft_time::Range::new(0, e.session().content_end().max(1)) } else { r };
+    let r = if r.is_empty() { liviwave_time::Range::new(0, e.session().content_end().max(1)) } else { r };
     let ext = std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("wav").to_ascii_lowercase();
     let format_name = str_param(p, "format").unwrap_or(ext.as_str());
-    let format = soundcraft_audio_io::encode_format_for(format_name).ok_or_else(|| {
-        bad("file.bounce_mix", format!("cannot write `{format_name}` files (supported: {})", soundcraft_audio_io::ENCODE_EXTENSIONS))
-    })?;
+    let format = liviwave_audio_io::encode_format_for(format_name)
+        .ok_or_else(|| bad("file.bounce_mix", format!("cannot write `{format_name}` files (supported: {})", liviwave_audio_io::ENCODE_EXTENSIONS)))?;
     let bit_depth = match p.get("bit_depth").map(|b| b.to_string().trim_matches('"').to_string()).as_deref() {
-        Some("16") => soundcraft_audio_io::BitDepth::Int16,
-        Some("32") | Some("32f") => soundcraft_audio_io::BitDepth::Float32,
-        _ => soundcraft_audio_io::BitDepth::Int24,
+        Some("16") => liviwave_audio_io::BitDepth::Int16,
+        Some("32") | Some("32f") => liviwave_audio_io::BitDepth::Float32,
+        _ => liviwave_audio_io::BitDepth::Int24,
     };
-    let opts = soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: bool_or(p, "dither", true), bwf: None };
+    let opts = liviwave_audio_io::EncodeOptions { format, bit_depth, dither: bool_or(p, "dither", true), bwf: None };
     let normalize = bool_or(p, "normalize", false);
     let fold = fold_down_param(p, "file.bounce_mix")?;
     let bus = bounce_bus(e, p)?;

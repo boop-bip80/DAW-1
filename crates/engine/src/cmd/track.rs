@@ -4,8 +4,8 @@ use super::{
 };
 
 use crate::{Engine, Result, cmd};
+use liviwave_model::{ChannelFormat, ClipContent, Group, GroupId, Playlist, Route, Session, Track, TrackHeight, TrackId, TrackKind};
 use serde_json::{Value, json};
-use soundcraft_model::{ChannelFormat, ClipContent, Group, GroupId, Playlist, Route, Session, Track, TrackHeight, TrackId, TrackKind};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -258,7 +258,7 @@ fn new_track(e: &mut Engine, p: &Value) -> Result<Value> {
                 t.ticks_timebase = tb;
             }
             if kind == TrackKind::Instrument {
-                t.instrument = Some(soundcraft_model::Insert::new(instrument.clone().unwrap_or_else(|| "subtractive_synth".into())));
+                t.instrument = Some(liviwave_model::Insert::new(instrument.clone().unwrap_or_else(|| "subtractive_synth".into())));
             }
         }
         if kind == TrackKind::Folder {
@@ -355,7 +355,7 @@ fn modify_group(e: &mut Engine, p: &Value) -> Result<Value> {
                 return Err(bad(CMD, format!("a group named `{n}` already exists")));
             }
             let mut n = n.to_string();
-            soundcraft_model::truncate_chars(&mut n, soundcraft_model::MAX_NAME_CHARS);
+            liviwave_model::truncate_chars(&mut n, liviwave_model::MAX_NAME_CHARS);
             Some(n)
         }
     };
@@ -381,7 +381,7 @@ fn duplicate(e: &mut Engine, p: &Value) -> Result<Value> {
     for t in tracks {
         let Some(idx) = s.track_index(t) else { continue };
         let Some(mut nt) = s.tracks.get(idx).cloned() else { continue };
-        nt.id = soundcraft_model::TrackId(s.alloc());
+        nt.id = liviwave_model::TrackId(s.alloc());
         nt.name = s.unique_track_name(&format!("{}.dup", nt.name));
         if !pl {
             for p in &mut nt.playlists {
@@ -453,11 +453,11 @@ fn split_mono(e: &mut Engine, p: &Value) -> Result<Value> {
                                 .ok_or_else(|| bad("track.split_into_mono", "split would copy too much audio"))?;
                             // Keep the full channel: the cloned clips retain their offsets, stretch,
                             // gain and fades, and every reader sees genuine mono media (including saves).
-                            let buf = soundcraft_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![samples.clone()] };
+                            let buf = liviwave_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![samples.clone()] };
                             let original = s.source(*source);
                             let name = format!("{}.{suffix}.wav", original.map_or(c.name.as_str(), |source| source.name.as_str()));
                             let time_reference = original.map_or(0, |source| source.time_reference);
-                            let id = crate::io::add_source(s, &name, buf, None, soundcraft_audio_io::FileFormat::Wav);
+                            let id = crate::io::add_source(s, &name, buf, None, liviwave_audio_io::FileFormat::Wav);
                             if let Some(source) = s.sources.iter_mut().find(|source| source.id == id) {
                                 source.time_reference = time_reference;
                             }
@@ -481,13 +481,7 @@ fn split_mono(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"tracks": out}))
 }
 
-fn flag(
-    e: &mut Engine,
-    p: &Value,
-    cmd: &str,
-    set: fn(&mut soundcraft_model::Track, bool),
-    get: fn(&soundcraft_model::Track) -> bool,
-) -> Result<Value> {
+fn flag(e: &mut Engine, p: &Value, cmd: &str, set: fn(&mut liviwave_model::Track, bool), get: fn(&liviwave_model::Track) -> bool) -> Result<Value> {
     let tracks = tracks_required(e, cmd, p)?;
     let explicit = p.get("inactive").or_else(|| p.get("hidden")).or_else(|| p.get("value")).or_else(|| p.get("ticks")).and_then(Value::as_bool);
     let s = e.session_mut();
@@ -501,7 +495,7 @@ fn flag(
 }
 
 /// A routing folder owns its summing bus; never reuse a user bus with the same name.
-fn unique_folder_bus_name(s: &Session, base: &str, own: Option<soundcraft_model::BusId>) -> String {
+fn unique_folder_bus_name(s: &Session, base: &str, own: Option<liviwave_model::BusId>) -> String {
     for suffix in 1..=s.busses.len().saturating_add(2) {
         let candidate = if suffix == 1 { base.to_string() } else { format!("{base} {suffix}") };
         if !s.busses.iter().any(|bus| bus.name == candidate && Some(bus.id) != own) {
@@ -582,7 +576,7 @@ fn folder_bus(s: &Session, folder: TrackId) -> Option<Route> {
 }
 
 /// The summing bus owned by a routing folder.
-fn owned_folder_bus(s: &Session, folder: TrackId) -> Option<soundcraft_model::BusId> {
+fn owned_folder_bus(s: &Session, folder: TrackId) -> Option<liviwave_model::BusId> {
     let folder = s.track(folder).filter(|track| track.kind == TrackKind::Folder)?;
     match folder.mixer.input {
         Route::Bus(id) => Some(id),
@@ -665,7 +659,7 @@ fn change_width(e: &mut Engine, p: &Value) -> Result<Value> {
     for t in &tracks {
         if let Some(tr) = s.track_mut(*t) {
             tr.format = f;
-            tr.mixer.pan = soundcraft_model::Mixer::new(f).pan;
+            tr.mixer.pan = liviwave_model::Mixer::new(f).pan;
         }
     }
     Ok(json!({"format": f}))
@@ -684,7 +678,7 @@ fn surviving_parent(s: &Session, deleted: &[TrackId], folder: TrackId) -> Option
 }
 
 /// Clear inputs and sends that used the removed bus; outputs that used it move to `replacement`.
-fn reroute_deleted_bus(s: &mut Session, bus: soundcraft_model::BusId, replacement: &Route) {
+fn reroute_deleted_bus(s: &mut Session, bus: liviwave_model::BusId, replacement: &Route) {
     for track in &mut s.tracks {
         if track.mixer.input == Route::Bus(bus) {
             track.mixer.input = Route::None;
@@ -793,7 +787,7 @@ fn color(e: &mut Engine, p: &Value) -> Result<Value> {
             let v: Vec<u8> = a.iter().map(|x| x.as_u64().unwrap_or(0).min(255) as u8).collect();
             [v.first().copied().unwrap_or(0), v.get(1).copied().unwrap_or(0), v.get(2).copied().unwrap_or(0)]
         }
-        Some(v) if v.is_u64() => soundcraft_model::TRACK_COLORS.get(v.as_u64().unwrap_or(0) as usize % 16).copied().unwrap_or([128, 128, 128]),
+        Some(v) if v.is_u64() => liviwave_model::TRACK_COLORS.get(v.as_u64().unwrap_or(0) as usize % 16).copied().unwrap_or([128, 128, 128]),
         _ => return Err(bad("track.color", "`color` must be [r,g,b] or a palette index")),
     };
     let s = e.session_mut();
@@ -844,7 +838,7 @@ fn view(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "track.view", p)?;
     let v = str_param(p, "view").ok_or_else(|| bad("track.view", "`view` required"))?.to_string();
     let ok = matches!(v.as_str(), "waveform" | "blocks" | "notes" | "regions" | "clip_gain" | "playlists")
-        || soundcraft_model::AutoParam::parse(&v).is_some();
+        || liviwave_model::AutoParam::parse(&v).is_some();
     if !ok {
         return Err(bad("track.view", format!("unknown view `{v}`")));
     }
@@ -958,7 +952,7 @@ fn select_playlist(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
-pub(crate) fn parse_route(s: &soundcraft_model::Session, v: &str) -> Route {
+pub(crate) fn parse_route(s: &liviwave_model::Session, v: &str) -> Route {
     match v.to_ascii_lowercase().as_str() {
         "" | "none" | "no input" | "no output" => Route::None,
         "main" | "out 1-2" | "master" => Route::Main,
@@ -1006,7 +1000,7 @@ mod tests {
         e.execute("track.playlist_duplicate", &json!({"track": kick})).unwrap();
         e.execute("edit.clear", &json!({"tracks": [kick], "start": {"seconds": 10.0}, "end": {"seconds": 12.0}})).unwrap();
         let gap = |e: &Engine| {
-            e.session().track(soundcraft_model::TrackId(kick)).unwrap().playlist().unwrap().clip_at(e.session().sample_rate.samples(11.0)).is_none()
+            e.session().track(liviwave_model::TrackId(kick)).unwrap().playlist().unwrap().clip_at(e.session().sample_rate.samples(11.0)).is_none()
         };
         assert!(gap(&e));
         e.execute("track.playlist_promote", &json!({"track": kick, "playlist": 0, "start": {"seconds": 10.0}, "end": {"seconds": 12.0}})).unwrap();

@@ -1,6 +1,6 @@
 use super::*;
 
-/// One parameter's points for one block. SoundCraft sends at most one point per block; a
+/// One parameter's points for one block. LiVi Wave sends at most one point per block; a
 /// plugin writing output changes may add more, of which only the last is kept.
 #[derive(Default)]
 pub(crate) struct ParamQueue {
@@ -161,7 +161,7 @@ impl IEventListTrait for EventList {
         // SAFETY: in-pointer from the plugin (or null, handled).
         let Some(&ev) = (unsafe { e.as_ref() }) else { return sb::kInvalidArgument };
         let cap = self.cap;
-        // Output events (e.g. MIDI out) are accepted while there is room; SoundCraft ignores them.
+        // Output events (e.g. MIDI out) are accepted while there is room; LiVi Wave ignores them.
         match self.with(|v| {
             if v.len() < cap {
                 v.push(ev);

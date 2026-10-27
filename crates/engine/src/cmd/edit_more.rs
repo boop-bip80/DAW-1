@@ -7,9 +7,9 @@ use super::{
 use super::more_util::{clip_db, render_stretched, replace_clip, set_clip_env, target_playlist};
 use crate::edit as ops;
 use crate::{Clipboard, Engine, Result, TransportRequest, cmd};
+use liviwave_model::{AutoParam, AutomationLane, Clip, ClipContent, ClipId, EditMode, Playlist, Session};
+use liviwave_time::{Range, Samples};
 use serde_json::{Value, json};
-use soundcraft_model::{AutoParam, AutomationLane, Clip, ClipContent, ClipId, EditMode, Playlist, Session};
-use soundcraft_time::{Range, Samples};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Lanes {
@@ -767,7 +767,7 @@ fn tce(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let Some(src) = render_stretched(s, id, &c, target.len())? else { return Err(bad(id, "the clip's audio is not loaded")) };
     let ratio = target.len() as f64 / c.length.max(1) as f64;
-    let scale = |x: Samples| soundcraft_time::to_samples(x as f64 * ratio);
+    let scale = |x: Samples| liviwave_time::to_samples(x as f64 * ratio);
     let mut nc = c.clone();
     nc.content = ClipContent::Audio { source: src, offset: 0 };
     nc.start = target.start;
@@ -858,7 +858,7 @@ fn coalesce_clip_gain_to_volume(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 /// The automation parameters a trim/glide over a range touches on `tr`.
-fn trim_params(tr: &soundcraft_model::Track, pan_only: bool) -> Vec<AutoParam> {
+fn trim_params(tr: &liviwave_model::Track, pan_only: bool) -> Vec<AutoParam> {
     let mut params: Vec<AutoParam> = tr
         .automation
         .iter()
@@ -878,7 +878,7 @@ fn trim_params(tr: &soundcraft_model::Track, pan_only: bool) -> Vec<AutoParam> {
 }
 
 /// Trim (shift the points inside `r` by the change at its end) or glide (ramp across `r`) one lane.
-fn trim_lane(tr: &mut soundcraft_model::Track, param: &AutoParam, r: Range, glide: bool) {
+fn trim_lane(tr: &mut liviwave_model::Track, param: &AutoParam, r: Range, glide: bool) {
     let cur = super::mix::current_value(tr, param);
     let (lo, hi, _) = param.range();
     let l = tr.lane_mut(param);
@@ -955,7 +955,7 @@ fn paste_merge_markers(e: &mut Engine, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_model::{ChannelFormat, SourceId, TrackKind};
+    use liviwave_model::{ChannelFormat, SourceId, TrackKind};
 
     #[test]
     fn merge_markers_pastes_copied_markers_once() {
@@ -974,7 +974,7 @@ mod tests {
         assert_eq!(e.execute("edit.paste_merge_markers", &json!({"at": at})).unwrap()["added"], 0);
     }
 
-    fn session_with_clips(starts: &[(Samples, Samples)]) -> (Engine, soundcraft_model::TrackId, Vec<ClipId>) {
+    fn session_with_clips(starts: &[(Samples, Samples)]) -> (Engine, liviwave_model::TrackId, Vec<ClipId>) {
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let mut ids = Vec::new();
@@ -987,7 +987,7 @@ mod tests {
         (Engine::new(s), t, ids)
     }
 
-    fn starts(e: &Engine, t: soundcraft_model::TrackId) -> Vec<Samples> {
+    fn starts(e: &Engine, t: liviwave_model::TrackId) -> Vec<Samples> {
         e.session().track(t).map(|tr| tr.clips().iter().map(|c| c.start).collect()).unwrap_or_default()
     }
 
@@ -1158,8 +1158,8 @@ mod tests {
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let tone: Vec<f32> = (0..24_000).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
-        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
-        let src = crate::io::add_source(&mut s, "tone", buf, None, soundcraft_audio_io::FileFormat::Wav);
+        let buf = liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
+        let src = crate::io::add_source(&mut s, "tone", buf, None, liviwave_audio_io::FileFormat::Wav);
         let id = s.new_clip_id();
         ops::place_clip(&mut s, t, Clip::audio(id, "tone", src, 0, 0, 24_000));
         s.edit.selected_tracks = vec![t];

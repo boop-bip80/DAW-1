@@ -37,7 +37,7 @@ fn class_name() -> Option<&'static [u16]> {
     static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
     CLASS
         .get_or_init(|| {
-            let name = wide("SoundCraftVst3Editor");
+            let name = wide("LiVi WaveVst3Editor");
             // SAFETY: null asks for this process's module handle.
             let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
             let wc = WNDCLASSEXW {

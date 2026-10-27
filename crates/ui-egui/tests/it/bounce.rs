@@ -1,13 +1,13 @@
 //! Bounce Mix renders across frames behind a progress window instead of freezing the app.
 use egui::vec2;
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_ui_egui::dialogs::Dialog;
+use liviwave_ui_egui::{Services, SoundApp};
 use serde_json::json;
-use soundcraft_ui_egui::dialogs::Dialog;
-use soundcraft_ui_egui::{Services, SoundApp};
 use std::path::{Path, PathBuf};
 
 fn harness() -> Harness<'static, SoundApp> {
-    let app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_max_steps(1_000).build_ui_state(
         |ui, app: &mut SoundApp| {
             app.logic(&ui.ctx().clone());
@@ -20,7 +20,7 @@ fn harness() -> Harness<'static, SoundApp> {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("soundcraft-ui-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -55,7 +55,7 @@ fn a_bounce_renders_across_frames_with_progress_until_its_file_is_written() {
     h.run();
     assert!(h.state().bounce.is_none());
     assert!(h.state().ui.status.starts_with("Bounced Mix.wav (peak"), "{}", h.state().ui.status);
-    let (_, file) = soundcraft_audio_io::decode(&std::fs::read(dir.join("Mix.wav")).unwrap(), None).unwrap();
+    let (_, file) = liviwave_audio_io::decode(&std::fs::read(dir.join("Mix.wav")).unwrap(), None).unwrap();
     assert_eq!(file.frames() as i64, frames);
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     let _ = std::fs::remove_dir_all(&dir);
@@ -117,8 +117,8 @@ fn cancel_or_escape_stops_a_bounce_and_leaves_no_file() {
 
 /// The largest gap between `int` and `float` in 16-bit LSBs.
 fn max_error_lsb(int: &Path, float: &Path) -> f64 {
-    let (_, a) = soundcraft_audio_io::decode(&std::fs::read(int).unwrap(), None).unwrap();
-    let (_, b) = soundcraft_audio_io::decode(&std::fs::read(float).unwrap(), None).unwrap();
+    let (_, a) = liviwave_audio_io::decode(&std::fs::read(int).unwrap(), None).unwrap();
+    let (_, b) = liviwave_audio_io::decode(&std::fs::read(float).unwrap(), None).unwrap();
     let mut worst = 0.0f64;
     for (i, f) in a.channels.iter().zip(&b.channels) {
         for (x, y) in i.iter().zip(f) {

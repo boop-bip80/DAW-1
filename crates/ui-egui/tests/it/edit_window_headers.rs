@@ -1,10 +1,10 @@
 use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use liviwave_model::{Track, TrackId};
+use liviwave_ui_egui::edit_window::HEADER_W;
+use liviwave_ui_egui::{MainWindow, Services, SoundApp};
 use serde_json::json;
-use soundcraft_model::{Track, TrackId};
-use soundcraft_ui_egui::edit_window::HEADER_W;
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
 const CMD: Modifiers = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };
 
@@ -47,7 +47,7 @@ fn bypassed(h: &Harness<'_, SoundApp>, slot: usize) -> bool {
 }
 
 fn harness(track: &str, height: &str, view: &str) -> (Harness<'static, SoundApp>, TrackId, [f32; 4]) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.run(view, json!({})).unwrap();
     app.run("track.height", json!({"tracks": [track], "height": height})).unwrap();
     let id = app.engine.session().track_by_name(track).unwrap().id;
@@ -106,7 +106,7 @@ fn edit_window_insert_slots_open_change_and_add_plugins() {
     click(&mut h, remove);
     assert_eq!(insert(&h, 1), None);
 
-    let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
+    let plugin = liviwave_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
     click(&mut h, slot(2));
     let category = h.get_by_label(&format!("{:?}", plugin.category)).rect().center();
     h.state_mut().synthetic.push(Event::PointerMoved(category));
@@ -131,7 +131,7 @@ fn short_tracks_show_insert_slots_as_squares() {
     assert!(bypassed(&h, 0));
 
     click(&mut h, square(4));
-    let plugin = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
+    let plugin = liviwave_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
     assert!(h.query_by_label(&format!("{:?}", plugin.category)).is_some());
 }
 

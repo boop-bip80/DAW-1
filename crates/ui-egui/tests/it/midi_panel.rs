@@ -1,6 +1,6 @@
 use egui::{Event, Id, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
+use liviwave_ui_egui::{Services, SoundApp, midi_editor};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, midi_editor};
 
 fn frame(ctx: &egui::Context, app: &mut SoundApp, events: Vec<Event>) {
     let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))), events, ..Default::default() };
@@ -14,7 +14,7 @@ fn frame(ctx: &egui::Context, app: &mut SoundApp, events: Vec<Event>) {
 
 /// The MIDI editor's last laid-out body rectangle, stored by the dock.
 fn panel(ctx: &egui::Context) -> Rect {
-    ctx.data(|data| data.get_temp::<Rect>(Id::unique("soundcraft-midi-body"))).unwrap()
+    ctx.data(|data| data.get_temp::<Rect>(Id::unique("liviwave-midi-body"))).unwrap()
 }
 
 fn button(pos: Pos2, pressed: bool) -> Event {
@@ -22,7 +22,7 @@ fn button(pos: Pos2, pressed: bool) -> Event {
 }
 
 fn check_resize(with_clip: bool) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.ui.show_midi_editor = true;
     if with_clip {
         app.run("edit.select", json!({"tracks": ["Keys"]})).unwrap();
@@ -101,7 +101,7 @@ fn legacy_visibility_sync_cancels_a_held_midi_divider_without_editing_the_sessio
 }
 
 fn check_held_replacement(operation: &str) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.ui.show_midi_editor = true;
     app.run("edit.select", json!({"tracks":["Keys"]})).unwrap();
     app.ui.show_memory_locations = operation == "arrange";
@@ -154,8 +154,8 @@ fn check_held_replacement(operation: &str) {
 
 #[test]
 fn a_selected_video_clip_is_not_a_midi_target() {
-    use soundcraft_model::{ChannelFormat, Clip, ClipContent, SourceId, Track, TrackKind};
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    use liviwave_model::{ChannelFormat, Clip, ClipContent, SourceId, Track, TrackKind};
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.run("edit.select", json!({"tracks": ["Keys"]})).unwrap();
     let midi = midi_editor::target_clip(&app).unwrap();
     let s = app.engine.session_mut();
@@ -174,9 +174,9 @@ fn a_selected_video_clip_is_not_a_midi_target() {
 
 #[test]
 fn only_pencil_inserts_notes_in_the_midi_roll() {
-    use soundcraft_model::{ClipContent, Tool};
+    use liviwave_model::{ClipContent, Tool};
 
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     app.ui.show_midi_editor = true;
     let created = app.run("midi.new_clip", json!({"track": "Keys", "start": 0, "length": 96000})).unwrap();
     let clip = created["clip"].as_u64().unwrap();
@@ -193,7 +193,7 @@ fn only_pencil_inserts_notes_in_the_midi_roll() {
         frame(&ctx, &mut app, vec![Event::PointerMoved(point)]);
         frame(&ctx, &mut app, vec![button(point, true)]);
         frame(&ctx, &mut app, vec![button(point, false)]);
-        let (_, edited) = app.engine.session().find_clip(soundcraft_model::ClipId(clip)).unwrap();
+        let (_, edited) = app.engine.session().find_clip(liviwave_model::ClipId(clip)).unwrap();
         let ClipContent::Midi { sequence } = &edited.content else { panic!("MIDI clip required") };
         if tool == Tool::Pencil {
             assert_eq!(sequence.notes.len(), 1);

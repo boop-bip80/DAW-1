@@ -3,13 +3,13 @@ use super::{
     CommandSpec, always, bad, bool_or, can_redo, can_undo, clip_id, clip_ids_param, f32_or, f64_or, has_clipboard, has_range, has_selection,
     has_tracks, i64_or, position_param, range_param, str_param, track_param, tracks_param, tracks_required,
 };
-use soundcraft_time::Samples;
+use liviwave_time::Samples;
 
 use super::more_util::toggle_flag;
 use crate::edit as ops;
 use crate::{Clipboard, Engine, Result, cmd};
+use liviwave_model::{ClipId, EditMode, Fade, FadeShape, Session, TrackId};
 use serde_json::{Value, json};
-use soundcraft_model::{ClipId, EditMode, Fade, FadeShape, Session, TrackId};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -175,7 +175,7 @@ pub fn specs() -> Vec<CommandSpec> {
             shuffle_lock
         ),
         cmd!(noundo "edit.tool", "Edit Tool", [], Some("F5-F10"), "{tool: zoom|trim|selector|grabber|scrubber|pencil|smart}", always, |e, p| {
-            let t = str_param(p, "tool").and_then(soundcraft_model::Tool::from_id).ok_or_else(|| bad("edit.tool", "unknown tool"))?;
+            let t = str_param(p, "tool").and_then(liviwave_model::Tool::from_id).ok_or_else(|| bad("edit.tool", "unknown tool"))?;
             e.session_mut().edit.tool = t;
             Ok(json!({"tool": t}))
         }),
@@ -280,7 +280,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
                             .points
                             .iter()
                             .filter(|p| range.contains(p.at))
-                            .map(|p| soundcraft_model::AutomationPoint { at: p.at - range.start, value: p.value })
+                            .map(|p| liviwave_model::AutomationPoint { at: p.at - range.start, value: p.value })
                             .collect();
                         l2
                     })
@@ -294,7 +294,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         .session()
         .markers
         .iter()
-        .filter(|m| m.kind == soundcraft_model::MarkerKind::Marker && range.contains(m.start))
+        .filter(|m| m.kind == liviwave_model::MarkerKind::Marker && range.contains(m.start))
         .map(|m| {
             let mut m = m.clone();
             m.end -= m.start;
@@ -309,7 +309,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
         for t in &tracks {
             cut_track(s, *t, range, sh, follow);
         }
-        s.edit.selection = soundcraft_time::Range::point(range.start);
+        s.edit.selection = liviwave_time::Range::point(range.start);
     }
     let n: usize = cb.tracks.iter().map(Vec::len).sum();
     e.clipboard = cb;
@@ -317,7 +317,7 @@ fn cut_copy(e: &mut Engine, p: &Value, cut: bool, id: &str) -> Result<Value> {
 }
 
 /// Remove `r` from a track, closing the gap in Shuffle mode; automation follows when `follow`.
-fn cut_track(s: &mut Session, t: TrackId, r: soundcraft_time::Range, sh: bool, follow: bool) {
+fn cut_track(s: &mut Session, t: TrackId, r: liviwave_time::Range, sh: bool, follow: bool) {
     if follow && let Some(tr) = s.track_mut(t) {
         for l in &mut tr.automation {
             l.clear_range(r.start, r.end);
@@ -372,7 +372,7 @@ fn paste(e: &mut Engine, p: &Value) -> Result<Value> {
             }
         }
     }
-    s.edit.selection = soundcraft_time::Range::new(at, at + cb.length);
+    s.edit.selection = liviwave_time::Range::new(at, at + cb.length);
     e.clipboard = cb;
     Ok(json!({"pasted": pasted}))
 }
@@ -423,8 +423,8 @@ fn clear_automation(e: &mut Engine, p: &Value, which: Option<&str>) -> Result<Va
             for l in &mut tr.automation {
                 let hit = match which {
                     None => true,
-                    Some("pan") => matches!(l.param, soundcraft_model::AutoParam::Pan(_)),
-                    Some(_) => matches!(l.param, soundcraft_model::AutoParam::Plugin { .. }),
+                    Some("pan") => matches!(l.param, liviwave_model::AutoParam::Pan(_)),
+                    Some(_) => matches!(l.param, liviwave_model::AutoParam::Plugin { .. }),
                 };
                 if hit {
                     n += l.clear_range(r.start, r.end);
@@ -471,7 +471,7 @@ fn select_all(e: &mut Engine, _: &Value) -> Result<Value> {
     let s = e.session_mut();
     s.edit.selected_tracks = s.tracks.iter().filter(|t| !t.hidden).map(|t| t.id).collect();
     let end = s.content_end();
-    s.edit.selection = soundcraft_time::Range::new(0, end);
+    s.edit.selection = liviwave_time::Range::new(0, end);
     Ok(json!({"tracks": s.edit.selected_tracks.len(), "end": end}))
 }
 
@@ -489,12 +489,12 @@ fn add_group_members(s: &Session, t: &mut Vec<TrackId>) {
 }
 
 /// Selecting clips also selects their range and tracks (Grabber click).
-fn select_clip_ids(s: &Session, ed: &mut soundcraft_model::EditState, c: Vec<ClipId>) {
-    let mut range: Option<soundcraft_time::Range> = None;
+fn select_clip_ids(s: &Session, ed: &mut liviwave_model::EditState, c: Vec<ClipId>) {
+    let mut range: Option<liviwave_time::Range> = None;
     let mut trs = Vec::new();
     for id in &c {
         if let Some((tid, clip)) = s.find_clip(*id) {
-            range = Some(range.map_or(clip.range(), |r| soundcraft_time::Range::new(r.start.min(clip.start), r.end.max(clip.end()))));
+            range = Some(range.map_or(clip.range(), |r| liviwave_time::Range::new(r.start.min(clip.start), r.end.max(clip.end()))));
             if !trs.contains(&tid) {
                 trs.push(tid);
             }
@@ -511,10 +511,9 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = if p.get("tracks").is_some() || p.get("track").is_some() { Some(tracks_param(e, "edit.select", p)?) } else { None };
     let st = position_param(e, "edit.select", p, "start")?;
     let en = position_param(e, "edit.select", p, "end")?;
-    let clips =
-        p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(soundcraft_model::ClipId).collect::<Vec<_>>());
+    let clips = p.get("clips").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(liviwave_model::ClipId).collect::<Vec<_>>());
     let sources =
-        p.get("sources").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(soundcraft_model::SourceId).collect::<Vec<_>>());
+        p.get("sources").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).map(liviwave_model::SourceId).collect::<Vec<_>>());
     let list_changes = clips.is_some() || sources.is_some() || st.is_some();
     let exact = bool_or(p, "exact", false);
     let s = e.session();
@@ -527,8 +526,8 @@ fn select(e: &mut Engine, p: &Value) -> Result<Value> {
         ed.selected_tracks = t;
     }
     match (st, en) {
-        (Some(a), Some(b)) => ed.selection = soundcraft_time::Range::new(a.max(0), b.max(0)),
-        (Some(a), None) => ed.selection = soundcraft_time::Range::point(a.max(0)),
+        (Some(a), Some(b)) => ed.selection = liviwave_time::Range::new(a.max(0), b.max(0)),
+        (Some(a), None) => ed.selection = liviwave_time::Range::point(a.max(0)),
         _ => {}
     }
     if let Some(c) = clips {
@@ -562,7 +561,7 @@ fn shift_selection(e: &mut Engine, dir: i64) -> Result<Value> {
 
 fn scale_selection(e: &mut Engine, f: f64) -> Result<Value> {
     let s = e.session_mut();
-    let len = soundcraft_time::to_samples(s.edit.selection.len() as f64 * f);
+    let len = liviwave_time::to_samples(s.edit.selection.len() as f64 * f);
     s.edit.selection.end = s.edit.selection.start.saturating_add(len);
     Ok(json!({"selection": s.edit.selection}))
 }
@@ -570,7 +569,7 @@ fn scale_selection(e: &mut Engine, f: f64) -> Result<Value> {
 /// Adds the nearest track above (`dir` < 0) or below the selected ones that the Edit window shows.
 fn extend_tracks(e: &mut Engine, dir: i64) -> Result<Value> {
     let s = e.session();
-    let shown = |t: &&soundcraft_model::Track| !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open);
+    let shown = |t: &&liviwave_model::Track| !t.hidden && t.folder.and_then(|f| s.track(f)).is_none_or(|f| f.folder_open);
     let idxs: Vec<usize> = s.edit.selected_tracks.iter().filter_map(|t| s.track_index(*t)).collect();
     let next = match (idxs.iter().min(), idxs.iter().max()) {
         (Some(&top), _) if dir < 0 => s.tracks.iter().take(top).rev().find(shown),
@@ -716,7 +715,7 @@ fn heal(e: &mut Engine, p: &Value) -> Result<Value> {
     let tracks = tracks_required(e, "edit.heal", p)?;
     let mut r = range_param(e, "edit.heal", p)?;
     if r.is_empty() {
-        r = soundcraft_time::Range::new(r.start - 1, r.start + 1);
+        r = liviwave_time::Range::new(r.start - 1, r.start + 1);
     }
     let s = e.session_mut();
     let n: usize = tracks.iter().map(|t| ops::heal(s, *t, r)).sum();
@@ -814,7 +813,7 @@ fn copy_to_new_playlist(e: &mut Engine, p: &Value) -> Result<Value> {
         }
         if let Some(tr) = s.track_mut(*t) {
             let name = format!("{}.{:02}", tr.name, tr.playlists.len() + 1);
-            tr.playlists.push(soundcraft_model::Playlist { name, clips: fresh });
+            tr.playlists.push(liviwave_model::Playlist { name, clips: fresh });
             tr.active_playlist = tr.playlists.len() - 1;
         }
     }
@@ -822,7 +821,7 @@ fn copy_to_new_playlist(e: &mut Engine, p: &Value) -> Result<Value> {
 }
 
 /// Strip Silence's tracks, range, threshold, minimum strip duration and clip start and end pads.
-type StripSettings = (Vec<TrackId>, soundcraft_time::Range, f32, Samples, (Samples, Samples));
+type StripSettings = (Vec<TrackId>, liviwave_time::Range, f32, Samples, (Samples, Samples));
 
 /// The [`StripSettings`] in Strip Silence's params, with their defaults and limits. `cmd` names the
 /// command in errors.
@@ -894,7 +893,7 @@ pub(super) fn strip_names(cmd: &str, p: &Value) -> Result<Option<crate::io::Stri
     };
     let d = StripNames::default();
     let suffix = suffix.unwrap_or(d.suffix);
-    let max_text = soundcraft_model::AutoName::MAX_TEXT_CHARS;
+    let max_text = liviwave_model::AutoName::MAX_TEXT_CHARS;
     if name.chars().count() + suffix.chars().count() > max_text {
         return Err(bad(cmd, format!("`name` and `suffix` together must be at most {max_text} characters")));
     }
@@ -920,7 +919,7 @@ fn fades_create(e: &mut Engine, p: &Value) -> Result<Value> {
         if ["track", "tracks", "clips", "start", "end"].iter().any(|key| p.get(key).is_some()) {
             return Err(bad("edit.fades_create", "clip fades cannot also specify tracks or an edit range"));
         }
-        let id = p.get("clip").and_then(Value::as_u64).map(soundcraft_model::ClipId).ok_or_else(|| bad("edit.fades_create", "clip must be an id"))?;
+        let id = p.get("clip").and_then(Value::as_u64).map(liviwave_model::ClipId).ok_or_else(|| bad("edit.fades_create", "clip must be an id"))?;
         let fade_in = match str_param(p, "side") {
             Some("in") => true,
             Some("out") => false,
@@ -976,7 +975,7 @@ fn fade_to(e: &mut Engine, p: &Value, to_start: bool) -> Result<Value> {
             tr.clips()
                 .iter()
                 .find(|c| c.range().contains(at))
-                .map(|c| if to_start { soundcraft_time::Range::new(c.start, at) } else { soundcraft_time::Range::new(at, c.end()) })
+                .map(|c| if to_start { liviwave_time::Range::new(c.start, at) } else { liviwave_time::Range::new(at, c.end()) })
         });
         if let Some(r) = range {
             n += ops::create_fades(s, *t, r, FadeShape::EqualPower);
@@ -1067,7 +1066,7 @@ fn consolidate(e: &mut Engine, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_model::{ChannelFormat, Clip, ClipContent, TrackId, TrackKind};
+    use liviwave_model::{ChannelFormat, Clip, ClipContent, TrackId, TrackKind};
 
     #[test]
     fn targeted_fade_curvature_saves_reopens_and_undoes_without_changing_lengths() {
@@ -1166,7 +1165,7 @@ mod tests {
             assert_eq!(e.session(), &before, "{params}");
             assert_eq!(e.undo_history(), history, "{params}");
         }
-        e.session_mut().find_clip_mut(soundcraft_model::ClipId(id)).unwrap().length = 0;
+        e.session_mut().find_clip_mut(liviwave_model::ClipId(id)).unwrap().length = 0;
         let before = e.session().clone();
         assert!(e.execute("edit.fades_create", &json!({"clip": id, "side": "in", "length": 1})).is_err());
         assert_eq!(e.session(), &before);
@@ -1214,12 +1213,12 @@ mod tests {
         let mut e = Engine::default();
         let t = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
         let (tempo, sr) = (e.session().tempo.clone(), e.session().sample_rate);
-        (e, t, move |q| tempo.tick_to_samples(q * soundcraft_time::TICKS_PER_QUARTER, sr))
+        (e, t, move |q| tempo.tick_to_samples(q * liviwave_time::TICKS_PER_QUARTER, sr))
     }
 
-    fn note(start: i64, length: i64, pitch: u8) -> soundcraft_midi::Note {
-        let q = soundcraft_time::TICKS_PER_QUARTER;
-        soundcraft_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start: start * q, length: length * q }
+    fn note(start: i64, length: i64, pitch: u8) -> liviwave_midi::Note {
+        let q = liviwave_time::TICKS_PER_QUARTER;
+        liviwave_midi::Note { pitch, velocity: 100, release_velocity: 64, channel: 0, start: start * q, length: length * q }
     }
 
     #[test]
@@ -1236,10 +1235,10 @@ mod tests {
     fn consolidating_midi_merges_the_clips_as_they_sound() {
         let (mut e, t, at) = keys();
         let s = e.session_mut();
-        let cc = soundcraft_midi::CtrlEvent { tick: 0, channel: 0, kind: soundcraft_midi::CtrlKind::Cc(1), value: 64 };
-        let a = soundcraft_midi::Sequence { notes: vec![note(0, 1, 60), note(3, 2, 62), note(5, 1, 63)], ctrls: vec![] };
-        let b = soundcraft_midi::Sequence { notes: vec![note(0, 1, 64)], ctrls: vec![] };
-        let c = soundcraft_midi::Sequence { notes: vec![note(1, 1, 65)], ctrls: vec![cc] };
+        let cc = liviwave_midi::CtrlEvent { tick: 0, channel: 0, kind: liviwave_midi::CtrlKind::Cc(1), value: 64 };
+        let a = liviwave_midi::Sequence { notes: vec![note(0, 1, 60), note(3, 2, 62), note(5, 1, 63)], ctrls: vec![] };
+        let b = liviwave_midi::Sequence { notes: vec![note(0, 1, 64)], ctrls: vec![] };
+        let c = liviwave_midi::Sequence { notes: vec![note(1, 1, 65)], ctrls: vec![cc] };
         for (start, end, seq, muted) in [(0, 4, a, false), (6, 8, b, true), (8, 12, c, false)] {
             let id = s.new_clip_id();
             let mut clip = Clip::midi(id, "Keys", at(start), at(end) - at(start), seq);
@@ -1252,16 +1251,16 @@ mod tests {
         assert_eq!(clips.iter().map(|c| (c.start, c.end())).collect::<Vec<_>>(), vec![(0, at(2)), (at(2), at(10)), (at(10), at(12))]);
         let ClipContent::Midi { sequence } = &clips[1].content else { panic!("not MIDI") };
         assert_eq!(sequence.notes, vec![note(1, 1, 62), note(7, 1, 65)]);
-        assert_eq!(sequence.ctrls, vec![soundcraft_midi::CtrlEvent { tick: 6 * soundcraft_time::TICKS_PER_QUARTER, ..cc }]);
+        assert_eq!(sequence.ctrls, vec![liviwave_midi::CtrlEvent { tick: 6 * liviwave_time::TICKS_PER_QUARTER, ..cc }]);
     }
 
     /// A 60,000-frame source with `clips` placed on one track as (start, length, source offset).
     fn trim_session(clips: &[(Samples, Samples, Samples)]) -> (Engine, TrackId, Vec<ClipId>) {
-        use soundcraft_model::{ChannelFormat, Clip, TrackKind};
+        use liviwave_model::{ChannelFormat, Clip, TrackKind};
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
-        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![vec![0.25; 60_000]] };
-        let src = crate::io::add_source(&mut s, "src", buf, None, soundcraft_audio_io::FileFormat::Wav);
+        let buf = liviwave_audio_io::AudioBuffer { sample_rate: s.sample_rate.hz(), channels: vec![vec![0.25; 60_000]] };
+        let src = crate::io::add_source(&mut s, "src", buf, None, liviwave_audio_io::FileFormat::Wav);
         let mut ids = Vec::new();
         for &(start, len, off) in clips {
             let id = s.new_clip_id();
@@ -1318,10 +1317,10 @@ mod tests {
         e.execute("edit.select", &json!({"tracks": [ids[1]], "start": 7_000, "end": 9_000})).unwrap();
         let tracks = |e: &Engine| e.session().edit.selected_tracks.iter().map(|t| t.0).collect::<Vec<_>>();
         e.execute("edit.restore_last_selection", &json!({})).unwrap();
-        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(1_000, 4_000));
+        assert_eq!(e.session().edit.selection, liviwave_time::Range::new(1_000, 4_000));
         assert_eq!(json!(tracks(&e)), json!([ids[0]]));
         e.execute("edit.restore_last_selection", &json!({})).unwrap();
-        assert_eq!(e.session().edit.selection, soundcraft_time::Range::new(7_000, 9_000));
+        assert_eq!(e.session().edit.selection, liviwave_time::Range::new(7_000, 9_000));
         assert_eq!(json!(tracks(&e)), json!([ids[1]]));
     }
 }

@@ -4,11 +4,11 @@
 use egui::{Key, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use liviwave_model::TrackId;
+use liviwave_ui_egui::{MainWindow, Services, SoundApp};
 use serde_json::json;
-use soundcraft_model::TrackId;
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
-fn harness(engine: soundcraft_engine::Engine, window: MainWindow) -> Harness<'static, SoundApp> {
+fn harness(engine: liviwave_engine::Engine, window: MainWindow) -> Harness<'static, SoundApp> {
     let mut app = SoundApp::new(engine, None, Services::default());
     app.ui.window = window;
     app.run("view.edit_inserts_ae", json!({})).unwrap();
@@ -24,8 +24,8 @@ fn harness(engine: soundcraft_engine::Engine, window: MainWindow) -> Harness<'st
     h
 }
 
-fn vox() -> soundcraft_engine::Engine {
-    let mut engine = soundcraft_engine::Engine::default();
+fn vox() -> liviwave_engine::Engine {
+    let mut engine = liviwave_engine::Engine::default();
     engine.execute("track.new", &json!({"name": "Vox"})).unwrap();
     engine
 }
@@ -35,9 +35,9 @@ fn vox_id(h: &Harness<SoundApp>) -> TrackId {
 }
 
 /// Two built-in effects from one category, and the category's menu label.
-fn two_effects() -> (String, &'static soundcraft_dsp::PluginInfo, &'static soundcraft_dsp::PluginInfo) {
-    let first = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
-    let other = soundcraft_dsp::plugins().iter().find(|p| p.category == first.category && p.id != first.id).unwrap();
+fn two_effects() -> (String, &'static liviwave_dsp::PluginInfo, &'static liviwave_dsp::PluginInfo) {
+    let first = liviwave_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
+    let other = liviwave_dsp::plugins().iter().find(|p| p.category == first.category && p.id != first.id).unwrap();
     (format!("{:?}", first.category), first, other)
 }
 

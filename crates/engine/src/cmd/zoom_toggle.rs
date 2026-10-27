@@ -1,7 +1,7 @@
 //! Zoom Toggle: zoom in on the edit selection, then back out to the view before.
 use super::{CommandSpec, always, f64_or};
-use soundcraft_model::{TrackHeight, ZoomToggle};
-use soundcraft_time::MAX_POSITION;
+use liviwave_model::{TrackHeight, ZoomToggle};
+use liviwave_time::MAX_POSITION;
 
 use crate::{Engine, Result, cmd};
 use serde_json::{Value, json};
@@ -40,8 +40,8 @@ fn toggle(e: &mut Engine, p: &Value) -> Result<Value> {
 mod tests {
     use super::TrackHeight::{Fit, Large, Medium};
     use super::*;
-    use soundcraft_model::TrackId;
-    use soundcraft_time::Samples;
+    use liviwave_model::TrackId;
+    use liviwave_time::Samples;
 
     fn engine(select: Value) -> Engine {
         let mut e = Engine::default();

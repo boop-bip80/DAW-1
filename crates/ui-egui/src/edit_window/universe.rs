@@ -97,7 +97,7 @@ pub(super) fn universe(app: &mut SoundApp, ui: &mut Ui) {
 #[cfg(test)]
 mod universe_tests {
     use super::*;
-    use soundcraft_model::{ChannelFormat, Clip, ClipId, SourceId, TrackKind};
+    use liviwave_model::{ChannelFormat, Clip, ClipId, SourceId, TrackKind};
 
     /// The pixel columns each block covers, per colour, as the old one-rect-per-clip painting did.
     fn covered(blocks: &[(Rect, Color32)]) -> Vec<(i32, Color32)> {

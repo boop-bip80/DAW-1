@@ -1,4 +1,4 @@
-use soundcraft_dsp::offline::{self, SpeedRampChange, SpeedRampSelection};
+use liviwave_dsp::offline::{self, SpeedRampChange, SpeedRampSelection};
 
 /// A channel whose samples rise from 0 to 1, so each output sample shows where it was read.
 fn ramp(len: usize) -> Vec<f32> {

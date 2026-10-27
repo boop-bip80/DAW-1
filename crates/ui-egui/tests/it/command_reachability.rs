@@ -3,8 +3,8 @@
 //! MCP left users stuck (#282: `midi.new_clip` had no UI path, so an empty instrument track could
 //! never get a MIDI clip).
 
-use soundcraft_engine::{catalog, cmd::command_specs};
-use soundcraft_ui_egui::menus::{self, MenuNode};
+use liviwave_engine::{catalog, cmd::command_specs};
+use liviwave_ui_egui::menus::{self, MenuNode};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -114,7 +114,7 @@ fn remove_sync_point_follows_identify_and_is_greyed_out_without_a_point() {
     let id = menus::command_for_path(path, &menus::ui_aliases());
     assert_eq!(id.as_deref(), Some("clip.remove_sync_point"));
 
-    let mut app = soundcraft_ui_egui::SoundApp::new(soundcraft_engine::demo::demo_engine(), None, soundcraft_ui_egui::Services::default());
+    let mut app = liviwave_ui_egui::SoundApp::new(liviwave_engine::demo::demo_engine(), None, liviwave_ui_egui::Services::default());
     app.engine.execute("edit.select", &serde_json::json!({"tracks": ["Kick"], "start": {"seconds": 12.0}})).unwrap();
     assert!(!menus::item_state(&app, path, id.as_deref()).0, "the selected Kick clip has no sync point yet");
     app.engine.execute("clip.identify_sync_point", &serde_json::json!({})).unwrap();

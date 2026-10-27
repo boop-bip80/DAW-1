@@ -46,7 +46,7 @@ impl SoundApp {
             updates_rt: updates_ui::Runtime::default(),
             meters: HashMap::new(),
             main_meter: MeterDisplay::default(),
-            meter_snapshot: soundcraft_playback::MeterSnapshot::default(),
+            meter_snapshot: liviwave_playback::MeterSnapshot::default(),
             gesture: None,
             edit_layout: edit_window::EditLayout::default(),
             midi: midi_editor::MidiEditorState::default(),

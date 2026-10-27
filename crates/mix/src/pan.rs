@@ -89,7 +89,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
             }
             _ if src_amb => {
                 for (d, az) in [(0usize, -30.0f32), (1, 30.0)] {
-                    let g = soundcraft_dsp::pan::ambisonic_decode(az, 0.0, 2);
+                    let g = liviwave_dsp::pan::ambisonic_decode(az, 0.0, 2);
                     for (c, gc) in g.iter().enumerate() {
                         set(&mut m, c, d, *gc);
                     }
@@ -131,7 +131,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
             return identity_matrix(ns.min(nd));
         }
         let mut enc = |m: &mut Matrix, s: usize, az: f32, el: f32, spread: f32| {
-            soundcraft_dsp::pan::ambisonic_encode(az, el, spread, &mut g);
+            liviwave_dsp::pan::ambisonic_encode(az, el, spread, &mut g);
             for (d, gd) in g.iter().enumerate().take(nd) {
                 set(m, s, d, *gd);
             }
@@ -141,7 +141,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
                 for s in 0..ns {
                     let dx = if ns == 2 { if s == 0 { -1.0 } else { 1.0 } } else { 0.0 };
                     let p = surround_params(sp, dx);
-                    enc(&mut m, s, soundcraft_dsp::pan::puck_azimuth(&[], p.x, p.y), p.z * 90.0, p.divergence);
+                    enc(&mut m, s, liviwave_dsp::pan::puck_azimuth(&[], p.x, p.y), p.z * 90.0, p.divergence);
                 }
             }
             (1, None) => enc(&mut m, 0, pan.stereo[0].clamp(-1.0, 1.0) * 30.0, 0.0, 0.0),
@@ -168,7 +168,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
         (1 | 2, Some(sp)) if !src_amb => {
             for s in 0..ns {
                 let dx = if ns == 2 { if s == 0 { -1.0 } else { 1.0 } } else { 0.0 };
-                soundcraft_dsp::pan::surround_gains(layout, &surround_params(sp, dx), &mut g);
+                liviwave_dsp::pan::surround_gains(layout, &surround_params(sp, dx), &mut g);
                 for (d, gd) in g.iter().enumerate().take(nd) {
                     set(&mut m, s, d, *gd);
                 }
@@ -202,7 +202,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
                 if sp.is_lfe() {
                     continue;
                 }
-                let dec = soundcraft_dsp::pan::ambisonic_decode(sp.azimuth(), sp.elevation(), n_spk);
+                let dec = liviwave_dsp::pan::ambisonic_decode(sp.azimuth(), sp.elevation(), n_spk);
                 for (c, gc) in dec.iter().enumerate() {
                     set(&mut m, c, d, *gc);
                 }
@@ -215,7 +215,7 @@ pub(crate) fn build_matrix(src_fmt: ChannelFormat, ns: usize, dst_fmt: ChannelFo
                 } else if sp.is_lfe() {
                     // No LFE in the destination: dropped.
                 } else {
-                    soundcraft_dsp::pan::direction_gains(layout, sp.azimuth(), sp.elevation(), &mut g);
+                    liviwave_dsp::pan::direction_gains(layout, sp.azimuth(), sp.elevation(), &mut g);
                     for (d, gd) in g.iter().enumerate().take(nd) {
                         set(&mut m, s, d, *gd);
                     }

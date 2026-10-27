@@ -3,8 +3,8 @@
 use crate::SoundApp;
 use crate::theme::{Tokens, bold, mono, regular, rgb};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
+use liviwave_model::{ClipId, SourceId};
 use serde_json::json;
-use soundcraft_model::{ClipId, SourceId};
 
 mod about;
 mod clips;

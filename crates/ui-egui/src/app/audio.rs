@@ -11,7 +11,7 @@ impl SoundApp {
     /// transport position, and keeps it as `ui.audio`. Plugin instances and their editors are
     /// recreated with the new player. Refused while recording, which would lose the take; `ui.audio`
     /// then stays the configuration of the open device.
-    pub fn apply_audio_config(&mut self, cfg: soundcraft_playback::AudioConfig) -> Result<(), String> {
+    pub fn apply_audio_config(&mut self, cfg: liviwave_playback::AudioConfig) -> Result<(), String> {
         if self.engine.transport.recording {
             return Err("stop recording before changing the audio device".into());
         }
@@ -26,7 +26,7 @@ impl SoundApp {
         // The input reopens on the next record or monitor with the new choice.
         self.recorder = None;
         self.recorder_failed = false;
-        let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
+        let player = liviwave_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
         Ok(())
@@ -37,7 +37,7 @@ impl SoundApp {
         if self.recorder.is_some() || self.recorder_failed || self.player.is_none() {
             return;
         }
-        match soundcraft_playback::record::Recorder::open_with(&self.ui.audio) {
+        match liviwave_playback::record::Recorder::open_with(&self.ui.audio) {
             Ok(r) => {
                 if let Some(p) = &self.player {
                     p.set_input(std::sync::Arc::clone(&r.monitor));
@@ -59,7 +59,7 @@ impl SoundApp {
         let (cause, then) = match trouble {
             OutputTrouble::Bug => (
                 "the audio engine hit an internal error (see the log)".to_string(),
-                "Use Reconnect audio device in Setup › Playback Engine, or restart SoundCraft.",
+                "Use Reconnect audio device in Setup › Playback Engine, or restart LiVi Wave.",
             ),
             OutputTrouble::Gone => {
                 (format!("“{name}” is unavailable"), "Check the audio device, then use Reconnect audio device in Setup › Playback Engine.")

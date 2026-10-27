@@ -23,7 +23,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | OMF | import/export | ❌ | ❌ | Legacy, still delivered by some editors |
 | Media Composer–compatible session | export | ❌ | ❌ | AAF variant |
 | ADM BWF (Dolby Atmos master) | import/export | ❌ | ❌ | G-12 |
-| SoundCraft session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
+| LiVi Wave session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
 | Import Session Data (from another session) | Pro Tools sessions | 🟡 | — | From `.scraft` only |
 | Session info as text | export | — | ✅ | `file.export_session_text` |
 | Clip groups `.rgrp` / ours `.scgrp` | read/write | 🟡 | 🟡 | Our own `.scgrp` format; Pro Tools' clip-group files not read |

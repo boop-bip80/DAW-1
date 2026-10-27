@@ -6,7 +6,7 @@ use super::*;
 /// open from that menu. Dropping an audio file on it loads the sampler.
 pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     let t = Tokens::current();
-    let (id, slot) = (track.id, soundcraft_mix::INSTRUMENT_SLOT);
+    let (id, slot) = (track.id, liviwave_mix::INSTRUMENT_SLOT);
     let ins = track.instrument.as_ref();
     let info = ins.and_then(|i| plugin_info(&i.plugin));
     let resp = ui.interact(r, ui.scope_id().with(("instrument", id.0)), Sense::click());
@@ -15,7 +15,7 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
         Some(info) => used_slot(ui.painter(), r, t.slot_face, Mark::Dot, info.short_name, t.text, None),
         None => empty_slot(ui.painter(), r, resp.hovered(), Mark::Dot),
     }
-    let hosted = ins.is_some_and(|i| soundcraft_mix::is_third_party(&i.plugin));
+    let hosted = ins.is_some_and(|i| liviwave_mix::is_third_party(&i.plugin));
     if resp.clicked() && hosted && !app.ui.plugin_windows.contains(&(id, slot)) {
         app.ui.plugin_windows.push((id, slot));
     }

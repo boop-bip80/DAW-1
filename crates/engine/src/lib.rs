@@ -1,4 +1,4 @@
-//! The SoundCraft command engine.
+//! The LiVi Wave command engine.
 //!
 //! Every user-visible action is a registered command ([`cmd::CommandSpec`]): menus, shortcuts, the
 //! CLI, the JSON control channel and MCP all dispatch the same commands by id with JSON params.
@@ -17,23 +17,23 @@ pub mod inspect;
 pub mod io;
 pub mod score;
 
+use liviwave_model::{Clip, Session, TrackId, ZoomState};
+use liviwave_time::Samples;
 use serde_json::{Value, json};
-use soundcraft_model::{Clip, Session, TrackId, ZoomState};
-use soundcraft_time::Samples;
 use std::cell::Cell;
 use std::sync::Arc;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
-pub use soundcraft_model as model;
+pub use liviwave_model as model;
 
 /// Shuts the third-party plugin hosts down, running the module exit of every plugin binary they
 /// loaded. Call it at the end of `main`, once every plugin instance (mixer, player) is gone: a
 /// plugin that has been used can crash when its module exit only runs from an exit handler.
 pub fn shutdown_plugin_hosts() {
-    soundcraft_vst3_host::shutdown();
+    liviwave_vst3_host::shutdown();
 }
 
-/// A new [`soundcraft_model::AutoName::id`] for a scheme in `s`: a hash of a counter, never 0 and
+/// A new [`liviwave_model::AutoName::id`] for a scheme in `s`: a hash of a counter, never 0 and
 /// not held by another scheme in `s`. Native builds seed the hash from the system, so each run of
 /// the app gives other ids.
 pub fn new_scheme_id(s: &Session) -> u64 {
@@ -99,24 +99,24 @@ pub struct TransportStatus {
 pub struct Clipboard {
     pub length: Samples,
     pub tracks: Vec<Vec<Clip>>,
-    pub automation: Vec<Vec<soundcraft_model::AutomationLane>>,
+    pub automation: Vec<Vec<liviwave_model::AutomationLane>>,
     /// Copy Special › Clip Gain: per track, (offset from the copied range start, dB) breakpoints.
     pub clip_gain: Vec<Vec<(Samples, f32)>>,
     /// Copy Special › Clip Effects: clip-effect settings (`param` → value) of the first copied clip.
     pub clip_effects: Vec<(String, f64)>,
     /// Markers inside the copied range (starts relative to it), for Paste Special › Merge Markers.
-    pub markers: Vec<soundcraft_model::MemoryLocation>,
+    pub markers: Vec<liviwave_model::MemoryLocation>,
     /// How far the copied range started after a grid line; Relative Grid pastes keep it.
     pub grid_offset: Samples,
     /// Copy Special › Automation: pasting it leaves the clips alone, in Shuffle mode too.
     pub automation_only: bool,
     /// The Auto Rename schemes of the copied clips, keyed as in their `auto_name`.
-    pub auto_names: std::collections::BTreeMap<u64, soundcraft_model::AutoName>,
+    pub auto_names: std::collections::BTreeMap<u64, liviwave_model::AutoName>,
 }
 
 impl Clipboard {
     /// An empty clipboard for material copied from `range`.
-    pub fn of_range(s: &Session, range: soundcraft_time::Range) -> Clipboard {
+    pub fn of_range(s: &Session, range: liviwave_time::Range) -> Clipboard {
         let line = s.edit.grid.line_at_or_before(range.start, s.sample_rate, &s.tempo, s.frame_rate);
         Clipboard { length: range.len(), grid_offset: range.start.saturating_sub(line), ..Clipboard::default() }
     }
@@ -127,7 +127,7 @@ impl Clipboard {
     }
 
     /// Before a paste into `s`: point the copied clips at schemes that `s` holds. A scheme that `s`
-    /// holds with the same [`AutoName::id`](soundcraft_model::AutoName::id), name, zeros and suffix
+    /// holds with the same [`AutoName::id`](liviwave_model::AutoName::id), name, zeros and suffix
     /// is used as it is, and its numbers count on. Any other goes into `s` under a new key, counting
     /// on from where it was when it was copied.
     pub fn adopt_auto_names(&mut self, s: &mut Session) {
@@ -192,7 +192,7 @@ pub struct Engine {
     pub messages: Vec<String>,
     /// The edit selection (range, tracks) before the last change, for Restore Last Selection.
     /// Kept out of the document so selecting never marks the session modified.
-    pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
+    pub last_selection: Option<(liviwave_time::Range, Vec<TrackId>)>,
     /// Audio decoded off the UI thread, waiting for its `file.import_audio` (see `offer_import`).
     imports: Vec<io::DecodedImport>,
 }
@@ -546,7 +546,7 @@ mod merge_tests {
     #[test]
     fn merged_gesture_is_one_undo_step() {
         let mut e = Engine::default();
-        let t = e.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, None);
+        let t = e.session_mut().add_track(liviwave_model::TrackKind::Audio, liviwave_model::ChannelFormat::Mono, None);
         for db in [-1.0, -2.0, -3.0, -4.0] {
             e.execute_merged("mix.volume", &json!({"track": t.0, "db": db}), "fader").unwrap();
         }
@@ -559,7 +559,7 @@ mod merge_tests {
     #[test]
     fn a_held_merge_joins_other_gestures_into_its_step() {
         let mut e = Engine::default();
-        let t = e.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, None);
+        let t = e.session_mut().add_track(liviwave_model::TrackKind::Audio, liviwave_model::ChannelFormat::Mono, None);
         e.hold_merge(Some("pass"));
         for db in [-1.0, -2.0, -3.0] {
             e.execute_merged("mix.volume", &json!({"track": t.0, "db": db}), "fader").unwrap();
@@ -574,7 +574,7 @@ mod merge_tests {
     #[test]
     fn only_a_change_to_the_document_ends_a_gesture() {
         let mut e = Engine::default();
-        let t = e.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, None);
+        let t = e.session_mut().add_track(liviwave_model::TrackKind::Audio, liviwave_model::ChannelFormat::Mono, None);
         e.execute_merged("mix.volume", &json!({"track": t.0, "db": -1.0}), "fader").unwrap();
         e.execute("transport.stop", &json!({})).unwrap();
         e.execute_merged("mix.volume", &json!({"track": t.0, "db": -2.0}), "fader").unwrap();
@@ -620,7 +620,7 @@ mod panic_tests {
         e.clipboard.length = 42;
         e.messages.push("prior".into());
         e.transport_requests.push(TransportRequest::Stop);
-        e.last_selection = Some((soundcraft_time::Range::new(20, 30), Vec::new()));
+        e.last_selection = Some((liviwave_time::Range::new(20, 30), Vec::new()));
         let (clipboard, messages, requests, selection) =
             (e.clipboard.clone(), e.messages.clone(), e.transport_requests.clone(), e.last_selection.clone());
         let r = e.execute("test.panic_probe", &json!({"panic": true}));

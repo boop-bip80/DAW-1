@@ -1,11 +1,11 @@
 //! Ordinary strip mute changes sample gates without splitting processor blocks.
-use soundcraft_audio_io::AudioBuffer;
-use soundcraft_dsp::Plugin;
-use soundcraft_mix::{MixEngine, PreparedInstance, render_range};
-use soundcraft_model::{
+use liviwave_audio_io::AudioBuffer;
+use liviwave_dsp::Plugin;
+use liviwave_mix::{MixEngine, PreparedInstance, render_range};
+use liviwave_model::{
     AutoParam, AutomationLane, AutomationMode, ChannelFormat, Clip, Insert, Route, SendSlot, Session, SourceAudio, SourceId, TrackId, TrackKind,
 };
-use soundcraft_time::Range;
+use liviwave_time::Range;
 use std::sync::{Arc, Mutex};
 
 const LEN: usize = 768;
@@ -176,7 +176,7 @@ struct Counted {
     instrument: bool,
 }
 impl Plugin for Counted {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.inner.info()
     }
     fn prepare(&mut self, sr: f32, block: usize, ch: usize) {
@@ -211,13 +211,13 @@ fn hosted_processing_keeps_the_callers_blocks_and_unmuted_pcm() {
         let slot = if instrument {
             s.track_mut(t).unwrap().kind = TrackKind::Instrument;
             s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.mute-cadence"));
-            soundcraft_mix::INSTRUMENT_SLOT
+            liviwave_mix::INSTRUMENT_SLOT
         } else {
             s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.mute-cadence"));
             0
         };
         let calls = Arc::new(Mutex::new(Vec::with_capacity(4)));
-        let mut plugin = soundcraft_dsp::create("gain").unwrap();
+        let mut plugin = liviwave_dsp::create("gain").unwrap();
         plugin.prepare(48_000.0, 256, 2);
         let mut mix = MixEngine::new(48_000.0, 256);
         mix.set_external_instances(true);

@@ -21,7 +21,7 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     match &snd {
         Some(s) => {
             let name = route_name(app, &s.target);
-            let level = soundcraft_model::fader_db_to_pos(s.level_db);
+            let level = liviwave_model::fader_db_to_pos(s.level_db);
             let color = if s.mute { t.mute } else { t.text };
             used_slot(ui.painter(), r, t.slot_face, mark, &name, color, Some(level));
             let which = (b'A' + slot as u8) as char;
@@ -149,7 +149,7 @@ fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
 }
 
 /// Secondary controls live behind the amount readout, separate from the bus selector like Logic.
-fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, send: &soundcraft_model::SendSlot) {
+fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, send: &liviwave_model::SendSlot) {
     ui.set_min_width(230.0);
     ui.strong(format!("Send {} · {}", (b'A' + slot as u8) as char, route_name(app, &send.target)));
     let mut db = send.level_db.max(-60.0);
@@ -199,7 +199,7 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
 /// so it runs smoothly down to −∞ and back. About 0.15 dB a point near 0 dB (0.02 when fine).
 pub(super) fn dragged_send_db(db: f32, dy: f32, fine: bool) -> f32 {
     let per_point = if fine { 0.0004 } else { 0.003 };
-    soundcraft_model::fader_pos_to_db(soundcraft_model::fader_db_to_pos(db) - dy * per_point)
+    liviwave_model::fader_pos_to_db(liviwave_model::fader_db_to_pos(db) - dy * per_point)
 }
 
 /// What an [`editable_readout`] shows and how a typed value is parsed.
@@ -304,7 +304,7 @@ fn send_level_scale(ui: &mut Ui, db: f32) {
     let line_y = r.min.y + 4.0;
     ui.painter().line_segment([pos2(r.min.x, line_y), pos2(r.max.x, line_y)], Stroke::new(1.0, t.border));
     for (i, mark) in [-60.0f32, -24.0, -10.0, 0.0, 6.0, 12.0].into_iter().enumerate() {
-        let x = r.min.x + r.width() * soundcraft_model::fader_db_to_pos(mark);
+        let x = r.min.x + r.width() * liviwave_model::fader_db_to_pos(mark);
         ui.painter().line_segment([pos2(x, line_y - 3.0), pos2(x, line_y + 3.0)], Stroke::new(1.0, t.text_dim));
         let align = if i == 0 {
             Align2::LEFT_TOP
@@ -316,7 +316,7 @@ fn send_level_scale(ui: &mut Ui, db: f32) {
         let label = if mark > 0.0 { format!("+{mark:.0}") } else { format!("{mark:.0}") };
         ui.painter().text(pos2(x, line_y + 5.0), align, label, regular(8.0), t.text_dim);
     }
-    let x = r.min.x + r.width() * soundcraft_model::fader_db_to_pos(db);
+    let x = r.min.x + r.width() * liviwave_model::fader_db_to_pos(db);
     ui.painter().line_segment([pos2(x, r.min.y), pos2(x, line_y + 3.0)], Stroke::new(2.0, t.counter_text));
 }
 
@@ -415,7 +415,7 @@ mod tests {
     /// back, with the search field in the same place and the footer under the list.
     #[test]
     fn the_send_destination_menu_grows_back_when_the_search_is_cleared() {
-        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
         for n in 0..30 {
             app.run("mix.new_bus", json!({"name": format!("Aux {n}")})).unwrap();
         }

@@ -1,7 +1,7 @@
 use egui::{Pos2, RawInput, Rect, pos2, vec2};
+use liviwave_time::to_samples;
+use liviwave_ui_egui::{ControlRequest, Services, SoundApp};
 use serde_json::{Value, json};
-use soundcraft_time::to_samples;
-use soundcraft_ui_egui::{ControlRequest, Services, SoundApp};
 use std::sync::mpsc::{Sender, channel};
 
 struct Rig {
@@ -16,7 +16,7 @@ impl Rig {
     /// offset assertions.
     fn new(width: f32) -> Rig {
         let (tx, rx) = channel();
-        let app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default()).with_control(rx);
+        let app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default()).with_control(rx);
         let mut r = Rig { ctx: egui::Context::default(), app, tx, width };
         // egui 0.37 scroll areas treat point wheel events as a trackpad: they rubber-band at an
         // edge and can coast after the gesture. These tests assert exact offsets, so the rig uses

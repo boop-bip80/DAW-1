@@ -4,8 +4,8 @@
 use super::{CommandSpec, bad, has_tracks, track_param};
 use crate::{Engine, Result};
 
+use liviwave_model::{INSERT_SLOTS, b64};
 use serde_json::{Value, json};
-use soundcraft_model::{INSERT_SLOTS, b64};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -74,8 +74,8 @@ fn insert_state(e: &mut Engine, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use crate::Engine;
+    use liviwave_model::b64;
     use serde_json::json;
-    use soundcraft_model::b64;
 
     #[test]
     fn stores_and_clears_state_without_undo() {
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(e.can_undo(), undo_before, "not undoable");
         assert!(e.journal.iter().all(|(id, _)| id != "mix.insert_state"), "not journaled");
         // Survives save/load.
-        let dir = std::env::temp_dir().join(format!("soundcraft-insert-state-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-insert-state-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.scraft");

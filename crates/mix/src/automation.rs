@@ -23,7 +23,7 @@ pub(crate) fn transport_at(s: &Session, pos: Samples, playing: bool, recording: 
 
 pub(crate) fn volume_db_at(t: &Track, pos: Samples) -> f32 {
     if t.mixer.automation_mode.reads()
-        && t.mixer.automation_mode != soundcraft_model::AutomationMode::Write
+        && t.mixer.automation_mode != liviwave_model::AutomationMode::Write
         && let Some(l) = t.lane(&AutoParam::Volume)
         && !l.points.is_empty()
     {

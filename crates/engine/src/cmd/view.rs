@@ -2,9 +2,9 @@
 use super::{CommandSpec, always, bad, bool_or, f32_or, f64_or, i64_or, position_param, str_param};
 
 use crate::{Engine, Result, cmd};
+use liviwave_time::TimeFormat;
+use liviwave_time::{GridValue, MAX_POSITION, NoteValue};
 use serde_json::{Value, json};
-use soundcraft_time::TimeFormat;
-use soundcraft_time::{GridValue, MAX_POSITION, NoteValue};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -52,7 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
             let to = position_param(e, "view.scroll", p, "to")?;
             let by = f64_or(p, "by_px", 0.0);
             let z = e.zoom_mut();
-            let by = soundcraft_time::to_samples(by * z.samples_per_px);
+            let by = liviwave_time::to_samples(by * z.samples_per_px);
             z.scroll = to.unwrap_or(z.scroll.saturating_add(by)).clamp(0, MAX_POSITION);
             Ok(json!({"scroll": z.scroll}))
         }),
@@ -103,7 +103,7 @@ fn zoom(e: &mut Engine, f: f64, x: Option<f64>) -> Result<Value> {
     let (old, scroll) = (z.samples_per_px, z.scroll as f64);
     let new = (old * f).clamp(MIN_SPP, MAX_SPP);
     if let Some(x) = x.or_else(|| Some((insertion - scroll) / old).filter(|x| (0.0..4000.0).contains(x))) {
-        z.scroll = soundcraft_time::to_samples(scroll + x * (old - new)).clamp(0, MAX_POSITION);
+        z.scroll = liviwave_time::to_samples(scroll + x * (old - new)).clamp(0, MAX_POSITION);
     }
     z.samples_per_px = new;
     Ok(json!({"samples_per_px": new, "scroll": z.scroll}))
@@ -161,7 +161,7 @@ pub fn grid_param(p: &Value, key: &str) -> Option<GridValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_time::Samples;
+    use liviwave_time::Samples;
     #[test]
     fn grid_values_parse() {
         assert_eq!(grid_param(&json!({"v": "1/16"}), "v"), Some(GridValue::Note { value: NoteValue::Sixteenth, dotted: false, triplet: false }));

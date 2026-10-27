@@ -1,7 +1,7 @@
 use super::*;
-use soundcraft_audio_io::AudioBuffer;
-use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
-use soundcraft_time::Range;
+use liviwave_audio_io::AudioBuffer;
+use liviwave_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+use liviwave_time::Range;
 use std::sync::Arc;
 
 fn rms_db(before: &[f32], after: &[f32]) -> f32 {
@@ -27,7 +27,7 @@ fn tone_session(points: &[(i64, f32)]) -> (Engine, TrackId) {
 }
 
 fn rendered(s: &Session) -> Vec<f32> {
-    soundcraft_mix::render_range(s, Range::new(0, 8192), 1024).into_iter().next().unwrap_or_default()
+    liviwave_mix::render_range(s, Range::new(0, 8192), 1024).into_iter().next().unwrap_or_default()
 }
 
 fn convert(e: &mut Engine, t: TrackId, start: i64, end: i64) {
@@ -259,7 +259,7 @@ fn retargeting_a_send_keeps_its_settings() {
     e.execute("mix.send", &json!({"track": "Gtr", "slot": 0, "bus": "Delay"})).unwrap();
     let sl = e.session().tracks[0].mixer.sends[0].clone().unwrap();
     let delay = e.session().busses.iter().find(|b| b.name == "Delay").unwrap().id;
-    assert_eq!(sl.target, soundcraft_model::Route::Bus(delay));
+    assert_eq!(sl.target, liviwave_model::Route::Bus(delay));
     assert_eq!((sl.level_db, sl.pan, sl.mute, sl.pre_fader), (-9.0, 0.5, true, true));
 }
 

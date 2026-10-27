@@ -185,7 +185,7 @@ pub(super) fn view_menu(app: &mut SoundApp, ui: &mut Ui, track: &Track) {
     }
     for (slot, ins) in track.mixer.inserts.iter().enumerate() {
         let Some(ins) = ins else { continue };
-        let Some(info) = soundcraft_dsp::plugin_info(&ins.plugin) else { continue };
+        let Some(info) = liviwave_dsp::plugin_info(&ins.plugin) else { continue };
         ui.menu_button(info.name, |ui| {
             for p in info.params {
                 let v = format!("plugin:{}:{}", (b'a' + slot as u8) as char, p.id);
@@ -260,7 +260,7 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         }
     });
     ui.menu_button("Track Color", |ui| {
-        for (i, c) in soundcraft_model::TRACK_COLORS.iter().enumerate() {
+        for (i, c) in liviwave_model::TRACK_COLORS.iter().enumerate() {
             let (r, resp) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::click());
             ui.painter().rect_filled(r, 2.0, rgb(*c));
             if resp.clicked() {

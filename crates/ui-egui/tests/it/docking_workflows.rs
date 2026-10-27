@@ -1,11 +1,11 @@
 //! Real Edit/Mix panel workflows, persistence, and command ownership without OS windows.
 use egui::{Event, Modifiers, PointerButton, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_ui_egui::{MainWindow, Services, SoundApp, UiState, docking::Panel};
 use serde_json::json;
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp, UiState, docking::Panel};
 
 pub(crate) fn harness(state: Option<UiState>, width: f32, scale: f32) -> Harness<'static, SoundApp> {
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     app.run("track.new", json!({"name":"Voice"})).unwrap();
     if let Some(state) = state {
         app.ui = state;
@@ -75,7 +75,7 @@ fn real_drag_float_close_reopen_reload_retains_transport_and_mixer_commands() {
     assert_eq!(reloaded.state().ui.docking.layout.panel_state(&Panel::Tracks), craft_ui::docking::PanelState::Front);
     reloaded.get_by_label("Trim (F6)").click();
     reloaded.run_steps(3);
-    assert_eq!(reloaded.state().engine.session().edit.tool, soundcraft_model::Tool::Trim);
+    assert_eq!(reloaded.state().engine.session().edit.tool, liviwave_model::Tool::Trim);
     assert!(!reloaded.state().engine.transport.playing);
     let edit = serde_json::to_value(&reloaded.state().ui.docking).unwrap();
     reloaded.state_mut().ui.window = MainWindow::Mix;
@@ -133,7 +133,7 @@ fn docking_renders_edit_and_mix_default_floating_and_redocked() {
         for scale in [1.0, 2.0] {
             for window in [MainWindow::Edit, MainWindow::Mix] {
                 let mut h = harness(Some(UiState { window, ..Default::default() }), width, scale);
-                h.state_mut().engine = soundcraft_engine::demo::demo_engine();
+                h.state_mut().engine = liviwave_engine::demo::demo_engine();
                 for state in ["default", "floating", "redocked"] {
                     if state == "floating" {
                         h.state_mut().run("ui.dock", json!({"operation":"float","panel":"tracks","rect":[100,80,260,500]})).unwrap();
@@ -141,8 +141,8 @@ fn docking_renders_edit_and_mix_default_floating_and_redocked() {
                         h.state_mut().run("ui.dock", json!({"operation":"move","panel":"tracks","target":"canvas","zone":"left"})).unwrap();
                     }
                     h.run_steps(5);
-                    soundcraft_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
-                    soundcraft_ui_egui::docking::validate(&h.state().ui.mix_docking).unwrap();
+                    liviwave_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
+                    liviwave_ui_egui::docking::validate(&h.state().ui.mix_docking).unwrap();
                     if let Ok(directory) = std::env::var("CRAFT_UI_DOCKING_DIR") {
                         std::fs::create_dir_all(&directory).unwrap();
                         h.render().unwrap().save(format!("{directory}/sound-{window:?}-{width}-{scale}-{state}.png")).unwrap();
@@ -155,8 +155,8 @@ fn docking_renders_edit_and_mix_default_floating_and_redocked() {
 
 #[test]
 fn reset_is_enabled_and_resolves_in_native_and_in_window_menu_trees() {
-    use soundcraft_ui_egui::menus;
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    use liviwave_ui_egui::menus;
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     let path = "Window > Reset Panel Layout";
     let extra: Vec<_> = menus::UI_COMMANDS.iter().map(|(id, _, path, _)| (*path, *id)).collect();
     assert_eq!(menus::command_for_path(path, &extra).as_deref(), Some("ui.dock.reset"));
@@ -171,14 +171,14 @@ fn reset_is_enabled_and_resolves_in_native_and_in_window_menu_trees() {
 
 #[test]
 fn legacy_preferences_restore_the_theme_and_validate_default_docking() {
-    let mut value = serde_json::to_value(UiState { theme: soundcraft_ui_egui::theme::ThemeMode::Light, ..Default::default() }).unwrap();
+    let mut value = serde_json::to_value(UiState { theme: liviwave_ui_egui::theme::ThemeMode::Light, ..Default::default() }).unwrap();
     let object = value.as_object_mut().unwrap();
     object.remove("docking");
     object.remove("mix_docking");
     let restored: UiState = serde_json::from_value(value).unwrap();
-    assert_eq!(restored.theme, soundcraft_ui_egui::theme::ThemeMode::Light);
-    soundcraft_ui_egui::docking::validate(&restored.docking).unwrap();
-    soundcraft_ui_egui::docking::validate_mix(&restored.mix_docking).unwrap();
+    assert_eq!(restored.theme, liviwave_ui_egui::theme::ThemeMode::Light);
+    liviwave_ui_egui::docking::validate(&restored.docking).unwrap();
+    liviwave_ui_egui::docking::validate_mix(&restored.mix_docking).unwrap();
 }
 
 /// The tab group holding `panel` in the docked frames or a dock column.
@@ -202,7 +202,7 @@ fn a_floating_window_saved_in_the_one_group_shape_keeps_it_when_written_back() {
     let mut settings = serde_json::to_value(UiState { show_midi_editor: true, ..Default::default() }).unwrap();
     settings["docking"]["layout"]["floating"] = json!([{"panels": ["memory", "history"], "active": 1, "rect": [300.0, 120.0, 420.0, 360.0]}]);
     let state: UiState = serde_json::from_value(settings).unwrap();
-    soundcraft_ui_egui::docking::validate(&state.docking).unwrap();
+    liviwave_ui_egui::docking::validate(&state.docking).unwrap();
     let floating = &state.docking.layout.floating;
     assert_eq!(floating.len(), 1);
     assert_eq!(floating[0].root, Node::Tabs { panels: vec![Panel::Memory, Panel::History], active: 1 });
@@ -226,7 +226,7 @@ fn dragging_a_group_by_its_drag_bar_joins_it_to_another_group() {
     let mut h = harness(None, 1400.0, 1.0);
     let root = h.state().ui.docking.layout.root.clone().unwrap();
     assert_eq!(docked_group(&root, Panel::Tracks), Some(vec![Panel::Tracks]));
-    let hits = DockArea::<Panel>::hit_rects(&h.ctx, soundcraft_ui_egui::docking::area_id(MainWindow::Edit));
+    let hits = DockArea::<Panel>::hit_rects(&h.ctx, liviwave_ui_egui::docking::area_id(MainWindow::Edit));
     let bar = hits.iter().find(|(hit, _)| *hit == Hit::DragBar(Panel::Clips)).expect("the Clips group has a drag bar").1;
     let target = h.get_by_role_and_label(egui::accesskit::Role::Tab, "Tracks and Groups").rect().center();
     drag(&mut h, bar.center(), target);
@@ -235,7 +235,7 @@ fn dragging_a_group_by_its_drag_bar_joins_it_to_another_group() {
     assert_eq!(group.len(), 2, "the dropped group joins the Tracks tabs: {group:?}");
     assert!(group.contains(&Panel::Clips));
     assert!(h.state().ui.show_clip_list);
-    soundcraft_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
+    liviwave_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
 }
 
 #[test]
@@ -286,5 +286,5 @@ fn panels_hidden_one_by_one_reopen_into_their_recorded_window() {
     assert!(window.contains(&Panel::History), "the hidden chain reopens History in Memory's window: {window:?}");
     assert_eq!(window.rect, rect);
     assert!(h.state().ui.show_memory_locations && h.state().ui.show_undo_history);
-    soundcraft_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
+    liviwave_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
 }

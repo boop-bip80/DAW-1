@@ -6,7 +6,7 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
     let mut keep = Vec::new();
     for (tid, slot) in wins {
         // The instrument slot (an instrument track's instrument) or an insert slot.
-        let instrument = slot == soundcraft_mix::INSTRUMENT_SLOT;
+        let instrument = slot == liviwave_mix::INSTRUMENT_SLOT;
         let Some((tname, ins)) = app.engine.session().track(tid).and_then(|t| {
             let ins = if instrument { t.instrument.clone() } else { t.mixer.inserts.get(slot).cloned().flatten() };
             ins.map(|i| (t.name.clone(), i))
@@ -32,7 +32,7 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                         ui.menu_button("Presets v", |ui| preset_menu(app, ui, tid, slot, info, &ins));
                     }
-                    if soundcraft_mix::is_third_party(&ins.plugin) {
+                    if liviwave_mix::is_third_party(&ins.plugin) {
                         let open = app.player.as_ref().is_some_and(|p| p.editor_open(tid, slot));
                         let available = app.player.as_ref().is_some_and(|p| p.has_editor(tid, slot));
                         let label = if open { "Close Plugin Editor" } else { "Open Plugin Editor" };
@@ -50,7 +50,7 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         }
                     }
                 });
-                if instrument && soundcraft_mix::is_third_party(&ins.plugin) {
+                if instrument && liviwave_mix::is_third_party(&ins.plugin) {
                     // A hosted instrument keeps its sounds and settings in its own editor.
                     ui.label(egui::RichText::new("Load and edit sounds in the plugin's own editor.").color(Tokens::current().text_dim));
                     return;
@@ -84,7 +84,7 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                                 if instrument && crate::sampler_window::whole_number(&ins.plugin, p.id) {
                                     sl = sl.integer();
                                 }
-                                if p.taper == soundcraft_dsp::Taper::Log && p.min > 0.0 {
+                                if p.taper == liviwave_dsp::Taper::Log && p.min > 0.0 {
                                     sl = sl.logarithmic(true);
                                 }
                                 ui.add(sl)
@@ -134,18 +134,15 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
     app.ui.plugin_windows = keep;
 }
 
-fn eq_curve(ui: &mut Ui, id: &str, ins: &soundcraft_model::Insert) {
+fn eq_curve(ui: &mut Ui, id: &str, ins: &liviwave_model::Insert) {
     let t = Tokens::current();
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width().max(300.0), 110.0), Sense::hover());
     ui.painter().rect_filled(r, 4.0, Color32::from_rgb(14, 18, 22));
     let n = 160;
     let freqs: Vec<f32> = (0..n).map(|i| 20.0 * 1000f32.powf(i as f32 / (n - 1) as f32)).collect();
     let params: Vec<(&str, f32)> = ins.params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let resp = if id == "eq_7band" {
-        soundcraft_dsp::eq7_response(&params, &freqs, 48_000.0)
-    } else {
-        soundcraft_dsp::eq1_response(&params, &freqs, 48_000.0)
-    };
+    let resp =
+        if id == "eq_7band" { liviwave_dsp::eq7_response(&params, &freqs, 48_000.0) } else { liviwave_dsp::eq1_response(&params, &freqs, 48_000.0) };
     for db in [-12.0f32, 0.0, 12.0] {
         let y = r.center().y - db / 18.0 * r.height() * 0.5;
         ui.painter().line_segment([pos2(r.min.x, y), pos2(r.max.x, y)], Stroke::new(1.0, Color32::from_rgb(40, 50, 60)));
@@ -167,10 +164,10 @@ fn preset_dir(app: &SoundApp, plugin: &str) -> Option<std::path::PathBuf> {
 fn preset_menu(
     app: &mut SoundApp,
     ui: &mut Ui,
-    tid: soundcraft_model::TrackId,
+    tid: liviwave_model::TrackId,
     slot: usize,
-    info: &soundcraft_dsp::PluginInfo,
-    ins: &soundcraft_model::Insert,
+    info: &liviwave_dsp::PluginInfo,
+    ins: &liviwave_model::Insert,
 ) {
     if ui.button("<factory default>").clicked() {
         let defaults: serde_json::Map<String, serde_json::Value> = info.params.iter().map(|p| (p.id.to_string(), json!(p.default))).collect();
@@ -210,8 +207,8 @@ fn preset_menu(
     ui.horizontal(|ui| {
         crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0)), "Preset name");
         if ui.button("Save").clicked() {
-            let clean = soundcraft_engine::io::sanitize_name(&name);
-            let body = json!({"format": "soundcraft-plugin-preset", "plugin": info.id, "params": ins.params});
+            let clean = liviwave_engine::io::sanitize_name(&name);
+            let body = json!({"format": "liviwave-plugin-preset", "plugin": info.id, "params": ins.params});
             let ok = std::fs::create_dir_all(&dir).is_ok() && std::fs::write(dir.join(format!("{clean}.json")), body.to_string()).is_ok();
             app.ui.status = if ok { format!("Saved preset {clean}") } else { "Could not save the preset".into() };
             if ok {

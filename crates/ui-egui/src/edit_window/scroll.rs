@@ -44,11 +44,11 @@ pub(super) fn scroll_and_zoom(app: &mut SoundApp, ui: &Ui, area: Rect, tl: Rect)
 
 fn pan(app: &mut SoundApp, px: f64) {
     let z = app.engine.session().edit.zoom;
-    let want = (z.scroll as f64 + app.edit_layout.scroll_carry + px * z.samples_per_px).clamp(0.0, soundcraft_engine::cmd::MAX_POSITION as f64);
+    let want = (z.scroll as f64 + app.edit_layout.scroll_carry + px * z.samples_per_px).clamp(0.0, liviwave_engine::cmd::MAX_POSITION as f64);
     if want.is_nan() {
         return;
     }
-    let to = soundcraft_time::to_samples(want);
+    let to = liviwave_time::to_samples(want);
     app.edit_layout.scroll_carry = want - to as f64;
     if to != z.scroll {
         let _ = app.engine.execute("view.scroll", &json!({"to": to}));

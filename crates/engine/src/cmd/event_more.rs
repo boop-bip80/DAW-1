@@ -9,11 +9,11 @@ use super::{
 
 use super::more_util::{store_value, track_key, values_with_prefix};
 use crate::{Engine, Result, cmd};
+use liviwave_midi::Note;
+use liviwave_midi::ops::QuantizeOptions;
+use liviwave_model::{ChannelFormat, Clip, ClipContent, ClipId, MarkerKind, Session, TrackId, TrackKind};
+use liviwave_time::{MAX_POSITION, Range, Samples, TICKS_PER_QUARTER, TempoMap};
 use serde_json::{Value, json};
-use soundcraft_midi::Note;
-use soundcraft_midi::ops::QuantizeOptions;
-use soundcraft_model::{ChannelFormat, Clip, ClipContent, ClipId, MarkerKind, Session, TrackId, TrackKind};
-use soundcraft_time::{MAX_POSITION, Range, Samples, TICKS_PER_QUARTER, TempoMap};
 
 /// Most tempo events one curve may write.
 const MAX_TEMPO_EVENTS: i64 = 10_000;
@@ -323,7 +323,7 @@ fn select_split(e: &mut Engine, p: &Value) -> Result<Value> {
     for (t, cid) in clips {
         let Some(c) = s.find_clip(cid).map(|(_, c)| c.clone()) else { continue };
         let ClipContent::Midi { sequence } = &c.content else { continue };
-        let (hit, rest) = soundcraft_midi::ops::split_notes(&sequence.notes, from, to);
+        let (hit, rest) = liviwave_midi::ops::split_notes(&sequence.notes, from, to);
         matched += hit.len();
         if !split || hit.is_empty() {
             continue;
@@ -344,7 +344,7 @@ fn select_split(e: &mut Engine, p: &Value) -> Result<Value> {
         };
         let mut nc = c.clone();
         nc.id = s.new_clip_id();
-        nc.content = ClipContent::Midi { sequence: soundcraft_midi::Sequence { notes: hit, ctrls: Vec::new() } };
+        nc.content = ClipContent::Midi { sequence: liviwave_midi::Sequence { notes: hit, ctrls: Vec::new() } };
         crate::edit::place_clip(s, nt, nc);
     }
     Ok(json!({"matched": matched, "split": split, "tracks": new_tracks.values().collect::<Vec<_>>()}))
@@ -426,7 +426,7 @@ fn step_input(e: &mut Engine, p: &Value) -> Result<Value> {
         None => {
             let cid = s.new_clip_id();
             let name = s.track(t).map(|x| x.name.clone()).unwrap_or_default();
-            crate::edit::place_clip(s, t, Clip::midi(cid, name, at, (end - at).max(1), soundcraft_midi::Sequence::default()));
+            crate::edit::place_clip(s, t, Clip::midi(cid, name, at, (end - at).max(1), liviwave_midi::Sequence::default()));
             cid
         }
     };
@@ -772,7 +772,7 @@ fn retro_record(e: &mut Engine, p: &Value) -> Result<Value> {
     // Start the clip on the bar line so the quantize grid lines up with the music.
     let clip_tick = s.tempo.bar_start_tick(s.tempo.bar_beat_at_tick(first).bar).min(first).max(0);
     let end_tick = raw.iter().map(|(tk, n)| tk.saturating_add(n.length)).max().unwrap_or_else(|| first.saturating_add(1));
-    let mut seq = soundcraft_midi::Sequence::default();
+    let mut seq = liviwave_midi::Sequence::default();
     for (tk, mut n) in raw {
         n.start = tk - clip_tick;
         seq.notes.push(n);
@@ -781,7 +781,7 @@ fn retro_record(e: &mut Engine, p: &Value) -> Result<Value> {
     let performance = seq.clone();
     let quantized = s.edit.flag("midi.input_quantize");
     if quantized {
-        soundcraft_midi::ops::quantize(&mut seq.notes, &quantize_opts(s));
+        liviwave_midi::ops::quantize(&mut seq.notes, &quantize_opts(s));
         seq.sort();
     }
     let start = s.tempo.tick_to_samples(clip_tick, sr);
@@ -894,7 +894,7 @@ mod tests {
         let mut ranges: Vec<(i64, i64)> = e.session().track(t).unwrap().clips().iter().map(|c| (c.start, c.end())).collect();
         ranges.sort();
         assert_eq!(ranges, vec![(0, sr), (sr, 2 * sr)]);
-        let c = e.session().find_clip(soundcraft_model::ClipId(second)).map(|(_, c)| c.clone()).unwrap();
+        let c = e.session().find_clip(liviwave_model::ClipId(second)).map(|(_, c)| c.clone()).unwrap();
         match &c.content {
             ClipContent::Midi { sequence } => assert_eq!(sequence.notes.iter().map(|n| n.start).collect::<Vec<_>>(), vec![0]),
             _ => panic!(),
@@ -914,7 +914,7 @@ mod tests {
         let mut e = Engine::default();
         e.execute("event.tempo_stretch", &json!({"start": 0, "end": 96_000, "factor": 2.0})).unwrap();
         assert_eq!(e.session().tempo.tempo_at_tick(0), 60.0);
-        assert_eq!(e.session().tempo.tick_to_samples(3840, soundcraft_time::SampleRate::HZ_48000), 192_000);
+        assert_eq!(e.session().tempo.tick_to_samples(3840, liviwave_time::SampleRate::HZ_48000), 192_000);
     }
 
     #[test]
@@ -965,7 +965,7 @@ mod tests {
         let mut e = crate::demo::demo_engine();
         let keys = e.session().track_by_name("Keys").unwrap().id;
         let far = 1i64 << 39;
-        if let Some(p) = e.session_mut().track_mut(keys).and_then(soundcraft_model::Track::playlist_mut) {
+        if let Some(p) = e.session_mut().track_mut(keys).and_then(liviwave_model::Track::playlist_mut) {
             p.clips.iter_mut().for_each(|c| c.start += far);
         }
         let r = e.execute("event.extract_chords", &json!({"tracks": [keys.0], "start": 0, "end": far + 48_000 * 600})).unwrap();

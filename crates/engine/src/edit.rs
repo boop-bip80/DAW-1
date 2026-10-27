@@ -5,8 +5,8 @@
 //! Placing a clip overwrites whatever is under it (like the incumbent's Slip mode); Shuffle
 //! mode also ripples later clips.
 
-use soundcraft_model::{AutoParam, AutomationPoint, Clip, ClipContent, ClipId, Fade, FadeShape, Session, Track, TrackId};
-use soundcraft_time::{Range, SampleRate, Samples, TempoMap};
+use liviwave_model::{AutoParam, AutomationPoint, Clip, ClipContent, ClipId, Fade, FadeShape, Session, Track, TrackId};
+use liviwave_time::{Range, SampleRate, Samples, TempoMap};
 use std::collections::{HashMap, HashSet};
 
 /// Edit-state flag: the Edit cursor and selections snap to the grid in Shuffle, Slip and Spot.
@@ -126,7 +126,7 @@ pub fn separate_at_if(s: &mut Session, track: TrackId, at: Samples, auto_name: i
 }
 
 /// Gives `c` the next name of its Auto Rename scheme, when it has one, and counts the scheme up.
-fn take_auto_name(schemes: &mut std::collections::BTreeMap<u64, soundcraft_model::AutoName>, c: &mut Clip) {
+fn take_auto_name(schemes: &mut std::collections::BTreeMap<u64, liviwave_model::AutoName>, c: &mut Clip) {
     if let Some(scheme) = c.auto_name.and_then(|k| schemes.get_mut(&k)) {
         c.name = crate::io::StripNames::from(&*scheme).clip_name(0);
         scheme.number = scheme.number.saturating_add(1);
@@ -205,7 +205,7 @@ pub fn copy_range(s: &Session, track: TrackId, range: Range) -> Vec<Clip> {
 /// sounds (muted clips stay silent). Returns false for tracks that aren't MIDI or instrument tracks.
 pub fn consolidate_midi(s: &mut Session, track: TrackId, range: Range) -> bool {
     let Some(name) = s.track(track).filter(|t| t.kind.is_midi()).map(|t| t.name.clone()) else { return false };
-    let mut merged = soundcraft_midi::Sequence::default();
+    let mut merged = liviwave_midi::Sequence::default();
     {
         let t = TimeCtx::of(s);
         let base = t.ticks(range.start);

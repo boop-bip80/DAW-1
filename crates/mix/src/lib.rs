@@ -1,4 +1,4 @@
-//! The SoundCraft mix engine.
+//! The LiVi Wave mix engine.
 //!
 //! [`MixEngine::render`] produces one block of the main output for a session at a timeline
 //! position: clips (with clip gain and fades) → trim/phase → inserts → pre-fader sends → fader and
@@ -10,11 +10,11 @@
 //! The main mix has the format of the session's main output path ([`Session::main_format`]:
 //! stereo by default, up to 16 channels such as 7.1.4 or 9.1.6) and every bus has its own format.
 //! Channels are in SMPTE / WAV order (L R C LFE Ls Rs …, see
-//! [`ChannelFormat::speakers`](soundcraft_model::ChannelFormat::speakers)). Routing a strip into a
+//! [`ChannelFormat::speakers`](liviwave_model::ChannelFormat::speakers)). Routing a strip into a
 //! destination builds a gain matrix per block:
 //! - mono/stereo sources into a stereo destination use the stereo pan exactly as before;
 //! - into a multichannel destination they use the track's [`SurroundPan`] (pairwise
-//!   constant-power panner over the speaker layout, see `soundcraft_dsp::pan::surround_gains`),
+//!   constant-power panner over the speaker layout, see `liviwave_dsp::pan::surround_gains`),
 //!   or go to L/R with the stereo pan when the track has no surround pan;
 //! - sources whose format equals the destination's pass straight through, channel for channel;
 //! - other multichannel sources fold to stereo with ITU-R BS.775 coefficients (C and surrounds at
@@ -46,17 +46,17 @@
 //! instrument (the Sampler) is handed the decoded audio of its insert's
 //! [`Insert::sample`] source straight from the session's pool, shared and never copied.
 //!
-//! [`Insert::state`]: soundcraft_model::Insert::state
-//! [`Insert::sample`]: soundcraft_model::Insert::sample
+//! [`Insert::state`]: liviwave_model::Insert::state
+//! [`Insert::sample`]: liviwave_model::Insert::sample
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
-use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
-use soundcraft_midi::CtrlKind;
-use soundcraft_model::{
+use liviwave_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
+use liviwave_dsp::{Plugin, SampleSource, Transport, db_to_gain};
+use liviwave_midi::CtrlKind;
+use liviwave_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
 };
-use soundcraft_time::{Range, Samples, TICKS_PER_QUARTER};
+use liviwave_time::{Range, Samples, TICKS_PER_QUARTER};
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::sync::Arc;

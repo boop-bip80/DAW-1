@@ -1,8 +1,8 @@
+use liviwave_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileFormat};
+use liviwave_engine::{Engine, io};
+use liviwave_model::{ChannelFormat, Clip, ClipContent, Insert, Route, SendSlot, Session, TrackId, TrackKind};
+use liviwave_time::{Range, SampleRate};
 use serde_json::json;
-use soundcraft_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileFormat};
-use soundcraft_engine::{Engine, io};
-use soundcraft_model::{ChannelFormat, Clip, ClipContent, Insert, Route, SendSlot, Session, TrackId, TrackKind};
-use soundcraft_time::{Range, SampleRate};
 use std::sync::Arc;
 
 const SIGNAL_FRAMES: usize = 128;
@@ -47,7 +47,7 @@ fn assert_audio_eq(actual: &[Vec<f32>], expected: &[Vec<f32>]) {
 
 #[test]
 fn commit_keeps_every_renderable_exact_format_and_processed_channel_order() {
-    for format in ChannelFormat::ALL.into_iter().filter(|format| format.channels() <= soundcraft_mix::MAX_CHANNELS) {
+    for format in ChannelFormat::ALL.into_iter().filter(|format| format.channels() <= liviwave_mix::MAX_CHANNELS) {
         let (mut e, track, signal) = fixture(format);
         let committed = commit(&mut e, track);
         assert_eq!(e.session().track(committed).unwrap().format, format, "{}", format.label());
@@ -82,21 +82,21 @@ fn commit_preserves_bus_and_send_audio_after_undo_reopen_and_wav_export() {
         tr.mixer.sends[0] = Some(send);
         let mixer = tr.mixer.clone();
         let range = Range::new(0, SIGNAL_FRAMES as i64);
-        let before = soundcraft_mix::render_range(e.session(), range, 64);
+        let before = liviwave_mix::render_range(e.session(), range, 64);
         let committed = commit(&mut e, track);
         let tr = e.session().track(committed).unwrap();
         assert_eq!(tr.mixer.output, mixer.output);
         assert_eq!(tr.mixer.sends, mixer.sends);
         assert_eq!(tr.mixer.volume_db, mixer.volume_db);
         assert!(tr.mixer.inserts.iter().all(Option::is_none), "processing is baked once");
-        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64), &before);
+        assert_audio_eq(&liviwave_mix::render_range(e.session(), range, 64), &before);
         assert!(e.undo());
         assert!(e.session().track(committed).is_none());
         assert!(!e.session().track(track).unwrap().inactive);
-        assert_audio_eq(&soundcraft_mix::render_range(e.session(), range, 64), &before);
+        assert_audio_eq(&liviwave_mix::render_range(e.session(), range, 64), &before);
         assert!(e.redo());
 
-        let dir = std::env::temp_dir().join(format!("soundcraft-commit-layout-{}-{}", std::process::id(), format.channels()));
+        let dir = std::env::temp_dir().join(format!("liviwave-commit-layout-{}-{}", std::process::id(), format.channels()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Commit.scraft").to_string_lossy().into_owned();
         io::save_session(&mut e, &path).unwrap();
@@ -104,13 +104,13 @@ fn commit_preserves_bus_and_send_audio_after_undo_reopen_and_wav_export() {
         assert!(io::open_session(&mut reopened, &path).unwrap().is_empty());
         assert_eq!(reopened.session().track(committed).unwrap().format, format);
         assert_audio_eq(&committed_audio(&reopened, committed).channels, &committed_audio(&e, committed).channels);
-        assert_audio_eq(&soundcraft_mix::render_range(reopened.session(), range, 64), &before);
+        assert_audio_eq(&liviwave_mix::render_range(reopened.session(), range, 64), &before);
 
         let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Float32, dither: false, bwf: None };
         let wav_path = dir.join("mix.wav");
         io::Bounce::new(reopened.session_arc(), &wav_path, range, &opts, None, false, false).unwrap().run().unwrap();
         let wav = std::fs::read(&wav_path).unwrap();
-        let (_, decoded) = soundcraft_audio_io::decode(&wav, Some("wav")).unwrap();
+        let (_, decoded) = liviwave_audio_io::decode(&wav, Some("wav")).unwrap();
         assert_audio_eq(&decoded.channels, &before);
         // The WAV extensible mask must describe this layout, not another layout of equal width.
         let fmt_at = wav.windows(4).position(|tag| tag == b"fmt ").unwrap();
@@ -123,9 +123,9 @@ fn commit_preserves_bus_and_send_audio_after_undo_reopen_and_wav_export() {
 #[test]
 fn oversized_or_overflowing_commit_rolls_back_all_selected_tracks() {
     for (format, length) in [
-        (ChannelFormat::Mono, (soundcraft_mix::MAX_RENDER_SAMPLES / 2 + 1) as i64),
-        (ChannelFormat::Surround51, (soundcraft_mix::MAX_RENDER_SAMPLES / 6 + 1) as i64),
-        (ChannelFormat::Ambisonics(3), (soundcraft_mix::MAX_RENDER_SAMPLES / 16 + 1) as i64),
+        (ChannelFormat::Mono, (liviwave_mix::MAX_RENDER_SAMPLES / 2 + 1) as i64),
+        (ChannelFormat::Surround51, (liviwave_mix::MAX_RENDER_SAMPLES / 6 + 1) as i64),
+        (ChannelFormat::Ambisonics(3), (liviwave_mix::MAX_RENDER_SAMPLES / 16 + 1) as i64),
         (ChannelFormat::Surround51, i64::MAX),
     ] {
         let (mut e, first, _) = fixture(format);
@@ -147,7 +147,7 @@ fn oversized_or_overflowing_commit_rolls_back_all_selected_tracks() {
 
 #[test]
 fn commit_rejects_formats_wider_than_the_renderer_without_replacing_tracks() {
-    for format in ChannelFormat::ALL.into_iter().filter(|format| format.channels() > soundcraft_mix::MAX_CHANNELS) {
+    for format in ChannelFormat::ALL.into_iter().filter(|format| format.channels() > liviwave_mix::MAX_CHANNELS) {
         let (mut e, track, _) = fixture(format);
         let before = e.session_arc();
         let result = e.execute("track.commit", &json!({"tracks": [track.0]}));

@@ -1,35 +1,35 @@
 //! End to end: build the test CLAP plugin in `tests/fixture` (a cdylib outside the workspace),
 //! install it as a `.clap` in a temp folder, then scan → instantiate → process → params → notes.
 
-use soundcraft_dsp::{Category, Unit};
+use liviwave_dsp::{Category, Unit};
 
 use crate::common::fixture_dir;
 
-const GAIN: &str = "clap:org.soundcraft.test.gain";
-const SYNTH: &str = "clap:org.soundcraft.test.synth";
+const GAIN: &str = "clap:org.liviwave.test.gain";
+const SYNTH: &str = "clap:org.liviwave.test.synth";
 
 #[test]
 fn scan_lists_both_fixture_plugins() {
     let dir = fixture_dir();
-    let found = soundcraft_clap_host::scan_paths(&[dir.to_path_buf()]);
+    let found = liviwave_clap_host::scan_paths(&[dir.to_path_buf()]);
     assert_eq!(found.len(), 5);
     let g = found.iter().find(|d| d.id == GAIN).unwrap();
     assert_eq!(g.name, "Fixture Gain");
-    assert_eq!(g.vendor, "SoundCraft tests");
+    assert_eq!(g.vendor, "LiVi Wave tests");
     assert_eq!(g.features, vec!["audio-effect", "stereo"]);
     assert_eq!(g.category, Category::Other);
     assert!(!g.is_instrument);
     let s = found.iter().find(|d| d.id == SYNTH).unwrap();
     assert_eq!(s.category, Category::Instrument);
     assert!(s.is_instrument);
-    let global = soundcraft_clap_host::scan();
+    let global = liviwave_clap_host::scan();
     assert!(global.iter().any(|d| d.id == GAIN) && global.iter().any(|d| d.id == SYNTH));
 }
 
 #[test]
 fn info_exposes_visible_params_with_names() {
     fixture_dir();
-    let info = soundcraft_clap_host::plugin_info(GAIN).unwrap();
+    let info = liviwave_clap_host::plugin_info(GAIN).unwrap();
     assert_eq!(info.id, GAIN);
     assert_eq!(info.short_name, "Fixture ");
     let ids: Vec<&str> = info.params.iter().map(|p| p.id).collect();
@@ -40,13 +40,13 @@ fn info_exposes_visible_params_with_names() {
     assert_eq!(mode.unit, Unit::Choice);
     assert_eq!(mode.choices, &["A", "B", "C"]);
     // Cached: the same leaked info every time.
-    assert!(std::ptr::eq(info, soundcraft_clap_host::plugin_info(GAIN).unwrap()));
+    assert!(std::ptr::eq(info, liviwave_clap_host::plugin_info(GAIN).unwrap()));
 }
 
 #[test]
 fn gain_processes_audio_and_follows_params() {
     fixture_dir();
-    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    let mut p = liviwave_clap_host::create(GAIN).unwrap();
     p.prepare(44_100.0, 256, 2);
     assert_eq!(p.latency(), 3);
     assert_eq!(p.param("7"), Some(1.0));
@@ -83,9 +83,9 @@ fn gain_processes_audio_and_follows_params() {
 #[test]
 fn synth_plays_notes_at_their_offsets() {
     fixture_dir();
-    let info = soundcraft_clap_host::plugin_info(SYNTH).unwrap();
+    let info = liviwave_clap_host::plugin_info(SYNTH).unwrap();
     assert!(info.is_instrument);
-    let mut p = soundcraft_clap_host::create(SYNTH).unwrap();
+    let mut p = liviwave_clap_host::create(SYNTH).unwrap();
     p.prepare(48_000.0, 64, 2);
     let mut io = vec![vec![9.0f32; 64], vec![9.0f32; 64]];
     p.note_on(10, 60, 127);
@@ -113,15 +113,15 @@ fn synth_plays_notes_at_their_offsets() {
 fn layouts_beyond_the_host_limits_are_rejected_not_truncated() {
     fixture_dir();
     // Control: exactly at the limits (16 ports of 64 channels) activates and gets its full layout.
-    let mut p = soundcraft_clap_host::create("clap:org.soundcraft.test.wide16").unwrap();
+    let mut p = liviwave_clap_host::create("clap:org.liviwave.test.wide16").unwrap();
     p.prepare(44_100.0, 64, 2);
     assert_eq!(p.latency(), 3);
     let mut io = vec![vec![0.5f32; 64]; 2];
     p.process(&mut io, 64);
     assert!(io.iter().flatten().all(|&x| x == 1.0), "16x64 layout delivered as advertised: {:?}", &io[0][..4]);
     // 17 ports, or a 65-channel port: never activated, never processed with a cut-down layout.
-    for id in ["clap:org.soundcraft.test.wide17ports", "clap:org.soundcraft.test.wide65ch"] {
-        let mut p = soundcraft_clap_host::create(id).unwrap();
+    for id in ["clap:org.liviwave.test.wide17ports", "clap:org.liviwave.test.wide65ch"] {
+        let mut p = liviwave_clap_host::create(id).unwrap();
         p.prepare(44_100.0, 64, 2);
         assert_eq!(p.latency(), 0, "{id}: not activated");
         let mut io = vec![vec![0.5f32; 64]; 2];
@@ -134,8 +134,8 @@ fn layouts_beyond_the_host_limits_are_rejected_not_truncated() {
 fn many_instances_create_and_drop_cleanly() {
     fixture_dir();
     for _ in 0..50 {
-        let mut a = soundcraft_clap_host::create(GAIN).unwrap();
-        let b = soundcraft_clap_host::create(SYNTH).unwrap();
+        let mut a = liviwave_clap_host::create(GAIN).unwrap();
+        let b = liviwave_clap_host::create(SYNTH).unwrap();
         let mut io = vec![vec![0.0f32; 32]; 2];
         a.process(&mut io, 32);
         drop(b);
@@ -145,7 +145,7 @@ fn many_instances_create_and_drop_cleanly() {
 #[test]
 fn state_saves_and_restores_into_a_new_instance() {
     fixture_dir();
-    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    let mut p = liviwave_clap_host::create(GAIN).unwrap();
     p.prepare(48_000.0, 64, 2);
     assert!(p.set_param("7", 1.5));
     assert!(p.set_param("3", 2.0));
@@ -153,7 +153,7 @@ fn state_saves_and_restores_into_a_new_instance() {
     p.process(&mut io, 64);
     let blob = p.save_state().expect("the gain fixture has clap.state");
     assert_eq!(blob.len(), 16);
-    let mut q = soundcraft_clap_host::create(GAIN).unwrap();
+    let mut q = liviwave_clap_host::create(GAIN).unwrap();
     q.prepare(48_000.0, 64, 2);
     assert_eq!(q.param("7"), Some(1.0));
     assert!(q.load_state(&blob));
@@ -167,7 +167,7 @@ fn state_saves_and_restores_into_a_new_instance() {
     assert!(!q.load_state(&[0u8; 4096]));
     assert_eq!(q.param("7"), Some(1.5));
     // Plugins without clap.state.
-    let mut s = soundcraft_clap_host::create(SYNTH).unwrap();
+    let mut s = liviwave_clap_host::create(SYNTH).unwrap();
     assert!(s.save_state().is_none());
     assert!(s.state_reader().is_none());
     assert!(!s.load_state(&blob));
@@ -178,7 +178,7 @@ fn state_saves_and_restores_into_a_new_instance() {
 #[test]
 fn state_reader_reads_while_another_thread_processes() {
     fixture_dir();
-    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    let mut p = liviwave_clap_host::create(GAIN).unwrap();
     p.prepare(48_000.0, 64, 2);
     assert!(p.set_param("7", 1.5));
     p.process(&mut vec![vec![0.5f32; 64]; 2], 64);
@@ -203,7 +203,7 @@ fn state_reader_reads_while_another_thread_processes() {
 fn editors_refuse_to_open_off_the_main_thread() {
     fixture_dir();
     // Test threads are never the process main thread.
-    let mut p = soundcraft_clap_host::create(GAIN).unwrap();
+    let mut p = liviwave_clap_host::create(GAIN).unwrap();
     let mut ed = p.editor().expect("the gain fixture has clap.gui");
     if cfg!(target_os = "macos") {
         assert!(ed.open().unwrap_err().contains("main thread"));

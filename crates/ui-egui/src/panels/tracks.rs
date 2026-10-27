@@ -3,7 +3,7 @@ use super::*;
 /// Drag a Tracks list row to reorder the tracks: a line marks the gap it will land in.
 fn drag_track(app: &mut SoundApp, ui: &Ui, row: Rect, id: u64, dropped: bool) {
     let s = app.engine.session();
-    let (Some(from), Some(p)) = (s.track_index(soundcraft_model::TrackId(id)), ui.ctx().pointer_latest_pos()) else { return };
+    let (Some(from), Some(p)) = (s.track_index(liviwave_model::TrackId(id)), ui.ctx().pointer_latest_pos()) else { return };
     let spacing = ui.spacing().item_spacing.y;
     let pitch = row.height() + spacing;
     let gap = (from as f32 + ((p.y - row.center().y) / pitch).floor() + 1.0).clamp(0.0, s.tracks.len() as f32);
@@ -74,7 +74,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
                 if shown { t.text } else { t.text_dim },
             );
             if resp.clicked() {
-                crate::edit_window::click_track(app, soundcraft_model::TrackId(id), ui.input(|i| i.modifiers), |_, _| true);
+                crate::edit_window::click_track(app, liviwave_model::TrackId(id), ui.input(|i| i.modifiers), |_, _| true);
             }
             if resp.dragged() || resp.drag_stopped() {
                 drag_track(app, ui, r, id, resp.drag_stopped());
@@ -133,7 +133,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
                     ui.close();
                 }
                 if ui.button("Modify Group…").clicked() {
-                    let _ = app.dialogs.open_modify_group(&app.engine, soundcraft_model::GroupId(id));
+                    let _ = app.dialogs.open_modify_group(&app.engine, liviwave_model::GroupId(id));
                     ui.close();
                 }
                 if ui.button("Delete Group").clicked() {

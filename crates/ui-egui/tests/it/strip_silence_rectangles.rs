@@ -1,15 +1,15 @@
 use egui::accesskit::Role;
 use egui::{Shape, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
+use liviwave_model::TrackId;
+use liviwave_time::Range;
+use liviwave_ui_egui::dialogs::Dialog;
+use liviwave_ui_egui::{Services, SoundApp, edit_window, menus};
 use serde_json::json;
-use soundcraft_model::TrackId;
-use soundcraft_time::Range;
-use soundcraft_ui_egui::dialogs::Dialog;
-use soundcraft_ui_egui::{Services, SoundApp, edit_window, menus};
 
 /// Selects the whole Kick track and opens Edit > Strip Silence from the menu.
 fn strip_silence_dialog() -> (Harness<'static, SoundApp>, TrackId) {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let track = app.engine.session().track_by_name("Kick").unwrap().id;
     let end = app.engine.session().content_end();
     app.run("edit.select", json!({"tracks": [track.0], "start": 0, "end": end})).unwrap();
@@ -64,7 +64,7 @@ fn strip_silence_draws_rectangles_around_what_strip_keeps() {
     let (mut h, track) = strip_silence_dialog();
     let before = clips(&h, track);
     let ctx = h.ctx.clone();
-    let shown = soundcraft_ui_egui::dialogs::strip_silence_rectangles(h.state_mut(), &ctx);
+    let shown = liviwave_ui_egui::dialogs::strip_silence_rectangles(h.state_mut(), &ctx);
     let ranges = preview(&mut h, track);
     assert!(!ranges.is_empty());
     assert_eq!(shown.iter().find(|(t, _)| *t == track).map(|(_, r)| r.clone()), Some(ranges.clone()));

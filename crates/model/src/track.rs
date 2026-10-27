@@ -1,7 +1,7 @@
 //! Tracks and playlists.
 
 use crate::{AutoParam, AutomationLane, ChannelFormat, Clip, ClipId, Mixer, TrackId};
-use soundcraft_time::{Range, Samples};
+use liviwave_time::{Range, Samples};
 
 /// Track types (Track › New).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -198,7 +198,7 @@ impl TrackHeight {
     }
 }
 
-/// The default track colour palette (original, chosen for SoundCraft).
+/// The default track colour palette (original, chosen for LiVi Wave).
 pub const TRACK_COLORS: [[u8; 3]; 16] = [
     [86, 132, 214],
     [94, 170, 214],

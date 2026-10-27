@@ -2,8 +2,8 @@
 use super::{CommandSpec, always};
 
 use crate::{Engine, Result, cmd};
+use liviwave_model::ClipContent;
 use serde_json::{Value, json};
-use soundcraft_model::ClipContent;
 use std::collections::BTreeMap;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -13,19 +13,19 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 struct ClipContext<'a> {
-    track: &'a soundcraft_model::Track,
-    playlist: &'a soundcraft_model::Playlist,
+    track: &'a liviwave_model::Track,
+    playlist: &'a liviwave_model::Playlist,
     active: bool,
     session_sample_rate: u32,
 }
 
 fn check_audio_clip(
     ctx: &ClipContext<'_>,
-    clip: &soundcraft_model::Clip,
-    source: soundcraft_model::SourceId,
+    clip: &liviwave_model::Clip,
+    source: liviwave_model::SourceId,
     offset: i64,
-    metadata: Option<&soundcraft_model::Source>,
-    audio: Option<&soundcraft_model::SourceAudio>,
+    metadata: Option<&liviwave_model::Source>,
+    audio: Option<&liviwave_model::SourceAudio>,
     issues: &mut Vec<Value>,
 ) {
     let mut add = |code: &str, message: &str| {
@@ -96,8 +96,8 @@ fn report(e: &mut Engine, _: &Value) -> Result<Value> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use soundcraft_audio_io::AudioBuffer;
-    use soundcraft_model::{Clip, ClipId, SourceAudio, SourceId};
+    use liviwave_audio_io::AudioBuffer;
+    use liviwave_model::{Clip, ClipId, SourceAudio, SourceId};
     use std::sync::Arc;
 
     fn check(e: &mut Engine) -> Value {
@@ -123,7 +123,7 @@ mod tests {
     fn reports_missing_media_in_inactive_takes() {
         let mut e = crate::demo::demo_engine();
         let t = e.session_mut().tracks.first_mut().unwrap();
-        let mut p = soundcraft_model::Playlist::new("Alternate take");
+        let mut p = liviwave_model::Playlist::new("Alternate take");
         p.clips.push(Clip::audio(ClipId(999), "Lost take", SourceId(999), 0, 0, 10));
         t.playlists.push(p);
         let r = check(&mut e);
@@ -141,7 +141,7 @@ mod tests {
         e.session_mut().pool.insert(id, Arc::new(SourceAudio::new(AudioBuffer::new(sr, 1, 10))));
         let t = e.session_mut().tracks.first_mut().unwrap();
         t.playlists.clear();
-        let mut p = soundcraft_model::Playlist::new("Bounds");
+        let mut p = liviwave_model::Playlist::new("Bounds");
         let mut c = Clip::audio(ClipId(999), "Stretch", id, 0, 0, 20);
         c.stretch = 2.0;
         p.clips.push(c);

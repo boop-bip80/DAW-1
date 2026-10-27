@@ -85,7 +85,7 @@ pub fn x_of(s: &Session, tl: Rect, at: Samples) -> f32 {
 }
 
 pub fn sample_at(s: &Session, tl: Rect, x: f32) -> Samples {
-    s.edit.zoom.scroll + soundcraft_time::to_samples(f64::from(x - tl.min.x) * s.edit.zoom.samples_per_px)
+    s.edit.zoom.scroll + liviwave_time::to_samples(f64::from(x - tl.min.x) * s.edit.zoom.samples_per_px)
 }
 
 pub const LANE_H: f32 = 46.0;

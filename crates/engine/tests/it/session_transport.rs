@@ -1,7 +1,7 @@
+use liviwave_engine::{Engine, TransportRequest, TransportStatus};
+use liviwave_model::Session;
+use liviwave_time::Range;
 use serde_json::json;
-use soundcraft_engine::{Engine, TransportRequest, TransportStatus};
-use soundcraft_model::Session;
-use soundcraft_time::Range;
 
 #[test]
 fn replacing_session_resets_status_and_discards_old_transport_requests() {

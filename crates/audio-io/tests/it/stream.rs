@@ -1,4 +1,4 @@
-use soundcraft_audio_io::{AudioBuffer, AudioError, BitDepth, BwfInfo, EncodeOptions, FileEncoder, FileFormat, encode, encode_with_channel_mask};
+use liviwave_audio_io::{AudioBuffer, AudioError, BitDepth, BwfInfo, EncodeOptions, FileEncoder, FileFormat, encode, encode_with_channel_mask};
 use std::io::{Cursor, Seek, SeekFrom, Write};
 
 fn tone(channels: usize, frames: usize) -> AudioBuffer {

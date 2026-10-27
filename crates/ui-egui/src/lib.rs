@@ -1,6 +1,6 @@
-//! SoundCraft's egui user interface.
+//! LiVi Wave's egui user interface.
 //!
-//! The UI is a thin shell over [`soundcraft_engine::Engine`]: it draws engine state and acts by
+//! The UI is a thin shell over [`liviwave_engine::Engine`]: it draws engine state and acts by
 //! executing commands. It can be replaced without touching anything below it.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -26,12 +26,12 @@ pub mod video_track;
 pub mod waveform;
 pub mod widgets;
 
+use liviwave_engine::{Engine, TransportRequest};
+use liviwave_model::TrackId;
+use liviwave_playback::record::Trouble;
+use liviwave_playback::{OutputTrouble, Player};
+use liviwave_time::{Range, Samples};
 use serde_json::{Value, json};
-use soundcraft_engine::{Engine, TransportRequest};
-use soundcraft_model::TrackId;
-use soundcraft_playback::record::Trouble;
-use soundcraft_playback::{OutputTrouble, Player};
-use soundcraft_time::{Range, Samples};
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
@@ -106,7 +106,7 @@ pub struct UiState {
     pub show_configurations: bool,
     pub show_playback_engine: bool,
     /// The audio device choice (Setup › Playback Engine), kept with the preferences: per machine.
-    pub audio: soundcraft_playback::AudioConfig,
+    pub audio: liviwave_playback::AudioConfig,
     /// The Mix window lives in its own native window (Window › Mix in Separate Window); the main
     /// window then always shows Edit.
     pub mix_separate: bool,
@@ -173,7 +173,7 @@ impl Default for UiState {
             show_workspace: false,
             show_configurations: false,
             show_playback_engine: false,
-            audio: soundcraft_playback::AudioConfig::default(),
+            audio: liviwave_playback::AudioConfig::default(),
             mix_separate: false,
             show_io_setup: false,
             show_shortcuts: false,
@@ -220,7 +220,7 @@ pub struct MeterDisplay {
     pub hold_age: f32,
     pub clip: bool,
     pub gr: f32,
-    /// [`soundcraft_mix::PluginFailures::count`] as last seen.
+    /// [`liviwave_mix::PluginFailures::count`] as last seen.
     pub plugin_failures: u32,
 }
 
@@ -228,16 +228,16 @@ pub struct MeterDisplay {
 #[derive(Debug, Clone)]
 pub enum Gesture {
     Select { track: TrackId, anchor: Samples, tracks: Vec<TrackId> },
-    MoveClips { clips: Vec<soundcraft_model::ClipId>, grab_at: Samples, delta: Samples, from_track: TrackId, to_track: TrackId },
-    TrimStart { clip: soundcraft_model::ClipId, track: TrackId, to: Samples },
-    TrimEnd { clip: soundcraft_model::ClipId, track: TrackId, to: Samples },
-    Fade { clip: soundcraft_model::ClipId, track: TrackId, fade_in: bool, to: Samples },
-    FadeCurve { clip: soundcraft_model::ClipId, fade_in: bool, curvature: f32, anchor: (f32, f32), height: f32 },
+    MoveClips { clips: Vec<liviwave_model::ClipId>, grab_at: Samples, delta: Samples, from_track: TrackId, to_track: TrackId },
+    TrimStart { clip: liviwave_model::ClipId, track: TrackId, to: Samples },
+    TrimEnd { clip: liviwave_model::ClipId, track: TrackId, to: Samples },
+    Fade { clip: liviwave_model::ClipId, track: TrackId, fade_in: bool, to: Samples },
+    FadeCurve { clip: liviwave_model::ClipId, fade_in: bool, curvature: f32, anchor: (f32, f32), height: f32 },
     Scrub { last: Samples },
     Fader { track: TrackId, start_db: f32 },
-    ClipGain { clip: soundcraft_model::ClipId, track: TrackId, pos: f32, anchor: (f32, f32), fine: bool, fader_bottom: egui::Pos2 },
+    ClipGain { clip: liviwave_model::ClipId, track: TrackId, pos: f32, anchor: (f32, f32), fine: bool, fader_bottom: egui::Pos2 },
     Pencil { track: TrackId, points: Vec<(Samples, f32)> },
-    Breakpoint { track: TrackId, param: soundcraft_model::AutoParam, at: Samples },
+    Breakpoint { track: TrackId, param: liviwave_model::AutoParam, at: Samples },
     MidiClip { track: TrackId, from: Samples, to: Samples },
     ZoomBox { start: f32 },
 }
@@ -252,7 +252,7 @@ pub struct SoundApp {
     recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
     pub player: Option<Player>,
     /// Input capture, opened on first record.
-    pub recorder: Option<soundcraft_playback::record::Recorder>,
+    pub recorder: Option<liviwave_playback::record::Recorder>,
     record_start: Samples,
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
@@ -260,7 +260,7 @@ pub struct SoundApp {
     /// Input this take lost to a slow disk, as last reported (ms).
     lost_shown: u64,
     /// Where the takes being recorded go, autosaved with the session so a crash can't lose them.
-    take_plan: Option<soundcraft_engine::io::Recording>,
+    take_plan: Option<liviwave_engine::io::Recording>,
     pub ui: UiState,
     pub audio_health_report: Option<Result<Value, String>>,
     pub services: Services,
@@ -269,11 +269,11 @@ pub struct SoundApp {
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Writes the open session's autosaves in the background, once there is something to write.
-    autosaver: Option<soundcraft_engine::autosave::Autosaver>,
+    autosaver: Option<liviwave_engine::autosave::Autosaver>,
     /// The document revision last handed to the autosaver (0 once that autosave is stale).
     autosaved_rev: u64,
     /// Unsaved work that earlier runs left in the autosave folder, offered for recovery.
-    pub leftovers: Vec<soundcraft_engine::autosave::Leftover>,
+    pub leftovers: Vec<liviwave_engine::autosave::Leftover>,
     /// The document revision last autosaved after a caught panic.
     panic_rev: u64,
     /// Folder for user plugin presets (native apps set it).
@@ -285,7 +285,7 @@ pub struct SoundApp {
     pub main_meter: MeterDisplay,
     /// Reused meter snapshot, taken from the player at an adaptive rate by `logic`: the highest
     /// peaks since the previous take. The only reader of the player's meters; windows read this.
-    pub(crate) meter_snapshot: soundcraft_playback::MeterSnapshot,
+    pub(crate) meter_snapshot: liviwave_playback::MeterSnapshot,
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
@@ -398,7 +398,7 @@ pub struct SoundApp {
     /// Movies for the Video window and Video track (decoded in the background).
     pub video: video_track::VideoPool,
     /// The Bounce Mix in progress, rendered a slice per frame.
-    pub bounce: Option<soundcraft_engine::io::Bounce>,
+    pub bounce: Option<liviwave_engine::io::Bounce>,
     /// Audio files importing in the background (issue #597).
     pub imports: import::Imports,
     /// Test-only: owns the process-wide palette lock while this app exists, so frames painted
@@ -411,7 +411,7 @@ pub struct SoundApp {
 }
 
 #[cfg(test)]
-type EditorPollFixture = Box<dyn FnMut(&mut Vec<(TrackId, usize)>) -> (Vec<soundcraft_playback::EditorEdit>, soundcraft_playback::PluginStates)>;
+type EditorPollFixture = Box<dyn FnMut(&mut Vec<(TrackId, usize)>) -> (Vec<liviwave_playback::EditorEdit>, liviwave_playback::PluginStates)>;
 
 #[cfg(test)]
 mod tests;

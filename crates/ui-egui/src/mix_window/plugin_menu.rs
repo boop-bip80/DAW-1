@@ -19,15 +19,15 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         }
         ui.separator();
     }
-    let mut cats: Vec<soundcraft_dsp::Category> = Vec::new();
-    for p in soundcraft_dsp::plugins() {
+    let mut cats: Vec<liviwave_dsp::Category> = Vec::new();
+    for p in liviwave_dsp::plugins() {
         if !p.is_instrument && !cats.contains(&p.category) {
             cats.push(p.category);
         }
     }
     for c in cats {
         ui.menu_button(format!("{c:?}"), |ui| {
-            for p in soundcraft_dsp::plugins().iter().filter(|p| p.category == c && !p.is_instrument) {
+            for p in liviwave_dsp::plugins().iter().filter(|p| p.category == c && !p.is_instrument) {
                 if ui.button(p.name).clicked() {
                     pick_insert(app, ui, id, slot, p.id);
                 }
@@ -43,7 +43,7 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
 /// (until something is typed) its instrument's editor and the built-in, CLAP, VST3 and Audio Units
 /// instruments.
 pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
-    let slot = soundcraft_mix::INSTRUMENT_SLOT;
+    let slot = liviwave_mix::INSTRUMENT_SLOT;
     let search = MenuSearch::show(ui, egui::Id::unique(("instrument-search", id.0)), "Search instruments…");
     if search.typing() {
         if let Some(plugin) = plugin_search(ui, &search, true) {
@@ -54,7 +54,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     let current = app.engine.session().track(id).and_then(|t| t.instrument.clone());
     if let Some(info) = current.as_ref().and_then(|i| plugin_info(&i.plugin)) {
         ui.label(egui::RichText::new(info.name).strong());
-        if current.as_ref().is_some_and(|i| !soundcraft_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
+        if current.as_ref().is_some_and(|i| !liviwave_mix::is_third_party(&i.plugin)) && ui.button("Edit Parameters…").clicked() {
             if !app.ui.plugin_windows.contains(&(id, slot)) {
                 app.ui.plugin_windows.push((id, slot));
             }
@@ -79,7 +79,7 @@ pub fn instrument_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     }
     let mut picked = None;
     ui.menu_button("Built-in", |ui| {
-        for p in soundcraft_dsp::plugins().iter().filter(|p| p.is_instrument) {
+        for p in liviwave_dsp::plugins().iter().filter(|p| p.is_instrument) {
             if ui.button(p.name).clicked() {
                 picked = Some(p.id.to_string());
             }
@@ -115,10 +115,10 @@ fn run_pick(app: &mut SoundApp, ui: &Ui, cmd: &str, params: serde_json::Value) {
 /// (listing them creates no instances) and whichever of CLAP and VST3 have been scanned, with a
 /// button to scan each of the others. Returns the id picked.
 fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<String> {
-    let mut built_in: Vec<&soundcraft_dsp::PluginInfo> =
-        soundcraft_dsp::plugins().iter().copied().filter(|p| p.is_instrument == instruments && search.matches(p.name)).collect();
+    let mut built_in: Vec<&liviwave_dsp::PluginInfo> =
+        liviwave_dsp::plugins().iter().copied().filter(|p| p.is_instrument == instruments && search.matches(p.name)).collect();
     built_in.sort_by_cached_key(|p| p.name.to_lowercase());
-    let (clap, vst3) = (soundcraft_clap_host::cached(), soundcraft_vst3_host::cached());
+    let (clap, vst3) = (liviwave_clap_host::cached(), liviwave_vst3_host::cached());
     let mut hosted: Vec<(MenuPlugin, &str)> = Vec::new();
     for d in clap.iter().flatten().filter(|d| d.is_instrument == instruments) {
         hosted.push((MenuPlugin { id: d.id.clone(), name: d.name.clone(), vendor: d.vendor.clone() }, "CLAP"));
@@ -126,7 +126,7 @@ fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<
     for d in vst3.iter().flatten().filter(|d| d.is_instrument == instruments) {
         hosted.push((MenuPlugin { id: d.id.clone(), name: d.name.clone(), vendor: d.vendor.clone() }, "VST3"));
     }
-    for d in soundcraft_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments) {
+    for d in liviwave_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments) {
         hosted.push((MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }, "AU"));
     }
     hosted.retain(|(p, _)| search.matches(&p.name) || search.matches(&p.vendor));
@@ -147,10 +147,10 @@ fn plugin_search(ui: &mut Ui, search: &MenuSearch, instruments: bool) -> Option<
         ui.separator();
         ui.horizontal(|ui| {
             if clap.is_none() && ui.small_button("Scan CLAP").clicked() {
-                soundcraft_clap_host::scan();
+                liviwave_clap_host::scan();
             }
             if vst3.is_none() && ui.small_button("Scan VST3").clicked() {
-                soundcraft_vst3_host::scan();
+                liviwave_vst3_host::scan();
             }
         });
     }
@@ -257,20 +257,20 @@ struct MenuPlugin {
 fn hosted_menus(ui: &mut Ui, instruments: bool) -> Option<String> {
     let mut picked = None;
     ui.menu_button("CLAP", |ui| {
-        let list = soundcraft_clap_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
+        let list = liviwave_clap_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
         if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No CLAP plugins found") {
             picked = Some(p);
         }
     });
     ui.menu_button("VST3", |ui| {
-        let list = soundcraft_vst3_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
+        let list = liviwave_vst3_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
         if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No VST3 plugins found") {
             picked = Some(p);
         }
     });
     if cfg!(target_os = "macos") {
         ui.menu_button("Audio Units", |ui| {
-            let list = soundcraft_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
+            let list = liviwave_au_host::scan().into_iter().filter(|d| d.is_instrument == instruments);
             if let Some(p) = vendor_menus(ui, list.map(|d| MenuPlugin { id: d.id, name: d.name, vendor: d.vendor }).collect(), "No Audio Units found")
             {
                 picked = Some(p);
@@ -310,9 +310,9 @@ fn vendor_menus(ui: &mut Ui, mut list: Vec<MenuPlugin>, none: &str) -> Option<St
 
 /// A built-in plugin's description, else a hosted CLAP (`clap:<id>`), VST3 (`vst3:<class id>`) or
 /// Audio Unit (`au:<type>:<subtype>:<manufacturer>`) plugin's.
-pub fn plugin_info(id: &str) -> Option<&'static soundcraft_dsp::PluginInfo> {
-    soundcraft_dsp::plugin_info(id)
-        .or_else(|| soundcraft_clap_host::plugin_info(id))
-        .or_else(|| soundcraft_vst3_host::plugin_info(id))
-        .or_else(|| soundcraft_au_host::plugin_info(id))
+pub fn plugin_info(id: &str) -> Option<&'static liviwave_dsp::PluginInfo> {
+    liviwave_dsp::plugin_info(id)
+        .or_else(|| liviwave_clap_host::plugin_info(id))
+        .or_else(|| liviwave_vst3_host::plugin_info(id))
+        .or_else(|| liviwave_au_host::plugin_info(id))
 }

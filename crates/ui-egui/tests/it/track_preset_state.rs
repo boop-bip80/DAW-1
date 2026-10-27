@@ -3,18 +3,18 @@
 #[path = "../../../clap-host/tests/common/mod.rs"]
 mod common;
 
+use liviwave_engine::Engine;
+use liviwave_model::{ChannelFormat, Insert, TrackKind, b64};
+use liviwave_playback::Player;
+use liviwave_ui_egui::{Services, SoundApp};
 use serde_json::{Value, json};
-use soundcraft_engine::Engine;
-use soundcraft_model::{ChannelFormat, Insert, TrackKind, b64};
-use soundcraft_playback::Player;
-use soundcraft_ui_egui::{Services, SoundApp};
 
 #[test]
 fn track_preset_captures_live_plugin_state_before_serializing() {
     common::fixture_dir();
     let mut engine = Engine::default();
     let track = engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Vox"));
-    engine.session_mut().track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:org.soundcraft.test.gain"));
+    engine.session_mut().track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:org.liviwave.test.gain"));
     let player = Player::new(engine.session_arc());
     let states = player.capture_states();
     assert_eq!(states.len(), 1, "the synthetic CLAP plugin must load even without an audio device");

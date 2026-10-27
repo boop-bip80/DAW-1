@@ -482,7 +482,7 @@ impl Side {
             }
             self.rate = sr;
         }
-        let specs = soundcraft_mix::instance_specs(s);
+        let specs = liviwave_mix::instance_specs(s);
         let stale: Vec<(TrackId, usize)> = self.shadow.keys().filter(|k| !specs.iter().any(|x| (x.track, x.slot) == **k)).copied().collect();
         for k in stale {
             self.forget(k);
@@ -494,10 +494,10 @@ impl Side {
                 continue;
             }
             self.forget(key);
-            let made = soundcraft_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
+            let made = liviwave_mix::create_instance(&spec.id, spec.state.as_deref(), sr, BLOCK, spec.ch);
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
-            if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
+            if let Some(liviwave_mix::NewInstance { mut plugin, refused_state }) = made {
                 if let Some(e) = plugin.editor() {
                     self.add_editor(key, e);
                 }

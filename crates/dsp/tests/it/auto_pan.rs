@@ -1,6 +1,6 @@
 use std::f32::consts::{FRAC_PI_4, PI, TAU};
 
-use soundcraft_dsp::{Plugin, Transport, create, db_to_gain};
+use liviwave_dsp::{Plugin, Transport, create, db_to_gain};
 
 const SR: f32 = 48_000.0;
 const BLOCK: usize = 512;

@@ -2,9 +2,9 @@
 use super::{CommandSpec, always, bad, bool_or, position_param, str_param};
 
 use crate::{Engine, Result, cmd};
+use liviwave_model::{BitDepthSetting, EditState};
+use liviwave_time::FrameRate;
 use serde_json::{Value, json};
-use soundcraft_model::{BitDepthSetting, EditState};
-use soundcraft_time::FrameRate;
 
 macro_rules! toggle {
     ($id:literal, $label:literal, [$($m:literal),*], $sc:expr, $field:ident) => {

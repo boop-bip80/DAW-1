@@ -1,0 +1,21 @@
+[package]
+name = "liviwave-cli"
+description = "LiVi Wave command line: headless editing, conversion, bounce, MCP server, app control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "liviwave-cli"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+liviwave-engine.workspace = true
+liviwave-automation.workspace = true
+liviwave-audio-io.workspace = true
+liviwave-dsp.workspace = true
+serde_json.workspace = true

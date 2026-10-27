@@ -2,9 +2,9 @@
 use super::{CommandSpec, bad};
 
 use crate::{Engine, Result, cmd};
+use liviwave_model::ClipId;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use soundcraft_model::ClipId;
 use std::collections::BTreeSet;
 
 const AUTO_RENAME: &str = "clip.auto_rename";
@@ -42,7 +42,7 @@ fn auto_rename(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     let key = names.map(|n| {
         let (key, id) = (s.alloc(), crate::new_scheme_id(s));
-        s.auto_names.insert(key, soundcraft_model::AutoName { id, ..n.into() });
+        s.auto_names.insert(key, liviwave_model::AutoName { id, ..n.into() });
         key
     });
     for c in s.tracks.iter_mut().flat_map(|t| t.playlists.iter_mut()).flat_map(|pl| pl.clips.iter_mut()) {
@@ -59,7 +59,7 @@ mod tests {
     use super::*;
 
     /// The first Kick clip: its track, id, start and length.
-    fn first_kick(e: &Engine) -> (soundcraft_model::TrackId, ClipId, i64, i64) {
+    fn first_kick(e: &Engine) -> (liviwave_model::TrackId, ClipId, i64, i64) {
         let s = e.session();
         let t = s.track_by_name("Kick").unwrap();
         let c = &t.clips()[0];
@@ -67,7 +67,7 @@ mod tests {
     }
 
     /// The names of the clips on `t` that lie inside `[start, end)`, in time order.
-    fn names_in(e: &Engine, t: soundcraft_model::TrackId, start: i64, end: i64) -> Vec<String> {
+    fn names_in(e: &Engine, t: liviwave_model::TrackId, start: i64, end: i64) -> Vec<String> {
         e.session().track(t).unwrap().clips().iter().filter(|c| c.start >= start && c.end() <= end).map(|c| c.name.clone()).collect()
     }
 
@@ -171,7 +171,7 @@ mod tests {
         let bass = e.session().track_by_name("Bass").unwrap().clips()[0].id;
         let s = e.session_mut();
         let key = s.alloc();
-        s.auto_names.insert(key, soundcraft_model::AutoName { name: "Other".into(), number: 100, zeros: 0, suffix: String::new(), id: copied });
+        s.auto_names.insert(key, liviwave_model::AutoName { name: "Other".into(), number: 100, zeros: 0, suffix: String::new(), id: copied });
         s.tracks
             .iter_mut()
             .flat_map(|t| t.playlists.iter_mut())
@@ -199,10 +199,10 @@ mod tests {
         let copied = e.clipboard.clone();
         // A time-locked clip at the paste point leaves Shuffle no room.
         e.session_mut().find_clip_mut(id).unwrap().time_locked = true;
-        e.session_mut().edit.edit_mode = soundcraft_model::EditMode::Shuffle;
+        e.session_mut().edit.edit_mode = liviwave_model::EditMode::Shuffle;
         assert!(e.execute("edit.paste", &json!({"tracks": [t], "at": start})).is_err());
         assert_eq!(e.clipboard, copied);
-        e.session_mut().edit.edit_mode = soundcraft_model::EditMode::Slip;
+        e.session_mut().edit.edit_mode = liviwave_model::EditMode::Slip;
         let at = e.session().content_end() + 48_000;
         e.execute("edit.paste", &json!({"tracks": [t], "at": at})).unwrap();
         assert_ne!(e.clipboard, copied, "a paste that succeeds keeps the scheme's new key");
@@ -237,9 +237,9 @@ mod tests {
         let key = *e.session().auto_names.keys().next().unwrap();
         v["auto_names"][key.to_string()]["zeros"] = json!(usize::MAX);
         v["auto_names"]["999999999"] = json!({"name": "Unused", "number": 1, "zeros": 0, "suffix": ""});
-        let mut s = soundcraft_model::Session::from_json(&v.to_string()).unwrap();
+        let mut s = liviwave_model::Session::from_json(&v.to_string()).unwrap();
         assert_eq!(s.auto_names.len(), 1, "a scheme no clip uses is dropped");
-        assert_eq!(s.auto_names[&key].zeros, soundcraft_model::AutoName::MAX_ZEROS);
+        assert_eq!(s.auto_names[&key].zeros, liviwave_model::AutoName::MAX_ZEROS);
         assert!(s.next_id > key);
         crate::edit::separate_at(&mut s, t, start + len / 2);
         let names: Vec<String> =

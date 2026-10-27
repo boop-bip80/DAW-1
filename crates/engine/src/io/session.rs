@@ -66,7 +66,7 @@ pub(crate) fn open_session_linked(e: &mut Engine, path: &str, links: &Path) -> R
 
 /// Decode one source's audio file at the session rate.
 pub(super) fn decode_source(bytes: &[u8], ext: Option<&str>, rate: u32) -> std::result::Result<Arc<SourceAudio>, String> {
-    let (_, buf) = soundcraft_audio_io::decode(bytes, ext).map_err(|err| err.to_string())?;
+    let (_, buf) = liviwave_audio_io::decode(bytes, ext).map_err(|err| err.to_string())?;
     let buf = at_rate(buf, rate, MAX_IMPORT_SAMPLES).ok_or("too large to load")?;
     Ok(Arc::new(SourceAudio::new(buf)))
 }
@@ -95,7 +95,7 @@ mod save_tests {
     fn autosave_copy_leaves_document_untouched_and_reuses_audio() {
         let mut e = crate::demo::demo_engine();
         e.execute("mix.volume", &serde_json::json!({"track": "Kick", "db": -7.0})).unwrap();
-        let dir = std::env::temp_dir().join(format!("soundcraft-autosave-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-autosave-{}", std::process::id()));
         let path = dir.join("Midnight Groove.scraft");
         let p = path.to_string_lossy().into_owned();
         let n1 = save_copy(&e, &p).unwrap();
@@ -127,7 +127,7 @@ mod save_tests {
 
     #[test]
     fn saving_never_replaces_audio_of_another_session() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-no-replace-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-no-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
         save_session(&mut with_take(0.5), &path("A/A.scraft")).unwrap();
@@ -144,13 +144,13 @@ mod save_tests {
 
     #[test]
     fn consolidating_twice_keeps_both_renders() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-consolidate-twice-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-consolidate-twice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut e = crate::demo::demo_engine();
         let kick = e.session().track_by_name("Kick").unwrap().id;
         let end = e.session().content_end();
-        let render = |e: &Engine| soundcraft_mix::render_clips(e.session(), kick, Range::new(0, end));
+        let render = |e: &Engine| liviwave_mix::render_clips(e.session(), kick, Range::new(0, end));
         e.execute("edit.consolidate", &json!({"tracks": [kick.0], "start": 500_000, "end": 560_000})).unwrap();
         save_session(&mut e, &path).unwrap();
         e.execute("edit.consolidate", &json!({"tracks": [kick.0], "start": 1_400_000, "end": 1_500_000})).unwrap();
@@ -161,7 +161,7 @@ mod save_tests {
 
     #[test]
     fn saving_after_undo_reuses_the_saved_audio() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-undo-resave-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-undo-resave-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut e = with_take(0.5);
@@ -175,7 +175,7 @@ mod save_tests {
 
     #[test]
     fn saved_audio_is_trusted_only_in_the_folder_it_was_saved_in() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-own-folder-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-own-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
         let level = |r: &Engine| r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0];
@@ -204,7 +204,7 @@ mod save_tests {
 
     #[test]
     fn saving_over_another_session_needs_replace() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-replace-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut first = with_take(0.5);
@@ -232,7 +232,7 @@ mod save_tests {
 
     #[test]
     fn saving_keeps_the_last_ten_versions_as_backups() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-backups-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-backups-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Song.scraft");
@@ -252,7 +252,7 @@ mod save_tests {
 
     #[test]
     fn backup_never_overwrites_an_existing_entry_when_numbers_run_out() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-backups-full-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-backups-full-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Backups")).unwrap();
         let path = dir.join("Song.scraft");
@@ -271,7 +271,7 @@ mod save_tests {
     #[cfg(unix)]
     #[test]
     fn backup_never_writes_through_a_link_to_an_outside_file() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-backups-link-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-backups-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Project/Backups")).unwrap();
         let outside = dir.join("outside.txt");
@@ -295,7 +295,7 @@ mod save_tests {
         add_source(&mut s, "tone", loud, Some("Audio Files/tone.wav"), FileFormat::Wav);
         add_source(&mut s, "tone", quiet, Some("Audio Files/tone.wav"), FileFormat::Wav);
         let mut e = Engine::new(s);
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-path-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-shared-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Shared.scraft");
@@ -316,11 +316,11 @@ mod open_tests {
 
     #[test]
     fn a_file_named_by_many_sources_is_decoded_once() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-shared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
-        std::fs::write(dir.join("k.wav"), soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
+        std::fs::write(dir.join("k.wav"), liviwave_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
         let mut s = Session::default();
         for _ in 0..3 {
             add_source(&mut s, "k", audio.clone(), Some("k.wav"), FileFormat::Wav);
@@ -337,11 +337,11 @@ mod open_tests {
 
     #[test]
     fn sources_playing_one_file_share_it_when_saved() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-save-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-shared-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Audio Files")).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
-        std::fs::write(dir.join("Audio Files/k.wav"), soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
+        std::fs::write(dir.join("Audio Files/k.wav"), liviwave_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
         let mut s = Session::default();
         for _ in 0..3 {
             add_source(&mut s, "k", audio.clone(), Some("Audio Files/k.wav"), FileFormat::Wav);
@@ -369,11 +369,11 @@ mod open_tests {
 
     #[test]
     fn stored_media_paths_are_followed_only_on_this_computer() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-stored-paths-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-stored-paths-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
-        std::fs::write(dir.join("k.wav"), soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
+        std::fs::write(dir.join("k.wav"), liviwave_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
         let mut saved = Session::default();
         let t = saved.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         let src = add_source(&mut saved, "k", audio, Some("../k.wav"), FileFormat::Wav);
@@ -392,7 +392,7 @@ mod open_tests {
             let mut s = saved.clone();
             s.sources[0].path.clone_from(&p);
             let id = SourceId(s.alloc());
-            s.videos.push(soundcraft_model::VideoSource {
+            s.videos.push(liviwave_model::VideoSource {
                 id,
                 name: "x".into(),
                 path: p.clone(),
@@ -429,7 +429,7 @@ mod pipe_tests {
 
     #[test]
     fn a_pipe_named_as_media_is_refused_not_waited_on() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-pipe-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-pipe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("pipe.wav");

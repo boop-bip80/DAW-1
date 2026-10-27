@@ -143,9 +143,9 @@ impl SoundApp {
 
     /// Remember where the armed `takes` go (split into passes of `pass` when loop recording) and
     /// autosave that plan with the session.
-    fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, pass: Option<Samples>) {
+    fn plan_recording(&mut self, takes: Vec<liviwave_engine::io::Take>, pass: Option<Samples>) {
         let rate = self.recorder.as_ref().map_or(0, |r| r.sample_rate);
-        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
+        self.take_plan = Some(liviwave_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
         if let Some(root) = self.autosave_dir.clone() {
             self.queue_autosave(root);
         }
@@ -153,11 +153,11 @@ impl SoundApp {
 
     /// Arm the input for the record-enabled tracks; a session never saved records into its
     /// autosave folder. Returns the takes it records.
-    fn arm_recorder(&mut self) -> Result<Vec<soundcraft_engine::io::Take>, String> {
-        let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
+    fn arm_recorder(&mut self) -> Result<Vec<liviwave_engine::io::Take>, String> {
+        let name = liviwave_engine::io::sanitize_name(&self.engine.session().name);
         let unsaved_dir = self.autosave_dir.as_ref().map_or_else(std::env::temp_dir, |d| d.join(name));
         let Some(r) = &mut self.recorder else { return Err("no audio input device".into()) };
-        let plan = soundcraft_engine::io::plan_takes(&self.engine, &unsaved_dir, r.channels);
+        let plan = liviwave_engine::io::plan_takes(&self.engine, &unsaved_dir, r.channels);
         if plan.is_empty() {
             return Err("no audio track is record-enabled".into());
         }
@@ -165,12 +165,12 @@ impl SoundApp {
         // owner-only, like the autosaves, before the recorder makes anything in it.
         if self.engine.path.is_none() && self.autosave_dir.is_some() {
             for dir in plan.iter().filter_map(|(_, _, path)| path.parent()) {
-                soundcraft_engine::autosave::create_folder(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                liviwave_engine::autosave::create_folder(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             }
         }
         let takes = plan
             .iter()
-            .map(|(track, inputs, path)| soundcraft_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
+            .map(|(track, inputs, path)| liviwave_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
             .collect();
         r.arm(plan)?;
         Ok(takes)
@@ -185,7 +185,7 @@ impl SoundApp {
         let Some(r) = &mut self.recorder else { return };
         let (takes, problem) = r.finish();
         let tracks = takes.len().max(1);
-        let plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
+        let plan = plan.unwrap_or_else(|| liviwave_engine::io::Recording {
             start: self.record_start,
             pass: None,
             punch: self.punch,
@@ -194,7 +194,7 @@ impl SoundApp {
         });
         self.punch = None;
         self.autosaved_rev = 0;
-        let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
+        let ids = liviwave_engine::io::place_recording(&mut self.engine, &plan, takes);
         self.ui.status =
             if plan.pass.is_some() { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
         if let Some(p) = problem {
@@ -208,7 +208,7 @@ impl SoundApp {
     /// automation since the previous one, and Stop writes a last point. A pass and whatever is
     /// dragged during it, its fader included, are one undo step.
     pub(crate) fn write_automation(&mut self) {
-        use soundcraft_model::AutomationMode as M;
+        use liviwave_model::AutomationMode as M;
         const PASS: &str = "automation_pass";
         let playing = self.is_playing();
         let may_write =

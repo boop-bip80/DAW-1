@@ -16,7 +16,7 @@ struct ClipRows {
     rows: std::sync::Arc<Vec<ClipRow>>,
 }
 
-fn clip_rows(s: &soundcraft_model::Session, needle: &str) -> Vec<ClipRow> {
+fn clip_rows(s: &liviwave_model::Session, needle: &str) -> Vec<ClipRow> {
     let shown = |name: &str| needle.is_empty() || name.to_lowercase().contains(needle);
     // Whole files first (bold), then clips on tracks.
     let sources =
@@ -126,7 +126,7 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_model::{ChannelFormat, Clip, Session, TrackKind};
+    use liviwave_model::{ChannelFormat, Clip, Session, TrackKind};
 
     #[test]
     fn clip_rows_list_every_clip_in_track_order_and_filter_by_name() {

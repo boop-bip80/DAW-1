@@ -12,7 +12,7 @@ pub(crate) fn at_rate(mut buf: AudioBuffer, rate: u32, limit: usize) -> Option<A
         return None;
     }
     if from != rate {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, from, rate);
+        buf.channels = liviwave_dsp::offline::resample(&buf.channels, from, rate);
         buf.sample_rate = rate;
     }
     Some(buf)
@@ -43,7 +43,7 @@ fn unique_audio_rel(s: &Session, stem: &str) -> String {
 pub fn add_source(s: &mut Session, name: &str, mut buf: AudioBuffer, path: Option<&str>, format: FileFormat) -> SourceId {
     let sr = s.sample_rate.hz();
     if buf.sample_rate != sr && buf.sample_rate > 0 {
-        buf.channels = soundcraft_dsp::offline::resample(&buf.channels, buf.sample_rate, sr);
+        buf.channels = liviwave_dsp::offline::resample(&buf.channels, buf.sample_rate, sr);
         buf.sample_rate = sr;
     }
     add_source_audio(s, name, Arc::new(SourceAudio::new(buf)), path, format)
@@ -89,7 +89,7 @@ fn stamp_at_rate(stamp: u64, file_rate: u32, session_rate: u32) -> u64 {
 pub struct DecodedImport {
     pub(crate) key: PathBuf,
     pub(crate) rate: u32,
-    info: soundcraft_audio_io::AudioInfo,
+    info: liviwave_audio_io::AudioInfo,
     audio: Arc<SourceAudio>,
 }
 
@@ -109,9 +109,9 @@ pub fn decode_import(path: &str, rate: u32) -> Result<DecodedImport> {
     Ok(DecodedImport { key: file_key(Path::new(path)), rate, info, audio })
 }
 
-fn decode_import_bytes(name: &str, bytes: &[u8], rate: u32) -> Result<(soundcraft_audio_io::AudioInfo, Arc<SourceAudio>)> {
+fn decode_import_bytes(name: &str, bytes: &[u8], rate: u32) -> Result<(liviwave_audio_io::AudioInfo, Arc<SourceAudio>)> {
     let ext = Path::new(name).extension().and_then(OsStr::to_str).map(str::to_ascii_lowercase);
-    let (info, buf) = soundcraft_audio_io::decode(bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
+    let (info, buf) = liviwave_audio_io::decode(bytes, ext.as_deref()).map_err(|err| EngineError::Io(format!("{name}: {err}")))?;
     let buf = at_rate(buf, rate, MAX_IMPORT_SAMPLES).ok_or_else(|| EngineError::Io(format!("{name}: file is too large to import")))?;
     if buf.frames() == 0 {
         return Err(EngineError::Io(format!("{name}: no audio")));
@@ -133,7 +133,7 @@ pub(crate) fn place_decoded(e: &mut Engine, name: &str, d: DecodedImport, path: 
 fn place_import(
     e: &mut Engine,
     name: &str,
-    info: &soundcraft_audio_io::AudioInfo,
+    info: &liviwave_audio_io::AudioInfo,
     audio: Arc<SourceAudio>,
     path: Option<&str>,
     target: Option<TrackId>,

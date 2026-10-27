@@ -71,7 +71,7 @@ fn os_thread() -> usize {
             fn pthread_self() -> usize;
         }
         // SAFETY: `pthread_self` takes no arguments and cannot fail; `pthread_t` is an integer or
-        // a pointer of pointer size on the Unix systems SoundCraft builds for.
+        // a pointer of pointer size on the Unix systems LiVi Wave builds for.
         unsafe { pthread_self() }
     }
     #[cfg(windows)]

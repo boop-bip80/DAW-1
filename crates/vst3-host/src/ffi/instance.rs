@@ -79,7 +79,7 @@ pub(crate) struct Instance {
 }
 
 // SAFETY: an `Instance` is used through `&mut self` only, so calls into the plugin are always
-// serialised. SoundCraft creates instances on the engine/UI thread and then moves them into the
+// serialised. LiVi Wave creates instances on the engine/UI thread and then moves them into the
 // mix engine (documented limitation: VST3 expects `setActive`, controller calls etc. on the UI
 // thread; they may then happen on the audio thread).
 unsafe impl Send for Instance {}
@@ -481,7 +481,7 @@ impl Drop for Instance {
     }
 }
 
-/// Splits a state blob into (component, controller) parts. A blob without SoundCraft's container
+/// Splits a state blob into (component, controller) parts. A blob without LiVi Wave's container
 /// header is taken as a bare component state.
 pub(super) fn split_state(data: &[u8]) -> Option<(&[u8], &[u8])> {
     if data.len() > MAX_STATE_BYTES.saturating_mul(2) {

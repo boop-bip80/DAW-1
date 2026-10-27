@@ -1,7 +1,7 @@
 //! A WAV whose data chunk is empty and followed by metadata decodes to no audio; a recording
 //! that was never finalised (RIFF and data sizes left at 0) still yields what was written (#466).
 
-use soundcraft_audio_io::{decode, probe};
+use liviwave_audio_io::{decode, probe};
 
 fn fmt16(channels: u16, sr: u32) -> Vec<u8> {
     let align = channels * 2;

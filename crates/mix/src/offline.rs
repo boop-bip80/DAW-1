@@ -170,7 +170,7 @@ pub fn render_track_pre_fader(s: &Session, track: TrackId, range: Range) -> Vec<
     let mut solo = s.clone();
     // Multichannel tracks render into a main mix of their own format (straight through).
     let fmt = s.track(track).map_or(ChannelFormat::Stereo, |t| if t.channels() > 2 { t.format } else { ChannelFormat::Stereo });
-    solo.outputs = vec![soundcraft_model::OutputPath { name: "Out".into(), first_channel: 0, format: fmt }];
+    solo.outputs = vec![liviwave_model::OutputPath { name: "Out".into(), first_channel: 0, format: fmt }];
     for t in &mut solo.tracks {
         if t.id == track {
             t.mixer.volume_db = 0.0;

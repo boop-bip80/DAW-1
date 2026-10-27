@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=LiVi Wave
+GenericName=Digital Audio Workstation
+Comment=Record, edit and mix audio and MIDI
+Exec=liviwave %F
+TryExec=liviwave
+Icon=ai.storyteller.liviwave
+Terminal=false
+StartupNotify=true
+StartupWMClass=ai.storyteller.liviwave
+Categories=AudioVideo;Audio;Midi;Mixer;Sequencer;Recorder;
+MimeType=application/x-liviwave-session;audio/x-wav;audio/wav;audio/vnd.wave;audio/x-aiff;audio/aiff;audio/flac;audio/x-flac;audio/mpeg;audio/midi;audio/x-midi;
+Keywords=daw;audio;mixer;recording;multitrack;midi;editor;music;

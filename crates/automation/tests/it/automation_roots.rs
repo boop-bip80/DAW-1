@@ -2,10 +2,10 @@
 //! stays inside the read root, every file it writes inside the write root.
 // Integration tests: unwrapping and panicking on failure is fine here, unlike in shipped code (AGENTS.md).
 
+use liviwave_automation::{Headless, mcp::Server};
+use liviwave_engine::Engine;
+use liviwave_engine::file_access::AutomationRoots;
 use serde_json::{Value, json};
-use soundcraft_automation::{Headless, mcp::Server};
-use soundcraft_engine::Engine;
-use soundcraft_engine::file_access::AutomationRoots;
 use std::path::{Path, PathBuf};
 
 /// A marker that must never come back from a file outside the read root.
@@ -39,7 +39,7 @@ fn fixture(name: &str) -> Fixture {
         std::fs::create_dir_all(d).unwrap();
     }
     // Real files, made by an unconfined engine.
-    let mut e = soundcraft_engine::demo::demo_engine();
+    let mut e = liviwave_engine::demo::demo_engine();
     for dir in [&read, &outside] {
         let run = |e: &mut Engine, id: &str, p: Value| e.execute(id, &p).unwrap_or_else(|err| panic!("{id}: {err}"));
         run(&mut e, "file.bounce_mix", json!({"path": s(dir.join("tone.wav")), "start": 0, "end": 4800}));
@@ -159,7 +159,7 @@ fn reads_outside_the_read_root_are_refused_and_nothing_reaches_the_result() {
 
 /// A clip of the demo session.
 fn kick_clip() -> u64 {
-    soundcraft_engine::demo::demo_engine().session().track_by_name("Kick").unwrap().clips()[0].id.0
+    liviwave_engine::demo::demo_engine().session().track_by_name("Kick").unwrap().clips()[0].id.0
 }
 
 /// Every command that writes a user-named file or folder, with params for `dir`.
@@ -187,7 +187,7 @@ fn writes(dir: &Path) -> Vec<(&'static str, Value)> {
 
 fn demo_server(read: Option<&Path>, write: Option<&Path>) -> Server<Headless> {
     let roots = AutomationRoots::new(read.as_slice(), write.as_slice()).unwrap();
-    Server::new(Headless::new(soundcraft_engine::demo::demo_engine()).with_automation_roots(roots))
+    Server::new(Headless::new(liviwave_engine::demo::demo_engine()).with_automation_roots(roots))
 }
 
 #[test]

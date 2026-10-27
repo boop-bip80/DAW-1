@@ -1,12 +1,12 @@
 //! AudioSuite-style offline processing of selected clips.
 use super::{CommandSpec, bad, clip_ids_param, has_selection, range_param, str_param, tracks_param};
-use soundcraft_time::Range;
+use liviwave_time::Range;
 
 use crate::{Engine, Result, cmd};
+use liviwave_audio_io::{AudioBuffer, FileFormat};
+use liviwave_dsp::offline::{SpeedRampChange, SpeedRampSelection};
+use liviwave_model::{Clip, ClipContent, TrackKind};
 use serde_json::{Value, json};
-use soundcraft_audio_io::{AudioBuffer, FileFormat};
-use soundcraft_dsp::offline::{SpeedRampChange, SpeedRampSelection};
-use soundcraft_model::{Clip, ClipContent, TrackKind};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
@@ -22,7 +22,7 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// The most frames a process can take in: these processes cut their output at MAX_OFFLINE_SAMPLES frames.
 fn frame_limit(name: &str, ratio: f64, semitones: f32, sr: f64, to: u32, selection: SpeedRampSelection) -> usize {
-    let longest = |grows: f64| (soundcraft_dsp::offline::MAX_OFFLINE_SAMPLES as f64 / grows) as usize;
+    let longest = |grows: f64| (liviwave_dsp::offline::MAX_OFFLINE_SAMPLES as f64 / grows) as usize;
     match name {
         "time_stretch" => longest(ratio),
         "pitch_shift" => longest(2f64.powf(f64::from(semitones) / 12.0)),
@@ -41,7 +41,7 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         .map(|o| o.iter().filter_map(|(k, v)| v.as_f64().filter(|x| x.is_finite()).map(|x| (k.clone(), x as f32))).collect())
         .unwrap_or_default();
     let get = |k: &str, d: f32| params.iter().find(|(n, _)| n == k).map_or(d, |(_, v)| *v);
-    let known = soundcraft_dsp::plugin_info(&name).is_some()
+    let known = liviwave_dsp::plugin_info(&name).is_some()
         || matches!(
             name.as_str(),
             "normalize"
@@ -58,7 +58,7 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
     if !known {
         return Err(bad("audiosuite.process", format!("unknown process `{name}`")));
     }
-    if soundcraft_dsp::is_generator(&name) && p.get("clips").is_none() && p.get("clip").is_none() {
+    if liviwave_dsp::is_generator(&name) && p.get("clips").is_none() && p.get("clip").is_none() {
         let r = range_param(e, "audiosuite.process", p)?;
         if !r.is_empty() {
             return generate(e, p, &name, &params, r);
@@ -84,7 +84,7 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         }
         let channels = e.session().track(track).map_or(1, |t| t.channels());
         crate::io::refuse_longer(e.session(), "audiosuite.process", &clip.name, "process", clip.length, most.min(crate::io::render_limit(channels)))?;
-        let mut audio = soundcraft_mix::render_clips(e.session(), track, clip.range());
+        let mut audio = liviwave_mix::render_clips(e.session(), track, clip.range());
         // Render without the clip's own fades: re-render a copy without fades so they stay editable.
         let mut tmp = e.session().clone();
         if let Some(c) = tmp.find_clip_mut(id) {
@@ -95,31 +95,31 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
         }
         if let Some(pl) = tmp.track_mut(track).and_then(|t| t.playlist_mut()) {
             pl.clips.retain(|c| c.id == id);
-            audio = soundcraft_mix::render_clips(&tmp, track, clip.range());
+            audio = liviwave_mix::render_clips(&tmp, track, clip.range());
         }
         let srf = sr.as_f64() as f32;
         let out: Vec<Vec<f32>> = match name.as_str() {
             "normalize" => {
-                soundcraft_dsp::offline::normalize(&mut audio, get("target_db", -0.1), false);
+                liviwave_dsp::offline::normalize(&mut audio, get("target_db", -0.1), false);
                 audio
             }
             "reverse" => {
-                soundcraft_dsp::offline::reverse(&mut audio);
+                liviwave_dsp::offline::reverse(&mut audio);
                 audio
             }
             "invert" => {
-                soundcraft_dsp::offline::invert(&mut audio);
+                liviwave_dsp::offline::invert(&mut audio);
                 audio
             }
-            "gain" if soundcraft_dsp::plugin_info("gain").is_none() || params.iter().any(|(k, _)| k == "db") => {
-                soundcraft_dsp::offline::gain(&mut audio, get("db", 0.0));
+            "gain" if liviwave_dsp::plugin_info("gain").is_none() || params.iter().any(|(k, _)| k == "db") => {
+                liviwave_dsp::offline::gain(&mut audio, get("db", 0.0));
                 audio
             }
             "duplicate" => audio,
-            "time_stretch" => soundcraft_dsp::offline::time_stretch(&audio, ratio, srf),
-            "pitch_shift" => soundcraft_dsp::offline::pitch_shift(&audio, semitones, srf),
-            "varispeed" => soundcraft_dsp::offline::resample(&audio, sr.hz(), to),
-            "speed_ramp" => soundcraft_dsp::offline::speed_ramp(&audio, change, selection, fades),
+            "time_stretch" => liviwave_dsp::offline::time_stretch(&audio, ratio, srf),
+            "pitch_shift" => liviwave_dsp::offline::pitch_shift(&audio, semitones, srf),
+            "varispeed" => liviwave_dsp::offline::resample(&audio, sr.hz(), to),
+            "speed_ramp" => liviwave_dsp::offline::speed_ramp(&audio, change, selection, fades),
             plugin => {
                 apply(plugin, &params, &mut audio, srf)?;
                 audio
@@ -159,7 +159,7 @@ fn process(e: &mut Engine, p: &Value) -> Result<Value> {
 fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: Range) -> Result<Value> {
     let sr = e.session().sample_rate;
     let tracks = tracks_param(e, "audiosuite.process", p)?;
-    let mut budget = soundcraft_mix::MAX_RENDER_SAMPLES;
+    let mut budget = liviwave_mix::MAX_RENDER_SAMPLES;
     // Refuse before generating anything, rather than cut the clip short.
     for t in tracks.iter().filter_map(|t| e.session().track(*t)).filter(|t| t.kind == TrackKind::Audio) {
         let channels = t.channels().max(1);
@@ -193,12 +193,12 @@ fn generate(e: &mut Engine, p: &Value, name: &str, params: &[(String, f32)], r: 
 
 /// Run plugin `id` with `params` over `audio`, in place.
 fn apply(id: &str, params: &[(String, f32)], audio: &mut [Vec<f32>], srf: f32) -> Result<()> {
-    let Some(mut pl) = soundcraft_dsp::create(id) else { return Err(bad("audiosuite.process", format!("cannot create `{id}`"))) };
+    let Some(mut pl) = liviwave_dsp::create(id) else { return Err(bad("audiosuite.process", format!("cannot create `{id}`"))) };
     pl.prepare(srf, 1024, audio.len().max(1));
     for (k, v) in params {
         pl.set_param(k, *v);
     }
-    soundcraft_dsp::offline::apply_plugin(audio, pl.as_mut(), srf);
+    liviwave_dsp::offline::apply_plugin(audio, pl.as_mut(), srf);
     Ok(())
 }
 
@@ -210,10 +210,10 @@ fn short(n: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_audio_io::AudioBuffer;
-    use soundcraft_model::{ChannelFormat, Session, TrackKind};
+    use liviwave_audio_io::AudioBuffer;
+    use liviwave_model::{ChannelFormat, Session, TrackKind};
 
-    fn gained_clip() -> (crate::Engine, soundcraft_model::ClipId) {
+    fn gained_clip() -> (crate::Engine, liviwave_model::ClipId) {
         let mut s = Session::default();
         let t = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Tone"));
         let buf = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 64]] };
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(e.session().tracks[0].clips().len(), 1, "one track generates one clip");
         // Two distinct tracks over the total budget are refused (MAX_RENDER_SAMPLES is f32 samples
         // across all channels; a single track over the limit is already refused per-track).
-        let len = (soundcraft_mix::MAX_RENDER_SAMPLES as i64) / 3 * 2;
+        let len = (liviwave_mix::MAX_RENDER_SAMPLES as i64) / 3 * 2;
         let out = e.execute(
             "audiosuite.process",
             &serde_json::json!({"process": "signal_generator", "tracks": [t[0], t[1]], "params": {"freq": 440.0}, "start": 0, "end": len}),

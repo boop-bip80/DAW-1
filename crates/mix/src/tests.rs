@@ -3,12 +3,12 @@
 //! adopts a fake under a clap:test.* id via MixEngine::adopt.
 
 use super::*;
-use soundcraft_audio_io::AudioBuffer;
-use soundcraft_model::{Insert, SourceAudio, SourceId};
+use liviwave_audio_io::AudioBuffer;
+use liviwave_model::{Insert, SourceAudio, SourceId};
 use std::sync::Arc;
 
 fn synth_session(level_db: f32) -> Session {
-    use soundcraft_midi::{Note, Sequence};
+    use liviwave_midi::{Note, Sequence};
     let mut s = Session::default();
     let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
     let mut seq = Sequence::default();
@@ -66,7 +66,7 @@ fn insert_slot_a_automation_does_not_drive_the_instrument() {
     let mut s = synth_session(-6.0);
     let reference = render_range(&s, Range::new(0, 12_000), 512);
     let tr = &mut s.tracks[0];
-    let mut lane = soundcraft_model::AutomationLane::new(AutoParam::Plugin { slot: 0, param: "level".into() });
+    let mut lane = liviwave_model::AutomationLane::new(AutoParam::Plugin { slot: 0, param: "level".into() });
     lane.set_point(0, -48.0);
     tr.automation.push(lane);
     assert_eq!(render_range(&s, Range::new(0, 12_000), 512), reference);
@@ -154,7 +154,7 @@ fn fade_curvature_reaches_the_rendered_audio() {
         for curvature in [-0.5, 0.0, 0.5] {
             let (mut s, t) = session_with_dc(1.0, 8192);
             s.track_mut(t).unwrap().mixer.pan = vec![-1.0];
-            let fade = soundcraft_model::Fade { len: 8192, shape: soundcraft_model::FadeShape::SCurve, curvature };
+            let fade = liviwave_model::Fade { len: 8192, shape: liviwave_model::FadeShape::SCurve, curvature };
             let c = &mut s.track_mut(t).unwrap().playlist_mut().unwrap().clips[0];
             if fade_in {
                 c.fade_in = fade;
@@ -197,7 +197,7 @@ fn fades_and_clip_gain_apply() {
     let (mut s, t) = session_with_dc(1.0, 48_000);
     {
         let c = &mut s.track_mut(t).unwrap().playlist_mut().unwrap().clips[0];
-        c.fade_in = soundcraft_model::Fade { len: 1000, shape: soundcraft_model::FadeShape::Linear, curvature: 0.0 };
+        c.fade_in = liviwave_model::Fade { len: 1000, shape: liviwave_model::FadeShape::Linear, curvature: 0.0 };
         c.gain_db = -6.0;
     }
     let out = render_range(&s, Range::new(0, 2000), 512);
@@ -216,7 +216,7 @@ fn sends_feed_aux_via_bus() {
     {
         let tr = s.track_mut(t).unwrap();
         tr.mixer.output = Route::None;
-        let mut snd = soundcraft_model::SendSlot::new(Route::Bus(bus));
+        let mut snd = liviwave_model::SendSlot::new(Route::Bus(bus));
         snd.level_db = 0.0;
         tr.mixer.sends[0] = Some(snd);
     }
@@ -304,7 +304,7 @@ fn inserts_process_and_survive_unknown_plugins() {
     s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("does-not-exist"));
     let out = render_range(&s, Range::new(0, 4800), 512);
     assert!(out[0][100] > 0.3);
-    let id = soundcraft_dsp::plugins().iter().find(|p| p.id.contains("gain")).map(|p| p.id).unwrap_or("gain");
+    let id = liviwave_dsp::plugins().iter().find(|p| p.id.contains("gain")).map(|p| p.id).unwrap_or("gain");
     let mut ins = Insert::new(id);
     ins.params.insert("gain".into(), -6.0);
     s.track_mut(t).unwrap().mixer.inserts[0] = Some(ins);
@@ -319,7 +319,7 @@ struct Stateful {
 }
 
 impl Plugin for Stateful {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.inner.info()
     }
     fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -338,7 +338,7 @@ impl Plugin for Stateful {
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
         self.inner.process(io, frames);
     }
-    fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
+    fn state_reader(&mut self) -> Option<Box<dyn liviwave_dsp::PluginStateReader>> {
         let blob = self.blob.clone();
         Some(Box::new(move || Some(blob.clone())))
     }
@@ -350,7 +350,7 @@ struct Clock {
 }
 
 impl Plugin for Clock {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.inner.info()
     }
     fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -380,7 +380,7 @@ fn plugins_get_the_session_transport() {
     s.tempo.set_meter(0, 3, 4).unwrap();
     s.track_mut(t).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.clock"));
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let clock = Clock { inner: soundcraft_dsp::create("gain").unwrap(), seen: Arc::clone(&seen) };
+    let clock = Clock { inner: liviwave_dsp::create("gain").unwrap(), seen: Arc::clone(&seen) };
     let mut eng = MixEngine::new(48_000.0, 512);
     eng.set_external_instances(true);
     eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.clock".into(), ch: 1, plugin: Box::new(clock) }]);
@@ -401,7 +401,7 @@ struct Ears {
 }
 
 impl Plugin for Ears {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.inner.info()
     }
     fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -429,13 +429,13 @@ fn controllers_play_at_their_offsets_and_are_chased_after_a_seek() {
     let mut s = Session::default();
     let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
     s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.ears"));
-    let cc = |tick, kind, value| soundcraft_midi::CtrlEvent { tick, channel: 0, kind, value };
+    let cc = |tick, kind, value| liviwave_midi::CtrlEvent { tick, channel: 0, kind, value };
     let ctrls = vec![cc(4, CtrlKind::Cc(64), 127), cc(960, CtrlKind::PitchBend, -8192), cc(1920, CtrlKind::Cc(64), 0)];
-    let seq = soundcraft_midi::Sequence { ctrls, ..Default::default() };
+    let seq = liviwave_midi::Sequence { ctrls, ..Default::default() };
     let cid = s.new_clip_id();
     s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000 * 4, seq));
     let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let ears = Ears { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+    let ears = Ears { inner: liviwave_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
     let mut eng = MixEngine::new(48_000.0, 512);
     eng.set_external_instances(true);
     eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.ears".into(), ch: 2, plugin: Box::new(ears) }]);
@@ -453,7 +453,7 @@ struct Keys {
 }
 
 impl Plugin for Keys {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.inner.info()
     }
     fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -481,14 +481,14 @@ fn real_time_properties_reach_the_instrument() {
     let mut s = Session::default();
     let t = s.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
     s.track_mut(t).unwrap().instrument = Some(Insert::new("clap:test.keys"));
-    let mut seq = soundcraft_midi::Sequence::default();
-    seq.notes.push(soundcraft_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
+    let mut seq = liviwave_midi::Sequence::default();
+    seq.notes.push(liviwave_midi::Note { pitch: 60, velocity: 100, release_velocity: 64, channel: 0, start: 0, length: 480 });
     let cid = s.new_clip_id();
     s.track_mut(t).unwrap().playlist_mut().unwrap().clips.push(Clip::midi(cid, "m", 0, 48_000, seq));
     s.edit.values.insert(format!("rtp.{}.transpose", t.0), 12.0);
     s.edit.values.insert(format!("rtp.{}.velocity", t.0), -20.0);
     let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let keys = Keys { inner: soundcraft_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
+    let keys = Keys { inner: liviwave_dsp::create("gain").unwrap(), heard: Arc::clone(&heard) };
     let mut eng = MixEngine::new(48_000.0, 512);
     eng.set_external_instances(true);
     eng.adopt(vec![PreparedInstance { track: t, slot: INSTRUMENT_SLOT, id: "clap:test.keys".into(), ch: 2, plugin: Box::new(keys) }]);
@@ -517,11 +517,11 @@ fn external_instances_are_adopted_and_retired() {
     let dry = render_block(&mut eng, &s, 0);
     assert!(dry > 0.3, "{dry}");
     let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut gain = soundcraft_dsp::create("gain").unwrap();
+    let mut gain = liviwave_dsp::create("gain").unwrap();
     gain.prepare(48_000.0, 512, 1);
     let fake = Stateful { inner: gain, blob: Vec::new(), sets: Arc::clone(&sets) };
     // An instance for the wrong channel count is retired, not used.
-    let wrong = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
+    let wrong = Stateful { inner: liviwave_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
     eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "clap:test.fake".into(), ch: 2, plugin: Box::new(wrong) }]);
     assert!(render_block(&mut eng, &s, 512) > 0.3);
     assert_eq!(eng.take_retired().len(), 1);
@@ -538,7 +538,7 @@ fn external_instances_are_adopted_and_retired() {
     render_block(&mut eng, &s, 20 * 512);
     assert_eq!(eng.take_retired().len(), 1);
     // Instances nobody claims are retired too; drain_plugins empties the engine.
-    eng.adopt(vec![PreparedInstance { track: t, slot: 3, id: "clap:x".into(), ch: 1, plugin: soundcraft_dsp::create("gain").unwrap() }]);
+    eng.adopt(vec![PreparedInstance { track: t, slot: 3, id: "clap:x".into(), ch: 1, plugin: liviwave_dsp::create("gain").unwrap() }]);
     render_block(&mut eng, &s, 21 * 512);
     assert_eq!(eng.take_retired().len(), 1);
     assert!(eng.drain_plugins().is_empty());
@@ -547,7 +547,7 @@ fn external_instances_are_adopted_and_retired() {
 struct Nan(Box<dyn Plugin>);
 
 impl Plugin for Nan {
-    fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+    fn info(&self) -> &'static liviwave_dsp::PluginInfo {
         self.0.info()
     }
     fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -571,7 +571,7 @@ impl Plugin for Nan {
 }
 
 fn nan(track: TrackId, slot: usize, ch: usize) -> Vec<PreparedInstance> {
-    vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(soundcraft_dsp::create("gain").unwrap())) }]
+    vec![PreparedInstance { track, slot, id: "clap:test.nan".into(), ch, plugin: Box::new(Nan(liviwave_dsp::create("gain").unwrap())) }]
 }
 
 #[test]
@@ -642,7 +642,7 @@ fn failed_inserts_stop_contributing_latency_until_reset() {
             let tr = s.track_mut(target).unwrap();
             tr.mixer.inserts[0] = Some(failed);
             tr.mixer.inserts[1] = Some(healthy);
-            let mut plugin = soundcraft_dsp::create("compressor").unwrap();
+            let mut plugin = liviwave_dsp::create("compressor").unwrap();
             plugin.prepare(48_000.0, block, 2);
             let mut eng = MixEngine::new(48_000.0, block);
             eng.set_external_instances(true);
@@ -683,7 +683,7 @@ fn a_new_instance_replaces_a_matching_one_in_its_slot() {
     eng.set_external_instances(true);
     let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let make = |blob: &[u8]| {
-        let mut gain = soundcraft_dsp::create("gain").unwrap();
+        let mut gain = liviwave_dsp::create("gain").unwrap();
         gain.prepare(48_000.0, 512, 1);
         Box::new(Stateful { inner: gain, blob: blob.to_vec(), sets: Arc::clone(&sets) })
     };
@@ -708,7 +708,7 @@ fn stored_state_comes_first_then_session_params() {
     let mut eng = MixEngine::new(48_000.0, 512);
     eng.set_external_instances(true);
     let sets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let fake = Stateful { inner: soundcraft_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
+    let fake = Stateful { inner: liviwave_dsp::create("gain").unwrap(), blob: Vec::new(), sets: Arc::clone(&sets) };
     eng.adopt(vec![PreparedInstance { track: t, slot: 0, id: "vst3:00000000000000000000000000000001".into(), ch: 1, plugin: Box::new(fake) }]);
     render_block(&mut eng, &s, 0);
     assert_eq!(sets.load(std::sync::atomic::Ordering::Relaxed), 1, "session params apply once");
@@ -757,7 +757,7 @@ fn delay_compensation_aligns_latent_tracks() {
         ids.push(t);
     }
     let argmax = |c: &[f32]| c.iter().enumerate().max_by(|a, b| a.1.abs().total_cmp(&b.1.abs())).map(|(i, _)| i).unwrap();
-    let lat = soundcraft_dsp::create("maximizer").unwrap().latency();
+    let lat = liviwave_dsp::create("maximizer").unwrap().latency();
     assert!(lat > 0, "test needs a latent plugin");
     let out = render_range(&s, Range::new(0, 8000), 512);
     assert_eq!(argmax(&out[0]), argmax(&out[1]), "PDC should align L and R");
@@ -869,10 +869,10 @@ fn offline_renders_line_up_with_the_timeline_in_any_block_size() {
     let tr = s.track_mut(t).unwrap();
     tr.playlist_mut().unwrap().clips.push(Clip::audio(cid, "i", SourceId(900), 0, 0, 48_000));
     tr.mixer.inserts[0] = Some(Insert::new("maximizer"));
-    let mut send = soundcraft_model::SendSlot::new(Route::Bus(bus));
+    let mut send = liviwave_model::SendSlot::new(Route::Bus(bus));
     send.level_db = 0.0;
     tr.mixer.sends[0] = Some(send);
-    let latency = soundcraft_dsp::create("maximizer").unwrap().latency();
+    let latency = liviwave_dsp::create("maximizer").unwrap().latency();
     assert!(latency > 16);
     for source in [None, Some(bus)] {
         for block in [16, 100, 512] {
@@ -896,7 +896,7 @@ fn offline_renders_line_up_with_the_timeline_in_any_block_size() {
 fn a_plugins_bogus_latency_is_capped() {
     struct Latent(Box<dyn Plugin>);
     impl Plugin for Latent {
-        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+        fn info(&self) -> &'static liviwave_dsp::PluginInfo {
             self.0.info()
         }
         fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
@@ -924,7 +924,7 @@ fn a_plugins_bogus_latency_is_capped() {
     eng.set_external_instances(true);
     for track in [t, aux] {
         s.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.latent"));
-        let mut gain = soundcraft_dsp::create("gain").unwrap();
+        let mut gain = liviwave_dsp::create("gain").unwrap();
         gain.prepare(48_000.0, 512, 1);
         eng.adopt(vec![PreparedInstance { track, slot: 0, id: "clap:test.latent".into(), ch: 1, plugin: Box::new(Latent(gain)) }]);
     }

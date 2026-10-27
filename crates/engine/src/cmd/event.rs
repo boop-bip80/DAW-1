@@ -2,10 +2,10 @@
 use super::{CommandSpec, always, bad, clip_ids_param, f32_or, f64_or, has_selection, has_tracks, i64_or, position_param, range_param, str_param};
 
 use crate::{Engine, Result, cmd};
+use liviwave_midi::ops::{DurationOp, QuantizeOptions, VelocityOp};
+use liviwave_model::{ClipContent, MarkerKind};
+use liviwave_time::TICKS_PER_QUARTER;
 use serde_json::{Value, json};
-use soundcraft_midi::ops::{DurationOp, QuantizeOptions, VelocityOp};
-use soundcraft_model::{ClipContent, MarkerKind};
-use soundcraft_time::TICKS_PER_QUARTER;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -36,7 +36,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("event.transpose", "Transpose...", ["Event", "MIDI Operations"], Some("Alt+T"), "{semitones, clips?}", has_selection, |e, p| {
             let st = i64_or(p, "semitones", 0).clamp(-127, 127) as i32;
-            midi_op(e, p, move |n| soundcraft_midi::ops::transpose(n, st))
+            midi_op(e, p, move |n| liviwave_midi::ops::transpose(n, st))
         }),
         cmd!(
             "event.change_velocity",
@@ -195,7 +195,7 @@ fn cut_time(e: &mut Engine, p: &Value) -> Result<Value> {
     Ok(json!({"removed": r.len()}))
 }
 
-fn midi_op(e: &mut Engine, p: &Value, f: impl Fn(&mut [soundcraft_midi::Note])) -> Result<Value> {
+fn midi_op(e: &mut Engine, p: &Value, f: impl Fn(&mut [liviwave_midi::Note])) -> Result<Value> {
     let ids = clip_ids_param(e, p);
     let s = e.session_mut();
     let mut n = 0;
@@ -236,7 +236,7 @@ fn quantize(e: &mut Engine, p: &Value) -> Result<Value> {
         swing: (f32_or(p, "swing", 0.0) / 100.0).clamp(0.0, 1.0),
         ..QuantizeOptions::default()
     };
-    midi_op(e, p, move |n| soundcraft_midi::ops::quantize(n, &opts))
+    midi_op(e, p, move |n| liviwave_midi::ops::quantize(n, &opts))
 }
 
 fn velocity(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -249,7 +249,7 @@ fn velocity(e: &mut Engine, p: &Value) -> Result<Value> {
     } else {
         VelocityOp::Limit { min: i64_or(p, "min", 1).clamp(1, 127) as u8, max: i64_or(p, "max", 127).clamp(1, 127) as u8 }
     };
-    midi_op(e, p, move |n| soundcraft_midi::ops::change_velocity(n, op))
+    midi_op(e, p, move |n| liviwave_midi::ops::change_velocity(n, op))
 }
 
 fn duration(e: &mut Engine, p: &Value) -> Result<Value> {
@@ -262,13 +262,13 @@ fn duration(e: &mut Engine, p: &Value) -> Result<Value> {
     } else {
         DurationOp::Legato { gap: i64_or(p, "legato", 0).max(0) }
     };
-    midi_op(e, p, move |n| soundcraft_midi::ops::change_duration(n, op))
+    midi_op(e, p, move |n| liviwave_midi::ops::change_duration(n, op))
 }
 
 fn add_note(e: &mut Engine, p: &Value) -> Result<Value> {
     let ids = clip_ids_param(e, p);
     let id = *ids.first().ok_or_else(|| bad("event.midi_note", "`clip` required"))?;
-    let note = soundcraft_midi::Note {
+    let note = liviwave_midi::Note {
         pitch: i64_or(p, "pitch", 60).clamp(0, 127) as u8,
         velocity: i64_or(p, "velocity", 100).clamp(1, 127) as u8,
         release_velocity: 64,
@@ -377,8 +377,8 @@ fn recall_marker(e: &mut Engine, p: &Value) -> Result<Value> {
     let Some(m) = s.markers.get(i).cloned() else { return Err(bad("markers.recall", "gone")) };
     let s = e.session_mut();
     match m.kind {
-        MarkerKind::Marker => s.edit.selection = soundcraft_time::Range::point(m.start),
-        MarkerKind::Selection => s.edit.selection = soundcraft_time::Range::new(m.start, m.end),
+        MarkerKind::Marker => s.edit.selection = liviwave_time::Range::point(m.start),
+        MarkerKind::Selection => s.edit.selection = liviwave_time::Range::new(m.start, m.end),
         MarkerKind::None => {}
     }
     s.edit.playhead = m.start;
@@ -396,7 +396,7 @@ fn step_marker(e: &mut Engine, dir: i64) -> Result<Value> {
     };
     let Some(t) = target else { return Ok(json!({"moved": false})) };
     let s = e.session_mut();
-    s.edit.selection = soundcraft_time::Range::point(t);
+    s.edit.selection = liviwave_time::Range::point(t);
     s.edit.playhead = t;
     e.transport_requests.push(crate::TransportRequest::Locate(t));
     Ok(json!({"at": t}))
@@ -422,7 +422,7 @@ mod tests {
     /// Changing the initial meter keeps a later meter change at its bar (issue #250).
     #[test]
     fn earlier_meter_change_keeps_later_meter_on_its_bar() {
-        use soundcraft_time::BarBeat;
+        use liviwave_time::BarBeat;
         let mut e = crate::Engine::default();
         assert_eq!(e.session().sample_rate.hz(), 48_000);
         e.execute("event.meter", &json!({"numerator": 3, "denominator": 4, "at": 192_000})).unwrap();

@@ -1,11 +1,11 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use liviwave_ui_egui::dialogs::Dialog;
+use liviwave_ui_egui::{Services, SoundApp, dialogs, menus};
 use serde_json::json;
-use soundcraft_ui_egui::dialogs::Dialog;
-use soundcraft_ui_egui::{Services, SoundApp, dialogs, menus};
 
 fn harness() -> Harness<'static, SoundApp> {
-    let app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(
         |ui, app: &mut SoundApp| {
             let ctx = ui.ctx().clone();
@@ -68,7 +68,7 @@ fn closing_a_modified_session_asks_first() {
 
 #[test]
 fn save_in_the_question_saves_before_closing() {
-    let dir = std::env::temp_dir().join(format!("soundcraft-save-changes-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-save-changes-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("Song.scraft").to_string_lossy().into_owned();
 
@@ -98,7 +98,7 @@ fn save_in_the_question_saves_before_closing() {
 
 /// A session the browser read: an empty one, so opening it is easy to see.
 fn session_bytes() -> Vec<u8> {
-    soundcraft_engine::Engine::default().session().to_json().unwrap().into_bytes()
+    liviwave_engine::Engine::default().session().to_json().unwrap().into_bytes()
 }
 
 fn open_bytes(h: &mut Harness<'_, SoundApp>) {
@@ -132,7 +132,7 @@ fn a_session_read_in_the_browser_asks_before_replacing_a_modified_one() {
 
 #[test]
 fn save_in_the_question_saves_before_opening_a_session_read_in_the_browser() {
-    let dir = std::env::temp_dir().join(format!("soundcraft-save-changes-bytes-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-save-changes-bytes-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("Song.scraft").to_string_lossy().into_owned();
 

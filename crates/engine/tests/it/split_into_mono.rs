@@ -1,10 +1,10 @@
 //! Split tracks into mono without replacing the right/surround channels with channel zero.
 
+use liviwave_audio_io::{AudioBuffer, FileFormat};
+use liviwave_engine::{Engine, io};
+use liviwave_model::{ChannelFormat, Clip, Session, SourceAudio, SourceId, TrackId, TrackKind};
+use liviwave_time::Range;
 use serde_json::json;
-use soundcraft_audio_io::{AudioBuffer, FileFormat};
-use soundcraft_engine::{Engine, io};
-use soundcraft_model::{ChannelFormat, Clip, Session, SourceAudio, SourceId, TrackId, TrackKind};
-use soundcraft_time::Range;
 use std::sync::Arc;
 
 fn fixture(format: ChannelFormat, channels: usize) -> (Engine, TrackId, SourceId) {
@@ -22,7 +22,7 @@ fn fixture(format: ChannelFormat, channels: usize) -> (Engine, TrackId, SourceId
     let mut second = clip.clone();
     second.id = s.new_clip_id();
     second.start = 100;
-    second.content = soundcraft_model::ClipContent::Audio { source, offset: 90 };
+    second.content = liviwave_model::ClipContent::Audio { source, offset: 90 };
     s.track_mut(track).unwrap().playlist_mut().unwrap().clips = vec![clip, second];
     (Engine::new(s), track, source)
 }
@@ -38,7 +38,7 @@ fn split_into_mono_preserves_every_channel_and_clip_edit() {
         let (mut e, track, source) = fixture(format, channels);
         let original = e.session().track(track).unwrap().clone();
         let audio = Arc::clone(e.session().pool.get(source).unwrap());
-        let expected = soundcraft_mix::render_clips(e.session(), track, Range::new(0, 192));
+        let expected = liviwave_mix::render_clips(e.session(), track, Range::new(0, 192));
         let tracks = split(&mut e, track);
         assert_eq!(tracks.len(), channels);
         assert_eq!(e.session().track(track).unwrap(), &original);
@@ -48,7 +48,7 @@ fn split_into_mono_preserves_every_channel_and_clip_edit() {
         for (ch, &id) in tracks.iter().enumerate() {
             let mono = e.session().track(id).unwrap();
             assert_eq!(mono.format, ChannelFormat::Mono);
-            let actual = soundcraft_mix::render_clips(e.session(), id, Range::new(0, 192));
+            let actual = liviwave_mix::render_clips(e.session(), id, Range::new(0, 192));
             assert_eq!(actual[0], expected[ch], "{format:?} channel {ch}");
             let mono_source = mono.clips()[0].source().unwrap();
             assert_ne!(mono_source, source);
@@ -63,7 +63,7 @@ fn split_into_mono_preserves_every_channel_and_clip_edit() {
                 let mut expected_clip = original.clone();
                 expected_clip.id = clip.id;
                 expected_clip.name = clip.name.clone();
-                expected_clip.content = soundcraft_model::ClipContent::Audio { source: mono_source, offset: original.source_offset() };
+                expected_clip.content = liviwave_model::ClipContent::Audio { source: mono_source, offset: original.source_offset() };
                 assert_eq!(clip, &expected_clip);
             }
         }
@@ -79,8 +79,8 @@ fn split_stereo_matches_the_original_mix_in_playback_and_bounce_blocks() {
     assert_eq!(e.session().track(tracks[1]).unwrap().name, "Original.R");
     e.session_mut().track_mut(track).unwrap().inactive = true;
     for block in [37, 512, 1024] {
-        let expected = soundcraft_mix::render_range(&original, Range::new(0, 192), block);
-        let actual = soundcraft_mix::render_range(e.session(), Range::new(0, 192), block);
+        let expected = liviwave_mix::render_range(&original, Range::new(0, 192), block);
+        let actual = liviwave_mix::render_range(e.session(), Range::new(0, 192), block);
         assert_eq!(actual, expected, "block {block}");
     }
 }
@@ -94,7 +94,7 @@ fn split_stereo_preserves_distinct_left_and_right_levels() {
     s.track_mut(track).unwrap().playlist_mut().unwrap().clips = vec![clip];
     split(&mut e, track);
     e.session_mut().track_mut(track).unwrap().inactive = true;
-    let audio = soundcraft_mix::render_range(e.session(), Range::new(0, 128), 64);
+    let audio = liviwave_mix::render_range(e.session(), Range::new(0, 128), 64);
     eprintln!("Split into Mono output: L={}, R={}", audio[0][64], audio[1][64]);
     assert_eq!(audio[0][64], 0.2);
     assert_eq!(audio[1][64], 0.7);
@@ -110,8 +110,8 @@ fn split_sources_survive_save_and_reopen_with_distinct_audio_files() {
     let mut reopened = Engine::default();
     assert!(io::open_session_bytes(&mut reopened, "split.scraftz", &bytes).unwrap().is_empty());
     for id in tracks {
-        let expected = soundcraft_mix::render_clips(e.session(), id, Range::new(0, 192));
-        let actual = soundcraft_mix::render_clips(reopened.session(), id, Range::new(0, 192));
+        let expected = liviwave_mix::render_clips(e.session(), id, Range::new(0, 192));
+        let actual = liviwave_mix::render_clips(reopened.session(), id, Range::new(0, 192));
         assert_eq!(actual, expected);
     }
 }
@@ -132,10 +132,10 @@ fn split_tracks_and_sources_undo_and_redo_together() {
 #[test]
 fn split_reuses_a_mono_source_on_a_stereo_track() {
     let (mut e, track, source) = fixture(ChannelFormat::Stereo, 1);
-    let expected = soundcraft_mix::render_clips(e.session(), track, Range::new(0, 192));
+    let expected = liviwave_mix::render_clips(e.session(), track, Range::new(0, 192));
     for id in split(&mut e, track) {
         assert!(e.session().track(id).unwrap().clips().iter().all(|clip| clip.source() == Some(source)));
-        assert_eq!(soundcraft_mix::render_clips(e.session(), id, Range::new(0, 192))[0], expected[0]);
+        assert_eq!(liviwave_mix::render_clips(e.session(), id, Range::new(0, 192))[0], expected[0]);
     }
     assert_eq!(e.session().sources.len(), 1);
 }
@@ -152,7 +152,7 @@ fn missing_or_empty_media_refuses_the_split_without_partial_changes() {
         e.session_mut().track_mut(track).unwrap().playlist_mut().unwrap().clips.push(clip);
         let before = e.session().clone();
         let error = e.execute("track.split_into_mono", &json!({"track": track.0})).unwrap_err();
-        assert!(matches!(error, soundcraft_engine::EngineError::BadParams(..)), "{error}");
+        assert!(matches!(error, liviwave_engine::EngineError::BadParams(..)), "{error}");
         assert_eq!(e.session(), &before);
         assert!(e.undo_history().is_empty());
     }

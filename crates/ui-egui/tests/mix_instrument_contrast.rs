@@ -1,7 +1,7 @@
 use egui::{Color32, Event, FullOutput, Rect, Shape, pos2, vec2};
 use egui_kittest::kittest::Queryable;
+use liviwave_ui_egui::{Services, SoundApp, theme::ThemeMode};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, theme::ThemeMode};
 
 #[derive(Debug)]
 struct Slot {
@@ -76,7 +76,7 @@ fn contrast(a: Color32, b: Color32) -> f64 {
 /// light, dark and system modes, and a plugin change leaves the rest of the session and audio pool intact.
 #[test]
 fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     assert_eq!(app.ui.theme, ThemeMode::Dark);
     // Keep demo audio loaded for the preservation check while isolating the new strips.
     for track in &mut app.engine.session_mut().tracks {
@@ -97,7 +97,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     }
     let session = app.engine.session().clone();
     assert!(!session.pool.is_empty(), "the fixture must include decoded audio");
-    let proof_dir = std::env::var_os("SOUNDCRAFT_MIX_PROOF_DIR").map(std::path::PathBuf::from);
+    let proof_dir = std::env::var_os("LIVIWAVE_MIX_PROOF_DIR").map(std::path::PathBuf::from);
     let mut builder = egui_kittest::Harness::builder().with_size(vec2(1600.0, 1000.0)).with_pixels_per_point(2.0);
     if proof_dir.is_some() {
         builder = builder.wgpu();
@@ -125,7 +125,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
         }
         let ordinary = slot(harness.output(), "SubSynth");
         let insert = slot(harness.output(), "EQ7");
-        let palette = if light { soundcraft_ui_egui::theme::Tokens::LIGHT } else { soundcraft_ui_egui::theme::Tokens::DARK };
+        let palette = if light { liviwave_ui_egui::theme::Tokens::LIGHT } else { liviwave_ui_egui::theme::Tokens::DARK };
         let face = palette.slot_face;
         assert!(near(insert.faces, face), "{name}: insert faces {:?}", insert.faces);
         // The empty instrument track's slot sits beside the populated one, drawn as an empty cell.
@@ -188,7 +188,7 @@ fn populated_mix_instrument_uses_readable_palette_in_real_frames() {
     let app = harness.state();
     let replacement = app.engine.session().track(instrument).unwrap().instrument.as_ref().unwrap();
     assert_eq!(replacement.plugin, "drum_synth");
-    for param in soundcraft_dsp::plugin_info("drum_synth").unwrap().params {
+    for param in liviwave_dsp::plugin_info("drum_synth").unwrap().params {
         assert_eq!(replacement.params.get(param.id), Some(&param.default));
     }
     assert_eq!(app.engine.session().edit.selected_tracks, session.edit.selected_tracks);

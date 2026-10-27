@@ -454,7 +454,7 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
         "engine.commands" => command_list(app, p),
         "engine.parity" => ok(crate::menus::parity()),
         "session.inspect" | "document.inspect" => {
-            ok(soundcraft_engine::inspect::session(&app.engine, p.get("detail").and_then(Value::as_str) == Some("full")))
+            ok(liviwave_engine::inspect::session(&app.engine, p.get("detail").and_then(Value::as_str) == Some("full")))
         }
         "ui.inspect" => {
             let mut v = app.inspect(ctx);
@@ -462,9 +462,9 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
             ok(v)
         }
         "ui.menu.list" => ok(json!(
-            soundcraft_engine::catalog::catalog()
+            liviwave_engine::catalog::catalog()
                 .iter()
-                .map(|e| json!({"path": e, "command": soundcraft_engine::catalog::implemented_by(e, &crate::menus::ui_aliases())}))
+                .map(|e| json!({"path": e, "command": liviwave_engine::catalog::implemented_by(e, &crate::menus::ui_aliases())}))
                 .collect::<Vec<_>>()
         )),
         "ui.menu.invoke" => {
@@ -473,7 +473,7 @@ fn handle(app: &mut SoundApp, ctx: &egui::Context, req: &ControlRequest) -> Opti
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .or_else(|| soundcraft_engine::catalog::implemented_by(path, &crate::menus::ui_aliases()));
+                .or_else(|| liviwave_engine::catalog::implemented_by(path, &crate::menus::ui_aliases()));
             match id {
                 Some(id) => {
                     crate::menus::invoke_menu(app, &id, path);

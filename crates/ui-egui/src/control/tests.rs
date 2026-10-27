@@ -21,7 +21,7 @@ fn raw_input(width: f32, height: f32, max_texture_side: usize) -> RawInput {
 
 /// A demo-backed app with no player, for control tests.
 fn app() -> SoundApp {
-    SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default())
+    SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default())
 }
 
 /// Run one real UI pass: feed raw input, then logic and UI, dropping texture deltas the tests do not inspect.
@@ -85,7 +85,7 @@ fn take_callbacks(out: &egui::FullOutput) -> Vec<egui::ScreenshotCallback> {
 
 /// A process-unique temporary PNG path for one test.
 fn tmp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("soundcraft-shot-{}-{name}.png", std::process::id()))
+    std::env::temp_dir().join(format!("liviwave-shot-{}-{name}.png", std::process::id()))
 }
 
 /// A completed capture writes one file and returns its dimensions once; draining the single completion leaves no

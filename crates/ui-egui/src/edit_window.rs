@@ -6,10 +6,10 @@ use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{groove, level_pos, meter_pos, raised_key, shade};
 use crate::{Gesture, SoundApp, toolbar};
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
+use liviwave_engine::edit as ops;
+use liviwave_model::{AutoParam, Clip, ClipContent, ClipId, EditMode, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
+use liviwave_time::{GridValue, NoteValue, Range, Samples, TimeFormat, format_position};
 use serde_json::json;
-use soundcraft_engine::edit as ops;
-use soundcraft_model::{AutoParam, Clip, ClipContent, ClipId, EditMode, Session, Tool, Track, TrackHeight, TrackId, TrackKind};
-use soundcraft_time::{GridValue, NoteValue, Range, Samples, TimeFormat, format_position};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -97,14 +97,14 @@ fn status_bar(app: &mut SoundApp, ui: &mut Ui) {
         s.name,
         s.sample_rate.hz(),
         match s.bit_depth {
-            soundcraft_model::BitDepthSetting::Int16 => "16-bit",
-            soundcraft_model::BitDepthSetting::Int24 => "24-bit",
-            soundcraft_model::BitDepthSetting::Float32 => "32-bit float",
+            liviwave_model::BitDepthSetting::Int16 => "16-bit",
+            liviwave_model::BitDepthSetting::Int24 => "24-bit",
+            liviwave_model::BitDepthSetting::Float32 => "32-bit float",
         },
         s.tracks.len(),
         app.ui.status
     );
-    soundcraft_model::truncate_chars(&mut left, 4 * soundcraft_model::MAX_NAME_CHARS);
+    liviwave_model::truncate_chars(&mut left, 4 * liviwave_model::MAX_NAME_CHARS);
     ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, left, regular(11.0), t.text_dim);
     let undo = app.engine.undo_label().map_or(String::new(), |l| format!("Undo {l}"));
     ui.painter().text(

@@ -7,11 +7,11 @@ use egui_kittest::{
     Harness,
     kittest::{NodeT, Queryable},
 };
+use liviwave_ui_egui::{Services, SoundApp};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp};
 
 fn harness() -> Harness<'static, SoundApp> {
-    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
     let first = app.engine.session().tracks.first().map(|t| t.id.0).unwrap_or_default();
     app.run("track.group", json!({"name": "Rhythm", "tracks": [first]})).unwrap();
     app.engine.session_mut().edit.selected_tracks.clear();

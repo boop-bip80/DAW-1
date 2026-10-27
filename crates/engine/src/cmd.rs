@@ -1,9 +1,9 @@
 //! The command registry. One module per menu area; each exposes `specs()`.
 
 use crate::{Engine, EngineError, Result};
+use liviwave_model::{ClipId, TrackId};
+use liviwave_time::{Range, Samples};
 use serde_json::Value;
-use soundcraft_model::{ClipId, TrackId};
-use soundcraft_time::{Range, Samples};
 use std::sync::OnceLock;
 
 mod audio_midi;
@@ -55,7 +55,7 @@ mod panic_probe {
         e.clipboard.length = 123;
         e.message("probe");
         e.transport_requests.push(crate::TransportRequest::Play);
-        e.last_selection = Some((soundcraft_time::Range::new(0, 10), Vec::new()));
+        e.last_selection = Some((liviwave_time::Range::new(0, 10), Vec::new()));
         panic!("probe")
     }
 }
@@ -278,7 +278,7 @@ pub fn tracks_required(e: &Engine, cmd: &str, p: &Value) -> Result<Vec<TrackId>>
     if t.is_empty() { Err(bad(cmd, "no tracks: pass `track`/`tracks` or select tracks")) } else { Ok(t) }
 }
 
-pub use soundcraft_time::MAX_POSITION;
+pub use liviwave_time::MAX_POSITION;
 
 /// Position from `key`: a number of samples, or `{"seconds": x}`, or a string in the main counter format.
 /// Values are clamped to ±[`MAX_POSITION`].
@@ -293,7 +293,7 @@ fn position_param_raw(e: &Engine, cmd: &str, p: &Value, key: &str) -> Result<Opt
         return Ok(Some(n));
     }
     if let Some(f) = v.as_f64() {
-        return Ok(Some(soundcraft_time::to_samples(f)));
+        return Ok(Some(liviwave_time::to_samples(f)));
     }
     if let Some(secs) = v.get("seconds").and_then(Value::as_f64) {
         return Ok(Some(s.sample_rate.samples(secs)));
@@ -301,14 +301,14 @@ fn position_param_raw(e: &Engine, cmd: &str, p: &Value, key: &str) -> Result<Opt
     if let Some(text) = v.as_str() {
         // Try each format, starting with an explicit prefix like "bars:5|1|000".
         let (fmt, body) = match text.split_once(':') {
-            Some((f, b)) if soundcraft_time::TimeFormat::from_id(f).is_some() => (soundcraft_time::TimeFormat::from_id(f), b),
+            Some((f, b)) if liviwave_time::TimeFormat::from_id(f).is_some() => (liviwave_time::TimeFormat::from_id(f), b),
             _ => (None, text),
         };
-        let fmts: Vec<soundcraft_time::TimeFormat> = match fmt {
+        let fmts: Vec<liviwave_time::TimeFormat> = match fmt {
             Some(f) => vec![f],
             None => {
                 let mut v = vec![s.edit.main_counter];
-                v.extend(soundcraft_time::TimeFormat::ALL);
+                v.extend(liviwave_time::TimeFormat::ALL);
                 v
             }
         };

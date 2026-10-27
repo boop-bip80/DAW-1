@@ -1,6 +1,6 @@
+use liviwave_engine::Engine;
+use liviwave_model::{ChannelFormat, Session, TrackKind};
 use serde_json::json;
-use soundcraft_engine::Engine;
-use soundcraft_model::{ChannelFormat, Session, TrackKind};
 use std::sync::Arc;
 
 #[test]
@@ -68,7 +68,7 @@ fn unchanged_name_after_truncation_does_not_make_an_undo_step() {
 
 #[test]
 fn routing_folder_rename_preserves_unique_owned_bus_routes_and_history() {
-    use soundcraft_model::{BusId, Route, TrackId};
+    use liviwave_model::{BusId, Route, TrackId};
 
     let stored = "界".repeat(64);
     let first_name = format!("{stored} Bus");
@@ -132,7 +132,7 @@ fn routing_folder_rename_preserves_unique_owned_bus_routes_and_history() {
 
 #[test]
 fn truncated_folder_collision_refuses_bus_and_document_changes_with_redo_pending() {
-    use soundcraft_model::{Route, TrackId};
+    use liviwave_model::{Route, TrackId};
 
     for character in ['B', '界'] {
         let occupied_name: String = std::iter::repeat_n(character, 64).collect();

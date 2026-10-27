@@ -22,7 +22,7 @@ struct Running {
     name: String,
     /// The session rate the audio is decoded for.
     rate: u32,
-    rx: std::sync::mpsc::Receiver<Result<soundcraft_engine::io::DecodedImport, String>>,
+    rx: std::sync::mpsc::Receiver<Result<liviwave_engine::io::DecodedImport, String>>,
 }
 
 impl Imports {
@@ -83,7 +83,7 @@ fn spawn(app: &mut SoundApp, params: Value, ctx: &egui::Context) {
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     let work = move || {
-        let r = soundcraft_engine::io::decode_import(&path, rate).map_err(|e| e.to_string());
+        let r = liviwave_engine::io::decode_import(&path, rate).map_err(|e| e.to_string());
         let _ = tx.send(r);
         ctx.request_repaint();
     };
@@ -161,8 +161,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sc-ui-import-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tone: Vec<f32> = (0..9_600).map(|i| (i as f32 * 0.05).sin() * 0.2).collect();
-        let buf = soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone.clone(), tone] };
-        let bytes = soundcraft_audio_io::encode(&buf, &soundcraft_audio_io::EncodeOptions::default()).unwrap();
+        let buf = liviwave_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![tone.clone(), tone] };
+        let bytes = liviwave_audio_io::encode(&buf, &liviwave_audio_io::EncodeOptions::default()).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_string_lossy().into_owned()
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn import_runs_in_the_background_and_places_one_undoable_clip() {
         let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         let wav = tone_wav("bg.wav");
         start(&mut app, json!({"path": wav, "at": 480}));
         assert!(app.imports.busy());
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn imports_queue_and_a_bad_file_reports_without_stopping_the_rest() {
         let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         let junk = tone_wav("junk.wav");
         std::fs::write(&junk, b"not audio").unwrap();
         let good = tone_wav("good.wav");
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn a_failed_import_stays_on_the_status_line_while_the_next_one_starts() {
         let ctx = egui::Context::default();
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         let junk = tone_wav("junk-status.wav");
         std::fs::write(&junk, b"not audio").unwrap();
         start(&mut app, json!({"path": junk}));

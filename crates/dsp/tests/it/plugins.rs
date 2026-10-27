@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::f32::consts::TAU;
 
-use soundcraft_dsp::{Plugin, Unit, create, db_to_gain, gain_to_db, is_generator, plugin_info, plugins};
+use liviwave_dsp::{Plugin, Unit, create, db_to_gain, gain_to_db, is_generator, plugin_info, plugins};
 
 const SR: f32 = 48_000.0;
 const BLOCK: usize = 512;
@@ -178,10 +178,10 @@ fn param_changes_are_smooth() {
 #[test]
 fn eq_magnitude_at_center_matches_gain() {
     let sr = SR;
-    let resp = soundcraft_dsp::eq7_response(&[("mid_freq", 1000.0), ("mid_gain", 9.0), ("mid_q", 2.0)], &[1000.0, 30.0, 15_000.0], sr);
+    let resp = liviwave_dsp::eq7_response(&[("mid_freq", 1000.0), ("mid_gain", 9.0), ("mid_q", 2.0)], &[1000.0, 30.0, 15_000.0], sr);
     assert!((resp[0] - 9.0).abs() < 0.05, "{resp:?}");
     assert!(resp[1].abs() < 0.2 && resp[2].abs() < 0.2, "{resp:?}");
-    let r1 = soundcraft_dsp::eq1_response(&[("freq", 2500.0), ("gain", -12.0)], &[2500.0], sr);
+    let r1 = liviwave_dsp::eq1_response(&[("freq", 2500.0), ("gain", -12.0)], &[2500.0], sr);
     assert!((r1[0] + 12.0).abs() < 0.05);
 
     // And the real-time EQ agrees with the curve.
@@ -195,7 +195,7 @@ fn eq_magnitude_at_center_matches_gain() {
     assert!((g - 9.0).abs() < 0.2, "measured {g}");
 
     // HPF attenuates lows.
-    let r = soundcraft_dsp::eq7_response(&[("hpf_on", 1.0), ("hpf_freq", 200.0), ("hpf_slope", 3.0)], &[50.0, 200.0, 2000.0], sr);
+    let r = liviwave_dsp::eq7_response(&[("hpf_on", 1.0), ("hpf_freq", 200.0), ("hpf_slope", 3.0)], &[50.0, 200.0, 2000.0], sr);
     assert!(r[0] < -40.0 && (r[1] + 3.0).abs() < 0.2 && r[2].abs() < 0.1, "{r:?}");
 }
 
@@ -326,9 +326,9 @@ fn pitch_shifter_moves_pitch() {
     p.set_param("semitones", 12.0);
     p.reset();
     let out = run(p.as_mut(), &[sine(440.0, 0.5, 48_000)]);
-    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][16_384..], 16_384);
+    let spec = liviwave_dsp::spectrum::magnitude_db(&out[0][16_384..], 16_384);
     let bin = spec.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-    let hz = soundcraft_dsp::spectrum::bin_hz(bin, 16_384, SR);
+    let hz = liviwave_dsp::spectrum::bin_hz(bin, 16_384, SR);
     assert!((hz - 880.0).abs() < 15.0, "peak at {hz}");
 }
 
@@ -508,7 +508,7 @@ fn saturator_adds_harmonics_and_stays_bounded() {
     p.set_param("drive", 30.0);
     let out = run(p.as_mut(), &[sine(1000.0, 1.0, 48_000)]);
     assert!(peak(&out[0]) <= 1.01);
-    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
+    let spec = liviwave_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
     let third = (3000.0 / (SR / 8192.0)) as usize;
     assert!(spec[third - 1..=third + 1].iter().cloned().fold(f32::MIN, f32::max) > -30.0);
 }
@@ -654,7 +654,7 @@ fn zero_crossings(x: &[f32]) -> usize {
 fn ring_mod_makes_sum_and_difference_tones() {
     let mut p = ring_mod(&[("effect", 0.0), ("frequency", 300.0), ("mod_depth", 0.0), ("mix", 100.0)]);
     let out = run(p.as_mut(), &[sine(1000.0, 0.5, 48_000)]);
-    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
+    let spec = liviwave_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
     let (low, high, input) = (band_db(&spec, 700.0), band_db(&spec, 1300.0), band_db(&spec, 1000.0));
     // The two tones fall at different places between bins, so their bin peaks differ a little.
     assert!((low - high).abs() < 2.0, "700 Hz {low} dB, 1300 Hz {high} dB");
@@ -664,11 +664,11 @@ fn ring_mod_makes_sum_and_difference_tones() {
 #[test]
 fn ring_mod_frequency_mod_adds_sidebands() {
     let x = sine(1000.0, 0.5, 48_000);
-    let dry = soundcraft_dsp::spectrum::magnitude_db(&x[8192..], 8192);
+    let dry = liviwave_dsp::spectrum::magnitude_db(&x[8192..], 8192);
     assert!(band_db(&dry, 1000.0) - band_db(&dry, 1200.0) > 40.0);
     let mut p = ring_mod(&[("effect", 1.0), ("frequency", 200.0), ("mix", 100.0)]);
     let out = run(p.as_mut(), &[x]);
-    let spec = soundcraft_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
+    let spec = liviwave_dsp::spectrum::magnitude_db(&out[0][8192..], 8192);
     for hz in [800.0, 1200.0] {
         assert!(band_db(&spec, 1000.0) - band_db(&spec, hz) < 20.0, "no sideband at {hz} Hz");
     }

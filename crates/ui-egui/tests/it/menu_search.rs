@@ -5,11 +5,11 @@ use egui::accesskit::Role;
 use egui::{Key, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use liviwave_model::Route;
+use liviwave_ui_egui::{MainWindow, Services, SoundApp};
 use serde_json::json;
-use soundcraft_model::Route;
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
-fn harness(engine: soundcraft_engine::Engine) -> Harness<'static, SoundApp> {
+fn harness(engine: liviwave_engine::Engine) -> Harness<'static, SoundApp> {
     let mut app = SoundApp::new(engine, None, Services::default());
     app.ui.window = MainWindow::Mix;
     let mut h = Harness::builder().with_size(vec2(1400.0, 1000.0)).build_ui_state(
@@ -39,15 +39,15 @@ fn press(h: &mut Harness<SoundApp>, key: Key) {
 }
 
 /// Built-in plugins whose name holds `text`, as the search lists them.
-fn built_in(instruments: bool, text: &str) -> Vec<&'static soundcraft_dsp::PluginInfo> {
+fn built_in(instruments: bool, text: &str) -> Vec<&'static liviwave_dsp::PluginInfo> {
     let mut found: Vec<_> =
-        soundcraft_dsp::plugins().iter().copied().filter(|p| p.is_instrument == instruments && p.name.to_lowercase().contains(text)).collect();
+        liviwave_dsp::plugins().iter().copied().filter(|p| p.is_instrument == instruments && p.name.to_lowercase().contains(text)).collect();
     found.sort_by_key(|p| p.name.to_lowercase());
     found
 }
 
-fn vox() -> soundcraft_engine::Engine {
-    let mut engine = soundcraft_engine::Engine::default();
+fn vox() -> liviwave_engine::Engine {
+    let mut engine = liviwave_engine::Engine::default();
     engine.execute("track.new", &json!({"name": "Vox"})).unwrap();
     engine
 }
@@ -86,7 +86,7 @@ fn a_menu_opens_with_an_empty_search() {
     assert!(h.query_by_label(built_in(false, "reverb")[0].name).is_none(), "Escape closes the menu");
 
     open(&mut h, "Insert B for Vox");
-    let category = format!("{:?}", soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap().category);
+    let category = format!("{:?}", liviwave_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap().category);
     assert!(h.query_by_label_contains(&category).is_some(), "the old search is gone, so the categories show");
     type_text(&mut h, "zzzz");
     assert!(h.query_by_label("No matches").is_some());
@@ -98,8 +98,8 @@ fn a_menu_opens_with_an_empty_search() {
 /// a secondary click on the now-filled slot.
 #[test]
 fn picks_without_the_search_still_close_the_menu() {
-    let first = soundcraft_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
-    let other = soundcraft_dsp::plugins().iter().find(|p| p.category == first.category && p.id != first.id).unwrap();
+    let first = liviwave_dsp::plugins().iter().find(|p| !p.is_instrument).unwrap();
+    let other = liviwave_dsp::plugins().iter().find(|p| p.category == first.category && p.id != first.id).unwrap();
     let category = format!("{:?}", first.category);
     let mut h = harness(vox());
     for (plugin, click) in [(first, egui::PointerButton::Primary), (other, egui::PointerButton::Secondary)] {
@@ -131,7 +131,7 @@ fn picks_without_the_search_still_close_the_menu() {
 fn an_instrument_menu_searches_as_soon_as_it_opens() {
     let drums = built_in(true, "drum");
     assert!(!drums.is_empty(), "the test needs a built-in drum instrument");
-    let mut engine = soundcraft_engine::Engine::default();
+    let mut engine = liviwave_engine::Engine::default();
     engine.execute("track.new", &json!({"kind": "instrument", "name": "Keys"})).unwrap();
     let mut h = harness(engine);
     h.state_mut().ui.mix_views.push("instruments".into());

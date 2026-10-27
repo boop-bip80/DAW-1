@@ -1,14 +1,14 @@
 //! Synthetic appearance checks for populated shared panels and custom controls.
 use egui::{Color32, vec2};
 use egui_kittest::Harness;
+use liviwave_ui_egui::{Services, SoundApp, theme, widgets};
 use serde_json::json;
-use soundcraft_ui_egui::{Services, SoundApp, theme, widgets};
 
 #[test]
 fn shared_panels_and_controls_follow_manual_and_live_system_appearance() {
     // Keep palette changes in one owning test: upstream custom painters use process-global tokens.
     for scale in [1.0, 2.0] {
-        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::demo::demo_engine(), None, Services::default());
         app.run("edit.select", json!({"tracks":["Keys"]})).unwrap();
         for id in ["window.midi_editor", "window.memory_locations", "window.undo_history"] {
             app.run(id, json!({})).unwrap();
@@ -36,7 +36,7 @@ fn shared_panels_and_controls_follow_manual_and_live_system_appearance() {
                 assert_eq!(theme::is_light(), light);
                 assert_eq!(h.state().ui.theme, mode);
                 assert_eq!(*h.state().engine.session(), session);
-                soundcraft_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
+                liviwave_ui_egui::docking::validate(&h.state().ui.docking).unwrap();
                 if let Some(directory) = std::env::var_os("CRAFT_UI_THEME_SHOTS").map(std::path::PathBuf::from) {
                     std::fs::create_dir_all(&directory).unwrap();
                     h.render().unwrap().save(directory.join(format!("sound-{name}-{width_name}-{scale}x.png"))).unwrap();

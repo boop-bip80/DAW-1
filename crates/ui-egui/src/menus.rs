@@ -2,8 +2,8 @@
 //! that map to a command are live; the rest are shown disabled (and listed in the parity report).
 
 use crate::{MainWindow, SoundApp};
+use liviwave_engine::catalog;
 use serde_json::{Value, json};
-use soundcraft_engine::catalog;
 
 /// UI-layer commands: (id, label, catalog path or "", shortcut).
 pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
@@ -24,7 +24,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.narrow_mix", "Narrow Mix", "View > Narrow Mix", Some("Cmd+Alt+M")),
     ("window.session_info", "Session Info", "", None),
     ("window.audio_health", "Session Audio Health", "", None),
-    ("window.about", "About SoundCraft", "", None),
+    ("window.about", "About LiVi Wave", "", None),
     ("window.close", "Close Window", "Window > Close Window", Some("Cmd+W")),
     ("window.hide_floating", "Hide All Floating Windows", "Window > Hide All Floating Windows", Some("Cmd+Ctrl+W")),
     ("window.midi_editor", "MIDI Editor", "Window > MIDI Editor", None),
@@ -229,8 +229,8 @@ pub fn menu_bar(app: &mut SoundApp, ui: &mut egui::Ui) {
         ui,
         |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("SoundCraft", |ui| {
-                    if ui.button("About SoundCraft").clicked() {
+                ui.menu_button("LiVi Wave", |ui| {
+                    if ui.button("About LiVi Wave").clicked() {
                         app.ui.show_about = true;
                     }
                     if ui.button("Check for Updates…").clicked() {
@@ -304,8 +304,8 @@ fn instrument_menu(app: &mut SoundApp, ui: &mut egui::Ui) {
 }
 
 /// The first selected instrument track, in track order.
-fn instrument_track(s: &soundcraft_model::Session) -> Option<soundcraft_model::TrackId> {
-    s.tracks.iter().find(|t| t.kind == soundcraft_model::TrackKind::Instrument && s.edit.selected_tracks.contains(&t.id)).map(|t| t.id)
+fn instrument_track(s: &liviwave_model::Session) -> Option<liviwave_model::TrackId> {
+    s.tracks.iter().find(|t| t.kind == liviwave_model::TrackKind::Instrument && s.edit.selected_tracks.contains(&t.id)).map(|t| t.id)
 }
 
 fn menu_node(app: &mut SoundApp, ui: &mut egui::Ui, n: &MenuNode, extra: &[(&str, &str)]) {
@@ -344,7 +344,7 @@ pub fn item_state(app: &SoundApp, path: &str, id: Option<&str>) -> (bool, bool) 
         {
             true
         }
-        Some(i) => soundcraft_engine::find_command(i).is_some_and(|c| (c.enabled)(&app.engine).is_ok() && !app.engine.blocked_while_recording(i)),
+        Some(i) => liviwave_engine::find_command(i).is_some_and(|c| (c.enabled)(&app.engine).is_ok() && !app.engine.blocked_while_recording(i)),
         None => false,
     };
     (enabled, checked_state(app, path, id))
@@ -437,7 +437,7 @@ fn params_for(path: &str, id: &str) -> Value {
     }
 }
 
-/// Menu items that open a SoundCraft window when clicked (programmatic calls still run the command).
+/// Menu items that open a LiVi Wave window when clicked (programmatic calls still run the command).
 const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Setup > Appearance", "window.ui_customization"),
     ("Setup > Hardware...", "window.playback_engine"),
@@ -454,7 +454,7 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
 
 /// The shortcut of an engine or window command.
 pub fn shortcut_for(id: &str) -> Option<&'static str> {
-    soundcraft_engine::find_command(id).map_or_else(|| UI_COMMANDS.iter().find(|c| c.0 == id).and_then(|c| c.3), |c| c.shortcut)
+    liviwave_engine::find_command(id).map_or_else(|| UI_COMMANDS.iter().find(|c| c.0 == id).and_then(|c| c.3), |c| c.shortcut)
 }
 
 /// Undo and Redo name the step they would undo or redo; other items keep their catalog label.
@@ -661,7 +661,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         }
         "view.scroll_into_view" => {
             // `track` (id or name), else the first selected track: the palette passes no params.
-            let track = match soundcraft_engine::cmd::track_param(&app.engine, id, p, "track") {
+            let track = match liviwave_engine::cmd::track_param(&app.engine, id, p, "track") {
                 Ok(Some(t)) => t,
                 Ok(None) => match app.engine.session().edit.selected_tracks.first() {
                     Some(t) => *t,
@@ -738,7 +738,7 @@ mod tests {
 
     #[test]
     fn programmatic_dialog_commands_stay_closed_and_the_menu_opens_them() {
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         let err = app.run("ui.new_tracks_dialog", json!({})).unwrap_err();
         assert!(err.contains("track.new"), "{err}");
         let err = app.run("ui.bounce_dialog", json!({})).unwrap_err();
@@ -754,14 +754,14 @@ mod tests {
 
     #[test]
     fn save_asks_for_a_path_until_the_session_has_one() {
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         invoke_menu(&mut app, "session.save", "File > Save Session");
         assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, .. }) if cmd == "session.save_as"));
         app.dialogs.open = None;
         assert!(invoke_shortcut_dialog(&mut app, "session.save"));
         app.dialogs.open = None;
 
-        let dir = std::env::temp_dir().join(format!("soundcraft-save-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("liviwave-save-{}", std::process::id()));
         let path = dir.join("Song.scraft");
         app.run("session.save_as", json!({"path": path.to_string_lossy()})).unwrap();
         app.run("track.new", json!({})).unwrap();
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn track_instrument_menu_targets_the_selected_instrument_track() {
-        let mut e = soundcraft_engine::Engine::default();
+        let mut e = liviwave_engine::Engine::default();
         let audio = e.execute("track.new", &json!({"kind": "audio"})).unwrap()["tracks"][0].as_u64().unwrap();
         assert_eq!(instrument_track(e.session()), None);
         let inst = e.execute("track.new", &json!({"kind": "instrument"})).unwrap()["tracks"][0].as_u64().unwrap();
@@ -786,10 +786,10 @@ mod tests {
 
     #[test]
     fn audiosuite_sci_fi_opens_the_ring_modulator() {
-        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
         invoke_menu(&mut app, "audiosuite.process", "AudioSuite > Modulation > Sci-Fi");
         assert_eq!(app.ui.audiosuite.as_deref(), Some("ring_mod"));
-        let info = soundcraft_dsp::plugin_info("ring_mod").unwrap();
-        assert!(info.audiosuite && info.category == soundcraft_dsp::Category::Modulation);
+        let info = liviwave_dsp::plugin_info("ring_mod").unwrap();
+        assert!(info.audiosuite && info.category == liviwave_dsp::Category::Modulation);
     }
 }

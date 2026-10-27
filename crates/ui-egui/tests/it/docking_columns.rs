@@ -4,9 +4,9 @@ use craft_ui::docking::{Column, Divider, DockArea, Group, Hit, Node, Side};
 use craft_ui::layout::{SplitAxis, SplitSize};
 use egui::{Rect, accesskit::Role};
 use egui_kittest::kittest::Queryable;
+use liviwave_ui_egui::docking::{self, CLIPS_WIDTH, MIDI_HEIGHT, Panel, TRACKS_WIDTH};
+use liviwave_ui_egui::{MainWindow, Services, SoundApp, UiState};
 use serde_json::json;
-use soundcraft_ui_egui::docking::{self, CLIPS_WIDTH, MIDI_HEIGHT, Panel, TRACKS_WIDTH};
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp, UiState};
 
 use super::docking_workflows::{drag, harness};
 
@@ -67,7 +67,7 @@ fn default_layouts_put_the_side_lists_in_full_height_dock_columns() {
     h.run_steps(3);
     let tracks = h.get_by_role_and_label(Role::Tab, "Tracks and Groups").rect();
     let clips = h.get_by_role_and_label(Role::Tab, "Clips").rect();
-    let midi = h.ctx.data(|data| data.get_temp::<Rect>(egui::Id::unique("soundcraft-midi-body"))).unwrap();
+    let midi = h.ctx.data(|data| data.get_temp::<Rect>(egui::Id::unique("liviwave-midi-body"))).unwrap();
     assert!(tracks.left() < TRACKS_WIDTH && clips.right() > width - CLIPS_WIDTH, "tracks {tracks:?}, clips {clips:?}");
     assert!(midi.left() >= TRACKS_WIDTH && midi.right() <= width - CLIPS_WIDTH, "midi {midi:?}");
     assert!((midi.height() - MIDI_HEIGHT).abs() < 1.0 && midi.top() > clips.bottom(), "midi {midi:?}");
@@ -228,7 +228,7 @@ fn split_frame_settings() -> serde_json::Value {
         "second": {"Tabs": {"panels": ["canvas"], "active": 0}}
     }}, "floating": []}});
     let mut settings =
-        serde_json::to_value(UiState { theme: soundcraft_ui_egui::theme::ThemeMode::Light, narrow_mix: true, ..Default::default() }).unwrap();
+        serde_json::to_value(UiState { theme: liviwave_ui_egui::theme::ThemeMode::Light, narrow_mix: true, ..Default::default() }).unwrap();
     let fields = settings.as_object_mut().unwrap();
     fields.remove("docking_version");
     fields.insert("docking".into(), edit);
@@ -246,14 +246,14 @@ fn split_frame_settings_load_as_the_dock_defaults_and_dock_layouts_round_trip() 
     assert_eq!(state.docking, docking::edit_default());
     assert_eq!(state.mix_docking, docking::mix_default());
     assert_eq!(state.docking_version, docking::LAYOUT_VERSION);
-    assert_eq!(state.theme, soundcraft_ui_egui::theme::ThemeMode::Light);
+    assert_eq!(state.theme, liviwave_ui_egui::theme::ThemeMode::Light);
     assert!(state.narrow_mix);
 
     // A configuration saved before dock columns resets the same way when recalled.
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     app.run("ui.dock", json!({"operation":"float","panel":"tracks","rect":[80,90,260,400]})).unwrap();
     app.ui.configurations = vec![("Old".into(), split_frame_settings())];
-    soundcraft_ui_egui::windows::recall_configuration(&mut app, &split_frame_settings()).unwrap();
+    liviwave_ui_egui::windows::recall_configuration(&mut app, &split_frame_settings()).unwrap();
     assert_eq!(app.ui.docking, docking::edit_default());
     assert_eq!(app.ui.mix_docking, docking::mix_default());
     assert!(app.ui.narrow_mix && app.ui.configurations.len() == 1);

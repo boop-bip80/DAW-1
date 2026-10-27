@@ -1,12 +1,12 @@
 use super::*;
 use crate::Engine;
-use soundcraft_audio_io::{AudioBuffer, EncodeOptions};
-use soundcraft_model::ChannelFormat;
+use liviwave_audio_io::{AudioBuffer, EncodeOptions};
+use liviwave_model::ChannelFormat;
 
 fn tone_wav(dir: &std::path::Path, name: &str) -> String {
     let tone: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.1).sin() * 0.2).collect();
     let buf = AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
-    let bytes = soundcraft_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
+    let bytes = liviwave_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
     path.to_string_lossy().into_owned()
@@ -147,7 +147,7 @@ fn bounce_source_renders_the_named_bus() {
     let track = e.session().tracks[0].id;
     {
         let tr = e.session_mut().track_mut(track).unwrap();
-        let mut send = soundcraft_model::SendSlot::new(soundcraft_model::Route::Bus(stem));
+        let mut send = liviwave_model::SendSlot::new(liviwave_model::Route::Bus(stem));
         send.level_db = -12.0;
         tr.mixer.sends[0] = Some(send);
     }
@@ -195,7 +195,7 @@ fn remove_media(dir: &std::path::Path) {
 #[test]
 fn session_open_reports_missing_media() {
     let mut e = crate::demo::demo_engine();
-    let dir = std::env::temp_dir().join(format!("soundcraft-open-missing-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-open-missing-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("Gone.scraft").to_string_lossy().into_owned();
     e.execute("session.save_as", &json!({"path": path})).unwrap();
@@ -210,7 +210,7 @@ fn session_open_reports_missing_media() {
 
 #[test]
 fn saving_a_session_without_audio_creates_its_folder() {
-    let dir = std::env::temp_dir().join(format!("soundcraft-new-folder-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-new-folder-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("Song").join("Song.scraft");
     Engine::default().execute("session.save_as", &json!({"path": path.to_string_lossy()})).unwrap();
@@ -224,9 +224,9 @@ fn tone_engine() -> (Engine, u64) {
     let track = e.session().tracks[0].id;
     let tone: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
     let buf = AudioBuffer { sample_rate: 48_000, channels: vec![tone] };
-    let src = crate::io::add_source(e.session_mut(), "tone", buf, None, soundcraft_audio_io::FileFormat::Wav);
+    let src = crate::io::add_source(e.session_mut(), "tone", buf, None, liviwave_audio_io::FileFormat::Wav);
     let id = e.session_mut().new_clip_id();
-    crate::edit::place_clip(e.session_mut(), track, soundcraft_model::Clip::audio(id, "tone", src, 0, 0, 4_800));
+    crate::edit::place_clip(e.session_mut(), track, liviwave_model::Clip::audio(id, "tone", src, 0, 0, 4_800));
     e.session_mut().edit.selected_tracks = vec![track];
     (e, track.0)
 }
@@ -237,7 +237,7 @@ fn same_named_clips_export_as_separate_files() {
     let first = e.session().tracks[0].clips()[0].id;
     let src = e.session().tracks[0].clips()[0].source().unwrap();
     let second = e.session_mut().new_clip_id();
-    crate::edit::place_clip(e.session_mut(), soundcraft_model::TrackId(track), soundcraft_model::Clip::audio(second, "tone", src, 0, 10_000, 4_800));
+    crate::edit::place_clip(e.session_mut(), liviwave_model::TrackId(track), liviwave_model::Clip::audio(second, "tone", src, 0, 10_000, 4_800));
     for id in [first, second] {
         e.session_mut().find_clip_mut(id).unwrap().name = "Take".into();
     }
@@ -255,7 +255,7 @@ fn same_named_clips_export_as_separate_files() {
 #[test]
 fn exports_the_selected_clips_and_refuses_an_empty_selection() {
     let mut e = crate::demo::demo_engine();
-    let dir = std::env::temp_dir().join(format!("soundcraft-clips-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("liviwave-clips-{}", std::process::id()));
     let p = json!({"dir": dir.to_string_lossy()});
     e.execute("edit.select_none", &json!({})).unwrap();
     assert!(e.execute("file.export_clips", &p).is_err());
@@ -267,8 +267,8 @@ fn exports_the_selected_clips_and_refuses_an_empty_selection() {
 }
 
 fn midi_engine() -> Engine {
-    use soundcraft_midi::{CtrlEvent, CtrlKind, Note, Sequence};
-    use soundcraft_model::{ChannelFormat, Clip, TrackKind};
+    use liviwave_midi::{CtrlEvent, CtrlKind, Note, Sequence};
+    use liviwave_model::{ChannelFormat, Clip, TrackKind};
     let mut s = Session::default();
     let keys = s.add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Keys"));
     let drums = s.add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Drums"));
@@ -287,11 +287,11 @@ fn midi_engine() -> Engine {
 }
 
 fn cc_numbers(bytes: &[u8]) -> Vec<(String, u8, i32)> {
-    let smf = soundcraft_midi::read_smf(bytes).unwrap();
+    let smf = liviwave_midi::read_smf(bytes).unwrap();
     let mut out = Vec::new();
     for t in &smf.tracks {
         for c in &t.sequence.ctrls {
-            if let soundcraft_midi::CtrlKind::Cc(n) = c.kind {
+            if let liviwave_midi::CtrlKind::Cc(n) = c.kind {
                 out.push((t.name.clone(), n, c.value));
             }
         }
@@ -327,7 +327,7 @@ fn midi_export_keeps_controllers_and_honours_tracks() {
 fn import_surround_creates_a_matching_track() {
     let channels: Vec<Vec<f32>> = (0..6).map(|ch| vec![0.1 * (ch as f32 + 1.0); 32]).collect();
     let buf = AudioBuffer { sample_rate: 48_000, channels };
-    let bytes = soundcraft_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
+    let bytes = liviwave_audio_io::encode(&buf, &EncodeOptions::default()).unwrap();
     let mut e = Engine::default();
     let v = crate::io::import_audio_bytes(&mut e, "bed.wav", &bytes, None, None, 0).unwrap();
     assert_eq!(v["channels"], 6);

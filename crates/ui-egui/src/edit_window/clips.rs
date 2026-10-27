@@ -52,7 +52,7 @@ pub(super) fn clip_name_height(s: &Session, lane: Rect) -> f32 {
     if lane.height() >= 40.0 && s.edit.flag("view.clip.name") { 13.0 } else { 0.0 }
 }
 
-pub(super) fn fade_curve_points(fade: soundcraft_model::Fade, fade_in: bool, a: f32, b: f32, body: Rect, pixels_per_point: f32) -> Vec<Pos2> {
+pub(super) fn fade_curve_points(fade: liviwave_model::Fade, fade_in: bool, a: f32, b: f32, body: Rect, pixels_per_point: f32) -> Vec<Pos2> {
     let scale = if pixels_per_point.is_finite() { pixels_per_point.clamp(0.5, 4.0) } else { 1.0 };
     let extent = (b - a).abs().max(body.height().abs()) * scale;
     let extent = if extent.is_finite() { extent.clamp(64.0, 4096.0) } else { 64.0 };
@@ -71,14 +71,14 @@ pub(super) fn fade_curve_points(fade: soundcraft_model::Fade, fade_in: bool, a: 
         .collect()
 }
 
-pub(super) fn fade_control_position(fade: soundcraft_model::Fade, a: f32, b: f32, body: Rect) -> Pos2 {
+pub(super) fn fade_control_position(fade: liviwave_model::Fade, a: f32, b: f32, body: Rect) -> Pos2 {
     let padding = body.height().clamp(0.0, 8.0) * 0.5;
     let y = body.max.y - body.height() * fade.gain(0.5);
     // Keep the whole handle inside the body when a bend approaches an edge.
     pos2((a + b) * 0.5, y.max(body.min.y + padding).min(body.max.y - padding))
 }
 
-fn clip_preview_fades(clip: &Clip, gesture: Option<&Gesture>) -> (soundcraft_model::Fade, soundcraft_model::Fade) {
+fn clip_preview_fades(clip: &Clip, gesture: Option<&Gesture>) -> (liviwave_model::Fade, liviwave_model::Fade) {
     let (mut fade_in, mut fade_out) = (clip.fade_in, clip.fade_out);
     match gesture {
         Some(Gesture::Fade { clip: id, fade_in: side, to, .. }) if *id == clip.id => {
@@ -106,11 +106,11 @@ fn clip_preview_fades(clip: &Clip, gesture: Option<&Gesture>) -> (soundcraft_mod
 pub(super) fn draw_live_take(app: &SoundApp, painter: &egui::Painter, s: &Session, track: &Track, tl: Rect, lane: Rect) {
     let Some(rec) = &app.recorder else { return };
     let Some(take) = rec.live_take(track.id) else { return };
-    let block_len = soundcraft_playback::record::LIVE_BLOCK as f64 * s.sample_rate.as_f64() / f64::from(rec.sample_rate.max(1));
-    let len = soundcraft_time::to_samples(take.first().map_or(0, Vec::len) as f64 * block_len);
+    let block_len = liviwave_playback::record::LIVE_BLOCK as f64 * s.sample_rate.as_f64() / f64::from(rec.sample_rate.max(1));
+    let len = liviwave_time::to_samples(take.first().map_or(0, Vec::len) as f64 * block_len);
     let sel = s.edit.selection;
     let (start, pass) = if s.edit.loop_record && !sel.is_empty() { (sel.start, Some(sel.len())) } else { (app.record_start, None) };
-    let Some((origin, span)) = soundcraft_engine::io::live_span(start, pass, app.punch, len) else { return };
+    let Some((origin, span)) = liviwave_engine::io::live_span(start, pass, app.punch, len) else { return };
     let r = Rect::from_min_max(pos2(x_of(s, tl, span.start), lane.min.y + 1.0), pos2(x_of(s, tl, span.end), lane.max.y - 1.0));
     let t = Tokens::current();
     let (body, _, wave) = clip_colors([t.rec.r(), t.rec.g(), t.rec.b()], false);

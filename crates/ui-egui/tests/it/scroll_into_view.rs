@@ -4,13 +4,13 @@
 use egui::{Event, Modifiers, PointerButton, Pos2, Shape, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
+use liviwave_ui_egui::{MainWindow, Services, SoundApp};
 use serde_json::json;
-use soundcraft_ui_egui::{MainWindow, Services, SoundApp};
 
 const SIZE: (f32, f32) = (1400.0, 900.0);
 
 fn harness(tracks: usize) -> Harness<'static, SoundApp> {
-    let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+    let mut app = SoundApp::new(liviwave_engine::Engine::default(), None, Services::default());
     for i in 1..=tracks {
         app.run("track.new", json!({"name": format!("T{i:02}")})).unwrap();
     }
@@ -100,7 +100,7 @@ fn near_the_end_it_scrolls_only_as_far_as_the_scroll_bar_goes() {
 fn from_the_mix_the_clicked_strip_goes_left_and_the_edit_window_follows() {
     let mut h = harness(20);
     let t03 = track_id(&h, "T03");
-    h.state_mut().engine.session_mut().edit.selected_tracks = vec![soundcraft_model::TrackId(t03)];
+    h.state_mut().engine.session_mut().edit.selected_tracks = vec![liviwave_model::TrackId(t03)];
     h.state_mut().ui.window = MainWindow::Mix;
     h.run_steps(4);
     let first = plate(&h, "T01").expect("the first strip's name").x;
@@ -110,7 +110,7 @@ fn from_the_mix_the_clicked_strip_goes_left_and_the_edit_window_follows() {
 
     let now = plate(&h, "T08").expect("T08 still on screen").x;
     assert!((now - first).abs() < 1.0, "T08 is the leftmost strip: at {now}, the first was at {first}");
-    assert_eq!(h.state().engine.session().edit.selected_tracks, vec![soundcraft_model::TrackId(t03)], "the selection is left alone");
+    assert_eq!(h.state().engine.session().edit.selected_tracks, vec![liviwave_model::TrackId(t03)], "the selection is left alone");
 
     h.state_mut().ui.window = MainWindow::Edit;
     h.run_steps(4);
