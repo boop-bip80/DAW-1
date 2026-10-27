@@ -164,6 +164,29 @@ fn alt_click_returns_clip_effects_sliders_and_value_boxes_to_their_defaults() {
 }
 
 #[test]
+fn fallback_audiosuite_sliders_reset_with_alt_click() {
+    for (process, label, id, default) in [
+        ("normalize", "Peak dB", "target_db", -0.1f32),
+        ("time_stretch", "Length ratio", "ratio", 1.0),
+        ("pitch_shift", "Semitones", "semitones", 0.0),
+    ] {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.ui.audiosuite = Some(process.into());
+        let mut h = harness(app);
+        let read = |h: &Harness<'_, SoundApp>| -> BTreeMap<String, f32> {
+            h.ctx.data(|d| d.get_temp(Id::unique(("as_params", process.to_string())))).unwrap_or_default()
+        };
+        let rail = h.get_by_role_and_label(Role::Slider, label).rect();
+        move_to(&mut h, near_left(rail));
+        press(&mut h, near_left(rail), true, Modifiers::NONE);
+        press(&mut h, near_left(rail), false, Modifiers::NONE);
+        assert_ne!(read(&h)[id], default, "{process}: plain click did not move the value");
+        alt_press(&mut h, near_left(rail), 0.0);
+        assert_eq!(read(&h)[id], default, "{process}: Alt-click did not restore the default");
+    }
+}
+
+#[test]
 fn alt_click_returns_audiosuite_parameter_sliders_to_their_defaults() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     app.ui.audiosuite = Some("compressor".into());
