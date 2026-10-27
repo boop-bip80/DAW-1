@@ -11,12 +11,12 @@ The reference corpora are GPL-licensed, so this committed report records only te
 
 | verdict | count |
 |---|---:|
-| consensus | 175 |
-| differs | 58 |
+| consensus | 179 |
+| differs | 59 |
 | split | 43 |
-| no-data | 802 |
+| no-data | 812 |
 
-Catalog keys compared: 1078 (deduplicated, length ≥ 3).
+Catalog keys compared: 1093 (deduplicated, length ≥ 3).
 
 
 ## Majority differs from our wording (review first)
@@ -53,6 +53,7 @@ Catalog keys compared: 1078 (deduplicated, length ≥ 3).
 | Open Recent | 打开最近项 | 0/3 | differs |
 | Parent folder | 父文件夹 | 0/1 | differs |
 | Pre-roll | 预卷 | 0/1 | differs |
+| Preset name | 预置名称 | 0/1 | differs |
 | Presets ▾ | 预设 ▾ | 0/2 | differs |
 | Start | 开头 | 0/4 | differs |
 | Strength % | 强度 % | 0/1 | differs |
@@ -140,6 +141,7 @@ Catalog keys compared: 1078 (deduplicated, length ≥ 3).
 | Audio... | 音频... | 5/5 | consensus |
 | Automation | 自动化 | 1/1 | consensus |
 | Chord Symbols | 和弦符号 | 1/1 | consensus |
+| Check for Updates… | 检查更新… | 1/1 | consensus |
 | Clear | 清除 | 5/6 | consensus |
 | Comments | 注释 | 2/3 | consensus |
 | Continuous | 连续 | 1/1 | consensus |
@@ -149,6 +151,8 @@ Catalog keys compared: 1078 (deduplicated, length ≥ 3).
 | Default | 默认 | 3/4 | consensus |
 | Delay | 延迟 | 2/2 | consensus |
 | Delete | 删除 | 5/5 | consensus |
+| Disable | 停用 | 2/3 | consensus |
+| Enable | 启用 | 4/4 | consensus |
 | Edit | 编辑 | 4/5 | consensus |
 | Export | 导出 | 5/6 | consensus |
 | File | 文件 | 4/5 | consensus |
@@ -177,6 +181,7 @@ Catalog keys compared: 1078 (deduplicated, length ≥ 3).
 | None | 无 | 6/6 | consensus |
 | Normalize | 标准化 | 2/3 | consensus |
 | Open | 打开 | 5/6 | consensus |
+| Open folder | 打开文件夹 | 1/1 | consensus |
 | Options | 选项 | 4/5 | consensus |
 | Paste | 粘贴 | 4/5 | consensus |
 | Peak | 峰值 | 3/3 | consensus |

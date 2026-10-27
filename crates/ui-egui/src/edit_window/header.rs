@@ -50,7 +50,7 @@ pub(super) fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head:
     ui.painter().circle_filled(round.center(), 5.0, shade(strip, if rresp.hovered() { 0.6 } else { 0.45 }));
     arrow(ui.painter(), round.center(), !track.is_folder() || track.folder_open, ink);
     if track.is_folder() {
-        if rresp.on_hover_text(if track.folder_open { "Close folder" } else { "Open folder" }).clicked() {
+        if rresp.on_hover_text(crate::i18n::t(if track.folder_open { "Close folder" } else { "Open folder" })).clicked() {
             let _ = app.run("track.folder_toggle", json!({"track": id.0}));
         }
     } else {
@@ -65,7 +65,7 @@ pub(super) fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head:
         ui.painter().line_segment([a, b], Stroke::new(1.0, ink));
         ui.painter().circle_filled(a, 1.3, ink);
         ui.painter().circle_filled(b, 1.3, ink);
-        if aresp.on_hover_text(if showing { "Hide automation" } else { "Show volume automation" }).clicked() {
+        if aresp.on_hover_text(crate::i18n::t(if showing { "Hide automation" } else { "Show volume automation" })).clicked() {
             let view = if !showing {
                 "volume"
             } else if track.kind.is_midi() {

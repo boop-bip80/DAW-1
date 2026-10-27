@@ -147,7 +147,9 @@ fn renderer(app: &mut SoundApp, ctx: &egui::Context) {
                         .color(t.text_dim),
                 );
             } else {
-                ui.label(egui::RichText::new(format!("{} object track(s)", objects.len())).small().color(t.text_dim));
+                let count = objects.len() as u64;
+                let text = crate::i18n::trn(crate::i18n::current(), count, "{n} object track", "{n} object tracks");
+                ui.label(egui::RichText::new(text).small().color(t.text_dim));
             }
         });
     app.extra.show_renderer = open;

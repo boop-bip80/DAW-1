@@ -2,7 +2,7 @@ use super::*;
 
 /// One recallable memory-location row: number button, editable name, time, length, kind and delete.
 fn memory_location_row(app: &mut SoundApp, ui: &mut Ui, n: u32, name: &str, loc: &str, len: &str, kind: &str) {
-    if ui.button(n.to_string()).on_hover_text("Recall").clicked() {
+    if ui.button(n.to_string()).on_hover_text(crate::i18n::t("Recall")).clicked() {
         let _ = app.run("markers.recall", json!({"number": n}));
     }
     let key = egui::Id::unique(("mem_name", n));

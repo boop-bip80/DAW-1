@@ -127,7 +127,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
                     let _ = app.run("edit.select", json!({"tracks": members, "exact": true}));
                     ui.close();
                 }
-                if ui.button(if active { "Disable" } else { "Enable" }).clicked() {
+                if ui.button(crate::i18n::t(if active { "Disable" } else { "Enable" })).clicked() {
                     let _ = app.run("track.group_toggle", json!({"group": id}));
                     ui.close();
                 }

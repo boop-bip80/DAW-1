@@ -112,6 +112,7 @@
 	Clip Groups...	片段组...
 	Clip List	片段列表
 	Close All Workspaces	关闭全部工作区
+	Close folder	关闭文件夹
 	Close Session	关闭会话
 	Close Window	关闭窗口
 	Coalesce Clip Gain to Volume Automation	将片段增益合并到音量自动化
@@ -156,6 +157,7 @@
 	Designate as Target Playlist	指定为目标播放列表
 	Destructive Record	破坏性录音
 	DestructivePunch	破坏性穿插
+	Disable	停用
 	Disk Allocation...	磁盘分配...
 	Disk Usage	磁盘用量
 	Display on All Channels	在所有通道上显示
@@ -173,6 +175,7 @@
 	Dyn3 Expander/Gate	Dyn3 扩展器/噪声门
 	Dynamic Transport	动态走带
 	Dynamics	动态
+	Enable	启用
 	EQ	均衡
 	EQ Curve	均衡曲线
 	EQ3 1-Band	EQ3 单段
@@ -224,6 +227,7 @@
 	Harmonic	谐波
 	Heal Separation	修复分离
 	Hide All Floating Windows	隐藏全部浮动窗口
+	Hide automation	隐藏自动化
 	I/O	I/O
 	I/O...	I/O...
 	Identify Beat...	识别节拍...
@@ -332,6 +336,7 @@
 	Object	对象
 	On Grid	在网格
 	Open	打开
+	Open folder	打开文件夹
 	Options	选项
 	Original Time Stamp	原始时间戳
 	Other	其他
@@ -404,6 +409,7 @@
 	S-Curve...	S 曲线...
 	Scroll Into View	滚动到可见位置
 	Set Preferences	设置首选项
+	Show volume automation	显示音量自动化
 	SIP (Solo In Place)	就地独奏 (SIP)
 	Samples	采样
 	SansAmp PSA-1	SansAmp PSA-1
@@ -1000,6 +1006,7 @@ automation	trim	微调
 	{note} dotted triplet	附点 {note}三连音
 	{value} sec	{value} 秒
 @plural	{n} frame|{n} frames	{n} 帧
+@plural	{n} object track|{n} object tracks	{n} 条对象轨道
 	1 msec	1 毫秒
 	10 msec	10 毫秒
 	100 msec	100 毫秒
