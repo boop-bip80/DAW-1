@@ -396,6 +396,8 @@ pub struct SoundApp {
     fonts_ready: bool,
     /// The language code the installed font fallback order was built for.
     fonts_language: Option<&'static str>,
+    /// Whether the system fonts are loaded next to the bundled ones; set before the first frame.
+    system_fonts: bool,
     /// The palette last applied to the context (light?), so visuals are set only on a change.
     theme_applied: Option<bool>,
     /// Last panel host context, used to cancel renderer-owned gestures on explicit replacement.

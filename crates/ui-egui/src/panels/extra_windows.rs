@@ -198,7 +198,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
             );
             crate::widgets::checkbox(ui, &mut app.extra.reduce_motion, crate::i18n::t("Reduce motion"));
             let mut chosen = None;
-            egui::ComboBox::from_label(crate::i18n::t("Theme")).selected_text(crate::i18n::t(app.ui.theme.label())).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_label(crate::i18n::t("Theme")).selected_text(crate::i18n::t(app.ui.theme.label())).show_ui(ui, |ui| {
                 for mode in crate::theme::ThemeMode::ALL {
                     if ui.selectable_label(app.ui.theme == mode, crate::i18n::t(mode.label())).clicked() {
                         chosen = Some(mode);
@@ -213,7 +213,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
             let mut chosen: Option<String> = None;
             let auto_label = crate::i18n::fmt(crate::i18n::t("Auto ({name})"), &[("name", crate::i18n::system_lang().name())]);
             let selected = if automatic { auto_label.clone() } else { crate::i18n::Lang::from_pref(&draft).name().to_string() };
-            egui::ComboBox::from_label(crate::i18n::t("Language")).selected_text(selected).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_label(crate::i18n::t("Language")).selected_text(selected).show_ui(ui, |ui| {
                 if ui.selectable_label(automatic, &auto_label).clicked() {
                     chosen = Some("auto".to_string());
                 }

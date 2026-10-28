@@ -65,5 +65,6 @@ here. The subset uses default_fonts; the parent face uses monochrome_emoji_fonts
 | `docs/images/` | SoundCraft contributors | screenshots of SoundCraft rendered from the synthesised demo session | MIT OR Apache-2.0 |
 | `assets/fonts/NotoSansSC-SoundCraftSubset.ttf` | Google LLC / Noto Project Authors | Noto Sans SC variable font, subset to the UI glyph set and pinned at weight 400 (generated with fontTools) | SIL Open Font License 1.1 (`assets/fonts/OFL.txt`) |
 | `assets/fonts/OFL.txt` | Noto Project Authors / SIL | SIL Open Font License 1.1 text | OFL-1.1 |
+| `crates/audio-io/tests/fixtures/` | SoundCraft contributors | original test tones and silence generated with ffmpeg (sine) or by hand; commands in `crates/audio-io/tests/fixtures/README.md` | MIT OR Apache-2.0 |
 | `crates/ui-egui/src/i18n/zh-hans.tsv` | SoundCraft contributors (AI-assisted) | original translation of SoundCraft's English source keys (clean-room; no proprietary translation resources) | MIT OR Apache-2.0 |
 | `crates/ui-egui/src/i18n/LICENSE-translations.txt` | SoundCraft contributors (AI-assisted) | original clean-room statement and translation license | MIT OR Apache-2.0 |

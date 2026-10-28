@@ -859,7 +859,7 @@ automation	trim	微调
 
 # --- Sentence glue in composite dialogs ---
 	new	个新
-	in	时基
+	in	使用
 	bpm	BPM
 	no insert	无插入
 	new bus...	新建总线...
@@ -1206,3 +1206,7 @@ automation	trim	微调
 	Zoom preset (click to recall, Cmd-click to store)	缩放预设（点击召回，Cmd+点击存储）
 	marker	标记
 	selection	选区
+	Channel format	声道格式
+	Track kind	轨道类型
+	Timebase	时基
+	Search buses…	搜索总线…
