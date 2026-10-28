@@ -4,7 +4,7 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipContent, ClipId, Tool};
+use soundcraft_model::{ClipContent, ClipId, Tool, TrackId};
 use soundcraft_time::TICKS_PER_QUARTER;
 
 const KEY_W: f32 = 48.0;
@@ -19,6 +19,9 @@ pub struct MidiEditorState {
     pub clip: Option<ClipId>,
     /// Rubber-band selection start (screen position).
     pub band: Option<egui::Pos2>,
+    /// The note sounding on the track's instrument while a key or note is held, and which player
+    /// it was sent to: a player rebuilt mid-press has heard nothing, so the note goes again.
+    pub audition: Option<(u64, TrackId, u8)>,
 }
 
 impl MidiEditorState {
@@ -68,8 +71,41 @@ fn is_black(p: i32) -> bool {
     matches!(p.rem_euclid(12), 1 | 3 | 6 | 8 | 10)
 }
 
+/// Sound `want` on the instrument, releasing the note that was sounding.
+/// What the player that is running now is playing: nothing when the note went to an earlier one.
+fn held_on(now: u64, audition: Option<(u64, TrackId, u8)>) -> Option<(TrackId, u8)> {
+    match audition {
+        Some((sent, t, p)) if sent == now => Some((t, p)),
+        _ => None,
+    }
+}
+
+fn audition(app: &mut SoundApp, want: Option<(TrackId, u8, u8)>) {
+    let now = app.player_gen;
+    let held = held_on(now, app.midi.audition);
+    if held == want.map(|(t, p, _)| (t, p)) {
+        return;
+    }
+    // Only what actually reached the player is remembered: with no player (no audio, or one being
+    // recreated by a control request) the note has to be sent when it comes back.
+    if let Some(player) = &app.player {
+        if let Some((t, p)) = held {
+            player.note(t, p, 0);
+        }
+        if let Some((t, p, v)) = want {
+            player.note(t, p, v);
+        }
+        app.midi.audition = want.map(|(t, p, _)| (now, t, p));
+    } else {
+        app.midi.audition = None;
+    }
+}
+
 /// Draw the MIDI editor for the target clip, with an empty-state prompt that adds a clip on the selected MIDI track.
 pub fn show(app: &mut SoundApp, ui: &mut Ui) {
+    if !ui.input(|i| i.pointer.primary_down()) {
+        audition(app, None);
+    }
     // Painter-only contents do not advance the layout. Claim the resized
     // space, including the empty state, so the dock keeps its chosen height.
     ui.take_available_space();
@@ -246,6 +282,21 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
         })
     };
     let snap = |tk: f32| -> i64 { ((tk / grid_ticks as f32).round() as i64) * grid_ticks };
+    // Audition: a held piano key plays its pitch (sliding across keys plays each one); a held
+    // note plays at its velocity, following the pitch it is dragged to.
+    let key_resp = ui.interact(keys, ui.scope_id().with(("keys", cid.0)), Sense::click_and_drag());
+    let pointer = ui.ctx().pointer_latest_pos();
+    let want = if key_resp.is_pointer_button_down_on() {
+        pointer.filter(|p| keys.contains(*p)).map(|p| (pitch_at(p.y).clamp(0, 127) as u8, 100))
+    } else if resp.is_pointer_button_down_on() {
+        ui.input(|i| i.pointer.press_origin()).and_then(hit).and_then(|(i, _)| sequence.notes.get(i)).map(|n| {
+            let dy = app.midi.drag.as_ref().filter(|d| !d.resize).map_or(0, |d| d.dy_semi);
+            ((i64::from(n.pitch) + dy).clamp(0, 127) as u8, n.velocity.max(1))
+        })
+    } else {
+        None
+    };
+    audition(app, want.map(|(p, v)| (track, p, v)));
     if resp.drag_started()
         && let Some(p) = resp.interact_pointer_pos()
     {
@@ -315,7 +366,6 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 } else {
                     app.midi.selected = vec![i];
                 }
-                // Audition on the instrument would go here (needs a live MIDI input path).
             }
             None if s.edit.tool == Tool::Pencil => {
                 let pitch = pitch_at(p.y).clamp(0, 127);
@@ -397,6 +447,14 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_note_held_on_a_replaced_player_is_sent_again() {
+        let a = TrackId(1);
+        assert_eq!(held_on(4, Some((4, a, 60))), Some((a, 60)), "the note on the running player stays held");
+        assert_eq!(held_on(5, Some((4, a, 60))), None, "a new player has heard nothing, so the key sounds again");
+        assert_eq!(held_on(5, None), None);
+    }
 
     #[test]
     fn switching_clip_drops_selection_and_gestures() {

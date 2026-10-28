@@ -229,6 +229,13 @@ impl MixEngine {
         self.main.len()
     }
 
+    /// Play (velocity > 0) or release (velocity 0) `pitch` on a track's instrument at the next
+    /// block, outside the clips: the MIDI Editor's audition. Does nothing before `sync`.
+    pub fn live_note(&mut self, track: TrackId, pitch: u8, velocity: u8) {
+        let Some(inst) = self.strips.get_mut(&track).and_then(|s| s.instrument.as_mut()) else { return };
+        if velocity > 0 { inst.plugin.note_on(0, pitch.min(127), velocity.min(127)) } else { inst.plugin.note_off(0, pitch.min(127)) }
+    }
+
     /// Reset all plugin state (on stop / seek).
     pub fn reset(&mut self) {
         for s in self.strips.values_mut() {
@@ -349,7 +356,8 @@ impl MixEngine {
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
         let frames = frames.min(self.max_block);
-        if pos != self.last_end {
+        // Stopped, the position stands still: not a seek (it would cut auditioned notes).
+        if pos != self.last_end && !self.monitor_only {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
                 if let Some(i) = &mut st.instrument {

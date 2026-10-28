@@ -31,6 +31,7 @@ impl SoundApp {
             recent_checked: None,
             engine,
             player,
+            player_gen: 0,
             recorder: None,
             record_start: 0,
             punch: None,
@@ -56,6 +57,7 @@ impl SoundApp {
             gesture: None,
             edit_layout: edit_window::EditLayout::default(),
             midi: midi_editor::MidiEditorState::default(),
+            keyboard: midi_keyboard::KeyboardState::default(),
             ops: ops_windows::OpsState::default(),
             extra: extra_windows::ExtraState::default(),
             palette: palette::PaletteState::default(),
@@ -314,6 +316,8 @@ impl SoundApp {
         // `DragValue` and text completion), so checking afterwards would see them missing, leave
         // the batch pending, and inject the same edit/navigation/cut again next frame.
         let received_synthetic = self.pass_received_synthetic(&ctx);
+        // The MIDI Keyboard takes its keys before the shortcuts see them.
+        midi_keyboard::capture(self, &ctx);
         shortcuts::handle(self, &ctx);
         self.sample_drop_targets.clear();
         if !self.native_menu_bar {

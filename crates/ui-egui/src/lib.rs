@@ -15,6 +15,7 @@ pub mod fonts;
 pub mod icons;
 pub mod import;
 pub mod menus;
+pub mod midi_keyboard;
 pub mod mix_window;
 pub mod palette;
 pub mod panels;
@@ -102,6 +103,8 @@ pub struct UiState {
     pub show_metadata: bool,
     pub show_event_list: bool,
     pub show_midi_keyboard: bool,
+    /// Window › MIDI Keyboard's octave, velocity, transpose and mode.
+    pub midi_keyboard: midi_keyboard::KeyboardPrefs,
     pub show_workspace: bool,
     pub show_configurations: bool,
     pub show_playback_engine: bool,
@@ -170,6 +173,7 @@ impl Default for UiState {
             show_metadata: false,
             show_event_list: false,
             show_midi_keyboard: false,
+            midi_keyboard: midi_keyboard::KeyboardPrefs::default(),
             show_workspace: false,
             show_configurations: false,
             show_playback_engine: false,
@@ -251,6 +255,9 @@ pub struct SoundApp {
     /// When the recent sessions were last checked for existence, which list, and the result.
     recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
     pub player: Option<Player>,
+    /// Bumped whenever `player` is replaced. Anything that remembers what it already sent to the
+    /// player (the MIDI audition) compares this first: a new player has heard nothing.
+    pub player_gen: u64,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
     record_start: Samples,
@@ -289,6 +296,7 @@ pub struct SoundApp {
     pub gesture: Option<Gesture>,
     pub edit_layout: edit_window::EditLayout,
     pub midi: midi_editor::MidiEditorState,
+    pub keyboard: midi_keyboard::KeyboardState,
     pub ops: ops_windows::OpsState,
     pub extra: extra_windows::ExtraState,
     pub palette: palette::PaletteState,

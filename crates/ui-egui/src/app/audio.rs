@@ -29,6 +29,7 @@ impl SoundApp {
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
+        self.player_gen += 1;
         Ok(())
     }
 
@@ -122,6 +123,7 @@ impl SoundApp {
         self.recorder = None;
         self.recorder_failed = false;
         self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
+        self.player_gen += 1;
     }
 }
 
