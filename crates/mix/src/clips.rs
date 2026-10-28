@@ -1,4 +1,4 @@
-use super::*;
+use super::{Bound, Clip, ClipContent, Plugin, Range, Samples, Session, db_to_gain};
 
 /// Clip Effects: an EQ and a compressor per clip, configured from `edit.values`
 /// (`clip_fx.<clip>.eq.<param>`, `clip_fx.<clip>.comp.<param>`, `clip_fx.<clip>.gain`).
