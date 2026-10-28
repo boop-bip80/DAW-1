@@ -1,4 +1,6 @@
-use super::*;
+use super::{BusId, Route, Session, Track, TrackKind};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Hash of everything `sync`/`processing_order` depend on (tracks, kinds, routing, plugins, sends).
 pub(crate) fn structure_fingerprint(s: &Session) -> usize {
@@ -211,6 +213,7 @@ pub fn solo_muted_tracks(s: &Session) -> Vec<bool> {
 #[allow(clippy::unwrap_used)]
 mod processing_order_tests {
     use super::*;
+    use soundcraft_model::ChannelFormat;
     use soundcraft_model::SendSlot;
 
     #[test]

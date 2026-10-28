@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, ClipId, Dialog, SoundApp, StripNames, Tokens, TrackId, Value, json, vec2};
 
 /// What Strip keeps on each track: the Strip Silence rectangles.
 pub type StripRects = Arc<Vec<(TrackId, Vec<soundcraft_time::Range>)>>;
