@@ -1,10 +1,13 @@
 //! Enter on a focused dialog button, checkbox, radio button or combo box acts on that widget and does not press the
 //! dialog's default button.
 
+use std::path::PathBuf;
+
 use egui::accesskit::Role;
 use egui::{Event, Key, Modifiers, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::json;
+use soundcraft_audio_io::FileFormat;
 use soundcraft_ui_egui::dialogs::Dialog;
 use soundcraft_ui_egui::{Services, SoundApp, menus};
 
@@ -63,7 +66,7 @@ fn enter_on_a_focused_dont_save_closes_without_saving() {
 #[test]
 fn enter_on_a_focused_browse_browses_without_pressing_ok() {
     let picked = "picked/Song.scraft";
-    let services = Services { pick_open: Some(Box::new(move |_, _| Some(picked.to_string()))), ..Services::default() };
+    let services = Services { pick_open: Some(Box::new(move |_, _| Some(PathBuf::from(picked)))), ..Services::default() };
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, services);
     menus::invoke_menu(&mut app, "session.open", "File > Open Session...");
     let mut h = harness(app);
@@ -75,12 +78,12 @@ fn enter_on_a_focused_browse_browses_without_pressing_ok() {
 #[test]
 fn enter_on_a_focused_browse_in_bounce_mix_does_not_bounce() {
     let picked = "picked/Mix.flac";
-    let services = Services { pick_save: Some(Box::new(move |_, _| Some(picked.to_string()))), ..Services::default() };
+    let services = Services { pick_save: Some(Box::new(move |_, _| Some(PathBuf::from(picked)))), ..Services::default() };
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, services);
     menus::invoke_menu(&mut app, "file.bounce_mix", "File > Bounce Mix...");
     let mut h = harness(app);
     enter_on(&mut h, "Browse…");
-    assert!(matches!(&h.state().dialogs.open, Some(Dialog::Bounce { path, format, .. }) if path == picked && format == "flac"));
+    assert!(matches!(&h.state().dialogs.open, Some(Dialog::Bounce { path, format, .. }) if path == picked && *format == FileFormat::Flac));
 }
 
 #[test]
