@@ -123,15 +123,15 @@ impl Dialogs {
     }
 
     pub fn open_rename_track(&mut self, id: TrackId, name: &str) {
-        self.open = Some(Dialog::RenameTrack { id, name: name.to_string() });
+        self.set(Dialog::RenameTrack { id, name: name.to_string() });
     }
 
     pub fn open_rename_clip(&mut self, id: ClipId, name: &str) {
-        self.open = Some(Dialog::RenameClip { id, name: name.to_string() });
+        self.set(Dialog::RenameClip { id, name: name.to_string() });
     }
 
     pub fn open_rename_marker(&mut self, id: soundcraft_model::MarkerId, name: &str) {
-        self.open = Some(Dialog::RenameMarker { id, name: name.to_string() });
+        self.set(Dialog::RenameMarker { id, name: name.to_string() });
     }
 
     /// Groups list › Modify Group…: the creation dialog, pre-filled from an existing group. False
@@ -140,7 +140,7 @@ impl Dialogs {
         let s = e.session();
         let Some(g) = s.group(id) else { return false };
         let members = s.tracks.iter().map(|t| (t.id.0, t.name.clone(), g.members.contains(&t.id))).collect();
-        self.open = Some(Dialog::Group { id: Some(id), name: g.name.clone(), edit: g.edit, mix: g.mix, members });
+        self.set(Dialog::Group { id: Some(id), name: g.name.clone(), edit: g.edit, mix: g.mix, members });
         true
     }
 

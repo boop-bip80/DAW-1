@@ -179,6 +179,20 @@ fn the_enter_that_replaces_an_open_dialog_does_not_press_the_new_default_button(
 }
 
 #[test]
+fn a_rename_dialog_that_replaces_an_open_dialog_ignores_the_enter_of_its_first_frame() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let ctx = egui::Context::default();
+    menus::invoke_menu(&mut app, "setup.session", "Setup > Session");
+    run_frame(&ctx, &mut app, vec![]);
+    run_frame(&ctx, &mut app, vec![]);
+    assert_eq!(app.dialogs.open_name(), Some("session"));
+    let id = app.engine.session().tracks[0].id;
+    app.dialogs.open_rename_track(id, "Renamed");
+    run_frame(&ctx, &mut app, vec![enter_key(false), enter_up()]);
+    assert_eq!(app.dialogs.open_name(), Some("rename_track"), "the first frame's Enter leaves the new dialog open");
+}
+
+#[test]
 fn a_held_enter_does_not_press_the_default_button_until_it_is_pressed_again() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     let ctx = egui::Context::default();
