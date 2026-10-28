@@ -126,6 +126,12 @@ enum Cmd {
     },
     Stop,
     Locate(Samples),
+    /// Audition a note on a track's instrument (velocity 0 releases it).
+    Note {
+        track: TrackId,
+        pitch: u8,
+        velocity: u8,
+    },
     /// Tracks the latest session no longer has (worked out on the UI thread): their meters go.
     Forget(Vec<TrackId>),
 }
@@ -478,6 +484,12 @@ impl Player {
 
     pub fn set_recording(&self, on: bool) {
         let _ = self.tx.send(Cmd::Recording(on));
+    }
+
+    /// Play `pitch` on `track`'s instrument while the transport is stopped or playing, until a
+    /// call with velocity 0 releases it (the MIDI Editor's audition).
+    pub fn note(&self, track: TrackId, pitch: u8, velocity: u8) {
+        let _ = self.tx.send(Cmd::Note { track, pitch, velocity });
     }
 
     pub fn stop(&self) {

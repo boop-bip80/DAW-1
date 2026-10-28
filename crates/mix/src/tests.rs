@@ -62,6 +62,33 @@ fn stored_instrument_params_reach_the_plugin() {
 }
 
 #[test]
+fn live_notes_sound_while_stopped_without_the_clips() {
+    let s = synth_session(-6.0);
+    let t = s.tracks[0].id;
+    let mut eng = MixEngine::new(48_000.0, 512);
+    eng.monitor_only = true;
+    let mut out = vec![vec![0.0f32; 512]; 2];
+    let peak = |out: &[Vec<f32>]| out.iter().flatten().fold(0.0f32, |m, x| m.max(x.abs()));
+    let mut loudest = 0.0f32;
+    for _ in 0..8 {
+        eng.render(&s, 0, 512, &mut out);
+        loudest = loudest.max(peak(&out));
+    }
+    assert_eq!(loudest, 0.0, "stopped: the clip's note must not play");
+    eng.live_note(t, 72, 100);
+    for _ in 0..8 {
+        eng.render(&s, 0, 512, &mut out);
+        loudest = loudest.max(peak(&out));
+    }
+    assert!(loudest > 0.01, "the auditioned note should sound: {loudest}");
+    eng.live_note(t, 72, 0);
+    for _ in 0..400 {
+        eng.render(&s, 0, 512, &mut out);
+    }
+    assert!(peak(&out) < 1e-4, "the released note should die away: {}", peak(&out));
+}
+
+#[test]
 fn insert_slot_a_automation_does_not_drive_the_instrument() {
     let mut s = synth_session(-6.0);
     let reference = render_range(&s, Range::new(0, 12_000), 512);

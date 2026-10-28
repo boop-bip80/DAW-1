@@ -15,6 +15,7 @@ pub mod fonts;
 pub mod icons;
 pub mod import;
 pub mod menus;
+pub mod midi_lanes;
 pub mod mix_window;
 pub mod palette;
 pub mod panels;
