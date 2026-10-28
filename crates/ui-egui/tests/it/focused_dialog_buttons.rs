@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use egui::accesskit::Role;
-use egui::{Event, Key, Modifiers, vec2};
+use egui::{Event, Key, Modifiers, Pos2, RawInput, Rect, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::json;
 use soundcraft_audio_io::FileFormat;
@@ -115,6 +115,43 @@ fn enter_with_nothing_focused_presses_the_default_button() {
     h.event(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(2);
     assert_eq!(h.state().dialogs.open_name(), None);
+}
+
+#[test]
+fn a_dialog_opened_while_a_window_button_has_the_focus_takes_enter() {
+    let app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let mut h = harness(app);
+    h.get_all_by_role(Role::Button).next().expect("the window has a button").focus();
+    h.run_steps(2);
+    assert!(h.ctx.memory(|m| m.focused().is_some()));
+    menus::invoke_menu(h.state_mut(), "edit.fades_create", "Edit > Fades > Create...");
+    h.run_steps(2);
+    assert_eq!(h.state().dialogs.open_name(), Some("fades"));
+    h.event(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(h.state().dialogs.open_name(), None, "Enter pressed Create");
+}
+
+#[test]
+fn the_enter_that_opens_a_dialog_does_not_press_its_default_button() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let ctx = egui::Context::default();
+    let frame = |app: &mut SoundApp, events: Vec<Event>| {
+        let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))), events, ..Default::default() };
+        ctx.run_ui(raw, |ui| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        })
+        .textures_delta
+        .clear();
+    };
+    let enter = || Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+    frame(&mut app, vec![]);
+    menus::invoke_menu(&mut app, "edit.fades_create", "Edit > Fades > Create...");
+    frame(&mut app, vec![enter()]);
+    assert_eq!(app.dialogs.open_name(), Some("fades"), "the opening Enter leaves the dialog open");
+    frame(&mut app, vec![enter()]);
+    assert_eq!(app.dialogs.open_name(), None, "the next Enter presses Create");
 }
 
 #[test]
