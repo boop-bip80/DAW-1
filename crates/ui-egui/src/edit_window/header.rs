@@ -8,34 +8,6 @@ use super::{
 /// name and the remaining track controls.
 pub(super) fn track_header(app: &mut SoundApp, ui: &mut Ui, track: &Track, head: Rect, selected: bool, head_bg: Color32) {
     let id = track.id;
-    // Drag the bottom edge to resize (snaps to the height presets).
-    let edge = Rect::from_min_max(pos2(head.min.x, head.max.y - 4.0), pos2(head.max.x, head.max.y + 2.0));
-    let eresp = ui.interact(edge, ui.scope_id().with(("hedge", id.0)), Sense::drag());
-    if eresp.hovered() || eresp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-    }
-    if eresp.drag_started() {
-        ui.data_mut(|d| d.insert_temp(eresp.id, track.height));
-    }
-    if eresp.dragged()
-        && let Some(p) = ui.ctx().pointer_latest_pos()
-        && let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|o| o.y != p.y)
-    {
-        let start = ui.data(|d| d.get_temp::<TrackHeight>(eresp.id)).unwrap_or(track.height);
-        let want = start.points() + p.y - origin.y;
-        let m = ui.input(|i| i.modifiers);
-        let best = if m.command {
-            TrackHeight::from_points(want)
-        } else {
-            TrackHeight::ALL.into_iter().min_by_key(|h| ((h.points() - want).abs() * 10.0) as i64).unwrap_or(start)
-        };
-        let s = app.engine.session();
-        let tracks = height_targets(s, m, &[id]);
-        if tracks.iter().any(|t| s.track(TrackId(*t)).is_some_and(|tr| tr.height != best)) {
-            let _ = app.engine.execute_merged("track.height", &json!({"tracks": tracks, "height": best.points()}), &format!("track_height:{}", id.0));
-            ui.ctx().request_repaint();
-        }
-    }
     // Click on header background selects the track.
     let bg = ui.interact(head, ui.scope_id().with(("hdr", id.0)), Sense::click());
     if bg.clicked() {
