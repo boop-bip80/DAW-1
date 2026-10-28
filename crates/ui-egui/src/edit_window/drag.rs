@@ -1,7 +1,9 @@
 use super::automation::{auto_value, automation_id, lane_range, plugin_range};
 use super::input::{new_midi_clip, snap};
 use super::layout::{lane_rect, rect, sample_at};
-use super::*;
+use super::{
+    Arc, AutoParam, Clip, ClipId, Dialog, EditMode, Gesture, HashSet, Pos2, Range, Rect, Samples, Session, SoundApp, Spot, TrackId, json, ops, pos2,
+};
 
 /// The same bounded range drives the preview and the committed fade.
 pub(super) fn fade_drag_range(clip: &Clip, fade_in: bool, to: Samples) -> Option<Range> {

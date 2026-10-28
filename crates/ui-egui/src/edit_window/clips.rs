@@ -1,7 +1,10 @@
 use super::drag::fade_drag_preview;
 use super::input::{gain_icon, near_fade_midpoint};
 use super::layout::{sample_at, x_of};
-use super::*;
+use super::{
+    Align2, AutoParam, Clip, ClipContent, ClipId, Color32, CornerRadius, Gesture, GridValue, NoteValue, Pos2, Range, Rect, Samples, Session, Shape,
+    SoundApp, Stroke, StrokeKind, TimeFormat, Tokens, Tool, Track, bold, clip_colors, crossfade_cut, format_position, ops, pos2, regular, vec2,
+};
 
 /// The outline of the Strip Silence rectangles.
 pub fn strip_silence_stroke() -> Stroke {
@@ -138,28 +141,58 @@ fn grid_veil(line: Color32, bg: Color32) -> Color32 {
     }
 }
 
+/// What `draw_clip` draws into: the app, painter and session, and the track lane the clips sit on.
+#[derive(Clone, Copy)]
+pub(super) struct ClipLane<'a> {
+    pub(super) app: &'a SoundApp,
+    pub(super) painter: &'a egui::Painter,
+    pub(super) s: &'a Session,
+    pub(super) track: &'a Track,
+    /// Whether `track.clips()` is sorted by start (worked out once per track and frame).
+    pub(super) sorted: bool,
+    pub(super) tl: Rect,
+    pub(super) lane: Rect,
+}
+
+/// Where and in what colours one clip is drawn, shared by the parts of `draw_clip`.
+#[derive(Clone, Copy)]
+struct ClipGeom<'a> {
+    r: Rect,
+    body_r: Rect,
+    vis: Rect,
+    /// The part of the clip that shows: up to or from the cut of a crossfade.
+    x0: f32,
+    x1: f32,
+    /// The clip's own extent, which its fades run along.
+    cx0: f32,
+    cx1: f32,
+    /// [`Self::x0`] and [`Self::x1`] as positions.
+    shown: (Samples, Samples),
+    name_h: f32,
+    body: Color32,
+    wave: Color32,
+    selected: bool,
+    dim: bool,
+    fade_in: soundcraft_model::Fade,
+    fade_out: soundcraft_model::Fade,
+    /// The clip's crossfade partners, before and after it (see [`ops::crossfade_partners`]).
+    before: Option<&'a Clip>,
+    after: Option<&'a Clip>,
+    /// A clip this one is laid over without a crossfade: its tail shows through.
+    layered: Option<&'a Clip>,
+}
+
 /// Draw one clip of `clips` (its playlist), with `partners`, its [`ops::crossfade_partners`]. The two clips of a
 /// crossfade are drawn butted at the cut, each only on its side of it; the zone laid over the cut is drawn with the
-/// later clip. `sorted`: whether `track.clips()` is sorted by start (worked out once per track and frame).
-pub(super) fn draw_clip<'a>(
-    app: &SoundApp,
-    outer: &egui::Painter,
-    s: &Session,
-    track: &Track,
-    sorted: bool,
-    clips: &[Clip],
-    partners: (Option<&'a Clip>, Option<&'a Clip>),
-    clip: &Clip,
-    tl: Rect,
-    lane: Rect,
-    dim: bool,
-) {
+/// later clip.
+pub(super) fn draw_clip<'a>(cl: &ClipLane<'_>, clips: &'a [Clip], partners: (Option<&'a Clip>, Option<&'a Clip>), clip: &Clip, dim: bool) {
+    let ClipLane { app, painter: outer, s, track, tl, lane, .. } = *cl;
     let (before, after) = partners;
-    // The clip's own extent (its fades run along it), and the part of it that shows.
-    let (cx0, cx1) = (x_of(s, tl, clip.start), x_of(s, tl, clip.end()).max(x_of(s, tl, clip.start) + 1.0));
-    let (shown_from, shown_to) = shown_span(clip, before, after);
-    let x0 = x_of(s, tl, shown_from);
-    let x1 = x_of(s, tl, shown_to).max(x0 + 1.0);
+    let cx0 = x_of(s, tl, clip.start);
+    let cx1 = x_of(s, tl, clip.end()).max(cx0 + 1.0);
+    let shown = shown_span(clip, before, after);
+    let x0 = x_of(s, tl, shown.0);
+    let x1 = x_of(s, tl, shown.1).max(x0 + 1.0);
     // The two clips of a crossfade show only on their side of the cut; any other clip keeps the lane as it was.
     let narrowed;
     let painter = if before.is_some() || after.is_some() {
@@ -168,6 +201,7 @@ pub(super) fn draw_clip<'a>(
     } else {
         outer
     };
+    let inner = ClipLane { painter, ..*cl };
     let r = Rect::from_min_max(pos2(x0, lane.min.y + 1.0), pos2(x1, lane.max.y - 1.0));
     let selected = s.edit.selected_clips.contains(&clip.id)
         || (s.edit.selected_tracks.contains(&track.id)
@@ -181,6 +215,27 @@ pub(super) fn draw_clip<'a>(
         wave = Color32::from_rgb(70, 70, 70);
     }
     let body = if s.edit.flag("view.clip.transparency") { body.gamma_multiply(0.55) } else { body };
+    let name_h = draw_clip_frame(&inner, clip, r, (body, bar), partners);
+    let body_r = Rect::from_min_max(pos2(r.min.x, r.min.y + name_h), r.max);
+    let vis = body_r.intersect(lane);
+    // The waveform and fade curve share the same temporary envelope every frame.
+    let (fade_in, fade_out) = clip_preview_fades(clip, app.gesture.as_ref().filter(|_| !dim));
+    let layered = crossfade_partner(clips, clip).filter(|p| before.is_none_or(|a| a.id != p.id));
+    let g = ClipGeom { r, body_r, vis, x0, x1, cx0, cx1, shown, name_h, body, wave, selected, dim, fade_in, fade_out, before, after, layered };
+    draw_clip_content(&inner, clip, &g);
+    draw_crossfade_tail(&inner, outer, clip, &g);
+    draw_gain_line(&inner, clip, &g);
+    draw_fades(&inner, clip, &g);
+    draw_clip_overlays(&inner, clip, &g);
+    if let Some(earlier) = before {
+        draw_zone(cl, earlier, clip, body_r.y_range(), dim);
+    }
+}
+
+/// The clip's body and outline, and its name bar; returns the bar's height. `fill` is the body's colour and the bar's.
+fn draw_clip_frame(cl: &ClipLane<'_>, clip: &Clip, r: Rect, fill: (Color32, Color32), partners: (Option<&Clip>, Option<&Clip>)) -> f32 {
+    let ClipLane { painter, s, tl, lane, .. } = *cl;
+    let ((body, bar), (before, after)) = (fill, partners);
     // Square where the clip is butted to its crossfade partner at the cut.
     let (left, right) = (if before.is_some() { 0 } else { 2 }, if after.is_some() { 0 } else { 2 });
     // The outline stops at the cut: its edge there lies just past the painter's clip, or the two outlines would draw
@@ -216,10 +271,13 @@ pub(super) fn draw_clip<'a>(
             );
         }
     }
-    let body_r = Rect::from_min_max(pos2(r.min.x, r.min.y + name_h), r.max);
-    let vis = body_r.intersect(lane);
-    // The waveform and fade curve share the same temporary envelope every frame.
-    let (fade_in, fade_out) = clip_preview_fades(clip, app.gesture.as_ref().filter(|_| !dim));
+    name_h
+}
+
+/// The clip body: waveform, MIDI notes or the offline notice.
+fn draw_clip_content(cl: &ClipLane<'_>, clip: &Clip, g: &ClipGeom<'_>) {
+    let ClipLane { painter, s, track, tl, .. } = *cl;
+    let ClipGeom { body_r, vis, body, wave, selected, fade_in, fade_out, .. } = *g;
     match &clip.content {
         _ if track.view == "blocks" => {}
         ClipContent::Audio { source, .. } => {
@@ -281,8 +339,13 @@ pub(super) fn draw_clip<'a>(
             }
         }
     }
-    // A clip laid over another (no crossfade) shows the other's tail through it.
-    let layered = crossfade_partner(clips, clip).filter(|p| before.is_none_or(|a| a.id != p.id));
+}
+
+/// The waveform of the clip this one crossfades with or is laid over, drawn over the overlap; in a crossfade, also
+/// the clip's own audio left of the cut, drawn with `outer` (the lane's painter: the clip's own stops at the cut).
+fn draw_crossfade_tail(cl: &ClipLane<'_>, outer: &egui::Painter, clip: &Clip, g: &ClipGeom<'_>) {
+    let ClipLane { painter, s, track, tl, lane, .. } = *cl;
+    let ClipGeom { body_r, vis, x0, x1, cx0, dim, before, layered, .. } = *g;
     let overlapped = s.edit.flag("waveform.overlapped_crossfades") && track.view != "blocks";
     if overlapped
         && let Some(prev) = before.or(layered)
@@ -304,7 +367,11 @@ pub(super) fn draw_clip<'a>(
         && let Some(audio) = s.pool.get(*source)
     {
         let own = Rect::from_min_max(pos2(cx0, body_r.min.y), pos2(x0, body_r.max.y));
-        let tail = if clip.muted || dim { Color32::from_rgb(70, 70, 70) } else { clip_colors(color, false).2.gamma_multiply(0.6) };
+        let tail = if clip.muted || dim {
+            Color32::from_rgb(70, 70, 70)
+        } else {
+            clip_colors(clip.color.unwrap_or(track.color), false).2.gamma_multiply(0.6)
+        };
         crate::waveform::draw(
             crate::waveform::Canvas { painter: &outer.with_clip_rect(own.intersect(lane)), s, tl },
             clip,
@@ -314,6 +381,12 @@ pub(super) fn draw_clip<'a>(
             tail,
         );
     }
+}
+
+/// The clip gain line and its icon.
+fn draw_gain_line(cl: &ClipLane<'_>, clip: &Clip, g: &ClipGeom<'_>) {
+    let ClipLane { painter, s, track, tl, lane, .. } = *cl;
+    let ClipGeom { body_r, x0, x1, shown, dim, .. } = *g;
     // Clip gain line.
     let show_gain = s.edit.flag("view.clip.gain_line") && (!clip.gain_env.is_empty() || clip.gain_db.abs() > 0.01 || track.view == "clip_gain");
     if show_gain && body_r.height() > 12.0 {
@@ -332,12 +405,18 @@ pub(super) fn draw_clip<'a>(
             painter.add(Shape::line(pts, Stroke::new(1.0, col)));
         }
     }
-    if !dim && let Some(icon) = gain_icon(s, tl, lane, clip, shown_from, shown_to) {
+    if !dim && let Some(icon) = gain_icon(s, tl, lane, clip, shown.0, shown.1) {
         let col = Color32::from_rgba_unmultiplied(255, 255, 255, 200);
         painter.line_segment([pos2(icon.center().x, icon.min.y), pos2(icon.center().x, icon.max.y)], Stroke::new(1.0, col));
         painter.rect_filled(Rect::from_center_size(pos2(icon.center().x, icon.center().y + 2.0), vec2(icon.width(), 3.0)), 1.0, col);
         painter.text(pos2(icon.max.x + 3.0, icon.center().y), Align2::LEFT_CENTER, format!("{:+.1} dB", clip.gain_db), regular(9.5), col);
     }
+}
+
+/// The fade curves, their midpoint handles and the fade-out of the clip this one is laid over.
+fn draw_fades(cl: &ClipLane<'_>, clip: &Clip, g: &ClipGeom<'_>) {
+    let ClipLane { painter, s, tl, .. } = *cl;
+    let ClipGeom { body_r, vis, cx0, cx1, fade_in, fade_out, before, after, layered, .. } = *g;
     let fade_col = Color32::from_rgba_unmultiplied(255, 255, 255, 90);
     for (side, fade) in [(true, fade_in), (false, fade_out)] {
         if fade.len <= 0 {
@@ -354,14 +433,10 @@ pub(super) fn draw_clip<'a>(
             _ => {}
         }
         painter.with_clip_rect(shown).add(Shape::line(pts, Stroke::new(1.2, fade_col)));
-        let midpoint = fade_control_position(fade, a, b, body_r);
-        let active = matches!(app.gesture, Some(Gesture::FadeCurve { clip: id, fade_in, .. }) if id == clip.id && fade_in == side);
-        let hovered = painter.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| near_fade_midpoint(p, midpoint));
         // The fades that run along a crossfade are the zone's: resized with its edges, not with a handle of their own.
         let hidden = if side { before.is_some() } else { after.is_some() };
-        if !dim && !hidden && s.edit.tool == Tool::Smart && AutoParam::parse(&track.view).is_none() && b - a >= 32.0 && vis.contains(midpoint) {
-            let col = Color32::from_rgba_unmultiplied(255, 255, 255, if active || hovered { 230 } else { 200 });
-            painter.with_clip_rect(vis).circle(midpoint, 3.5, body, Stroke::new(1.0, col));
+        if !hidden {
+            draw_fade_handle(cl, clip, g, (side, fade), (a, b));
         }
     }
     // The fade-out of the clip this one is laid over, drawn over the overlap.
@@ -370,6 +445,26 @@ pub(super) fn draw_clip<'a>(
         let pts = fade_curve_points(c.fade_out, false, a, b, body_r, painter.ctx().pixels_per_point());
         painter.with_clip_rect(vis).add(Shape::line(pts, Stroke::new(1.2, fade_col)));
     }
+}
+
+/// The midpoint handle of one fade (`side`: true for the fade-in), which runs from `a` to `b` on screen.
+fn draw_fade_handle(cl: &ClipLane<'_>, clip: &Clip, g: &ClipGeom<'_>, fade: (bool, soundcraft_model::Fade), span: (f32, f32)) {
+    let ClipLane { app, painter, s, track, .. } = *cl;
+    let ClipGeom { body_r, vis, body, dim, .. } = *g;
+    let ((side, fade), (a, b)) = (fade, span);
+    let midpoint = fade_control_position(fade, a, b, body_r);
+    let active = matches!(app.gesture, Some(Gesture::FadeCurve { clip: id, fade_in, .. }) if id == clip.id && fade_in == side);
+    let hovered = painter.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| near_fade_midpoint(p, midpoint));
+    if !dim && s.edit.tool == Tool::Smart && AutoParam::parse(&track.view).is_none() && b - a >= 32.0 && vis.contains(midpoint) {
+        let col = Color32::from_rgba_unmultiplied(255, 255, 255, if active || hovered { 230 } else { 200 });
+        painter.with_clip_rect(vis).circle(midpoint, 3.5, body, Stroke::new(1.0, col));
+    }
+}
+
+/// Optional clip overlays (View › Clip).
+fn draw_clip_overlays(cl: &ClipLane<'_>, clip: &Clip, g: &ClipGeom<'_>) {
+    let ClipLane { painter, s, track, sorted, tl, lane, .. } = *cl;
+    let ClipGeom { r, name_h, after, .. } = *g;
     // Optional clip overlays (View › Clip).
     let ov = Color32::from_rgb(16, 16, 16);
     if s.edit.flag("view.clip.rating") && clip.rating > 0 && name_h > 0.0 {
@@ -384,23 +479,7 @@ pub(super) fn draw_clip<'a>(
         ));
         painter.line_segment([pos2(x, r.min.y + name_h), pos2(x, r.max.y)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
     }
-    let time_text = if s.edit.flag("view.clip.time.current") {
-        Some(s.format_position(clip.start, s.edit.main_counter))
-    } else if s.edit.flag("view.clip.time.original") || s.edit.flag("view.clip.time.user") {
-        clip.source().and_then(|src| s.source(src)).map(|src| {
-            format_position(
-                i64::try_from(src.time_reference).unwrap_or(0).saturating_add(clip.source_offset()).saturating_sub(s.timecode_start),
-                TimeFormat::Timecode,
-                s.sample_rate,
-                &s.tempo,
-                s.frame_rate,
-                0,
-                0,
-            )
-        })
-    } else {
-        None
-    };
+    let time_text = clip_time_text(s, clip);
     if let Some(tt) = time_text
         && r.height() > 30.0
     {
@@ -430,8 +509,26 @@ pub(super) fn draw_clip<'a>(
     if clip.edit_locked || clip.time_locked {
         painter.text(pos2(r.max.x - 10.0, r.min.y + 7.0), Align2::CENTER_CENTER, "🔒", regular(9.0), Color32::WHITE);
     }
-    if let Some(earlier) = before {
-        draw_zone(app, outer, s, tl, lane, earlier, clip, body_r.y_range(), dim);
+}
+
+/// The clip's start (or original) time label for the overlays, when one is shown.
+fn clip_time_text(s: &Session, clip: &Clip) -> Option<String> {
+    if s.edit.flag("view.clip.time.current") {
+        Some(s.format_position(clip.start, s.edit.main_counter))
+    } else if s.edit.flag("view.clip.time.original") || s.edit.flag("view.clip.time.user") {
+        clip.source().and_then(|src| s.source(src)).map(|src| {
+            format_position(
+                i64::try_from(src.time_reference).unwrap_or(0).saturating_add(clip.source_offset()).saturating_sub(s.timecode_start),
+                TimeFormat::Timecode,
+                s.sample_rate,
+                &s.tempo,
+                s.frame_rate,
+                0,
+                0,
+            )
+        })
+    } else {
+        None
     }
 }
 
@@ -457,17 +554,9 @@ pub(super) fn zone_box(painter: &egui::Painter, zone: Rect, ghost: bool) {
 /// we: it shows where the earlier clip's waveform gives way to the later one's. `body_y` is the height
 /// the clips' fades span. Over another view of the track (`dim`, the automation view) the zone is only
 /// the box, so the crossfade stays visible without competing with the curve being edited.
-fn draw_zone(
-    app: &SoundApp,
-    painter: &egui::Painter,
-    s: &Session,
-    tl: Rect,
-    lane: Rect,
-    earlier: &Clip,
-    later: &Clip,
-    body_y: egui::Rangef,
-    dim: bool,
-) {
+/// `cl` is the lane's: the zone spans the cut, past either clip's own painter.
+fn draw_zone(cl: &ClipLane<'_>, earlier: &Clip, later: &Clip, body_y: egui::Rangef, dim: bool) {
+    let ClipLane { app, painter, s, tl, lane, .. } = *cl;
     let (zs, ze) = (x_of(s, tl, later.start), x_of(s, tl, earlier.end()));
     let zone = Rect::from_x_y_ranges(zs..=ze, lane.y_range());
     zone_box(painter, zone, false);
