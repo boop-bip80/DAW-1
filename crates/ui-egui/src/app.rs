@@ -75,6 +75,7 @@ impl SoundApp {
             pointer_down: false,
             wants_keyboard: false,
             sample_drop_targets: Vec::new(),
+            clip_list_rect: None,
             pending_drops: Vec::new(),
             host_drops: Vec::new(),
             sample_reads: Vec::new(),
@@ -316,6 +317,7 @@ impl SoundApp {
         let received_synthetic = self.pass_received_synthetic(&ctx);
         shortcuts::handle(self, &ctx);
         self.sample_drop_targets.clear();
+        self.clip_list_rect = None;
         if !self.native_menu_bar {
             menus::menu_bar(self, ui);
         }
@@ -336,6 +338,7 @@ impl SoundApp {
         score_editor::show(self, &ctx);
         palette::show(self, &ctx);
         dialogs::show(self, &ctx);
+        import_audio::paint_drop_hint(self, &ctx);
         #[cfg(not(target_arch = "wasm32"))]
         updates_ui::show(self, &ctx);
         // The sampler's drop rects are current now, so route any captured drop in this pass.

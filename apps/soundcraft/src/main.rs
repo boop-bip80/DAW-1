@@ -144,6 +144,15 @@ fn save_prefs(env: &Env, ui: &UiState) {
     }
 }
 
+fn open_dialog(purpose: &str) -> rfd::FileDialog {
+    let d = rfd::FileDialog::new();
+    match purpose {
+        "session.open" => d.add_filter("SoundCraft Session", &["scraft"]),
+        "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
+        _ => d.add_filter("Audio", soundcraft_ui_egui::import_audio::AUDIO_EXTENSIONS),
+    }
+}
+
 fn services() -> Services {
     Services {
         pick_open: Some(Box::new(|purpose: &str, _exts: &[&str]| {
@@ -154,6 +163,10 @@ fn services() -> Services {
                 _ => d.add_filter("Audio", &FileFormat::readable_extensions()),
             };
             d.pick_file()
+        })),
+        // Multi-select for Import Audio, as text: the dialog is the only place a path appears.
+        pick_open_many: Some(Box::new(|purpose: &str, _exts: &[&str]| {
+            open_dialog(purpose).pick_files().unwrap_or_default().iter().map(|p| p.to_string_lossy().into_owned()).collect()
         })),
         pick_save: Some(Box::new(|purpose: &str, path: &std::path::Path| {
             let mut d = match purpose {

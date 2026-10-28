@@ -14,6 +14,7 @@ pub mod edit_window;
 pub mod fonts;
 pub mod icons;
 pub mod import;
+pub mod import_audio;
 pub mod menus;
 pub mod mix_window;
 pub mod palette;
@@ -337,6 +338,8 @@ pub struct SoundApp {
     wants_keyboard: bool,
     /// Where a dropped audio file loads into a track's sampler (last frame's rects).
     pub sample_drop_targets: Vec<(egui::Rect, TrackId)>,
+    /// The Clip List panel this frame (audio dropped there goes to the Clip List only).
+    pub clip_list_rect: Option<egui::Rect>,
     /// Files dropped on the window, captured at the start of the UI pass before the font gate.
     pending_drops: Vec<(egui::DroppedFileHandle, Option<egui::Pos2>)>,
     /// Dropped files the side panels did not claim, for the native/browser shell to open or import.

@@ -35,6 +35,7 @@ use drag::drive_drag;
 use drag::fade_drag_range;
 #[cfg(test)]
 use header::{header_column, header_selector};
+pub(crate) use input::snap_drop;
 pub use input::{CLIP_FADER_TRAVEL, clip_gain_icon};
 #[cfg(test)]
 use input::{clip_at, fade_midpoint};

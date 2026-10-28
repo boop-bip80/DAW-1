@@ -30,6 +30,7 @@ fn clip_rows(s: &soundcraft_model::Session, needle: &str) -> Vec<ClipRow> {
 
 /// Clips panel with a filter and a revision-cached list of audio sources and clips.
 pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
+    app.clip_list_rect = Some(ui.max_rect());
     let t = Tokens::current();
     panel_header(ui, "CLIPS");
     let fkey = egui::Id::unique("clip_filter");

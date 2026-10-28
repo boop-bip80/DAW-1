@@ -1,6 +1,6 @@
 use super::*;
 use crate::Engine;
-use soundcraft_audio_io::{AudioBuffer, EncodeOptions};
+use soundcraft_audio_io::{AudioBuffer, BitDepth, EncodeOptions, FileFormat};
 use soundcraft_model::ChannelFormat;
 
 fn tone_wav(dir: &std::path::Path, name: &str) -> String {
@@ -400,4 +400,98 @@ fn save_copy_leaves_the_open_session_alone() {
     assert_eq!(from_copy.session().tracks.len(), 2);
     assert!(from_copy.session().track_by_name("Extra").is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn import_audio_places_several_files_and_can_fill_the_clip_list_only() {
+    let dir = std::env::temp_dir().join(format!("sc-import-many-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (a, b) = (tone_wav(&dir, "a.wav"), tone_wav(&dir, "b.wav"));
+    let starts = |e: &Engine, i: usize| e.session().tracks[i].clips().iter().map(|c| c.start).collect::<Vec<_>>();
+
+    // Several files, new tracks: one track each, all at `at`, and one undo step.
+    let mut e = Engine::default();
+    e.execute("file.import_audio", &json!({"paths": [a, b], "at": 1000})).unwrap();
+    assert_eq!(e.session().tracks.len(), 2);
+    assert_eq!((starts(&e, 0), starts(&e, 1)), (vec![1000], vec![1000]));
+    assert!(e.undo());
+    assert!(e.session().tracks.is_empty() && e.session().sources.is_empty(), "one undo step takes the whole import back");
+
+    // Several files on one track: one after another, unless told otherwise.
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({"count": 1, "name": "Target", "format": "mono"})).unwrap();
+    e.execute("file.import_audio", &json!({"paths": [a, b], "track": "Target", "at": 1000})).unwrap();
+    assert_eq!(starts(&e, 0), vec![1000, 1000 + 4_800]);
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({"count": 1, "name": "Target", "format": "mono"})).unwrap();
+    e.execute("file.import_audio", &json!({"paths": [a], "track": "Target", "at": 0, "sequential": false})).unwrap();
+    assert_eq!(starts(&e, 0), vec![0]);
+
+    // Clip List only: sources, no tracks and no clips, whatever else is asked.
+    let mut e = Engine::default();
+    e.execute("file.import_audio", &json!({"paths": [a, b], "clip_list": true, "new_tracks": true})).unwrap();
+    assert!(e.session().tracks.is_empty());
+    assert_eq!(e.session().sources.len(), 2);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_that_cannot_be_decoded_is_skipped_and_the_rest_land() {
+    let dir = std::env::temp_dir().join(format!("sc-import-skip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = tone_wav(&dir, "good.wav");
+    let bad = dir.join("bad.wav");
+    std::fs::write(&bad, b"not audio at all").unwrap();
+    let missing = dir.join("gone.wav").to_string_lossy().into_owned();
+
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({"count": 1, "name": "Target", "format": "mono"})).unwrap();
+    let r = e
+        .execute("file.import_audio", &json!({"paths": [bad.to_string_lossy(), good.clone(), missing.clone()], "track": "Target", "at": 0}))
+        .unwrap();
+    let imported = r["imported"].as_array().map(Vec::len).unwrap_or(0);
+    let failed = r["failed"].as_array().cloned().unwrap_or_default();
+    assert_eq!((imported, failed.len()), (1, 2), "{r}");
+    assert!(failed.iter().any(|f| f["path"].as_str() == Some(missing.as_str())), "{r}");
+    let clips = e.session().tracks[0].clips();
+    assert_eq!(clips.len(), 1, "the readable file still lands");
+    assert!(e.undo(), "the import is still one undo step");
+    assert!(e.session().tracks[0].clips().is_empty());
+
+    // Nothing readable at all: the command fails with the file's error instead of silence.
+    let mut e = Engine::default();
+    let err = e.execute("file.import_audio", &json!({"paths": [bad.to_string_lossy()]})).unwrap_err();
+    assert!(err.to_string().contains("bad.wav"), "{err}");
+    assert!(e.session().tracks.is_empty());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_wider_than_the_target_track_is_refused() {
+    let dir = std::env::temp_dir().join(format!("sc-import-width-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let path = dir.join("stereo.wav");
+    let one: Vec<f32> = (0..4_800).map(|i| 0.3 * (std::f32::consts::TAU * 330.0 * i as f32 / 48_000.0).sin()).collect();
+    let buf = AudioBuffer { sample_rate: 48_000, channels: vec![one.clone(), one] };
+    let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
+    std::fs::write(&path, soundcraft_audio_io::encode(&buf, &opts).unwrap()).unwrap();
+
+    let mut e = Engine::default();
+    e.execute("track.new", &json!({"count": 1, "name": "Mono", "format": "mono"})).unwrap();
+    let err = e.execute("file.import_audio", &json!({"paths": [path.to_string_lossy()], "track": "Mono"})).unwrap_err().to_string();
+    assert!(err.contains("2 channels on the 1-channel track Mono"), "{err}");
+    assert!(err.contains("new track of its width"), "{err}");
+    assert!(e.session().tracks[0].clips().is_empty());
+    assert!(e.session().sources.is_empty(), "nothing was added either");
+    // The same file below the tracks makes a stereo track of its own.
+    e.execute("file.import_audio", &json!({"paths": [path.to_string_lossy()], "new_tracks": true})).unwrap();
+    assert_eq!(e.session().tracks.len(), 2);
+    assert_eq!(e.session().tracks[1].channels(), 2);
+    let _ = std::fs::remove_dir_all(dir);
 }

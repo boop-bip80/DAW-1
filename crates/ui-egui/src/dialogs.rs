@@ -55,6 +55,7 @@ pub enum Dialog {
     Loop { by: LoopBy, count: u32, length: String, format: soundcraft_time::TimeFormat, start: Samples, filled: (String, Samples) },
     ScoreSetup { title: String, composer: String, bars_per_system: u32, show_track_names: bool },
     SaveChanges { then: (String, Value) },
+    ImportAudio(crate::import_audio::ImportAudio),
 }
 
 /// The Clip Looping dialog's choice of how far a clip is looped.
@@ -105,6 +106,7 @@ impl Dialogs {
             Dialog::Loop { .. } => "clip_looping",
             Dialog::ScoreSetup { .. } => "score_setup",
             Dialog::SaveChanges { .. } => "save_changes",
+            Dialog::ImportAudio(_) => "import_audio",
         })
     }
 
@@ -185,7 +187,7 @@ impl Dialogs {
                     dither: false,
                 }
             }
-            "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
+            "file.import_audio" => Dialog::ImportAudio(crate::import_audio::ImportAudio::default()),
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
             "session.open" => Dialog::PathPrompt { cmd: id.into(), title: "Open Session".into(), path: home, key: "path".into() },
             "session.save" if e.path.is_some() => return false,
@@ -316,6 +318,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::ScoreSetup { .. } => "Score Setup",
         Dialog::SaveChanges { then } if then.0 == "session.revert" => "Revert to Saved",
         Dialog::SaveChanges { .. } => "Unsaved Changes",
+        Dialog::ImportAudio(_) => "Import Audio",
     }
     .to_string();
     let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
@@ -460,6 +463,11 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     ui.label(message.as_str());
                     if buttons(ui, "Remove", enter) {
                         action = Some(("clip.clear".into(), json!({"clips": clips, "sources": sources, "with_clips": true})));
+                    }
+                }
+                Dialog::ImportAudio(imp) => {
+                    if let Some(params) = crate::import_audio::body(app, ui, imp, enter) {
+                        action = Some(("file.import_audio".into(), params));
                     }
                 }
                 Dialog::PathPrompt { cmd, path, key, .. } => {
@@ -797,7 +805,7 @@ fn buttons(ui: &mut egui::Ui, ok: &str, enter: bool) -> bool {
 }
 
 /// `buttons`, but a greyed-out OK when the dialog's values can't be submitted yet. Cancel always works.
-fn buttons_enabled(ui: &mut egui::Ui, ok: &str, enter: bool, ready: bool) -> bool {
+pub(crate) fn buttons_enabled(ui: &mut egui::Ui, ok: &str, enter: bool, ready: bool) -> bool {
     let mut pressed = enter && ready;
     ui.separator();
     ui.horizontal(|ui| {

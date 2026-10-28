@@ -102,9 +102,12 @@ impl Purpose {
     }
 }
 
-/// Files picked or dropped, read asynchronously (browsers can only read files that way) and
-/// handled on the next frame. The browser has no paths: files travel as bytes.
-type Inbox = Rc<RefCell<Vec<(Purpose, String, Vec<u8>)>>>;
+/// One picker selection or one drop: its files land as one undo step.
+type Batch = Vec<(String, Vec<u8>)>;
+
+/// Batches read asynchronously (browsers can only read files that way), handled on the next frame.
+/// The browser has no paths: files travel as bytes.
+type Inbox = Rc<RefCell<Vec<(Purpose, Batch)>>>;
 
 /// Audio dropped on an instrument track or a Sampler window, its bytes read, waiting for the
 /// next frame to load into that track's sampler.
@@ -120,19 +123,43 @@ impl WebShell {
     /// File > Open Session… / Import > Audio… / MIDI… would show a text box for a path, which the
     /// browser can't read (#63, #64). Show the browser's file picker instead.
     fn take_path_prompt(&mut self, ctx: &egui::Context) {
+        // The Import Audio dialog can't work here: its "Add Files…" wants paths, which a browser
+        // has none of. Keep the picker instead, taking any number of files at once.
+        if matches!(self.app.dialogs.open, Some(Dialog::ImportAudio(_))) {
+            self.app.dialogs.open = None;
+            self.pick(Purpose::Audio, ctx);
+            return;
+        }
         let purpose = match &self.app.dialogs.open {
             Some(Dialog::PathPrompt { cmd, .. }) => Purpose::for_command(cmd),
             _ => None,
         };
         let Some(purpose) = purpose else { return };
         self.app.dialogs.open = None;
+        self.pick(purpose, ctx);
+    }
+
+    /// Takes the files from the browser's picker: one for a session or a MIDI file, any number
+    /// for audio.
+    fn pick(&mut self, purpose: Purpose, ctx: &egui::Context) {
         let (inbox, ctx) = (self.inbox.clone(), ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let (label, exts) = purpose.filter();
-            let Some(file) = rfd::AsyncFileDialog::new().add_filter(label, &exts).pick_file().await else { return };
-            let bytes = file.read().await;
-            inbox.borrow_mut().push((purpose, file.file_name(), bytes));
-            ctx.request_repaint();
+            let dialog = rfd::AsyncFileDialog::new().add_filter(label, &exts);
+            let files = match purpose {
+                Purpose::Audio => dialog.pick_files().await.unwrap_or_default(),
+                Purpose::Session | Purpose::Midi => dialog.pick_file().await.into_iter().collect(),
+            };
+            let mut batch = Batch::new();
+            for file in files {
+                let name = file.file_name();
+                let bytes = file.read().await;
+                batch.push((name, bytes));
+            }
+            if !batch.is_empty() {
+                inbox.borrow_mut().push((purpose, batch));
+                ctx.request_repaint();
+            }
         });
     }
 
@@ -156,7 +183,7 @@ impl WebShell {
             wasm_bindgen_futures::spawn_local(async move {
                 match f.bytes_async().await {
                     Ok(bytes) => {
-                        inbox.borrow_mut().push((Purpose::of(&name), name, bytes));
+                        inbox.borrow_mut().push((Purpose::of(&name), vec![(name, bytes)]));
                         ctx.request_repaint();
                     }
                     Err(e) => log::error!("couldn't read dropped file {name}: {e}"),
@@ -165,30 +192,64 @@ impl WebShell {
         }
     }
 
-    fn handle(&mut self, purpose: Purpose, name: String, bytes: Vec<u8>) {
+    fn handle(&mut self, purpose: Purpose, mut files: Batch) {
         let e = &mut self.app.engine;
         let at = e.session().edit.selection.start.max(0);
-        let result = match purpose {
+        let result: Result<String, String> = match purpose {
             // Asks first when the open session has changes: the bytes wait for the answer.
-            Purpose::Session => return soundcraft_ui_egui::dialogs::open_session_bytes(&mut self.app, name, bytes),
-            // Imports are edits: one undo step each, like the import commands.
+            Purpose::Session => {
+                let Some((name, bytes)) = files.pop() else { return };
+                return soundcraft_ui_egui::dialogs::open_session_bytes(&mut self.app, name, bytes);
+            }
+            // One undo step for the whole selection, and the files that failed are named.
             Purpose::Audio => {
                 let before = e.session_arc();
-                io::import_audio_bytes(e, &name, &bytes, None, None, at).map(|_| {
+                let (mut done, mut failed) = (Vec::new(), Vec::new());
+                for (name, bytes) in files {
+                    match io::import_audio_bytes(e, &name, &bytes, None, None, at) {
+                        Ok(_) => done.push(name),
+                        Err(err) => failed.push(format!("{name}: {err}")),
+                    }
+                }
+                if !done.is_empty() {
                     e.push_undo("Import Audio", before);
-                    format!("Imported {name}")
-                })
+                }
+                imported("Imported", done, failed)
             }
             Purpose::Midi => {
                 let before = e.session_arc();
-                io::import_midi_bytes(e, &bytes, at, true).map(|_| {
+                let (mut done, mut failed) = (Vec::new(), Vec::new());
+                for (name, bytes) in files {
+                    match io::import_midi_bytes(e, &bytes, at, true) {
+                        Ok(_) => done.push(name),
+                        Err(err) => failed.push(format!("{name}: {err}")),
+                    }
+                }
+                if !done.is_empty() {
                     e.push_undo("Import MIDI", before);
-                    format!("Imported {name}")
-                })
+                } else if !failed.is_empty() {
+                    // A file can fail after it has added tempos or a track (an SMF whose length is
+                    // past the limit `import_midi_bytes` accepts). With nothing imported there is no
+                    // undo step to take that back, so the document goes back to what it was.
+                    *e.session_mut() = (*before).clone();
+                }
+                imported("Imported", done, failed)
             }
         };
-        self.app.ui.status = result.unwrap_or_else(|err| err.to_string());
+        self.app.ui.status = result.unwrap_or_else(|err| err);
     }
+}
+
+/// What a batch did, for the status line: nothing but errors when every file failed.
+fn imported(verb: &str, done: Vec<String>, failed: Vec<String>) -> Result<String, String> {
+    if done.is_empty() {
+        return Err(failed.join("; "));
+    }
+    let mut msg = format!("{verb} {}", done.join(", "));
+    if !failed.is_empty() {
+        msg = format!("{msg}; not imported: {}", failed.join("; "));
+    }
+    Ok(msg)
 }
 
 impl eframe::App for WebShell {
@@ -196,8 +257,8 @@ impl eframe::App for WebShell {
         self.take_drops(ctx);
         self.take_path_prompt(ctx);
         let pending = std::mem::take(&mut *self.inbox.borrow_mut());
-        for (purpose, name, bytes) in pending {
-            self.handle(purpose, name, bytes);
+        for (purpose, files) in pending {
+            self.handle(purpose, files);
         }
         let samples = std::mem::take(&mut *self.samples.borrow_mut());
         for (read, bytes) in samples {

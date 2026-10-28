@@ -7,7 +7,7 @@ use super::{
 use crate::{Engine, EngineError, Result, cmd};
 use serde_json::{Value, json};
 use soundcraft_model::{Session, TrackId, TrackKind};
-use soundcraft_time::SampleRate;
+use soundcraft_time::{MAX_POSITION, SampleRate};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -62,7 +62,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Audio...",
             ["File", "Import"],
             Some("Cmd+Shift+I"),
-            "{path | paths: [..], track?: target track, at?: position, new_tracks?: true (default; false uses `track` or the selected audio track)}",
+            "{path | paths: [..], track?: target track, at?: position, new_tracks?: true (default; false uses `track` or the selected audio track), sequential?: true (files on one track go one after another), clip_list?: false (true: only into the Clip List, no tracks)}",
             always,
             import_audio
         ),
@@ -235,24 +235,49 @@ fn import_audio(e: &mut Engine, p: &Value) -> Result<Value> {
     if paths.is_empty() {
         return Err(bad("file.import_audio", "`path` or `paths` required"));
     }
-    let at = position_param(e, "file.import_audio", p, "at")?.unwrap_or(0).max(0);
-    let target = import_audio_target(e, p)?;
+    let mut at = position_param(e, "file.import_audio", p, "at")?.unwrap_or(0).max(0);
+    let clip_list = bool_or(p, "clip_list", false);
+    let target = if clip_list { None } else { import_audio_target(e, p)? };
+    // Several files on one track would stack at the same spot: they go one after another.
+    let sequential = target.is_some() && bool_or(p, "sequential", true);
     let mut out = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
     for path in &paths {
         let name = std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("Audio").to_string();
-        // Audio the app decoded on a worker thread (`Engine::offer_import`) is only placed here;
-        // the path is checked the same way either way.
-        crate::file_access::check_read(std::path::Path::new(path)).map_err(crate::EngineError::Io)?;
-        let r = match e.take_import(std::path::Path::new(path)) {
-            Some(d) => crate::io::place_decoded(e, &name, d, Some(path.as_str()), target, at)?,
-            None => {
+        // One file that can't be read or decoded doesn't take the others with it: it is reported
+        // back and the rest is imported as one undo step.
+        let one = (|| -> Result<Value> {
+            // Audio the app decoded on a worker thread (`Engine::offer_import`) is only placed
+            // here; the path is checked the same way either way.
+            crate::file_access::check_read(std::path::Path::new(path)).map_err(crate::EngineError::Io)?;
+            if clip_list {
                 let bytes = crate::io::read_file(path)?;
-                crate::io::import_audio_bytes(e, &name, &bytes, Some(path.as_str()), target, at)?
+                Ok(crate::io::import_audio_to_clip_list(e, &name, &bytes, Some(path.as_str()))?)
+            } else {
+                match e.take_import(std::path::Path::new(path)) {
+                    Some(d) => Ok(crate::io::place_decoded(e, &name, d, Some(path.as_str()), target, at)?),
+                    None => {
+                        let bytes = crate::io::read_file(path)?;
+                        Ok(crate::io::import_audio_bytes(e, &name, &bytes, Some(path.as_str()), target, at)?)
+                    }
+                }
             }
-        };
-        out.push(r);
+        })();
+        match one {
+            Ok(r) => {
+                if sequential {
+                    at = at.saturating_add(r.get("frames").and_then(Value::as_i64).unwrap_or(0)).min(MAX_POSITION);
+                }
+                out.push(r);
+            }
+            Err(err) => failed.push(json!({"path": path, "error": err.to_string()})),
+        }
     }
-    Ok(json!({"imported": out}))
+    if out.is_empty() && !failed.is_empty() {
+        let first = failed[0]["error"].as_str().unwrap_or("nothing imported");
+        return Err(bad("file.import_audio", first));
+    }
+    Ok(if failed.is_empty() { json!({"imported": out}) } else { json!({"imported": out, "failed": failed}) })
 }
 
 /// Destination for `file.import_audio`: an explicit `track` wins; otherwise `new_tracks`

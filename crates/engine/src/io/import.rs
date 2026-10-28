@@ -130,6 +130,23 @@ pub(crate) fn place_decoded(e: &mut Engine, name: &str, d: DecodedImport, path: 
     place_import(e, name, &d.info, d.audio, path, target, at)
 }
 
+/// Decodes an audio file into the session's Clip List only (a source at the session rate, no
+/// track and no clip): Pro Tools' "Clip List" import destination.
+pub fn import_audio_to_clip_list(e: &mut Engine, name: &str, bytes: &[u8], path: Option<&str>) -> Result<Value> {
+    let rate = e.session().sample_rate.hz();
+    let (info, audio) = decode_import_bytes(name, bytes, rate)?;
+    let channels = audio.buffer.num_channels();
+    let file_rate = info.sample_rate;
+    let s = e.session_mut();
+    let session_rate = s.sample_rate.hz();
+    let src = add_source_audio(s, name, audio, path, info.format);
+    if let (Some(bwf), Some(sx)) = (info.bwf.as_ref(), s.sources.last_mut()) {
+        sx.time_reference = stamp_at_rate(bwf.time_reference, file_rate, session_rate);
+    }
+    let frames = s.source(src).map_or(0, |x| i64::try_from(x.frames).unwrap_or(0));
+    Ok(json!({"source": src, "frames": frames, "channels": channels}))
+}
+
 fn place_import(
     e: &mut Engine,
     name: &str,
@@ -143,6 +160,16 @@ fn place_import(
     let file_rate = info.sample_rate;
     let s = e.session_mut();
     let session_rate = s.sample_rate.hz();
+    // A file's width has to match the track it lands on: playback reads `channels[ch % n]`, so a
+    // stereo file on a mono track would lose its right channel without a word.
+    if let Some(tr) = target.and_then(|t| s.track(t)) {
+        let (t_name, t_width) = (tr.name.clone(), tr.channels());
+        if t_width != channels {
+            return Err(EngineError::Io(format!(
+                "{name}: {channels} channels on the {t_width}-channel track {t_name} — import it below the tracks, as a new track of its width"
+            )));
+        }
+    }
     let src = add_source_audio(s, name, audio, path, info.format);
     if let (Some(bwf), Some(sx)) = (info.bwf.as_ref(), s.sources.last_mut()) {
         sx.time_reference = stamp_at_rate(bwf.time_reference, file_rate, session_rate);

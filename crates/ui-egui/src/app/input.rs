@@ -131,19 +131,21 @@ impl SoundApp {
         self.injected_events.clear();
     }
 
-    /// Load dropped audio into the sampler track under the drop point; leave everything else for
-    /// the native/browser shell to open or import.
+    /// Load dropped audio into the sampler track under the drop point, import other dropped audio
+    /// where it was dropped (see [`crate::import_audio::drop_target`]), and leave everything else
+    /// for the native/browser shell to open or import.
     pub(super) fn route_dropped_files(&mut self) {
         if self.pending_drops.is_empty() {
             return;
         }
         let mut claimed = false;
+        let mut rest: Vec<(egui::DroppedFileHandle, Option<egui::Pos2>)> = Vec::new();
         for (file, pos) in std::mem::take(&mut self.pending_drops) {
             // As before, one dropped audio file goes to the sampler under the pointer; the rest
-            // are left to the shell.
+            // are left for the Edit window or the shell.
             let claim = !claimed && sampler_window::is_audio_name(file.path());
             let Some(track) = self.drop_track(pos).filter(|_| claim) else {
-                self.host_drops.push(file);
+                rest.push((file, pos));
                 continue;
             };
             claimed = true;
@@ -159,5 +161,14 @@ impl SoundApp {
                 self.sample_reads.push(sampler_window::SampleRead { track, file });
             }
         }
+        if rest.is_empty() {
+            return;
+        }
+        // All the files of one drop share the pointer position it was captured at.
+        let pos = rest.first().and_then(|(_, pos)| *pos);
+        let files = rest.into_iter().map(|(file, _)| file).collect::<Vec<_>>();
+        // One undo step for the batch; files without a full path (the browser) go back to the shell.
+        let left = self.import_dropped_audio(files, pos);
+        self.host_drops.extend(left);
     }
 }
