@@ -125,6 +125,8 @@ impl SoundApp {
     }
 }
 
+/// Instant attack and ~26 dB/s release over `dt`; `holds` is the (Peak Hold, Clip Indication)
+/// setting, timed against `now`, the frame time in egui seconds.
 pub(crate) fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32, now: f64, holds: (MeterHold, MeterHold)) {
     let (peak_hold, clip_indication) = holds;
     let fall = 10f32.powf(-26.0 * dt / 20.0);

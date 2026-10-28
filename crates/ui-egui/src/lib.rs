@@ -261,6 +261,7 @@ impl MeterHold {
 
 /// Seconds a [`MeterHold::ThreeSeconds`] meter keeps its peak or clip.
 const METER_HOLD_SECS: f64 = 3.0;
+
 /// Ballistic meter display state per strip.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MeterDisplay {

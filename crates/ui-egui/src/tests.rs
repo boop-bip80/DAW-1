@@ -159,14 +159,14 @@ fn clear_all_clip_indicators_clears_every_meter() {
     let kick = app.engine.session().track_by_name("Kick").unwrap().id;
     app.meters.entry(kick).or_default().clip = true;
     app.main_meter.clip = true;
-    app.meters.get_mut(&kick).unwrap().hold = [0.9, 0.8];
-    app.main_meter.hold = [1.0, 1.0];
+    app.meters.entry(kick).or_default().hold = [0.8, 0.7];
+    app.main_meter.hold = [0.9, 0.9];
     app.run("track.clear_clip_indicators", json!({})).unwrap();
     assert!(!app.meters[&kick].clip && !app.main_meter.clip);
-    assert_eq!(app.meters[&kick].hold, [0.0, 0.0]);
-    assert_eq!(app.main_meter.hold, [0.0, 0.0]);
+    assert_eq!((app.meters[&kick].hold, app.main_meter.hold), ([0.0, 0.0], [0.0, 0.0]), "held peaks clear with the clips");
 }
 
+/// Feeds `peak` once, then silence for `secs` in 0.1 s steps; returns (held peak, clip lit).
 fn after_peak(peak: f32, secs: f32, holds: (MeterHold, MeterHold)) -> (f32, bool) {
     let mut d = MeterDisplay::default();
     feed_meter(&mut d, [peak, peak], 0.0, 0.1, 0.0, holds);
