@@ -1,7 +1,7 @@
 use super::layout::track_height;
 use super::tracks::in_edit_window;
 use super::universe::content_end;
-use super::*;
+use super::{Rect, Samples, Sense, SoundApp, Tokens, TrackId, Ui, json, pos2, vec2};
 
 /// Scroll Into View: track `id` to the top, as far as the scroll bar reaches. A track the Edit
 /// window doesn't show (hidden, or in a closed folder) leaves the view where it is.

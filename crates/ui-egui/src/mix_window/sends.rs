@@ -1,7 +1,10 @@
 use super::plugin_menu::{MenuSearch, menu_row};
 use super::routing::route_name;
 use super::slots::{COMPACT_SLOT, Mark, empty_slot, level_icon, used_slot};
-use super::*;
+use super::{
+    Align2, Rect, Route, Sense, SoundApp, Stroke, StrokeKind, Tokens, Track, TrackId, TrackKind, Ui, db_text, fader, json, pan_knob, pan_text, pos2,
+    regular, text_toggle, vec2,
+};
 use craft_ui::combo::Menu;
 
 /// Draw one send slot: the route area picks a destination, while the level area opens or edits the send level.
@@ -433,7 +436,7 @@ mod tests {
         let mut h = Harness::builder().with_size(vec2(600.0, 800.0)).build_ui_state(
             move |ui, (app, kick): &mut (SoundApp, TrackId)| {
                 if !ready {
-                    crate::fonts::install(ui.ctx());
+                    crate::fonts::install(ui.ctx(), true);
                     crate::theme::apply(ui.ctx(), false);
                     ready = true;
                     return;

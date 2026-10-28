@@ -1,4 +1,4 @@
-use super::*;
+use super::{Rect, Samples, Session, Track, pos2};
 
 pub const HEADER_W: f32 = 136.0;
 
