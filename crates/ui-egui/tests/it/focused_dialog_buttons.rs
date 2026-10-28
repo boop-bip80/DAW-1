@@ -136,22 +136,61 @@ fn a_dialog_opened_while_a_window_button_has_the_focus_takes_enter() {
 fn the_enter_that_opens_a_dialog_does_not_press_its_default_button() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     let ctx = egui::Context::default();
-    let frame = |app: &mut SoundApp, events: Vec<Event>| {
-        let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))), events, ..Default::default() };
-        ctx.run_ui(raw, |ui| {
-            app.logic(ui.ctx());
-            app.ui(ui);
-        })
-        .textures_delta
-        .clear();
-    };
-    let enter = || Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
-    frame(&mut app, vec![]);
+    run_frame(&ctx, &mut app, vec![]);
     menus::invoke_menu(&mut app, "edit.fades_create", "Edit > Fades > Create...");
-    frame(&mut app, vec![enter()]);
+    run_frame(&ctx, &mut app, vec![enter_key(false), enter_up()]);
     assert_eq!(app.dialogs.open_name(), Some("fades"), "the opening Enter leaves the dialog open");
-    frame(&mut app, vec![enter()]);
+    run_frame(&ctx, &mut app, vec![enter_key(false)]);
     assert_eq!(app.dialogs.open_name(), None, "the next Enter presses Create");
+}
+
+/// Runs one frame of `app` with `events`.
+fn run_frame(ctx: &egui::Context, app: &mut SoundApp, events: Vec<Event>) {
+    let raw = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0))), events, ..Default::default() };
+    ctx.run_ui(raw, |ui| {
+        app.logic(ui.ctx());
+        app.ui(ui);
+    })
+    .textures_delta
+    .clear();
+}
+
+fn enter_key(repeat: bool) -> Event {
+    Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }
+}
+
+fn enter_up() -> Event {
+    Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }
+}
+
+#[test]
+fn the_enter_that_replaces_an_open_dialog_does_not_press_the_new_default_button() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let ctx = egui::Context::default();
+    menus::invoke_menu(&mut app, "setup.session", "Setup > Session");
+    run_frame(&ctx, &mut app, vec![]);
+    run_frame(&ctx, &mut app, vec![]);
+    assert_eq!(app.dialogs.open_name(), Some("session"));
+    menus::invoke_menu(&mut app, "edit.fades_create", "Edit > Fades > Create...");
+    run_frame(&ctx, &mut app, vec![enter_key(false), enter_up()]);
+    assert_eq!(app.dialogs.open_name(), Some("fades"), "the opening Enter leaves the new dialog open");
+    run_frame(&ctx, &mut app, vec![enter_key(false)]);
+    assert_eq!(app.dialogs.open_name(), None, "the next Enter presses Create");
+}
+
+#[test]
+fn a_held_enter_does_not_press_the_default_button_until_it_is_pressed_again() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let ctx = egui::Context::default();
+    run_frame(&ctx, &mut app, vec![]);
+    menus::invoke_menu(&mut app, "edit.fades_create", "Edit > Fades > Create...");
+    run_frame(&ctx, &mut app, vec![enter_key(false)]);
+    run_frame(&ctx, &mut app, vec![enter_key(true)]);
+    run_frame(&ctx, &mut app, vec![enter_key(true)]);
+    assert_eq!(app.dialogs.open_name(), Some("fades"), "the held Enter's repeats leave the dialog open");
+    run_frame(&ctx, &mut app, vec![enter_up()]);
+    run_frame(&ctx, &mut app, vec![enter_key(false)]);
+    assert_eq!(app.dialogs.open_name(), None, "a new press of Enter presses Create");
 }
 
 #[test]
