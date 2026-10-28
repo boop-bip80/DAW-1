@@ -41,7 +41,7 @@ fn bounce_from_dialog(h: &mut Harness<'_, SoundApp>, file: &Path) {
 
 #[test]
 fn enter_on_a_focused_cancel_closes_the_dialog_and_starts_no_bounce() {
-    let dir = scratch("bounce-cancel");
+    let dir = scratch("bounce-enter-cancel");
     let file = dir.join("Mix.wav");
     let mut h = harness();
     let app = h.state_mut();
