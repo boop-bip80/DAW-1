@@ -24,6 +24,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     configurations(app, ctx);
     playback_engine(app, ctx);
     io_setup(app, ctx);
+    plugin_manager(app, ctx);
     shortcuts_window(app, ctx);
     clip_effects(app, ctx);
 }
@@ -725,6 +726,18 @@ pub fn io_setup(app: &mut SoundApp, ctx: &egui::Context) {
         }
     });
     app.ui.show_io_setup = open;
+}
+
+/// Setup › Audio Plug-in Manager: a placeholder until the manager itself lands. The menu item, its
+/// command and its translations are in place, so the window can grow behind them.
+fn plugin_manager(app: &mut SoundApp, ctx: &egui::Context) {
+    let mut open = app.ui.show_plugin_manager;
+    if open {
+        win(ctx, &mut open, "Audio Plug-in Manager", vec2(560.0, 200.0), |ui| {
+            ui.label(crate::i18n::t("Plug-in management arrives in a later update."));
+        });
+    }
+    app.ui.show_plugin_manager = open;
 }
 
 /// Setup › Keyboard Shortcuts.

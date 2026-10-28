@@ -870,6 +870,9 @@ automation	trim	微调
 # --- Window and UI-command leaves that are not in the menu catalog ---
 	Arrange Panel	排列面板
 	Audio Device	音频设备
+	Audio Plug-in Manager	音频插件管理器
+	Audio Plug-in Manager...	音频插件管理器…
+	Plug-in management arrives in a later update.	插件管理功能将在后续版本中推出。
 	Bounce Mix…	导出混音…
 	I/O Setup	I/O 设置
 	Keyboard Shortcuts	键盘快捷键
