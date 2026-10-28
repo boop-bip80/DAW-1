@@ -80,8 +80,8 @@ fn load_from_fontconfig(pattern: &str, lang: Option<&str>) -> Option<FontData> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn load(cands: &[(&str, u32)], pattern: &str, lang: Option<&str>) -> Option<FontData> {
-    if std::env::var_os("SOUNDCRAFT_NO_SYSTEM_FONTS").is_some() {
+fn load(cands: &[(&str, u32)], pattern: &str, lang: Option<&str>, system_fonts: bool) -> Option<FontData> {
+    if !system_fonts {
         return None;
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -104,29 +104,30 @@ fn load(cands: &[(&str, u32)], pattern: &str, lang: Option<&str>) -> Option<Font
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load(_: &[(&str, u32)], _: &str, _: Option<&str>) -> Option<FontData> {
+fn load(_: &[(&str, u32)], _: &str, _: Option<&str>, _: bool) -> Option<FontData> {
     None
 }
 
-pub fn definitions() -> FontDefinitions {
+/// The font set: the bundled faces, plus the system ones when `system_fonts` is true.
+pub fn definitions(system_fonts: bool) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     plain_zero_mono(&mut fonts);
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     let mut bold_family = base.clone();
-    if let Some(reg) = load(REGULAR, "sans-serif", None) {
+    if let Some(reg) = load(REGULAR, "sans-serif", None, system_fonts) {
         fonts.font_data.insert("system-regular".into(), Arc::new(reg));
         if let Some(f) = fonts.families.get_mut(&FontFamily::Proportional) {
             f.insert(0, "system-regular".into());
         }
     }
-    if let Some(b) = load(BOLD, "sans-serif:style=Bold", None) {
+    if let Some(b) = load(BOLD, "sans-serif:style=Bold", None, system_fonts) {
         fonts.font_data.insert("system-bold".into(), Arc::new(b));
         bold_family.insert(0, "system-bold".into());
     } else if fonts.font_data.contains_key("system-regular") {
         bold_family.insert(0, "system-regular".into());
     }
     fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
-    if let Some(h) = load(HANGUL, "sans-serif:lang=ko", Some("ko")) {
+    if let Some(h) = load(HANGUL, "sans-serif:lang=ko", Some("ko"), system_fonts) {
         fonts.font_data.insert("system-hangul".into(), Arc::new(h));
         for family in fonts.families.values_mut() {
             family.push("system-hangul".into());
@@ -135,8 +136,8 @@ pub fn definitions() -> FontDefinitions {
     fonts
 }
 
-pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(definitions());
+pub fn install(ctx: &egui::Context, system_fonts: bool) {
+    ctx.set_fonts(definitions(system_fonts));
 }
 
 /// Name of the embedded monospace face in [`FontDefinitions::font_data`].
@@ -176,7 +177,7 @@ mod plain_zero_tests {
     /// Hack's 0.602 em, 1 000 px apart at this size).
     #[test]
     fn monospace_starts_with_the_plain_zero_font() {
-        let defs = definitions();
+        let defs = definitions(false);
         let mono = &defs.families[&FontFamily::Monospace];
         assert_eq!(mono.first().map(String::as_str), Some(MONO), "Droid Sans Mono must come first: {mono:?}");
         assert!(mono.iter().any(|n| n == "Hack"), "Hack must stay as the fallback: {mono:?}");
@@ -234,7 +235,7 @@ mod tests {
     /// Korean names draw in every family, not as boxes; skipped when the system has no Korean font.
     #[test]
     fn every_family_draws_hangul_with_a_system_korean_font() {
-        let defs = definitions();
+        let defs = definitions(true);
         if !defs.font_data.contains_key("system-hangul") {
             eprintln!("skipping: no Korean system font");
             return;
