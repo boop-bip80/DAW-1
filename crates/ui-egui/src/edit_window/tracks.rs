@@ -198,74 +198,66 @@ pub(super) fn view_menu(app: &mut SoundApp, ui: &mut Ui, track: &Track) {
 }
 
 pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
-    let tid = id.0;
-    let items: [(&str, &str); 10] = [
-        ("Rename...", "ui.rename_track"),
-        ("Duplicate...", "track.duplicate"),
-        ("Make Inactive", "track.make_inactive"),
-        ("Hide", "track.hide"),
-        ("Delete", "track.delete"),
-        ("Split into Mono", "track.split_into_mono"),
-        ("Commit...", "track.commit"),
-        ("Freeze", "track.freeze"),
-        ("Move to New Folder...", "track.move_to_new_folder"),
-        ("Group...", "track.group"),
-    ];
-    let selection: Vec<u64> = {
-        let selected = &app.engine.session().edit.selected_tracks;
-        if selected.contains(&id) { selected.iter().map(|track| track.0).collect() } else { vec![tid] }
-    };
-    for (label, cmd) in items {
-        if ui.button(label).clicked() {
-            if cmd == "ui.rename_track" {
-                let name = app.engine.session().track(id).map(|t| t.name.clone()).unwrap_or_default();
-                app.dialogs.open_rename_track(id, &name);
-            } else {
-                let _ = app.run(cmd, json!({"tracks": selection}));
-            }
-        }
-    }
-    let folders: Vec<(u64, String)> = app
-        .engine
-        .session()
-        .tracks
+    crate::context_menu::show(app, ui, &crate::context_menu::Target::Track(id));
+}
+
+pub(crate) fn native_columns_menu(app: &SoundApp) -> Vec<crate::context_menu::Entry> {
+    use crate::context_menu::Entry;
+    let shown = edit_columns(app.engine.session());
+    let mut entries: Vec<_> = COLUMNS
         .iter()
-        .filter(|track| track.is_folder() && !selection.contains(&track.id.0))
-        .map(|track| (track.id.0, track.name.clone()))
+        .map(|(id, label, _, _)| Entry::command(*label, &format!("view.edit_{id}"), json!({})).checked(shown.iter().any(|c| c.0 == *id)))
         .collect();
-    if !folders.is_empty() {
-        ui.menu_button("Move to Folder", |ui| {
-            for (folder, name) in &folders {
-                if ui.button(name).clicked() {
-                    let _ = app.run("track.move_to_folder", json!({"tracks": selection, "folder": folder}));
-                }
-            }
+    entries.extend([Entry::Separator, Entry::command("All", "view.edit_all", json!({})), Entry::command("Minimal", "view.edit_minimal", json!({}))]);
+    entries
+}
+
+pub(crate) fn native_playlist_menu(app: &SoundApp, id: TrackId) -> Vec<crate::context_menu::Entry> {
+    use crate::context_menu::Entry;
+    let Some(track) = app.engine.session().track(id) else { return vec![] };
+    let mut entries: Vec<_> =
+        [("New...", "track.playlist_new"), ("Duplicate...", "track.playlist_duplicate"), ("Delete Unused...", "track.playlist_delete_unused")]
+            .into_iter()
+            .map(|(label, command)| Entry::command(label, command, json!({"track": id.0})))
+            .collect();
+    entries.push(Entry::Separator);
+    entries.extend(track.playlists.iter().enumerate().map(|(index, playlist)| {
+        Entry::command(&playlist.name, "track.playlist_select", json!({"track": id.0, "index": index})).checked(index == track.active_playlist)
+    }));
+    entries
+}
+
+pub(crate) fn native_view_menu(app: &SoundApp, id: TrackId) -> Vec<crate::context_menu::Entry> {
+    use crate::context_menu::Entry;
+    let Some(track) = app.engine.session().track(id) else {
+        return vec![];
+    };
+    let mut opts = if track.kind.is_midi() {
+        vec!["notes", "regions", "blocks"]
+    } else if track.kind.has_playlist() {
+        vec!["waveform", "blocks", "clip_gain", "playlists"]
+    } else {
+        vec![]
+    };
+    opts.extend(["volume", "pan", "mute"]);
+    let mut entries: Vec<_> = opts
+        .into_iter()
+        .map(|view| Entry::command(view_label(view), "track.view", json!({"track": id.0, "view": view})).checked(track.view == view))
+        .collect();
+    for (slot, insert) in track.mixer.inserts.iter().enumerate() {
+        let Some(info) = insert.as_ref().and_then(|insert| soundcraft_dsp::plugin_info(&insert.plugin)) else { continue };
+        let Some(letter) = u8::try_from(slot).ok().and_then(|slot| b'a'.checked_add(slot)).map(char::from) else { continue };
+        entries.push(Entry::Submenu {
+            label: info.name.into(),
+            entries: info
+                .params
+                .iter()
+                .map(|param| {
+                    let view = format!("plugin:{letter}:{}", param.id);
+                    Entry::command(param.name, "track.view", json!({"track": id.0, "view": view})).checked(track.view == view)
+                })
+                .collect(),
         });
     }
-    if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button("Remove from Folder").clicked() {
-        let _ = app.run("track.remove_from_folder", json!({"tracks": selection}));
-    }
-    // Only the track clicked: the command has one target, and the selection stays as it is.
-    if ui.button("Scroll Into View").clicked() {
-        let _ = app.run("view.scroll_into_view", json!({"track": id.0}));
-    }
-    ui.separator();
-    ui.menu_button("Track Height", |ui| {
-        for h in TrackHeight::ALL {
-            if ui.button(h.label()).clicked() {
-                let own: Vec<TrackId> = selection.iter().map(|&t| TrackId(t)).collect();
-                let tracks = height_targets(app.engine.session(), ui.input(|i| i.modifiers), &own);
-                let _ = app.run("track.height", json!({"tracks": tracks, "height": h.label()}));
-            }
-        }
-    });
-    ui.menu_button("Track Color", |ui| {
-        for (i, c) in soundcraft_model::TRACK_COLORS.iter().enumerate() {
-            let (r, resp) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::click());
-            ui.painter().rect_filled(r, 2.0, rgb(*c));
-            if resp.clicked() {
-                let _ = app.run("track.color", json!({"tracks": selection, "color": i}));
-            }
-        }
-    });
+    entries
 }

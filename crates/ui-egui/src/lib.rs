@@ -6,16 +6,20 @@
 
 pub mod appearance;
 pub mod bounce;
+pub mod context_menu;
 pub mod control;
 pub mod credits;
 pub mod dialogs;
 pub mod docking;
+pub mod dropdown;
 pub mod edit_window;
 pub mod fonts;
 pub mod icons;
 pub mod import;
 pub mod menus;
 pub mod mix_window;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_host;
 pub mod palette;
 pub mod panels;
 pub mod shortcuts;
@@ -266,6 +270,7 @@ pub struct SoundApp {
     pub services: Services,
     /// Set only by a desktop host after installing an OS menu bar.
     pub native_menu_bar: bool,
+    pub context_menus: context_menu::State,
     /// Folder for crash-recovery autosaves (native apps set it).
     pub autosave_dir: Option<std::path::PathBuf>,
     /// Writes the open session's autosaves in the background, once there is something to write.

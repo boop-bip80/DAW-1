@@ -1,6 +1,8 @@
 //! Application panel identities and persistence around the shared docking renderer.
 //! Document contents remain owned by their existing view implementations.
 
+pub mod native_menus;
+
 use craft_ui::docking::{
     Action, Column, DockArea, DockCommand, DockError, DockOperation, DockStyle, FloatSpace, Floating, Group, Layout, Location, Node, PanelLimits,
     Permissions, Placement, Side, Target, UiDock, Zone, ZoneName,
@@ -479,23 +481,26 @@ pub fn show(app: &mut crate::SoundApp, ui: &mut egui::Ui, window: crate::MainWin
         |panel| panel.label().into(),
         permissions,
         panel_limits,
-        |ui, panel| match panel {
-            Panel::Canvas => {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, t.window_bg);
-                if edit {
-                    crate::edit_window::main_area(app, ui);
-                } else {
-                    crate::mix_window::content(app, ui);
+        |ui, panel| {
+            native_menus::record_body(ui.ctx(), window, *panel, ui.max_rect());
+            match panel {
+                Panel::Canvas => {
+                    ui.painter().rect_filled(ui.max_rect(), 0.0, t.window_bg);
+                    if edit {
+                        crate::edit_window::main_area(app, ui);
+                    } else {
+                        crate::mix_window::content(app, ui);
+                    }
                 }
+                Panel::Tracks => crate::panels::tracks_and_groups(app, ui),
+                Panel::Clips => crate::panels::clip_list(app, ui),
+                Panel::Midi => {
+                    ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("soundcraft-midi-body"), ui.max_rect()));
+                    minimum_body(ui, egui::vec2(420.0, 260.0), |ui| crate::midi_editor::show(app, ui));
+                }
+                Panel::Memory => crate::panels::memory_locations(app, ui),
+                Panel::History => crate::panels::undo_history(app, ui),
             }
-            Panel::Tracks => crate::panels::tracks_and_groups(app, ui),
-            Panel::Clips => crate::panels::clip_list(app, ui),
-            Panel::Midi => {
-                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique("soundcraft-midi-body"), ui.max_rect()));
-                minimum_body(ui, egui::vec2(420.0, 260.0), |ui| crate::midi_editor::show(app, ui));
-            }
-            Panel::Memory => crate::panels::memory_locations(app, ui),
-            Panel::History => crate::panels::undo_history(app, ui),
         },
     );
     let _ = sync(&mut workspace, app, edit);
@@ -506,6 +511,7 @@ pub fn show(app: &mut crate::SoundApp, ui: &mut egui::Ui, window: crate::MainWin
             app.ui.status = format!("Panel move was not applied: {error}");
         }
     }
+    native_menus::collect(app, ui, window);
 }
 
 /// Docking may make a specialist view smaller than its fixed tool/ruler geometry. Keep that

@@ -17,11 +17,13 @@ pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
 /// The input or output menu under `resp`. It closes only on a click outside, so its bus search
 /// field can be typed in.
 pub(crate) fn route_popup(app: &mut SoundApp, resp: &egui::Response, id: TrackId, input: bool) {
-    egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, input));
+    if !crate::context_menu::dropdown(app, resp, crate::context_menu::Target::Route { track: id, input }) {
+        egui::Popup::menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| route_menu(app, ui, id, input));
+    }
 }
 
 /// Input or output menu: no route and buses on both, plus the main output (outputs) or inputs 1-8 (inputs).
-fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
+pub(super) fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
     if ui.button(if input { "no input" } else { "no output" }).clicked() {

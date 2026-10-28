@@ -95,6 +95,29 @@ System to Dark, or on Linux to the desktop's portal setting when one is availabl
 track) brings the track to the top of the Edit window and the left of the Mix window, the same as
 Scroll Into View in the track name menu. A window not on screen catches up when it is next shown.
 
+## Native-menu auxiliary windows
+
+On macOS the desktop host presents right-click menus and dropdowns with AppKit. The menu descriptions and
+command actions are shared with egui fallback hosts. Native tracking never owns an app-state
+borrow; cancelling a menu executes nothing, and replacing the session invalidates its result.
+Dropdowns anchor below their controls. Ordinary form choices return a row identity and apply
+once on the next frame, after validating the session, row label and result age. Other hosts
+retain their existing egui UI.
+
+These UI-only commands expose the auxiliary controls used by native menus:
+
+| Command | Parameters | Result |
+|---|---|---|
+| `window.plugin_search` | `{track: id, slot: index, instruments?: false, scan?: "CLAP" or "VST3"}` | Opens a focused plugin picker with an empty search. With `instruments: true`, the track must be an instrument track and `slot` is ignored. `scan` explicitly scans the requested format before showing results. |
+| `window.send_controls` | `{track: id, slot: index}` | Opens the existing detailed controls for an assigned Send. |
+| `window.routing_search` | `{track: id, input?: false, send?: index}` | Opens a focused bus-search picker for the input/output route, or for a Send when `send` is present. |
+| `window.save_preset` | `{track: id, slot: index}` | Opens Save Preset controls for an occupied insert slot. |
+
+Invalid or missing targets and out-of-range slots return an error. Choosing a plugin uses the
+same insertion command, Undo history and automatic editor opening as the inline picker.
+When opened from a native menu, auxiliary controls belong to that menu's viewport; a programmatic
+call opens it in the root viewport.
+
 ## Panel docking
 
 Tracks and Groups, Clips, MIDI Editor, Memory Locations, and Undo History use movable panels. Commands target the active Edit or Mix view; floating panels stay inside the current viewport. Edit and Mix retain separate arrangements; Clips and MIDI Editor belong to Edit. Transport, plug-in, and specialist utility windows retain their existing hosts. The document/session view is protected.

@@ -39,6 +39,7 @@ pub use input::{CLIP_FADER_TRAVEL, clip_gain_icon};
 #[cfg(test)]
 use input::{clip_at, fade_midpoint};
 use layout::COLUMN_TITLES_H;
+use layout::COLUMNS;
 #[cfg(test)]
 use layout::lane_rect;
 pub use layout::{COLUMN_W, EditLayout, HEADER_W, LANE_H, RULER_H, edit_columns, header_width, rect, sample_at, track_height, x_of};
@@ -49,7 +50,7 @@ pub use scroll::zoom_toggle;
 #[cfg(test)]
 use scroll::{FollowFrame, follow_update};
 use scroll::{follow_zoom_toggle, hscrollbar, scroll_and_zoom, scroll_into_view};
-pub(crate) use tracks::{click_track, height_targets, track_context_menu};
+pub(crate) use tracks::{click_track, height_targets, native_columns_menu, native_playlist_menu, native_view_menu};
 use tracks::{in_edit_window, track_row};
 use universe::universe;
 

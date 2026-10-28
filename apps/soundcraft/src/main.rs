@@ -19,16 +19,18 @@ mod graphics;
 mod launch_args;
 mod logging;
 #[cfg(target_os = "macos")]
+mod native_context_menu;
+#[cfg(target_os = "macos")]
 mod native_menu;
 mod switch;
 
 use env::Env;
 use soundcraft_audio_io::FileFormat;
 use soundcraft_engine::Engine;
-use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
+use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs, native_host::NativeUiHost};
 use std::sync::Arc;
 
-struct App(SoundApp, Option<&'static logging::AppLogger>, Env, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App(NativeUiHost, Option<&'static logging::AppLogger>, Env, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
 fn set_title(ctx: &egui::Context, title: String) {
@@ -47,49 +49,50 @@ impl eframe::App for App {
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
         }
+        let Ok(mut app) = self.0.state.try_borrow_mut() else { return };
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.3 {
-            menu.process(&mut self.0);
+            menu.process(&mut app);
         }
-        self.0.guarded(|app| app.logic(ctx));
+        app.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
         if let Some(menu) = &mut self.3 {
-            menu.sync(&self.0);
+            menu.sync(&app);
         }
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
         // the sampler; otherwise sessions open and audio/MIDI import.
-        for f in self.0.take_dropped_files() {
+        for f in app.take_dropped_files() {
             if !f.path().as_os_str().is_empty() {
-                dialogs::open_path(&mut self.0, f.path());
+                dialogs::open_path(&mut app, f.path());
             }
         }
-        if self.0.quit_requested {
+        if app.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut self.0, "app.quit", &serde_json::json!({})) {
+        } else if ctx.input(|i| i.viewport().close_requested()) && dialogs::ask_to_save(&mut app, "app.quit", &serde_json::json!({})) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         soundcraft_ui_egui::fit_window_to_screen(ctx);
         let (inner, maximized) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().maximized.unwrap_or(false)));
-        self.0.ui.window_maximized = maximized;
+        app.ui.window_maximized = maximized;
         if let Some(r) = inner.filter(|_| !maximized) {
-            self.0.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
+            app.ui.window_size = (r.size() * ctx.zoom_factor()).round().into();
         }
-        self.0.ui.ui_scale = self.0.extra.ui_scale;
+        app.ui.ui_scale = app.extra.ui_scale;
         // Saved now rather than at exit: the recent list matters most after a crash.
-        if self.0.take_recent_changed() {
-            save_prefs(&self.2, &self.0.ui);
+        if app.take_recent_changed() {
+            save_prefs(&self.2, &app.ui);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
-        let title = if self.0.native_menu_bar {
+        let title = if app.native_menu_bar {
             format!(
                 "{}{} — SoundCraft — {}",
-                self.0.engine.session().name,
-                if self.0.engine.is_dirty() { " *" } else { "" },
-                if self.0.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
+                app.engine.session().name,
+                if app.engine.is_dirty() { " *" } else { "" },
+                if app.ui.window == soundcraft_ui_egui::MainWindow::Edit { "Edit" } else { "Mix" }
             )
         } else {
-            format!("{} — SoundCraft", self.0.engine.session().name)
+            format!("{} — SoundCraft", app.engine.session().name)
         };
         set_title(ctx, title);
     }
@@ -99,17 +102,19 @@ impl eframe::App for App {
         self.0.raw_input_hook(ctx, raw);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.0.guarded(|app| app.ui(ui));
+        self.0.ui(ui);
     }
     fn on_exit(&mut self) {
-        self.0.close_autosave();
-        save_prefs(&self.2, &self.0.ui);
-        if let Some(logger) = self.1 {
-            logger.report_audio_thread();
+        if let Ok(mut app) = self.0.state.try_borrow_mut() {
+            app.close_autosave();
+            save_prefs(&self.2, &app.ui);
+            if let Some(logger) = self.1 {
+                logger.report_audio_thread();
+            }
+            // The system Quit (⌘Q) ends the process from inside the event loop, so `run_native` never
+            // returns: release the player's plugin instances and shut plugin hosting down here.
+            app.player = None;
         }
-        // The system Quit (⌘Q) ends the process from inside the event loop, so `run_native` never
-        // returns: release the player's plugin instances and shut plugin hosting down here.
-        self.0.player = None;
         soundcraft_engine::shutdown_plugin_hosts();
     }
 }
@@ -278,8 +283,15 @@ fn main() -> eframe::Result {
                     None
                 }
             };
+            let host = NativeUiHost::new(app).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "macos")]
+            if let Some(presenter) = menu.as_ref().and_then(|menu| menu.context_menu.clone())
+                && let Err(error) = host.set_context_menu_presenter(presenter)
+            {
+                log::warn!("Native context menus unavailable: {error}");
+            }
             Ok(Box::new(App(
-                app,
+                host,
                 logger,
                 env,
                 #[cfg(target_os = "macos")]

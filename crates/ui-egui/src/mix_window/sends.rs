@@ -1,4 +1,5 @@
 use super::plugin_menu::{MenuSearch, menu_row};
+use super::routing::route_menu;
 use super::routing::route_name;
 use super::slots::{COMPACT_SLOT, Mark, empty_slot, level_icon, used_slot};
 use super::*;
@@ -50,12 +51,16 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
                 "Send {which} to {name}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
                 db_text(s.level_db)
             ));
-            level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
+            if !crate::context_menu::native(app, ui, &level_resp, crate::context_menu::Target::Send { track: id, slot }) {
+                level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
+            }
         }
         None => empty_slot(ui.painter(), r, ui.rect_contains_pointer(r), mark),
     }
-    let current = snd.as_ref().map(|send| (send.target.clone(), route_name(app, &send.target)));
-    send_route_menu(app, ui, &route_resp, id, slot, current);
+    if !crate::context_menu::dropdown(app, &route_resp, crate::context_menu::Target::SendRoute { track: id, slot }) {
+        let current = snd.as_ref().map(|send| (send.target.clone(), route_name(app, &send.target)));
+        send_route_menu(app, ui, &route_resp, id, slot, current);
+    }
 }
 
 /// The Send window, as in Pro Tools: one send's fader, level, pan, Mute and Pre-fader. Clicking a
@@ -402,6 +407,132 @@ fn send_route_menu(app: &mut SoundApp, ui: &Ui, field: &egui::Response, id: Trac
             let _ = app.run("mix.send_remove", json!({"track": id.0, "slot": slot}));
         }
         None => {}
+    }
+}
+
+pub(crate) fn native_route_menu(app: &SoundApp, track: TrackId, input: bool, send: Option<usize>) -> Vec<crate::context_menu::Entry> {
+    use crate::context_menu::{Action, Entry};
+    let Some(t) = app.engine.session().track(track) else { return vec![] };
+    let current = if let Some(slot) = send {
+        t.mixer.sends.get(slot).and_then(Option::as_ref).map(|s| &s.target)
+    } else {
+        Some(if input { &t.mixer.input } else { &t.mixer.output })
+    };
+    let key = if input { "input" } else { "output" };
+    let command = if input { "track.input" } else { "track.output" };
+    let mut entries =
+        vec![Entry::command("Search Buses…", "window.routing_search", json!({"track": track.0, "input": input, "send": send})), Entry::Separator];
+    if let Some(slot) = send {
+        if current.is_some() {
+            entries.push(Entry::command("Remove send", "mix.send_remove", json!({"track": track.0, "slot": slot})));
+            entries.push(Entry::Separator);
+        }
+    } else {
+        entries.push(
+            Entry::command(if input { "no input" } else { "no output" }, command, json!({"track": track.0, key: "none"}))
+                .checked(current == Some(&Route::None)),
+        );
+        if input {
+            for n in 1..=8 {
+                let name = format!("In {n}");
+                entries.push(Entry::command(&name, command, json!({"track": track.0, key: name})).checked(current == Some(&Route::Hardware(name))));
+            }
+        } else {
+            let name = app.engine.session().outputs.first().map_or("Out 1-2", |output| output.name.as_str());
+            entries.push(Entry::command(name, command, json!({"track": track.0, key: "main"})).checked(current == Some(&Route::Main)));
+        }
+        entries.push(Entry::Separator);
+    }
+    for bus in &app.engine.session().busses {
+        let action = if let Some(slot) = send {
+            Entry::command(&bus.name, "mix.send", json!({"track": track.0, "slot": slot, "bus": bus.name}))
+        } else {
+            Entry::command(&bus.name, command, json!({"track": track.0, key: bus.name}))
+        };
+        entries.push(action.checked(current == Some(&Route::Bus(bus.id))));
+    }
+    entries.extend([Entry::Separator, Entry::item("new bus...", Action::NewBus { track, send, input })]);
+    entries
+}
+
+pub(crate) fn routing_search_command(app: &mut SoundApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let track = TrackId(p.get("track").and_then(serde_json::Value::as_u64).ok_or("track must be an unsigned integer")?);
+    let input = p.get("input").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let send = match p.get("send").filter(|value| !value.is_null()) {
+        Some(value) => Some(value.as_u64().and_then(|slot| usize::try_from(slot).ok()).ok_or("send must be an unsigned slot index")?),
+        None => None,
+    };
+    let t = app.engine.session().track(track).ok_or("Track no longer exists")?;
+    if send.is_some_and(|slot| t.mixer.sends.get(slot).is_none()) {
+        return Err("Invalid send slot".into());
+    }
+    app.context_menus.routing = Some(crate::context_menu::RoutingSearch { track, send, input, viewport: egui::ViewportId::ROOT, fresh: true });
+    Ok(json!({"track": track.0, "send": send, "input": input}))
+}
+
+pub(crate) fn routing_search_window(app: &mut SoundApp, ctx: &egui::Context) {
+    let Some(search) = app.context_menus.routing.as_mut() else { return };
+    if search.viewport != ctx.viewport_id() {
+        return;
+    }
+    let (track, send, input) = (search.track, search.send, search.input);
+    let fresh = std::mem::take(&mut search.fresh);
+    let valid = app.engine.session().track(track).is_some_and(|t| send.is_none_or(|slot| t.mixer.sends.get(slot).is_some()));
+    if !valid || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        app.context_menus.routing = None;
+        return;
+    }
+    let mut open = true;
+    let mut close = false;
+    egui::Window::new("Search Buses")
+        .id(egui::Id::unique(("routing_search", track.0, send, input)))
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(320.0)
+        .show(ctx, |ui| {
+            let key = send
+                .map_or_else(|| egui::Id::unique(("route-bus-search", track.0, input)), |slot| egui::Id::unique(("send-bus-search", track.0, slot)));
+            if fresh {
+                ui.data_mut(|data| data.remove::<(String, usize, u64)>(key));
+            }
+            if let Some(slot) = send {
+                let current =
+                    app.engine.session().track(track).and_then(|t| t.mixer.sends.get(slot)).and_then(Option::as_ref).map(|s| s.target.clone());
+                send_route_list(app, ui, track, slot, current.as_ref());
+            } else {
+                route_menu(app, ui, track, input);
+            }
+            close = ui.should_close();
+        });
+    if !open || close {
+        app.context_menus.routing = None;
+    }
+}
+
+fn send_route_list(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, current: Option<&Route>) {
+    let busses = app.engine.session().busses.clone();
+    let search = MenuSearch::show(ui, egui::Id::unique(("send-bus-search", id.0, slot)), "Search buses…");
+    let visible: Vec<_> = busses.iter().filter(|bus| search.matches(&bus.name)).collect();
+    let picked = search.rows(ui, visible.len(), 260.0, |ui, i, highlighted| {
+        let current = matches!(current, Some(Route::Bus(bus_id)) if *bus_id == visible[i].id);
+        menu_row(ui, highlighted || (current && !search.typing()), &visible[i].name)
+    });
+    if let Some(i) = picked {
+        let _ = app.run("mix.send", json!({"track": id.0, "slot": slot, "bus": visible[i].name}));
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("new bus...").clicked() {
+        let mut n = busses.len() + 1;
+        while busses.iter().any(|bus| bus.name.eq_ignore_ascii_case(&format!("Bus {n}")))
+            || app.engine.session().track_by_name(&format!("Bus {n}")).is_some()
+        {
+            n += 1;
+        }
+        if app.run("mix.new_bus", json!({"name": format!("Bus {n}")})).is_ok() {
+            let _ = app.run("mix.send", json!({"track": id.0, "slot": slot, "bus": format!("Bus {n}")}));
+        }
+        ui.close();
     }
 }
 

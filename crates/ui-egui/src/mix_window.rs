@@ -11,6 +11,9 @@ use serde_json::json;
 use soundcraft_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
 use soundcraft_playback::MeterSnapshot;
 
+pub(crate) use plugin_menu::{context_window_command, native_plugin_menu, plugin_search_window};
+pub(crate) use sends::{native_route_menu, routing_search_command, routing_search_window};
+
 mod plugin_menu;
 mod routing;
 mod sends;
@@ -44,6 +47,9 @@ pub fn show_separate(app: &mut SoundApp, ctx: &egui::Context) {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         show(app, ui);
+        plugin_search_window(app, ui.ctx());
+        routing_search_window(app, ui.ctx());
+        crate::panels::save_preset_window(app, ui.ctx());
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             separate_closed(app);
         }
@@ -348,13 +354,15 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             col,
             SelectorLabels { name: &format!("Automation mode for {}", track.name), value: &full_label, tooltip: &full_label },
         );
-        egui::Popup::menu(&resp).show(|ui| {
-            for m in soundcraft_model::AutomationMode::ALL {
-                if ui.selectable_label(m == mode, m.label()).clicked() {
-                    let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
+        if !crate::context_menu::dropdown(app, &resp, crate::context_menu::Target::Automation(id)) {
+            egui::Popup::menu(&resp).show(|ui| {
+                for m in soundcraft_model::AutomationMode::ALL {
+                    if ui.selectable_label(m == mode, m.label()).clicked() {
+                        let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
+                    }
                 }
-            }
-        });
+            });
+        }
         y = sec.max.y + 4.0;
     }
     // Group selector.
@@ -540,7 +548,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
     if nresp.double_clicked() {
         app.dialogs.open_rename_track(id, &track.name);
     }
-    nresp.context_menu(|ui| crate::edit_window::track_context_menu(app, ui, id));
+    crate::context_menu::attach(app, ui, &nresp, crate::context_menu::Target::Track(id));
     if app.ui.mix_views.iter().any(|v| v == "color") {
         ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x, r.max.y - 5.0), vec2(w, 5.0)), 0.0, rgb(track.color));
     }

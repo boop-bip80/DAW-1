@@ -104,7 +104,7 @@ pub(super) fn lane_interaction(app: &mut SoundApp, ui: &mut Ui, track: &Track, l
     }
     // The clip may have been removed or moved since the right-click; only use it if it still exists.
     let menu_clip = ui.ctx().data(|d| d.get_temp::<Option<ClipId>>(menu_clip_id)).flatten().filter(|c| track.clips().iter().any(|x| x.id == *c));
-    resp.context_menu(|ui| clip_context_menu(app, ui, menu_clip));
+    crate::context_menu::attach(app, ui, &resp, crate::context_menu::Target::Clip(menu_clip));
     // Audio files dropped from the Clip List.
     if let Some(src) = resp.dnd_release_payload::<crate::DragSource>()
         && let Some(p) = ui.ctx().pointer_latest_pos()
@@ -413,37 +413,5 @@ pub(super) fn new_midi_clip(app: &mut SoundApp, s: &Session, track: TrackId, fro
         && let Ok(v) = app.run("midi.new_clip", json!({"track": track.0, "start": r.start, "end": r.end}))
     {
         let _ = app.run("edit.select", json!({"clips": [v["clip"]]}));
-    }
-}
-
-fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
-    let Some(c) = clip else {
-        if ui.button("Paste").clicked() {
-            let _ = app.run("edit.paste", json!({}));
-        }
-        return;
-    };
-    let ids = json!([c.0]);
-    for (label, cmd) in [
-        ("Mute/Unmute", "edit.mute_clips"),
-        ("Edit Lock/Unlock", "clip.edit_lock"),
-        ("Time Lock/Unlock", "clip.time_lock"),
-        ("Quantize to Grid", "clip.quantize_to_grid"),
-        ("Render Clip Gain", "clip.gain_render"),
-        ("Bring to Front", "clip.bring_to_front"),
-        ("Send to Back", "clip.send_to_back"),
-    ] {
-        if ui.button(label).clicked() {
-            let _ = app.run(cmd, json!({"clips": ids}));
-        }
-    }
-    ui.separator();
-    if ui.button("Rename...").clicked() {
-        let name = app.engine.session().find_clip(c).map(|(_, x)| x.name.clone()).unwrap_or_default();
-        app.dialogs.open_rename_clip(c, &name);
-    }
-    if ui.button("Delete").clicked() {
-        let _ = app.run("edit.select", json!({"clips": ids}));
-        let _ = app.run("edit.clear", json!({}));
     }
 }

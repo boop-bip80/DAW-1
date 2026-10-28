@@ -4,13 +4,13 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold, mono, regular, rgb};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipId, SourceId};
 
 mod about;
 mod clips;
 mod history;
 mod memory;
 mod plugins;
+pub(crate) use plugins::{load_preset, native_preset_menu, save_preset_command, save_preset_window};
 mod tracks;
 mod transport;
 

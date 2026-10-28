@@ -95,12 +95,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
         if all.double_clicked() {
             let _ = app.run("edit.select_all", json!({}));
         }
-        all.context_menu(|ui| {
-            if ui.button("New Group…").clicked() {
-                let _ = app.dialogs.open_for_command(&app.engine, "track.group");
-                ui.close();
-            }
-        });
+        crate::context_menu::attach(app, ui, &all, crate::context_menu::Target::Group(None));
         for (id, letter, name, active, color) in groups {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 17.0), Sense::click());
             resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, active, &name));
@@ -123,24 +118,7 @@ pub fn tracks_and_groups(app: &mut SoundApp, ui: &mut Ui) {
             if resp.double_clicked() {
                 let _ = app.run("edit.select", json!({"tracks": members, "exact": true}));
             }
-            resp.context_menu(|ui| {
-                if ui.button("Select Tracks in Group").clicked() {
-                    let _ = app.run("edit.select", json!({"tracks": members, "exact": true}));
-                    ui.close();
-                }
-                if ui.button(if active { "Disable" } else { "Enable" }).clicked() {
-                    let _ = app.run("track.group_toggle", json!({"group": id}));
-                    ui.close();
-                }
-                if ui.button("Modify Group…").clicked() {
-                    let _ = app.dialogs.open_modify_group(&app.engine, soundcraft_model::GroupId(id));
-                    ui.close();
-                }
-                if ui.button("Delete Group").clicked() {
-                    let _ = app.run("track.ungroup", json!({"group": id}));
-                    ui.close();
-                }
-            });
+            crate::context_menu::attach(app, ui, &resp, crate::context_menu::Target::Group(Some(soundcraft_model::GroupId(id))));
         }
     });
     gutter_scroll(ui, gutter, &out);

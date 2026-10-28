@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-25 · **Change:** trivial (G-04: Clip Looping crossfade and loop count; previously trivial: G-08 and G-20: built-in plugin count, the sampler shipped) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (responsive native menu tracking) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -204,6 +204,14 @@ settings command only. Needs an openly licensed local speech model. ≈ 30–50 
 
 ### G-19. UI feel
 
+**Fixed (2026-10-28):** Native macOS menus no longer enter their nested tracking loop from inside an egui/winit render callback. Main-thread scheduling lets the callback return first, so redraws continue with the menu open. Requests are deduplicated, revalidated at execution and cancelled when their host closes; queue failure restores egui. Regression tests cover frames during tracking and deferred-request lifecycle; a live demo confirmed advancing frames and playback while the native docking menu remained open. Estimates unchanged.
+
+**Fixed (2026-10-28):** Docking tabs (including Memory Locations and Undo History), group drag bars, tab overflow lists and dock-column handles now use AppKit on macOS. Float/move/close/minimize/collapse actions and overflow activation retain their originating Edit/Mix workspace, validate permissions and reject stale layouts. Other hosts retain egui. Renderer-driven regression tests cover native dispatch without an egui popup, group/column menus, overflow activation, persistence and stale targets; other UI fidelity estimates are unchanged.
+
+**Done (2026-10-26):** Dropdowns also use AppKit on macOS: track controls, routing and sends, inserts/instruments, toolbar values, presets, and ordinary form/settings ComboBoxes. Routing Search and Save Preset open auxiliary controls; deferred form choices validate session, age and row identity before applying once. The egui fallback is retained for other hosts. Other UI fidelity work and estimates remain unchanged.
+
+**Done (2026-10-25):** macOS context menus now use AppKit for Track, Clip, Groups, Clip List, Insert, Instrument and Send, with system appearance and Liquid Glass on supported macOS/SDK combinations. Plugin Search preserves filtering and keyboard selection in a separate picker; Send opens its existing detailed controls and exposes native quick actions. Cancellation, stale targets, one-shot dispatch and egui fallback are covered. Other UI fidelity work and estimates remain unchanged.
+
 See [`ui-parity.md`](ui-parity.md). ≈ 60–100 h.
 
 ### G-20. MIDI and instrument depth
@@ -225,6 +233,9 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Native menu tracking leaves the UI/event callback before entering AppKit's nested loop; redraws and playback verified while open, with deferred-request lifecycle regression coverage; readiness estimates unchanged |
+| 2026-10-28 | minor | macOS docking tabs, group handles, overflow lists and dock-column menus use the deferred native presenter; scoped layout actions reject stale menus and retain the egui fallback; readiness estimates unchanged |
+| 2026-10-26 | minor | Native macOS context menus and dropdowns with focused plugin/routing search and Send/preset controls; readiness estimates unchanged |
 | 2026-10-25 | trivial | G-04: Clip Looping (#1030) lacks the loop crossfade option, and Number of Loops stops at 512 while length and fill make up to 1000 loops |
 | 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
 | 2026-10-19 | trivial | G-04: Float32 encoding retains finite headroom (#791); integer clipping and non-finite handling retained |

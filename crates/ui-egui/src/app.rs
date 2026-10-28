@@ -41,6 +41,7 @@ impl SoundApp {
             audio_health_report: None,
             services,
             native_menu_bar: false,
+            context_menus: context_menu::State::default(),
             autosave_dir: None,
             autosaver: None,
             autosaved_rev: 0,
@@ -327,6 +328,9 @@ impl SoundApp {
         if self.ui.mix_separate {
             mix_window::show_separate(self, &ctx);
         }
+        mix_window::plugin_search_window(self, &ctx);
+        mix_window::routing_search_window(self, &ctx);
+        panels::save_preset_window(self, &ctx);
         panels::floating(self, &ctx);
         windows::show(self, &ctx);
         video_window::show(self, &ctx);

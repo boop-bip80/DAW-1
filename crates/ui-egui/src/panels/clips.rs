@@ -71,33 +71,7 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
         };
         for (id, name, whole, color, selected) in items {
             let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), if whole { Sense::click_and_drag() } else { Sense::click() });
-            resp.context_menu(|ui| {
-                if whole {
-                    if ui.button("Place on New Track").clicked() {
-                        let _ = app.run("clip.place_source", json!({"source": id}));
-                        ui.close();
-                    }
-                    let sel_track = app.engine.session().edit.selected_tracks.first().map(|t| t.0);
-                    if let Some(t) = sel_track
-                        && ui.button("Place on Selected Track").clicked()
-                    {
-                        let _ = app.run("clip.place_source", json!({"source": id, "track": t}));
-                        ui.close();
-                    }
-                    ui.separator();
-                }
-                if !whole && ui.button("Auto Rename…").clicked() {
-                    // The selected clips when the row is one of them, otherwise the row's clip.
-                    let clips = if selected { app.engine.session().edit.selected_clips.clone() } else { vec![ClipId(id)] };
-                    app.dialogs.open_auto_rename(&app.engine, clips);
-                    ui.close();
-                }
-                if ui.button("Clear…").clicked() {
-                    let (clips, sources) = if whole { (vec![], vec![SourceId(id)]) } else { (vec![ClipId(id)], vec![]) };
-                    app.dialogs.open_clear(&app.engine, clips, sources);
-                    ui.close();
-                }
-            });
+            crate::context_menu::attach(app, ui, &resp, crate::context_menu::Target::ClipList { id, source: whole });
             if whole {
                 // Whole files drag onto tracks.
                 resp.dnd_set_drag_payload(crate::DragSource(id));
@@ -126,7 +100,7 @@ pub fn clip_list(app: &mut SoundApp, ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_model::{ChannelFormat, Clip, Session, TrackKind};
+    use soundcraft_model::{ChannelFormat, Clip, Session, SourceId, TrackKind};
 
     #[test]
     fn clip_rows_list_every_clip_in_track_order_and_filter_by_name() {

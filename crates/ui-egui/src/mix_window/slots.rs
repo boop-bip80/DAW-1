@@ -20,9 +20,12 @@ pub(crate) fn instrument_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, r:
         app.ui.plugin_windows.push((id, slot));
     }
     let menu_resp = if hosted { resp.clone().on_hover_text("Click: open instrument · right-click: change") } else { resp.clone() };
-    let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
-    let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| instrument_menu(app, ui, id));
+    let native = crate::context_menu::native(app, ui, &menu_resp, crate::context_menu::Target::Instrument(id));
+    let left_native = if !hosted { crate::context_menu::dropdown(app, &menu_resp, crate::context_menu::Target::Instrument(id)) } else { native };
+    if !left_native {
+        let popup = if hosted { egui::Popup::context_menu(&menu_resp) } else { egui::Popup::menu(&menu_resp) };
+        popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| instrument_menu(app, ui, id));
+    }
     crate::sampler_window::drop_target(app, ui.ctx(), r, id);
 }
 
@@ -124,7 +127,11 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
     let tip = format!("{name}: click to open · {cmd}click to bypass · right-click to change");
     let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
-    let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
-    let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
+    let native = crate::context_menu::native(app, ui, &menu_resp, crate::context_menu::Target::Insert { track: id, slot });
+    let left_native =
+        if ins.is_none() { crate::context_menu::dropdown(app, &menu_resp, crate::context_menu::Target::Insert { track: id, slot }) } else { native };
+    if !left_native {
+        let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
+        popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
+    }
 }
