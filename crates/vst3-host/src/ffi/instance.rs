@@ -2,7 +2,11 @@ use super::editor::EditorLink;
 use super::host::HostContext;
 use super::module::Bundle;
 use super::process::{BusBuffers, EventList, MemoryStream, NoteEvent, ParamChanges};
-use super::*;
+use super::{
+    Arc, ComPtr, ComWrapper, EVENT_CAP, IAudioProcessorTrait, IComponentTrait, IConnectionPointTrait, IEditControllerTrait, IMidiMappingTrait,
+    IPluginBaseTrait, MAX_BUS_CHANNELS, MAX_BUSES, MAX_PARAMS, MAX_STATE_BYTES, Mutex, Ordering, PARAM_QUEUE_CAP, PITCH_BEND, STATE_MAGIC, Transport,
+    Vst3Error, ok, read_c16, sb, sv,
+};
 
 // ---- instances -----------------------------------------------------------------------------
 
@@ -32,7 +36,9 @@ pub(crate) struct Layout {
 }
 
 pub(super) fn apply_transport(c: &mut sv::ProcessContext, t: &Transport) {
-    use sv::ProcessContext_::StatesAndFlags_::*;
+    use sv::ProcessContext_::StatesAndFlags_::{
+        kBarPositionValid, kContTimeValid, kPlaying, kProjectTimeMusicValid, kRecording, kTempoValid, kTimeSigValid,
+    };
     let mut state = kTempoValid | kTimeSigValid | kProjectTimeMusicValid | kBarPositionValid | kContTimeValid;
     if t.playing {
         state |= kPlaying;
@@ -375,18 +381,8 @@ impl Instance {
     /// `controls` (time, id, value) one point at their time when it falls in this call (the last
     /// one wins per parameter), and `notes` (sorted by time) have their times made relative to
     /// `offset`.
-    pub fn process(
-        &mut self,
-        frames: usize,
-        inputs: &mut BusBuffers,
-        outputs: &mut BusBuffers,
-        params: &[(u32, f64)],
-        controls: &[(u32, u32, f64)],
-        notes: &[NoteEvent],
-        offset: u32,
-        project_time: i64,
-        transport: Option<&Transport>,
-    ) -> Result<(), Vst3Error> {
+    pub fn process(&mut self, input: ProcessInput<'_>) -> Result<(), Vst3Error> {
+        let ProcessInput { frames, inputs, outputs, params, controls, notes, offset, project_time, transport } = input;
         if !self.active {
             return Err(Vst3Error::Process("not active".into()));
         }
@@ -448,6 +444,18 @@ impl Instance {
         let r = unsafe { p.process(&mut data) };
         if ok(r) { Ok(()) } else { Err(Vst3Error::Process(format!("process returned {r}"))) }
     }
+}
+
+pub(crate) struct ProcessInput<'a> {
+    pub frames: usize,
+    pub inputs: &'a mut BusBuffers,
+    pub outputs: &'a mut BusBuffers,
+    pub params: &'a [(u32, f64)],
+    pub controls: &'a [(u32, u32, f64)],
+    pub notes: &'a [NoteEvent],
+    pub offset: u32,
+    pub project_time: i64,
+    pub transport: Option<&'a Transport>,
 }
 
 impl Drop for Instance {

@@ -2,7 +2,7 @@ use super::drag::drag_plan;
 use super::input::midi_clip_span;
 use super::layout::x_of;
 use super::scroll::{FollowFrame, follow_update};
-use super::*;
+use super::{Color32, Gesture, Rect, Samples, SoundApp, Stroke, StrokeKind, Tokens, TrackId, Ui, json, ops, pos2, rgb};
 
 /// Selection overlay, insertion point and playhead across rulers and tracks.
 /// The insertion point stays drawn while playing, beside the moving playhead.
