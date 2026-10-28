@@ -127,3 +127,28 @@ fn pressing_and_releasing_ctrl_during_a_drag_keeps_the_value() {
     press(&mut h, from + vec2(40.0, 0.0), false, Modifiers::NONE);
     assert_eq!(value(&h, label), held, "releasing the button moved the value back to the pointer");
 }
+
+#[test]
+fn pressing_ctrl_during_a_drag_on_the_value_box_keeps_the_value() {
+    let mut h = strip_silence_dialog();
+    let label = "Threshold dB";
+    let plain = drag_on(&mut h, Role::SpinButton, label, 30.0, Modifiers::NONE);
+    let held = drag_on(&mut h, Role::SpinButton, label, 30.0, Modifiers::COMMAND);
+    assert!(held < plain / 2.0, "a Ctrl-drag on the value box moved {held}, a plain drag {plain}");
+    let from = h.get_by_role_and_label(Role::SpinButton, label).rect().center();
+    move_to(&mut h, from);
+    press(&mut h, from, true, Modifiers::NONE);
+    move_to(&mut h, from + vec2(10.0, 0.0));
+    let before = value(&h, label);
+    hold(&mut h, Modifiers::COMMAND);
+    assert_eq!(value(&h, label), before, "pressing Ctrl moved the value");
+    for i in 1..=6 {
+        move_to(&mut h, from + vec2(10.0 + 5.0 * i as f32, 0.0));
+    }
+    let fine = value(&h, label) - before;
+    // The rest of the drag moves as far as a drag with Ctrl held from the start.
+    assert!((0.8..=1.2).contains(&(fine / held)), "after Ctrl, the value box moved {fine}; a Ctrl-drag moves {held}");
+    press(&mut h, from + vec2(40.0, 0.0), true, Modifiers::COMMAND);
+    press(&mut h, from + vec2(40.0, 0.0), false, Modifiers::COMMAND);
+    hold(&mut h, Modifiers::NONE);
+}
