@@ -1,7 +1,7 @@
 use super::import::add_source;
 #[cfg(test)]
 use super::midi::{MAX_MIDI_METERS, import_midi_bytes};
-use super::*;
+use super::{AudioBuffer, Clip, ClipContent, Engine, EngineError, FileFormat, Range, Result, Samples, Session, TrackId, TrackKind};
 
 /// Consolidate `r` on a track into one new clip backed by a rendered source. The clip covers the
 /// whole range, silence included; a range too long to render is refused rather than shortened.
