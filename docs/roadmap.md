@@ -1,12 +1,16 @@
 # SoundCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (native macOS popup menus) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (responsive native menu tracking) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Forward-looking plan. Status and numbers: [`../ROADMAP.md`](../ROADMAP.md) and
 [`target-app-parity.md`](target-app-parity.md); the ranked work list: [`gaps.md`](gaps.md).
 Hours are Opus 5.5 agent-hours.
 
 ## Current focus
+
+**Delivered 2026-10-28:** Native macOS menu tracking is scheduled after the current UI/event callback, keeping redraws and playback running while a menu stays open. Requests are deduplicated and revalidated before tracking; closed hosts cancel queued work and scheduling failures restore in-window menus. Live playback/redraw verification and lifecycle regression tests cover the fix; readiness estimates unchanged.
+
+**Delivered 2026-10-28:** Native macOS menus now cover docking tabs, group drag bars, tab overflow and column handles. Layout selections stay scoped to their originating workspace and stale menus cannot change a different group. Other hosts retain the shared renderer menus; readiness estimates unchanged.
 
 1. **Merge or close the open bug-fix PRs** (#123–#134, #146, #148, #75) and fix the rest of the
    correctness backlog (G-04). ≈ 15–25 h.
@@ -89,6 +93,8 @@ There is no `cargo xtask scorecard` in this repo; the measured number is `cargo 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Native menu tracking leaves the UI/event callback before entering AppKit's nested loop; redraws and playback verified while open, with deferred-request lifecycle regression coverage; readiness estimates unchanged |
+| 2026-10-28 | minor | macOS docking tabs, group handles, overflow lists and dock-column menus use the deferred native presenter; scoped layout actions reject stale menus and retain the egui fallback; readiness estimates unchanged |
 | 2026-10-26 | minor | Native macOS context menus and dropdowns with focused plugin/routing search and Send/preset controls; readiness estimates unchanged |
 | 2026-10-24 | trivial | 27 built-in processors, as the plugin registry holds; the sampler (#108) is no longer listed under plugin essentials |
 | 2026-10-14 | trivial | M8: reject oversized MCP batches before execution (#460) |

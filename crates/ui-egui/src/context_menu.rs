@@ -8,6 +8,7 @@ use soundcraft_model::{ClipId, GroupId, SourceId, TrackHeight, TrackId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
+    Dock { window: crate::MainWindow, panel: crate::docking::Panel, kind: crate::docking::native_menus::MenuKind },
     Control(egui::Id),
     TrackView(TrackId),
     Playlists(TrackId),
@@ -32,6 +33,7 @@ pub enum Target {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    Dock(crate::docking::native_menus::Selection),
     Choice { control: egui::Id, index: usize, label: String },
     NewBus { track: TrackId, send: Option<usize>, input: bool },
     LoadPreset { track: TrackId, slot: usize, name: String },
@@ -98,6 +100,13 @@ pub struct Selection {
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Presenter {
     fn capture_input(&self, _raw: &egui::RawInput) {}
+    /// Tracking hosts must enqueue this after the current UI/event callback returns.
+    /// The immediate default is for presenters that do not enter a nested native loop.
+    /// On error, the callback must not have been queued or called.
+    fn schedule(&self, callback: Box<dyn FnOnce()>) -> Result<(), String> {
+        callback();
+        Ok(())
+    }
     fn present(&self, request: &Request) -> Result<Option<Selection>, String>;
 }
 
@@ -141,6 +150,7 @@ impl State {
 pub fn valid(app: &SoundApp, target: &Target) -> bool {
     let s = app.engine.session();
     match target {
+        Target::Dock { window, panel, .. } => crate::docking::native_menus::valid(app, *window, *panel),
         Target::Presets { track, slot, plugin } => {
             s.track(*track).and_then(|t| t.mixer.inserts.get(*slot)).and_then(Option::as_ref).is_some_and(|insert| insert.plugin == *plugin)
         }
@@ -245,6 +255,7 @@ pub fn execute(app: &mut SoundApp, action: Action, modifiers: Modifiers, viewpor
     let opening_routing = matches!(&action, Action::Command(id, _) if id == "window.routing_search");
     let opening_preset = matches!(&action, Action::Command(id, _) if id == "window.save_preset");
     let result = match action {
+        Action::Dock(selection) => crate::docking::native_menus::execute(app, selection),
         Action::Choice { .. } => Err("Dropdown selection requires a window host".into()),
         Action::LoadPreset { track, slot, name } => crate::panels::load_preset(app, track, slot, &name),
         Action::NewBus { track, send, input } => {
@@ -339,6 +350,7 @@ pub fn describe(app: &SoundApp, target: &Target) -> Vec<Entry> {
         return vec![];
     }
     let mut entries = match *target {
+        Target::Dock { window, panel, kind } => crate::docking::native_menus::describe(app, window, panel, kind),
         Target::Control(_) => vec![],
         Target::Presets { track, slot, .. } => crate::panels::native_preset_menu(app, track, slot),
         Target::TrackView(id) => crate::edit_window::native_view_menu(app, id),

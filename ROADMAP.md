@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (native macOS popup menus) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-28 · **Last updated:** 2026-10-28 · **Change:** minor (responsive native menu tracking) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -122,6 +122,10 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-10-28:** Native macOS menus begin tracking after the egui/winit event callback returns, allowing the UI to repaint while menus stay open. Deferred requests are deduplicated, revalidated and cancelled when their host closes; scheduling failures restore the egui fallback. Live demo playback and redraws verified during native tracking; readiness estimates unchanged.
+
+- **2026-10-28:** Docking tab context menus, group drag-bar menus, overflowing tab lists and dock-column menus use AppKit on macOS through the existing deferred native presenter. Float, move, close, minimize, collapse and tab activation retain the originating Edit/Mix workspace and reject stale layout snapshots. Other hosts keep the shared egui menus. Readiness estimates unchanged.
+
 - **2026-10-26:** macOS context menus and dropdowns use native AppKit menus: Track View/Playlist/Voice/Automation, routing, inserts/instruments, toolbar values, presets, and form/settings ComboBoxes. Search and Save Preset open auxiliary controls; form choices apply once after native tracking. Windows, Linux and web retain egui. Stage and readiness estimates unchanged.
 
 - **2026-10-25:** Tracks and Groups and the Clip List sit in dock columns that run the Edit window's full height at its left and right edges, with the MIDI Editor under the session view between them; Mix docks Tracks and Groups at its left edge. A panel dragged onto a dock group joins it as a tab, stacks above or below it, or makes a new column; one dragged to an empty window edge makes a dock there. A list with no saved place reopens in its dock, and makes the dock again when it is gone. Preferences and window configurations saved with the earlier split-frame layouts load with the new default layouts and keep their other settings. No readiness percentage change.
@@ -178,6 +182,8 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Native menu tracking leaves the UI/event callback before entering AppKit's nested loop; redraws and playback verified while open, with deferred-request lifecycle regression coverage; readiness estimates unchanged |
+| 2026-10-28 | minor | macOS docking tabs, group handles, overflow lists and dock-column menus use the deferred native presenter; scoped layout actions reject stale menus and retain the egui fallback; readiness estimates unchanged |
 | 2026-10-26 | minor | Native macOS context menus and dropdowns with focused plugin/routing search and Send/preset controls; readiness estimates unchanged |
 | 2026-10-25 | trivial | Progress log: side panels in dock columns; readiness estimates unchanged |
 | 2026-10-25 | trivial | Progress log: Auto Pan stereo balance; readiness estimates unchanged |

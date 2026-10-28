@@ -46,9 +46,9 @@ pub(crate) fn collect(app: &mut crate::SoundApp, ctx: &Context) {
     }
 }
 
-/// Same small ComboBox API used by SoundCraft's forms, with an unchanged egui fallback.
+/// Same small ComboBox API used by SoundCraft's forms, with the shared menu fallback.
 pub struct ComboBox {
-    fallback: egui::ComboBox<'static>,
+    fallback: craft_ui::ComboBox<'static>,
     salt: Id,
     label: Option<WidgetText>,
     selected: WidgetText,
@@ -58,12 +58,12 @@ pub struct ComboBox {
 impl ComboBox {
     pub fn from_id_salt(salt: impl std::hash::Hash + std::fmt::Debug) -> Self {
         let salt = Id::unique(salt);
-        Self { fallback: egui::ComboBox::from_id_salt(salt), salt, label: None, selected: "".into(), width: None }
+        Self { fallback: craft_ui::ComboBox::from_id_salt(salt), salt, label: None, selected: "".into(), width: None }
     }
     pub fn from_label(label: impl Into<WidgetText>) -> Self {
         let label = label.into();
         Self {
-            fallback: egui::ComboBox::from_label(label.clone()),
+            fallback: craft_ui::ComboBox::from_label(label.clone()),
             salt: Id::unique(label.text()),
             label: Some(label),
             selected: "".into(),

@@ -9,7 +9,15 @@ use soundcraft_ui_egui::context_menu::{Action, Anchor, Entry, Presenter, Request
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
+
+type MenuJob = Box<dyn FnOnce()>;
+thread_local! {
+    // Non-Send UI state stays on the main thread. Only the numeric ticket crosses DispatchQueue.
+    static MENU_JOBS: RefCell<HashMap<u64, MenuJob>> = RefCell::new(HashMap::new());
+}
+static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 
 pub const EVENT_PREFIX: &str = "soundcraft.context.";
 
@@ -101,6 +109,30 @@ impl NativeContextMenu {
 }
 
 impl Presenter for NativeContextMenu {
+    fn schedule(&self, callback: MenuJob) -> Result<(), String> {
+        let _mtm = MainThreadMarker::new().ok_or("Context menus require the main thread")?;
+        let id = NEXT_JOB.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).map_err(|_| "Menu job ids exhausted")?;
+        MENU_JOBS.with(|jobs| {
+            let mut jobs = jobs.try_borrow_mut().map_err(|_| "Native menu queue busy")?;
+            if jobs.len() >= 16 {
+                return Err("Native menu queue full");
+            }
+            jobs.insert(id, callback);
+            Ok(())
+        })?;
+        // Return all the way out of eframe/winit's current event handler before AppKit enters
+        // menu tracking. winit can then deliver redraws from the nested tracking run loop.
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let job = MENU_JOBS.with(|jobs| jobs.try_borrow_mut().ok().and_then(|mut jobs| jobs.remove(&id)));
+            if let Some(job) = job
+                && std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err()
+            {
+                log::error!("Deferred native menu callback failed");
+            }
+        });
+        Ok(())
+    }
+
     fn capture_input(&self, raw: &egui::RawInput) {
         if raw.events.iter().any(|event| matches!(event, egui::Event::PointerButton { pressed: false, .. } | egui::Event::Key { pressed: true, .. }))
             && let Ok(mut origins) = self.origins.try_borrow_mut()

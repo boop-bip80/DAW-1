@@ -2,13 +2,14 @@
 
 use crate::SoundApp;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 thread_local! {
     static HOSTS: RefCell<HashMap<u64, Weak<RefCell<SoundApp>>>> = RefCell::new(HashMap::new());
     static PRESENTERS: RefCell<HashMap<u64, Rc<dyn crate::context_menu::Presenter>>> = RefCell::new(HashMap::new());
+    static SCHEDULED_MENUS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
 }
 
 static NEXT_HOST: AtomicU64 = AtomicU64::new(1);
@@ -68,8 +69,55 @@ fn present_pending(id: u64, ctx: &egui::Context) {
     let state = HOSTS.with(|hosts| hosts.try_borrow().ok().and_then(|hosts| hosts.get(&id).and_then(Weak::upgrade)));
     let presenter = PRESENTERS.with(|p| p.try_borrow().ok().and_then(|p| p.get(&id).cloned()));
     let (Some(state), Some(presenter)) = (state, presenter) else { return };
+    let wanted = state.try_borrow().is_ok_and(|app| !app.context_menus.active && app.context_menus.pending.is_some());
+    if !wanted || !SCHEDULED_MENUS.with(|scheduled| scheduled.try_borrow_mut().is_ok_and(|mut scheduled| scheduled.insert(id))) {
+        return;
+    }
+    let repaint = ctx.clone();
+    let run = Box::new(move || {
+        let scheduled = SCHEDULED_MENUS.with(|scheduled| scheduled.try_borrow_mut().is_ok_and(|mut scheduled| scheduled.remove(&id)));
+        if !scheduled {
+            return; // The host was dropped before its queued callback ran.
+        }
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| present_now(id, &repaint))).is_err() {
+            fail_menu(id, &repaint, "Native context menu failed; using in-window menus".into());
+        }
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| presenter.schedule(run)))
+        .unwrap_or_else(|_| Err("Native context menu scheduling failed; using in-window menus".into()));
+    if let Err(error) = result {
+        SCHEDULED_MENUS.with(|scheduled| {
+            if let Ok(mut scheduled) = scheduled.try_borrow_mut() {
+                scheduled.remove(&id);
+            }
+        });
+        fail_menu(id, ctx, error);
+    }
+}
+
+fn fail_menu(id: u64, ctx: &egui::Context, error: String) {
+    log::warn!("Native context menu: {error}");
+    let state = HOSTS.with(|hosts| hosts.try_borrow().ok().and_then(|hosts| hosts.get(&id).and_then(Weak::upgrade)));
+    if let Some(state) = state
+        && let Ok(mut app) = state.try_borrow_mut()
+    {
+        app.context_menus.active = false;
+        app.context_menus.pending = None;
+        app.context_menus.enabled = false;
+        app.ui.status = error;
+    }
+    ctx.request_repaint();
+}
+
+fn present_now(id: u64, ctx: &egui::Context) {
+    let state = HOSTS.with(|hosts| hosts.try_borrow().ok().and_then(|hosts| hosts.get(&id).and_then(Weak::upgrade)));
+    let presenter = PRESENTERS.with(|p| p.try_borrow().ok().and_then(|p| p.get(&id).cloned()));
+    let (Some(state), Some(presenter)) = (state, presenter) else { return };
     let request = {
-        let Ok(mut app) = state.try_borrow_mut() else { return };
+        let Ok(mut app) = state.try_borrow_mut() else {
+            ctx.request_repaint(); // Leave the request queued for the next available UI pass.
+            return;
+        };
         if app.context_menus.active {
             return;
         }
@@ -109,6 +157,11 @@ fn present_pending(id: u64, ctx: &egui::Context) {
 
 impl Drop for NativeUiHost {
     fn drop(&mut self) {
+        SCHEDULED_MENUS.with(|scheduled| {
+            if let Ok(mut scheduled) = scheduled.try_borrow_mut() {
+                scheduled.remove(&self.id);
+            }
+        });
         HOSTS.with(|hosts| {
             if let Ok(mut hosts) = hosts.try_borrow_mut() {
                 hosts.remove(&self.id);
@@ -128,6 +181,7 @@ mod context_menu_tests {
     use crate::context_menu::{self, Action, Presenter, Request, Selection, Target};
     use egui::{Modifiers, ViewportId};
     use serde_json::json;
+    use std::cell::Cell;
 
     struct Mock {
         state: Weak<RefCell<SoundApp>>,
@@ -169,6 +223,115 @@ mod context_menu_tests {
         });
         drop(app);
         (host, presenter, track)
+    }
+
+    struct Deferred {
+        state: Weak<RefCell<SoundApp>>,
+        queued: RefCell<Vec<Box<dyn FnOnce()>>>,
+        in_ui: Cell<bool>,
+        calls: Cell<usize>,
+        frames: Cell<usize>,
+        ctx: egui::Context,
+    }
+
+    impl Presenter for Deferred {
+        fn schedule(&self, callback: Box<dyn FnOnce()>) -> Result<(), String> {
+            self.queued.borrow_mut().push(callback);
+            Ok(())
+        }
+
+        fn present(&self, _: &Request) -> Result<Option<Selection>, String> {
+            assert!(!self.in_ui.get(), "native tracking must start after the original UI callback returns");
+            let state = self.state.upgrade().unwrap();
+            assert!(state.borrow().context_menus.active);
+            self.calls.set(self.calls.get() + 1);
+            // Model AppKit's nested loop delivering more frames while the menu stays open.
+            // This Context is the one that was rendering when the request was queued.
+            for _ in 0..3 {
+                let mut output = self.ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let mut app = state.try_borrow_mut().expect("menu tracking must not own the app");
+                    app.logic(ui.ctx());
+                    app.ui(ui);
+                    self.frames.set(self.frames.get() + 1);
+                });
+                output.textures_delta.clear();
+            }
+            Ok(None)
+        }
+    }
+
+    fn deferred() -> (NativeUiHost, Rc<Deferred>) {
+        let (host, _, _) = setup(Ok(None), false);
+        let presenter = Rc::new(Deferred {
+            state: Rc::downgrade(&host.state),
+            queued: RefCell::new(vec![]),
+            in_ui: Cell::new(false),
+            calls: Cell::new(0),
+            frames: Cell::new(0),
+            ctx: egui::Context::default(),
+        });
+        host.set_context_menu_presenter(presenter.clone()).unwrap();
+        (host, presenter)
+    }
+
+    #[test]
+    fn deferred_tracking_leaves_the_ui_callback_and_allows_frames_while_open() {
+        let (host, presenter) = deferred();
+        presenter.in_ui.set(true);
+        let mut output = presenter.ctx.run_ui(egui::RawInput::default(), |_| {
+            present_pending(host.id, &presenter.ctx);
+            present_pending(host.id, &presenter.ctx);
+            assert_eq!(presenter.calls.get(), 0);
+            assert!(host.state.borrow().context_menus.pending.is_some());
+        });
+        output.textures_delta.clear();
+        presenter.in_ui.set(false);
+        assert_eq!(presenter.queued.borrow().len(), 1, "multipass rendering queues only one callback");
+        let callback = presenter.queued.borrow_mut().pop().unwrap();
+        callback();
+        assert_eq!(presenter.calls.get(), 1);
+        assert!(presenter.frames.get() >= 3);
+        assert!(!host.state.borrow().context_menus.active);
+        assert!(host.state.borrow().context_menus.pending.is_none());
+    }
+
+    #[test]
+    fn deferred_requests_revalidate_targets_and_stop_when_the_host_is_dropped() {
+        let (host, presenter) = deferred();
+        present_pending(host.id, &presenter.ctx);
+        host.state.borrow_mut().run("session.new", json!({})).unwrap();
+        let callback = presenter.queued.borrow_mut().pop().unwrap();
+        callback();
+        assert_eq!(presenter.calls.get(), 0);
+        assert!(!host.state.borrow().context_menus.active);
+
+        let (host, presenter) = deferred();
+        present_pending(host.id, &presenter.ctx);
+        drop(host);
+        let callback = presenter.queued.borrow_mut().pop().unwrap();
+        callback();
+        assert_eq!(presenter.calls.get(), 0);
+    }
+
+    #[test]
+    fn scheduling_failure_restores_the_in_window_fallback_without_running_the_menu() {
+        struct Refused;
+        impl Presenter for Refused {
+            fn schedule(&self, _: Box<dyn FnOnce()>) -> Result<(), String> {
+                Err("queue unavailable".into())
+            }
+            fn present(&self, _: &Request) -> Result<Option<Selection>, String> {
+                panic!("must not track after a scheduling failure")
+            }
+        }
+        let (host, _, _) = setup(Ok(None), false);
+        host.set_context_menu_presenter(Rc::new(Refused)).unwrap();
+        present_pending(host.id, &egui::Context::default());
+        let app = host.state.borrow();
+        assert!(!app.context_menus.active);
+        assert!(!app.context_menus.enabled);
+        assert!(app.context_menus.pending.is_none());
+        assert!(app.ui.status.contains("queue unavailable"));
     }
 
     #[test]
