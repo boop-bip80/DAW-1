@@ -71,6 +71,7 @@ impl EditLayout {
         self.scroll_y = (self.scroll_y + dy).clamp(0.0, (self.content_h - view_h + 40.0).max(0.0));
     }
 
+    /// Clears the vertical scroll position Zoom Toggle would restore, so Cancel Zoom Toggle keeps the current scroll.
     pub(crate) fn forget_zoom_back(&mut self) {
         self.zoom_back = None;
     }
