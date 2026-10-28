@@ -78,6 +78,7 @@
 	Big Counter	大计数器
 	Bounce Mix...	导出混音...
 	Bounce...	导出...
+	Bounce	导出
 	Bring to Front	移到前面
 	Bypass	旁通
 	Bypass Inserts	旁通插入
@@ -691,6 +692,7 @@
 	Refresh devices	刷新设备
 	Remove from Folder	从文件夹中移除
 	Remove send	移除发送
+	Remove	移除
 	Rename bus…	重命名总线…
 	Renders and AudioSuite processes run to completion before returning.	渲染与 AudioSuite 处理会执行完毕后再返回。
 	Reopen the audio devices with these settings	使用这些设置重新打开音频设备
@@ -864,6 +866,7 @@ automation	trim	微调
 	no insert	无插入
 	new bus...	新建总线...
 	OK	确定
+	Replace	替换
 	Revert “{name}” to its last saved version? Your changes will be lost.	将“{name}”恢复到上次保存的版本？你的更改将丢失。
 	Close “{name}” without saving? Your changes will be lost.	不保存就关闭“{name}”？你的更改将丢失。
 	Save changes to “{name}” before closing?	关闭前要保存对“{name}”的更改吗？

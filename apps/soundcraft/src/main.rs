@@ -144,7 +144,7 @@ impl eframe::App for App {
         self.app.guarded(|app| app.ui(ui));
     }
     fn on_exit(&mut self) {
-        self.app.close_autosave();
+        let _ = self.app.close_autosave();
         save_prefs(&self.env, &self.app.ui);
         // Only write when a preference actually changed: `load_prefs_json` is lenient, so an
         // unconditional save would replace a hand-edited (or damaged) file with defaults, and an

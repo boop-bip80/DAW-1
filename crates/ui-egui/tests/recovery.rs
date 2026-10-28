@@ -49,8 +49,8 @@ fn launch(root: &Path) -> SoundApp {
 
 /// Fail with the reason an autosave couldn't be written (a full disk, say) rather than an empty
 /// recovery list that says nothing about why.
-fn assert_autosaved(app: &SoundApp) {
-    if let Some(e) = app.autosave_failure() {
+fn assert_autosaved(app: &SoundApp, closed: Option<String>) {
+    if let Some(e) = closed.or_else(|| app.autosave_failure()) {
         panic!("autosave failed: {e}");
     }
 }
@@ -68,8 +68,8 @@ fn an_exit_without_quit_offers_unsaved_changes_at_the_next_launch() {
     let then = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
     std::fs::File::options().write(true).open(&path).unwrap().set_modified(then).unwrap();
     first.run("track.new", json!({"name": "Vocal"})).unwrap();
-    first.close_autosave();
-    assert_autosaved(&first);
+    let closed = first.close_autosave();
+    assert_autosaved(&first, closed);
     drop(first);
 
     let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_ui_state(
@@ -119,8 +119,8 @@ fn recovering_keeps_the_unsaved_work_it_replaces() {
     let root = dir.join("Autosave");
     let mut first = launch(&root);
     first.run("track.new", json!({"name": "Vocal"})).unwrap();
-    first.close_autosave();
-    assert_autosaved(&first);
+    let closed = first.close_autosave();
+    assert_autosaved(&first, closed);
     let left = leftovers(&root);
     assert_eq!((left.len(), left[0].name.as_str(), left[0].origin.as_deref()), (1, "Untitled", None));
     let mut next = launch(&root);
@@ -143,8 +143,8 @@ fn closing_the_session_or_quitting_drops_its_autosave() {
     for end in ["session.close", "app.quit"] {
         let mut first = launch(&root);
         first.run("track.new", json!({"name": "Vocal"})).unwrap();
-        first.close_autosave();
-        assert_autosaved(&first);
+        let closed = first.close_autosave();
+        assert_autosaved(&first, closed);
         let mut next = launch(&root);
         let left = next.leftovers[0].clone();
         next.recover(&left);

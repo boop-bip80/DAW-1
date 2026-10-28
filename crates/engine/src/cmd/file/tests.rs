@@ -256,6 +256,7 @@ fn same_named_clips_export_as_separate_files() {
 fn exports_the_selected_clips_and_refuses_an_empty_selection() {
     let mut e = crate::demo::demo_engine();
     let dir = crate::test_scratch::root().join(format!("soundcraft-clips-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
     let p = json!({"dir": dir.to_string_lossy()});
     e.execute("edit.select_none", &json!({})).unwrap();
     assert!(e.execute("file.export_clips", &p).is_err());

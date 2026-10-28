@@ -128,7 +128,7 @@ fn an_open_plugin_editor_gesture_is_autosaved() {
 fn closing_during_a_plugin_editor_gesture_keeps_the_autosave() {
     for gesture in [false, true] {
         let (mut app, dir) = app_with_editor_gesture("gesture-close", gesture);
-        app.close_autosave();
+        let _ = app.close_autosave();
         assert_eq!(app.latest_autosave().is_some(), gesture);
         let _ = std::fs::remove_dir_all(dir);
     }

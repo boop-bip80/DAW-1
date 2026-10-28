@@ -438,7 +438,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             .small()
                             .color(Tokens::current().text_dim),
                     );
-                    if buttons(ui, "Bounce", enter) {
+                    if buttons(ui, crate::i18n::t("Bounce"), enter) {
                         let p = std::path::Path::new(path.as_str()).with_extension(format.default_extension());
                         crate::bounce::start(
                             app,
@@ -468,7 +468,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::ClearClips { clips, sources, message } => {
                     ui.set_max_width(340.0);
                     ui.label(message.as_str());
-                    if buttons(ui, "Remove", enter) {
+                    if buttons(ui, crate::i18n::t("Remove"), enter) {
                         action = Some(("clip.clear".into(), json!({"clips": clips, "sources": sources, "with_clips": true})));
                     }
                 }
@@ -511,7 +511,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             &[("name", &file.file_name().unwrap_or_default().to_string_lossy())],
                         ));
                     }
-                    if buttons(ui, if replaces { "Replace" } else { "OK" }, enter && !replaces) {
+                    if buttons(ui, crate::i18n::t(if replaces { "Replace" } else { "OK" }), enter && !replaces) {
                         let mut v = json!({});
                         v[key.as_str()] = json!(path);
                         if replaces {

@@ -80,7 +80,7 @@ impl SoundApp {
     /// Done with the open session. Unsaved changes stay in its autosave folder for the next
     /// launch, unless the user quit with SoundCraft's Quit; a take still recording is finished
     /// and always stays.
-    pub fn close_autosave(&mut self) {
+    pub fn close_autosave(&mut self) -> Option<String> {
         let recording = self.engine.transport.recording;
         if recording {
             self.stop_play();
@@ -91,9 +91,8 @@ impl SoundApp {
             self.write_autosave();
         }
         self.release_autosave(keep);
-        if let Some(w) = &self.autosaver {
-            let _ = w.flush();
-        }
+        let w = self.autosaver.as_ref()?;
+        w.flush().err().map(|e| e.to_string())
     }
 
     /// Run part of a frame. If it panics, the session is autosaved (once per change) and the app
@@ -117,7 +116,7 @@ impl SoundApp {
             self.ui.status = crate::i18n::t("Stop recording before recovering other work.").into();
             return;
         }
-        self.close_autosave();
+        let _ = self.close_autosave();
         match soundcraft_engine::autosave::recover(&mut self.engine, left) {
             Ok(missing) => {
                 self.document_replaced();
