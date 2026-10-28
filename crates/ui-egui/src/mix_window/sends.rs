@@ -15,8 +15,14 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
     let level_r = if compact { r } else { level_icon(r).expand2(vec2(3.0, 0.0)).with_min_y(r.min.y).with_max_y(r.max.y) };
     let route_r = Rect::from_min_max(r.min, pos2((level_r.min.x - 1.0).max(r.min.x), r.max.y));
     let route_resp = ui.interact(if snd.is_some() { route_r } else { r }, ui.scope_id().with(("snd-route", id.0, slot)), Sense::click());
-    route_resp
-        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Send {} for {}", (b'A' + slot as u8) as char, track.name)));
+    route_resp.widget_info(|| {
+        let which = (b'A' + slot as u8) as char;
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            crate::i18n::fmt(crate::i18n::t("Send {which} for {name}"), &[("which", &which.to_string()), ("name", &track.name)]),
+        )
+    });
     let mark = if compact { Mark::Arrow } else { Mark::Letter((b'a' + slot as u8) as char) };
     match &snd {
         Some(s) => {
@@ -27,7 +33,13 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
             let which = (b'A' + slot as u8) as char;
             let shown = app.ui.send_window == Some((id, slot));
             let level_resp = ui.interact(level_r, ui.scope_id().with(("send-value", id.0, slot)), Sense::click_and_drag());
-            level_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Send {which} level for {}", track.name)));
+            level_resp.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::Role::Button,
+                    true,
+                    crate::i18n::fmt(crate::i18n::t("Send {which} level for {name}"), &[("which", &which.to_string()), ("name", &track.name)]),
+                )
+            });
             if shown {
                 ui.painter().rect_stroke(level_r.shrink(0.5), 1.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
             }
@@ -46,9 +58,11 @@ pub(crate) fn send_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: us
                 let _ =
                     app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
             }
-            let _ = level_resp.clone().on_hover_text(format!(
-                "Send {which} to {name}: {} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
-                db_text(s.level_db)
+            let _ = level_resp.clone().on_hover_text(crate::i18n::fmt(
+                crate::i18n::t(
+                    "Send {which} to {name}: {db} dB\nClick for the send fader · drag vertically to adjust · Shift-drag for fine control · Alt-click for 0 dB · right-click for options",
+                ),
+                &[("which", &which.to_string()), ("name", &name), ("db", &db_text(s.level_db))],
             ));
             level_resp.context_menu(|ui| send_options_menu(app, ui, id, slot, s));
         }
@@ -151,9 +165,11 @@ fn send_window_contents(app: &mut SoundApp, ctx: &egui::Context) {
 /// Secondary controls live behind the amount readout, separate from the bus selector like Logic.
 fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, send: &soundcraft_model::SendSlot) {
     ui.set_min_width(230.0);
-    ui.strong(format!("Send {} · {}", (b'A' + slot as u8) as char, route_name(app, &send.target)));
+    let which = (b'A' + slot as u8) as char;
+    let name = route_name(app, &send.target);
+    ui.strong(crate::i18n::fmt(crate::i18n::t("Send {which} · {name}"), &[("which", &which.to_string()), ("name", &name)]));
     let mut db = send.level_db.max(-60.0);
-    if ui.add(egui::Slider::new(&mut db, -60.0..=12.0).text("Level").suffix(" dB")).changed() {
+    if ui.add(egui::Slider::new(&mut db, -60.0..=12.0).text(crate::i18n::t("Level")).suffix(" dB")).changed() {
         let _ = app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "db": db}), &format!("send:{}:{slot}", id.0));
     }
     send_level_scale(ui, send.level_db);
@@ -164,7 +180,7 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
                 let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": db}));
             }
         }
-        if ui.small_button("0 dB").clicked() {
+        if ui.small_button(crate::i18n::t("0 dB")).clicked() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "db": 0.0}));
         }
         if ui.small_button("−∞").clicked() {
@@ -172,23 +188,23 @@ fn send_options_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, 
         }
     });
     let mut pan = send.pan;
-    if ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).text("Pan")).changed() {
+    if ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).text(crate::i18n::t("Pan"))).changed() {
         let _ = app.engine.execute_merged("mix.send_level", &json!({"track": id.0, "slot": slot, "pan": pan}), &format!("send-pan:{}:{slot}", id.0));
     }
     ui.horizontal(|ui| {
         let mut mute = send.mute;
-        if crate::widgets::checkbox(ui, &mut mute, "Mute").changed() {
+        if crate::widgets::checkbox(ui, &mut mute, crate::i18n::t("Mute")).changed() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "mute": mute}));
         }
         let mut pre = send.pre_fader;
-        if crate::widgets::checkbox(ui, &mut pre, "Pre-fader").changed() {
+        if crate::widgets::checkbox(ui, &mut pre, crate::i18n::t("Pre-fader")).changed() {
             let _ = app.run("mix.send_level", json!({"track": id.0, "slot": slot, "pre_fader": pre}));
         }
     });
     if let Route::Bus(bus) = send.target
         && let Some(aux) =
             app.engine.session().tracks.iter().find(|t| t.kind == TrackKind::Aux && t.mixer.input == Route::Bus(bus)).map(|t| (t.id, t.name.clone()))
-        && ui.button("Rename bus…").clicked()
+        && ui.button(crate::i18n::t("Rename bus…")).clicked()
     {
         app.dialogs.open_rename_track(aux.0, &aux.1);
         ui.close();
@@ -338,18 +354,18 @@ fn send_route_menu(app: &mut SoundApp, ui: &Ui, field: &egui::Response, id: Trac
         match &current {
             Some((_, name)) => {
                 ui.horizontal(|ui| {
-                    ui.strong(format!("Send {which}"));
+                    ui.strong(crate::i18n::fmt(crate::i18n::t("Send {which}"), &[("which", &which.to_string())]));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(egui::RichText::new(name).color(Tokens::current().counter_text));
                     });
                 });
-                ui.label(egui::RichText::new("DESTINATION").size(8.0).color(Tokens::current().text_dim));
+                ui.label(egui::RichText::new(crate::i18n::t("DESTINATION")).size(8.0).color(Tokens::current().text_dim));
             }
             None => {
-                ui.strong(format!("Send {which} · Choose destination"));
+                ui.strong(crate::i18n::fmt(crate::i18n::t("Send {which} · Choose destination"), &[("which", &which.to_string())]));
             }
         }
-        let search = MenuSearch::show(ui, egui::Id::unique(("send-bus-search", id.0, slot)), "Search buses…");
+        let search = MenuSearch::show(ui, egui::Id::unique(("send-bus-search", id.0, slot)), crate::i18n::t("Search buses…"));
         let visible: Vec<_> = busses.iter().filter(|bus| search.matches(&bus.name)).collect();
         (search, visible)
     };
@@ -371,11 +387,11 @@ fn send_route_menu(app: &mut SoundApp, ui: &Ui, field: &egui::Response, id: Trac
             })
         },
         |ui| {
-            if ui.button("new bus...").clicked() {
+            if ui.button(crate::i18n::t("new bus...")).clicked() {
                 ui.close();
                 return Some(SendFooter::NewBus);
             }
-            if has_send && ui.button("Remove send").clicked() {
+            if has_send && ui.button(crate::i18n::t("Remove send")).clicked() {
                 ui.close();
                 return Some(SendFooter::RemoveSend);
             }

@@ -789,7 +789,7 @@ mod stem_tests {
     #[test]
     fn stems_one_file_per_track() {
         let mut e = crate::demo::demo_engine();
-        let dir = std::env::temp_dir().join(format!("soundcraft-stems-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-stems-{}", std::process::id()));
         let r = e
             .execute("file.bounce_stems", &serde_json::json!({"dir": dir.to_string_lossy(), "start": {"seconds": 10.0}, "end": {"seconds": 11.0}}))
             .unwrap();

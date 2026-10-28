@@ -134,6 +134,14 @@ fn short_label(text: &str) -> &str {
     }
 }
 
+/// The English key a section caption is translated from, and the shorter key to fall back to when
+/// even the translation doesn't fit. Both stay English: translating first would make `short_label`
+/// miss its map and the width fallback would draw the same long caption again.
+fn caption_keys(text: &str, narrow: bool) -> (&str, &str) {
+    let key = if narrow { short_label(text) } else { text };
+    (key, short_label(key))
+}
+
 /// A section's caption. Narrow strips always use the short names, as Pro Tools' Narrow Mix does, so
 /// every narrow strip reads the same whatever the UI font: measuring alone left the full name in
 /// place wherever a narrower font (egui's built-in face on a system with no fonts) happened to fit.
@@ -141,10 +149,10 @@ fn short_label(text: &str) -> &str {
 fn section_label(ui: &Ui, r: Rect, text: &str, narrow: bool) {
     let p = ui.painter();
     let color = Tokens::current().section_label;
-    let text = if narrow { short_label(text) } else { text };
-    let mut galley = p.layout_no_wrap(text.to_owned(), bold(10.0), color);
+    let (key, short_key) = caption_keys(text, narrow);
+    let mut galley = p.layout_no_wrap(crate::i18n::t(key).to_owned(), bold(10.0), color);
     if galley.size().x > r.width() - 8.0 {
-        galley = p.layout_no_wrap(short_label(text).to_owned(), bold(10.0), color);
+        galley = p.layout_no_wrap(crate::i18n::t(short_key).to_owned(), bold(10.0), color);
     }
     p.galley(Align2::CENTER_CENTER.anchor_size(pos2(r.center().x, r.min.y + 7.0), galley.size()).min, galley, color);
 }
@@ -209,7 +217,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             _ if track.kind == TrackKind::Instrument => instrument_slot(app, ui, track, sr),
             Some(k) => insert_slot(app, ui, track, k, sr),
             None if track.kind == TrackKind::Midi => {
-                ui.painter().text(sr.center(), Align2::CENTER_CENTER, "MIDI in: all", regular(9.0), t.text_dim);
+                ui.painter().text(sr.center(), Align2::CENTER_CENTER, crate::i18n::t("MIDI in: all"), regular(9.0), t.text_dim);
             }
             None => {}
         }
@@ -220,8 +228,11 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         if has_input {
             let on = app.engine.session().edit.flag(&format!("object.{}", id.0));
             let mut c = ui.new_child(egui::UiBuilder::new().max_rect(sec));
-            let label = egui::RichText::new(if on { "OBJECT" } else { "BED" }).font(bold(9.0));
-            if c.add_sized(sec.size(), egui::Button::new(label).selected(on)).on_hover_text("Route as an immersive object or to the bed").clicked() {
+            let label = egui::RichText::new(if on { crate::i18n::t("OBJECT") } else { crate::i18n::t("BED") }).font(bold(9.0));
+            if c.add_sized(sec.size(), egui::Button::new(label).selected(on))
+                .on_hover_text(crate::i18n::t("Route as an immersive object or to the bed"))
+                .clicked()
+            {
                 let _ = app.run("track.object", json!({"tracks": [id.0], "object": !on}));
             }
         }
@@ -332,11 +343,12 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         } else {
             t.auto_write
         };
-        let full_label = format!("auto {}", mode.label());
+        let mode_label = crate::i18n::tr_ctx(crate::i18n::current(), "automation", mode.label());
+        let full_label = crate::i18n::fmt(crate::i18n::t("auto {mode}"), &[("mode", mode_label)]);
         let label = if mode == soundcraft_model::AutomationMode::TouchLatch {
-            if narrow { "t/l" } else { mode.label() }
+            if narrow { crate::i18n::t("t/l") } else { mode_label }
         } else if narrow {
-            mode.label()
+            mode_label
         } else {
             &full_label
         };
@@ -350,7 +362,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         );
         egui::Popup::menu(&resp).show(|ui| {
             for m in soundcraft_model::AutomationMode::ALL {
-                if ui.selectable_label(m == mode, m.label()).clicked() {
+                if ui.selectable_label(m == mode, crate::i18n::tr_ctx(crate::i18n::current(), "automation", m.label())).clicked() {
                     let _ = app.run("mix.automation_mode", json!({"track": id.0, "mode": m.label()}));
                 }
             }
@@ -358,7 +370,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         y = sec.max.y + 4.0;
     }
     // Group selector.
-    let no_group = if narrow { "nogrp" } else { "no group" };
+    let no_group = crate::i18n::t(if narrow { "nogrp" } else { "no group" });
     let gname = app.engine.session().groups.iter().find(|g| g.members.contains(&id)).map_or(no_group.to_string(), |g| g.name.clone());
     let gr = Rect::from_min_size(pos2(x0 + 2.0, y), vec2(inner_w - 4.0, 16.0));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(gr));
@@ -523,7 +535,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         TrackKind::Folder => "folder",
         TrackKind::Video => "video",
     };
-    ui.painter().text(pos2(vr.center().x, vr.max.y + 9.0), Align2::CENTER_CENTER, kind, regular(9.5), t.text_dim);
+    ui.painter().text(pos2(vr.center().x, vr.max.y + 9.0), Align2::CENTER_CENTER, crate::i18n::t(kind), regular(9.5), t.text_dim);
     let nr = Rect::from_min_size(pos2(x0, r.max.y - 26.0), vec2(inner_w, 18.0));
     ui.painter().rect(
         nr,
@@ -549,8 +561,45 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
 
 #[cfg(test)]
 mod tests {
-    use super::{Readout, dragged_send_db, editable_readout, parse_db, parse_pan};
+    use super::{Readout, caption_keys, dragged_send_db, editable_readout, parse_db, parse_pan};
+    use crate::i18n::{self, Lang, language_scope};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+
+    fn zh() -> Lang {
+        Lang::from_code("zh-Hans").expect("zh-Hans is registered")
+    }
+
+    #[test]
+    fn section_captions_keep_the_english_key_for_the_short_fallback() {
+        for (long, short) in
+            [("INSERTS A-E", "I A-E"), ("INSERTS F-J", "I F-J"), ("SENDS A-E", "S A-E"), ("SENDS F-J", "S F-J"), ("INSTRUMENT", "INST")]
+        {
+            let (key, fallback) = caption_keys(long, false);
+            assert_eq!((key, fallback), (long, short), "wide strips start from the long name and fall back to the short one");
+            // English (the source language): the fallback is the short Pro Tools name.
+            assert_eq!((i18n::t(key), i18n::t(fallback)), (long, short));
+            let (key, fallback) = caption_keys(long, true);
+            assert_eq!((key, fallback), (short, short), "narrow strips start from the short name");
+        }
+        let _scope = language_scope(zh());
+        for (long, short, long_zh, short_zh) in [
+            ("INSERTS A-E", "I A-E", "插入 A-E", "插 A-E"),
+            ("INSERTS F-J", "I F-J", "插入 F-J", "插 F-J"),
+            ("SENDS A-E", "S A-E", "发送 A-E", "送 A-E"),
+            ("SENDS F-J", "S F-J", "发送 F-J", "送 F-J"),
+            ("INSTRUMENT", "INST", "乐器", "乐器"),
+        ] {
+            // The width fallback translates the *short* English key, so it really draws the short
+            // Chinese row: translating before `short_label` used to leave that fallback dead.
+            let (key, fallback) = caption_keys(long, false);
+            assert_eq!((key, i18n::t(key)), (long, long_zh));
+            assert_eq!((fallback, i18n::t(fallback)), (short, short_zh));
+            // Narrow strips always draw the short row, without a second measurement.
+            let (key, fallback) = caption_keys(long, true);
+            assert_eq!((key, fallback), (short, short));
+            assert_eq!((i18n::t(key), i18n::t(fallback)), (short_zh, short_zh));
+        }
+    }
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {

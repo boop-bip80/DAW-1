@@ -250,7 +250,7 @@ mod bundle_tests {
 
     #[test]
     fn write_file_writes_to_disk_natively() {
-        let p = std::env::temp_dir().join(format!("soundcraft-write-file-{}.txt", std::process::id()));
+        let p = crate::test_scratch::root().join(format!("soundcraft-write-file-{}.txt", std::process::id()));
         write_file(&p.to_string_lossy(), b"hello").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"hello");
         let _ = std::fs::remove_file(&p);

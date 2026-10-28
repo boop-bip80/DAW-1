@@ -36,7 +36,10 @@ impl SoundApp {
                 Ok(v)
             }
             Err(e) => {
-                self.ui.status = e.to_string();
+                // Engine messages are English keys too: a catalog entry translates the static ones
+                // (a message built with ids and numbers falls back to English).
+                let message = e.to_string();
+                self.ui.status = crate::i18n::t(&message).to_string();
                 log::warn!("{id}: {e}");
                 Err(e.to_string())
             }

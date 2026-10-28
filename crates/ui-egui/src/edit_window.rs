@@ -75,7 +75,7 @@ fn dock_tabs(app: &mut SoundApp, ui: &mut Ui) {
         ("MEMORY LOCATIONS", app.ui.show_memory_locations, "window.memory_locations"),
         ("UNDO HISTORY", app.ui.show_undo_history, "window.undo_history"),
     ] {
-        let g = ui.painter().layout_no_wrap(label.to_string(), bold(10.5), if on { Color32::WHITE } else { t.text_dim });
+        let g = ui.painter().layout_no_wrap(crate::i18n::t(label).to_string(), bold(10.5), if on { Color32::WHITE } else { t.text_dim });
         let tr = Rect::from_min_size(pos2(x, r.min.y + 2.0), vec2(g.size().x + 16.0, r.height() - 4.0));
         if on {
             ui.painter().rect_filled(tr, 3.0, t.accent_dark);
@@ -92,21 +92,23 @@ fn status_bar(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
     let r = ui.max_rect();
     let s = app.engine.session();
+    let tracks = crate::i18n::trn(crate::i18n::current(), s.tracks.len() as u64, "{n} track", "{n} tracks");
     let mut left = format!(
-        "{} · {} Hz · {} · {} tracks · {}",
+        "{} · {} Hz · {} · {} · {}",
         s.name,
         s.sample_rate.hz(),
         match s.bit_depth {
-            soundcraft_model::BitDepthSetting::Int16 => "16-bit",
-            soundcraft_model::BitDepthSetting::Int24 => "24-bit",
-            soundcraft_model::BitDepthSetting::Float32 => "32-bit float",
+            soundcraft_model::BitDepthSetting::Int16 => crate::i18n::t("16-bit"),
+            soundcraft_model::BitDepthSetting::Int24 => crate::i18n::t("24-bit"),
+            soundcraft_model::BitDepthSetting::Float32 => crate::i18n::t("32-bit float"),
         },
-        s.tracks.len(),
+        tracks,
         app.ui.status
     );
     soundcraft_model::truncate_chars(&mut left, 4 * soundcraft_model::MAX_NAME_CHARS);
     ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, left, regular(11.0), t.text_dim);
-    let undo = app.engine.undo_label().map_or(String::new(), |l| format!("Undo {l}"));
+    let undo =
+        app.engine.undo_label().map_or_else(String::new, |l| crate::i18n::fmt(crate::i18n::t("Undo {action}"), &[("action", crate::i18n::t(l))]));
     ui.painter().text(
         pos2(r.max.x - 10.0, r.center().y),
         Align2::RIGHT_CENTER,

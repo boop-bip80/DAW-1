@@ -37,8 +37,11 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                         let available = app.player.as_ref().is_some_and(|p| p.has_editor(tid, slot));
                         let label = if open { "Close Plugin Editor" } else { "Open Plugin Editor" };
                         let resp = ui.add_enabled(available, egui::Button::new(label));
-                        let resp =
-                            if available { resp } else { resp.on_disabled_hover_text("This plugin has no editor of its own, or it is not loaded") };
+                        let resp = if available {
+                            resp
+                        } else {
+                            resp.on_disabled_hover_text(crate::i18n::t("This plugin has no editor of its own, or it is not loaded"))
+                        };
                         if resp.clicked()
                             && let Some(p) = &app.player
                         {
@@ -52,7 +55,9 @@ pub(super) fn plugin_windows(app: &mut SoundApp, ctx: &egui::Context) {
                 });
                 if instrument && soundcraft_mix::is_third_party(&ins.plugin) {
                     // A hosted instrument keeps its sounds and settings in its own editor.
-                    ui.label(egui::RichText::new("Load and edit sounds in the plugin's own editor.").color(Tokens::current().text_dim));
+                    ui.label(
+                        egui::RichText::new(crate::i18n::t("Load and edit sounds in the plugin's own editor.")).color(Tokens::current().text_dim),
+                    );
                     return;
                 }
                 if instrument && ins.plugin == crate::sampler_window::SAMPLER {
@@ -172,13 +177,13 @@ fn preset_menu(
     info: &soundcraft_dsp::PluginInfo,
     ins: &soundcraft_model::Insert,
 ) {
-    if ui.button("<factory default>").clicked() {
+    if ui.button(crate::i18n::t("<factory default>")).clicked() {
         let defaults: serde_json::Map<String, serde_json::Value> = info.params.iter().map(|p| (p.id.to_string(), json!(p.default))).collect();
         let _ = app.run("mix.insert_params", json!({"track": tid.0, "slot": slot, "params": defaults, "preset": "<factory default>"}));
         ui.close();
     }
     let Some(dir) = preset_dir(app, info.id) else {
-        ui.label("User presets need the desktop app.");
+        ui.label(crate::i18n::t("User presets need the desktop app."));
         return;
     };
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -208,8 +213,8 @@ fn preset_menu(
     let key = egui::Id::unique(("preset_name", tid.0, slot));
     let mut name: String = ui.ctx().memory(|m| m.data.get_temp(key)).unwrap_or_else(|| format!("{} preset", info.name));
     ui.horizontal(|ui| {
-        crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0)), "Preset name");
-        if ui.button("Save").clicked() {
+        crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(&mut name).desired_width(140.0)), crate::i18n::t("Preset name"));
+        if ui.button(crate::i18n::t("Save")).clicked() {
             let clean = soundcraft_engine::io::sanitize_name(&name);
             let body = json!({"format": "soundcraft-plugin-preset", "plugin": info.id, "params": ins.params});
             let ok = std::fs::create_dir_all(&dir).is_ok() && std::fs::write(dir.join(format!("{clean}.json")), body.to_string()).is_ok();

@@ -136,7 +136,7 @@ mod record_tests {
 
     #[test]
     fn armed_tracks_get_new_take_files_used_in_place() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-takes-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-takes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut e = Engine::default();
         let vox = armed(&mut e, "Vox", "mono", "In 2");
@@ -162,7 +162,7 @@ mod record_tests {
 
     #[test]
     fn a_loop_take_becomes_one_clip_per_pass_and_autosaves_in_place() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-loop-take-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-loop-take-{}", std::process::id()));
         let path = dir.join("Audio Files/Vox_01.wav");
         write_take(&path, 1_050);
         let mut e = Engine::default();

@@ -96,7 +96,7 @@ impl SoundApp {
             } else {
                 "No track is record-enabled: click the R button on the track to record."
             };
-            self.ui.status = why.into();
+            self.ui.status = crate::i18n::t(why).into();
             self.record_hint = Some((self.last_frame.unwrap_or_default(), why));
             return;
         }
@@ -104,7 +104,7 @@ impl SoundApp {
         let takes = match self.arm_recorder() {
             Ok(takes) => takes,
             Err(err) => {
-                self.ui.status = format!("Cannot record: {err}");
+                self.ui.status = crate::i18n::fmt(crate::i18n::t("Cannot record: {error}"), &[("error", &err.to_string())]);
                 return;
             }
         };

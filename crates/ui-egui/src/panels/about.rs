@@ -22,10 +22,10 @@ pub(super) fn about(app: &mut SoundApp, ctx: &egui::Context) {
             1 => crate::credits::contributors_ui(ui),
             2 => crate::credits::models_ui(ui),
             _ => {
-                ui.label(egui::RichText::new("SoundCraft").font(bold(22.0)));
-                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                ui.label("An open-source digital audio workstation from the ArtCraft team.");
-                ui.label("Dual-licensed MIT OR Apache-2.0. Made with Rust and egui.");
+                ui.label(egui::RichText::new(crate::i18n::t("SoundCraft")).font(bold(22.0)));
+                ui.label(crate::i18n::fmt(crate::i18n::t("Version {version}"), &[("version", env!("CARGO_PKG_VERSION"))]));
+                ui.label(crate::i18n::t("An open-source digital audio workstation from the ArtCraft team."));
+                ui.label(crate::i18n::t("Dual-licensed MIT OR Apache-2.0. Made with Rust and egui."));
                 ui.hyperlink_to("getartcraft.com/apps/soundcraft", "https://getartcraft.com/apps/soundcraft");
                 ui.hyperlink_to("Join us on Discord", "https://discord.gg/artcraft");
             }
@@ -39,7 +39,7 @@ pub(super) fn session_info(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    egui::Window::new("Session Info").open(&mut open).default_size(vec2(480.0, 360.0)).show(ctx, |ui| {
+    crate::windows::keyed("Session Info").open(&mut open).default_size(vec2(480.0, 360.0)).show(ctx, |ui| {
         let text = soundcraft_engine::inspect::session_text(&app.engine);
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.label(egui::RichText::new(text).font(mono(11.0)));

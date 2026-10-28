@@ -92,7 +92,7 @@ impl SoundApp {
             pending_open: None,
             last_rev: 0,
             fonts_ready: false,
-            fonts_installed: false,
+            fonts_language: None,
             system_fonts: true,
             theme_applied: None,
             docking_context: None,
@@ -126,21 +126,24 @@ impl SoundApp {
 
     /// Per-frame logic: control channel, transport, document sync.
     ///
-    /// eframe calls this once per layout pass and also on logic-only ticks while hidden. Consumed
-    /// queues are one-shot, autosave is revision/instant based, and the monotonic clock decides
-    /// timed work. Bounce and import polling run only on pass zero, including hidden logic ticks.
-    /// Each host iteration starts with `raw_input_hook`; its editor-poll admission prevents an
-    /// empty queue on a discarded pass from ending a still-active plugin gesture.
+    /// Runs on every layout pass and on logic-only ticks while hidden, so the work below is either
+    /// idempotent per pass (gesture expiry, a drained queue) or gated on `current_pass_index() == 0`
+    /// where it must happen once per host frame.
     pub fn logic(&mut self, ctx: &egui::Context) {
-        // Fonts set now take effect next frame, so draw only from the frame after.
-        if !self.fonts_ready {
-            if self.fonts_installed {
-                self.fonts_ready = true;
-            } else {
-                fonts::install(ctx, self.system_fonts);
-                self.fonts_installed = true;
-                ctx.request_repaint();
-            }
+        // The interface language is a preference like the theme: resolve it before anything draws.
+        let language = i18n::apply_preference(&self.engine.prefs().interface.language);
+        // The font fallback order follows the language, and fonts set now take effect next frame:
+        // install them on a language change and draw only from the frame after. The system-fonts
+        // switch is fixed before the first frame, so the first install is this same path.
+        if self.fonts_language != Some(language.code()) {
+            self.fonts_language = Some(language.code());
+            // An agent may have changed the preference: an unapplied draft would be stale.
+            self.extra.language_draft = None;
+            fonts::install(ctx, self.system_fonts);
+            self.fonts_ready = false;
+            ctx.request_repaint();
+        } else if !self.fonts_ready {
+            self.fonts_ready = true;
         }
         let light = theme::wants_light(ctx, self.ui.theme);
         if self.theme_applied != Some(light) || theme::is_light() != light {

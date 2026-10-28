@@ -418,7 +418,7 @@ pub(super) fn new_midi_clip(app: &mut SoundApp, s: &Session, track: TrackId, fro
 
 fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
     let Some(c) = clip else {
-        if ui.button("Paste").clicked() {
+        if ui.button(crate::i18n::t("Paste")).clicked() {
             let _ = app.run("edit.paste", json!({}));
         }
         return;
@@ -438,11 +438,11 @@ fn clip_context_menu(app: &mut SoundApp, ui: &mut Ui, clip: Option<ClipId>) {
         }
     }
     ui.separator();
-    if ui.button("Rename...").clicked() {
+    if ui.button(crate::i18n::t("Rename...")).clicked() {
         let name = app.engine.session().find_clip(c).map(|(_, x)| x.name.clone()).unwrap_or_default();
         app.dialogs.open_rename_clip(c, &name);
     }
-    if ui.button("Delete").clicked() {
+    if ui.button(crate::i18n::t("Delete")).clicked() {
         let _ = app.run("edit.select", json!({"clips": ids}));
         let _ = app.run("edit.clear", json!({}));
     }

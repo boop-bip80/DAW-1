@@ -34,7 +34,7 @@ impl SoundApp {
     /// plugins' own state reaches the session every two minutes (`autosave`).
     pub(super) fn autosave_changes(&mut self) {
         if let Some(e) = self.autosaver.as_ref().and_then(soundcraft_engine::autosave::Autosaver::failure) {
-            self.ui.status = format!("Autosave failed: {e}");
+            self.ui.status = crate::i18n::fmt(crate::i18n::t("Autosave failed: {error}"), &[("error", &e.to_string())]);
         }
         if self.autosave_dir.is_none() || self.engine.revision == self.autosaved_rev {
             return;
@@ -60,7 +60,7 @@ impl SoundApp {
         let Some(w) = &self.autosaver else { return false };
         let written = w.flush();
         if let Err(e) = &written {
-            self.ui.status = format!("Autosave failed: {e}");
+            self.ui.status = crate::i18n::fmt(crate::i18n::t("Autosave failed: {error}"), &[("error", &e.to_string())]);
         }
         written.is_ok()
     }
@@ -80,7 +80,7 @@ impl SoundApp {
     /// Done with the open session. Unsaved changes stay in its autosave folder for the next
     /// launch, unless the user quit with SoundCraft's Quit; a take still recording is finished
     /// and always stays.
-    pub fn close_autosave(&mut self) {
+    pub fn close_autosave(&mut self) -> Option<String> {
         let recording = self.engine.transport.recording;
         if recording {
             self.stop_play();
@@ -91,9 +91,8 @@ impl SoundApp {
             self.write_autosave();
         }
         self.release_autosave(keep);
-        if let Some(w) = &self.autosaver {
-            let _ = w.flush();
-        }
+        let w = self.autosaver.as_ref()?;
+        w.flush().err().map(|e| e.to_string())
     }
 
     /// Run part of a frame. If it panics, the session is autosaved (once per change) and the app
@@ -105,19 +104,19 @@ impl SoundApp {
         self.panic_rev = self.engine.revision;
         let saved = self.engine.is_dirty() && self.write_autosave();
         self.ui.status = if saved {
-            "SoundCraft hit an internal error (see the log). Your changes were autosaved: save them, then restart SoundCraft.".into()
+            crate::i18n::t("SoundCraft hit an internal error (see the log). Your changes were autosaved: save them, then restart SoundCraft.").into()
         } else {
-            "SoundCraft hit an internal error (see the log). Restart SoundCraft to be safe.".into()
+            crate::i18n::t("SoundCraft hit an internal error (see the log). Restart SoundCraft to be safe.").into()
         };
     }
 
     /// Replace the open session with unsaved work an earlier run left behind.
     pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
         if self.engine.transport.recording {
-            self.ui.status = "Stop recording before recovering other work.".into();
+            self.ui.status = crate::i18n::t("Stop recording before recovering other work.").into();
             return;
         }
-        self.close_autosave();
+        let _ = self.close_autosave();
         match soundcraft_engine::autosave::recover(&mut self.engine, left) {
             Ok(missing) => {
                 self.document_replaced();
@@ -125,12 +124,24 @@ impl SoundApp {
                     soundcraft_engine::autosave::discard(left);
                 }
                 self.ui.status = match missing.len() {
-                    0 => format!("Recovered “{}”. Save it to keep the changes.", left.name),
-                    n => format!("Recovered “{}”, but {n} audio file(s) are missing. Save it to keep the changes.", left.name),
+                    0 => crate::i18n::fmt(crate::i18n::t("Recovered “{name}”. Save it to keep the changes."), &[("name", &left.name)]),
+                    n => crate::i18n::fmt(
+                        crate::i18n::t("Recovered “{name}”, but {n} audio file(s) are missing. Save it to keep the changes."),
+                        &[("name", &left.name), ("n", &n.to_string())],
+                    ),
                 };
             }
-            Err(e) => self.ui.status = format!("Couldn't recover “{}”: {e}", left.name),
+            Err(e) => {
+                self.ui.status =
+                    crate::i18n::fmt(crate::i18n::t("Couldn't recover “{name}”: {error}"), &[("name", &left.name), ("error", &e.to_string())])
+            }
         }
+    }
+
+    /// The newest autosave failure since the last call, if any: a full disk, a folder that stays
+    /// locked. Tests read it so a failed write names its reason.
+    pub fn autosave_failure(&self) -> Option<String> {
+        self.autosaver.as_ref().and_then(soundcraft_engine::autosave::Autosaver::failure)
     }
 
     /// The most recent autosave, if any.

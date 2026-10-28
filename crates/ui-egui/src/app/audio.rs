@@ -46,7 +46,7 @@ impl SoundApp {
             }
             Err(e) => {
                 self.recorder_failed = true;
-                self.ui.status = format!("No audio input: {e}");
+                self.ui.status = crate::i18n::fmt(crate::i18n::t("No audio input: {error}"), &[("error", &e.to_string())]);
             }
         }
     }
@@ -58,24 +58,28 @@ impl SoundApp {
         let name = p.device_name.clone();
         let (cause, then) = match trouble {
             OutputTrouble::Bug => (
-                "the audio engine hit an internal error (see the log)".to_string(),
-                "Use Reconnect audio device in Setup › Playback Engine, or restart SoundCraft.",
+                crate::i18n::t("the audio engine hit an internal error (see the log)").to_string(),
+                crate::i18n::t("Use Reconnect audio device in Setup › Playback Engine, or restart SoundCraft."),
             ),
-            OutputTrouble::Gone => {
-                (format!("“{name}” is unavailable"), "Check the audio device, then use Reconnect audio device in Setup › Playback Engine.")
-            }
-            OutputTrouble::Stalled => (format!("“{name}” stopped asking for audio"), "Use Reconnect audio device in Setup › Playback Engine."),
+            OutputTrouble::Gone => (
+                crate::i18n::fmt(crate::i18n::t("“{name}” was disconnected"), &[("name", &name)]),
+                crate::i18n::t("Plug it back in, then use Reconnect audio device in Setup › Playback Engine."),
+            ),
+            OutputTrouble::Stalled => (
+                crate::i18n::fmt(crate::i18n::t("“{name}” stopped asking for audio"), &[("name", &name)]),
+                crate::i18n::t("Use Reconnect audio device in Setup › Playback Engine."),
+            ),
         };
         let (recording, playing) = (self.engine.transport.recording, self.engine.transport.playing);
         if recording || playing {
             self.stop_play();
         }
         self.ui.status = if recording {
-            format!("Recording stopped: {cause}. The take is kept up to there. {then}")
+            crate::i18n::fmt(crate::i18n::t("Recording stopped: {cause}. The take is kept up to there. {then}"), &[("cause", &cause), ("then", then)])
         } else if playing {
-            format!("Playback stopped: {cause}. {then}")
+            crate::i18n::fmt(crate::i18n::t("Playback stopped: {cause}. {then}"), &[("cause", &cause), ("then", then)])
         } else {
-            format!("Audio output: {cause}. {then}")
+            crate::i18n::fmt(crate::i18n::t("Audio output: {cause}. {then}"), &[("cause", &cause), ("then", then)])
         };
     }
 
@@ -88,7 +92,10 @@ impl SoundApp {
             let lost = r.lost_ms();
             if recording && lost > self.lost_shown {
                 self.lost_shown = lost;
-                self.ui.status = format!("The disk is too slow: this take has lost {lost} ms of input so far.");
+                self.ui.status = crate::i18n::fmt(
+                    crate::i18n::t("The disk is too slow: this take has lost {lost} ms of input so far."),
+                    &[("lost", &lost.to_string())],
+                );
             }
             return;
         };
@@ -99,14 +106,15 @@ impl SoundApp {
             Trouble::Device(what) => {
                 self.recorder = None;
                 self.recorder_failed = true;
-                (what, "Reconnect it, then use Reconnect audio device in Setup › Playback Engine.")
+                (what, crate::i18n::t("Reconnect it, then use Reconnect audio device in Setup › Playback Engine."))
             }
-            Trouble::Disk(what) => (what, "Check the disk, then record again."),
+            Trouble::Disk(what) => (what, crate::i18n::t("Check the disk, then record again.")),
         };
+        let what = crate::i18n::t(&what);
         self.ui.status = if recording {
-            format!("Recording stopped: {what}. The take is kept up to there. {then}")
+            crate::i18n::fmt(crate::i18n::t("Recording stopped: {cause}. The take is kept up to there. {then}"), &[("cause", what), ("then", then)])
         } else {
-            format!("Audio input: {what}. {then}")
+            crate::i18n::fmt(crate::i18n::t("Audio input: {cause}. {then}"), &[("cause", what), ("then", then)])
         };
     }
 

@@ -87,7 +87,7 @@ fn record_with_nothing_armed_says_what_to_do() {
 
 #[test]
 fn a_hidden_window_still_autosaves() {
-    let dir = std::env::temp_dir().join(format!("soundcraft-hidden-autosave-{}", std::process::id()));
+    let dir = crate::scratch("soundcraft-hidden-autosave");
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
     app.autosave_dir = Some(dir.clone());
     app.run("track.new", json!({"count": 1, "format": "mono"})).unwrap();
@@ -128,7 +128,7 @@ fn an_open_plugin_editor_gesture_is_autosaved() {
 fn closing_during_a_plugin_editor_gesture_keeps_the_autosave() {
     for gesture in [false, true] {
         let (mut app, dir) = app_with_editor_gesture("gesture-close", gesture);
-        app.close_autosave();
+        let _ = app.close_autosave();
         assert_eq!(app.latest_autosave().is_some(), gesture);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -98,7 +98,10 @@ mod save_tests {
     fn autosave_copy_leaves_document_untouched_and_reuses_audio() {
         let mut e = crate::demo::demo_engine();
         e.execute("mix.volume", &serde_json::json!({"track": "Kick", "db": -7.0})).unwrap();
-        let dir = std::env::temp_dir().join(format!("soundcraft-autosave-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-autosave-{}", std::process::id()));
+        // A run killed mid-save leaves its audio behind; a later run reusing the process id would
+        // otherwise reuse those files and write none of its own.
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Midnight Groove.scraft");
         let p = path.to_string_lossy().into_owned();
         let n1 = save_copy(&e, &p).unwrap();
@@ -130,7 +133,7 @@ mod save_tests {
 
     #[test]
     fn saving_never_replaces_audio_of_another_session() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-no-replace-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-no-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
         save_session(&mut with_take(0.5), &path("A/A.scraft")).unwrap();
@@ -147,7 +150,7 @@ mod save_tests {
 
     #[test]
     fn consolidating_twice_keeps_both_renders() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-consolidate-twice-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-consolidate-twice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut e = crate::demo::demo_engine();
@@ -164,7 +167,7 @@ mod save_tests {
 
     #[test]
     fn saving_after_undo_reuses_the_saved_audio() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-undo-resave-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-undo-resave-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut e = with_take(0.5);
@@ -178,7 +181,7 @@ mod save_tests {
 
     #[test]
     fn saved_audio_is_trusted_only_in_the_folder_it_was_saved_in() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-own-folder-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-own-folder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
         let level = |r: &Engine| r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0];
@@ -207,7 +210,7 @@ mod save_tests {
 
     #[test]
     fn saving_over_another_session_needs_replace() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-replace-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-replace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("Song.scraft").to_string_lossy().into_owned();
         let mut first = with_take(0.5);
@@ -235,7 +238,7 @@ mod save_tests {
 
     #[test]
     fn saving_keeps_the_last_ten_versions_as_backups() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-backups-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-backups-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Song.scraft");
@@ -298,7 +301,7 @@ mod save_tests {
         add_source(&mut s, "tone", loud, Some("Audio Files/tone.wav"), FileFormat::Wav);
         add_source(&mut s, "tone", quiet, Some("Audio Files/tone.wav"), FileFormat::Wav);
         let mut e = Engine::new(s);
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-path-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-shared-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Shared.scraft");
@@ -319,7 +322,7 @@ mod open_tests {
 
     #[test]
     fn a_file_named_by_many_sources_is_decoded_once() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-shared-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
@@ -340,7 +343,7 @@ mod open_tests {
 
     #[test]
     fn sources_playing_one_file_share_it_when_saved() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-shared-save-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-shared-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Audio Files")).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
@@ -372,7 +375,7 @@ mod open_tests {
 
     #[test]
     fn stored_media_paths_are_followed_only_on_this_computer() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-stored-paths-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-stored-paths-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 480]] };
@@ -432,7 +435,7 @@ mod pipe_tests {
 
     #[test]
     fn a_pipe_named_as_media_is_refused_not_waited_on() {
-        let dir = std::env::temp_dir().join(format!("soundcraft-pipe-{}", std::process::id()));
+        let dir = crate::test_scratch::root().join(format!("soundcraft-pipe-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let fifo = dir.join("pipe.wav");

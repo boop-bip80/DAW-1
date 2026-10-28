@@ -24,15 +24,19 @@ pub(super) fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
             match process.as_str() {
                 "normalize" => {
                     let v = params.entry("target_db".into()).or_insert(-0.1);
-                    ui.add(egui::Slider::new(v, -24.0..=0.0).text("Peak dB"));
+                    ui.add(egui::Slider::new(v, -24.0..=0.0).text(crate::i18n::t("Peak dB")));
                 }
                 "time_stretch" => {
                     let v = params.entry("ratio".into()).or_insert(1.0);
-                    ui.add(egui::Slider::new(v, 0.25..=4.0).text("Length ratio"));
+                    ui.add(egui::Slider::new(v, 0.25..=4.0).text(crate::i18n::t("Length ratio")));
                 }
                 "pitch_shift" => {
                     let v = params.entry("semitones".into()).or_insert(0.0);
-                    ui.add(egui::Slider::new(v, -24.0..=24.0).text("Semitones"));
+                    ui.add(egui::Slider::new(v, -24.0..=24.0).text(crate::i18n::t("Semitones")));
+                }
+                "varispeed" => {
+                    let v = params.entry("speed".into()).or_insert(1.0);
+                    ui.add(egui::Slider::new(v, 0.25..=4.0).text(crate::i18n::t("Speed")));
                 }
                 "speed_ramp" => {
                     for (id, label, default, choices) in SPEED_RAMP_CHOICES {
@@ -46,7 +50,7 @@ pub(super) fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 _ => {
-                    ui.label("No parameters.");
+                    ui.label(crate::i18n::t("No parameters."));
                 }
             }
         }
@@ -57,7 +61,7 @@ pub(super) fn audiosuite_window(app: &mut SoundApp, ctx: &egui::Context) {
             "Processes the selected clips and replaces them with rendered audio."
         };
         ui.label(egui::RichText::new(hint).small());
-        if ui.button(egui::RichText::new("Render").strong()).clicked() {
+        if ui.button(egui::RichText::new(crate::i18n::t("Render")).strong()).clicked() {
             let p: serde_json::Map<String, Value> = params.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
             let _ = app.run("audiosuite.process", json!({"process": process, "params": p}));
         }

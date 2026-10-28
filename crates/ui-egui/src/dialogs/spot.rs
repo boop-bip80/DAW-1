@@ -117,7 +117,7 @@ fn recorded_at(s: &Session, time_reference: u64) -> Samples {
 /// or show the formatted value when read-only.
 fn spot_field_row(ui: &mut Ui, s: &Session, d: &mut Spot, i: usize, label: &str) {
     let show = |at: Samples, f: TimeFormat| s.format_position(at, f);
-    let lab = ui.label(label);
+    let lab = ui.label(crate::i18n::t(label));
     if d.editable(i) {
         let id = Id::unique(("spot_field", i));
         if !ui.memory(|m| m.has_focus(id)) {
@@ -141,10 +141,10 @@ fn spot_field_row(ui: &mut Ui, s: &Session, d: &mut Spot, i: usize, label: &str)
 }
 
 fn original_time_stamp_row(ui: &mut Ui, s: &Session, d: &mut Spot, at: Samples) {
-    ui.label("Original Time Stamp");
+    ui.label(crate::i18n::t("Original Time Stamp"));
     ui.horizontal(|ui| {
         ui.label(RichText::new(s.format_position(at, TimeFormat::Timecode)).font(mono(13.0)));
-        if ui.button("Use").on_hover_text("Spot to where it was recorded").clicked() {
+        if ui.button(crate::i18n::t("Use")).on_hover_text(crate::i18n::t("Spot to where it was recorded")).clicked() {
             d.start = at;
         }
     });
@@ -154,10 +154,10 @@ fn original_time_stamp_row(ui: &mut Ui, s: &Session, d: &mut Spot, at: Samples) 
 /// The dialog's fields; the caller adds OK and Cancel.
 pub fn fields(ui: &mut Ui, s: &Session, d: &mut Spot) {
     egui::Grid::new("spot").num_columns(2).spacing(vec2(10.0, 6.0)).show(ui, |ui| {
-        let scale = ui.label("Time Scale");
-        let time_scale = craft_ui::ComboBox::from_id_salt("spot_scale").selected_text(d.format.label()).show_ui(ui, |ui| {
+        let scale = ui.label(crate::i18n::t("Time Scale"));
+        let time_scale = craft_ui::ComboBox::from_id_salt("spot_scale").selected_text(crate::i18n::t(d.format.label())).show_ui(ui, |ui| {
             for f in TimeFormat::ALL {
-                ui.selectable_value(&mut d.format, f, f.label());
+                ui.selectable_value(&mut d.format, f, crate::i18n::t(f.label()));
             }
         });
         time_scale.response.labelled_by(scale.id);
@@ -168,7 +168,7 @@ pub fn fields(ui: &mut Ui, s: &Session, d: &mut Spot) {
             }
             spot_field_row(ui, s, d, i, label);
         }
-        ui.label("Duration");
+        ui.label(crate::i18n::t("Duration"));
         ui.label(RichText::new(format_length(d.start, d.len, d.format, s.sample_rate, &s.tempo, s.frame_rate)).font(mono(13.0)));
         ui.end_row();
         if let Some(at) = d.stamp {

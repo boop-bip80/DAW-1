@@ -137,7 +137,12 @@ pub(super) fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
         _ => "",
     };
     let path = if importing || key == "dir" { format!("{home}/") } else { format!("{home}/{name}{ext}") };
-    let title = format!("{} — {}", spec.menu.last().copied().unwrap_or("File"), spec.label.trim_end_matches("..."));
+    // Composed now, from the same catalog the menus use: the dialog is short-lived, so the
+    // language cannot change while it is open.
+    let title = crate::i18n::fmt(
+        crate::i18n::t("{menu} — {command}"),
+        &[("menu", crate::i18n::t(spec.menu.last().copied().unwrap_or("File"))), ("command", crate::i18n::t(spec.label.trim_end_matches("...")))],
+    );
     Some(Dialog::PathPrompt { cmd: id.into(), title, path, key: key.into() })
 }
 

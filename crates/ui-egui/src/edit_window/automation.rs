@@ -36,7 +36,7 @@ pub(super) fn draw_automation(painter: &egui::Painter, s: &Session, track: &Trac
             }
         }
     }
-    painter.text(pos2(lane.min.x + 6.0, lane.min.y + 9.0), Align2::LEFT_CENTER, p.label(), regular(10.0), t.text_dim);
+    painter.text(pos2(lane.min.x + 6.0, lane.min.y + 9.0), Align2::LEFT_CENTER, crate::widgets::auto_param_label(p), regular(10.0), t.text_dim);
 }
 
 /// The values an automation lane spans, bottom to top.

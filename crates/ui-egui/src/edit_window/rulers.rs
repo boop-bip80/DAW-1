@@ -96,7 +96,7 @@ pub(super) fn draw_rulers(app: &mut SoundApp, ui: &mut Ui, area: Rect, tl: Rect,
         let lab = Rect::from_min_max(pos2(area.min.x, y0), pos2(area.min.x + HEADER_W, y0 + h));
         y0 += h;
         let painter = ui.painter().with_clip_rect(row);
-        ui.painter().text(pos2(lab.max.x - 12.0, lab.center().y), Align2::RIGHT_CENTER, ruler_label(id), bold(11.0), t.ruler_text);
+        ui.painter().text(pos2(lab.max.x - 12.0, lab.center().y), Align2::RIGHT_CENTER, crate::i18n::t(ruler_label(id)), bold(11.0), t.ruler_text);
         let fmt = TimeFormat::from_id(id);
         match id.as_str() {
             "tempo" => {
@@ -370,7 +370,7 @@ pub(super) fn column_titles(ui: &Ui, rulers: Rect, cols: &[Column]) {
     ui.painter().vline(end - 0.5, row.y_range(), line);
     for &(_, _, title, w) in cols {
         ui.painter().vline(x + 0.5, row.y_range(), line);
-        ui.painter().text(pos2(x + w / 2.0, row.center().y), Align2::CENTER_CENTER, title, bold(10.0), t.section_label);
+        ui.painter().text(pos2(x + w / 2.0, row.center().y), Align2::CENTER_CENTER, crate::i18n::t(title), bold(10.0), t.section_label);
         x += w;
     }
 }
@@ -379,21 +379,21 @@ pub(super) fn column_titles(ui: &Ui, rulers: Rect, cols: &[Column]) {
 pub(super) fn views_button(app: &mut SoundApp, ui: &mut Ui, rulers: Rect) {
     let r = Rect::from_min_size(rulers.min + vec2(6.0, 5.0), vec2(50.0, 18.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
-    let resp = crate::widgets::selector_box(&mut child, r.width(), r.height(), "Views", Tokens::current().text);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, child.is_enabled(), "Views"));
-    let resp = resp.on_hover_text("Columns beside the track headers: inserts, sends, I/O…");
+    let resp = crate::widgets::selector_box(&mut child, r.width(), r.height(), crate::i18n::t("Views"), Tokens::current().text);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, child.is_enabled(), crate::i18n::t("Views")));
+    let resp = resp.on_hover_text(crate::i18n::t("Columns beside the track headers: inserts, sends, I/O…"));
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         let shown = edit_columns(app.engine.session());
         for (id, label, _, _) in COLUMNS {
-            if ui.add(egui::Button::new(label).selected(shown.iter().any(|c| c.0 == id))).clicked() {
+            if ui.add(egui::Button::new(crate::i18n::t(label)).selected(shown.iter().any(|c| c.0 == id))).clicked() {
                 let _ = app.run(&format!("view.edit_{id}"), json!({}));
             }
         }
         ui.separator();
-        if ui.button("All").clicked() {
+        if ui.button(crate::i18n::t("All")).clicked() {
             let _ = app.run("view.edit_all", json!({}));
         }
-        if ui.button("Minimal").clicked() {
+        if ui.button(crate::i18n::t("Minimal")).clicked() {
             let _ = app.run("view.edit_minimal", json!({}));
         }
     });

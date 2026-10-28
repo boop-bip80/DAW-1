@@ -6,7 +6,7 @@ pub(super) fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
         return;
     }
     let t = Tokens::current();
-    egui::Window::new("Transport").open(&mut open).resizable(false).default_pos(pos2(400.0, 500.0)).show(ctx, |ui| {
+    crate::windows::keyed("Transport").open(&mut open).resizable(false).default_pos(pos2(400.0, 500.0)).show(ctx, |ui| {
         let flags = app.engine.session().edit.flags.clone();
         let expanded = flags.contains("view.transport.expanded");
         ui.horizontal(|ui| {
@@ -29,7 +29,7 @@ pub(super) fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
                 if cmd == "transport.record"
                     && let Some(why) = app.record_hint()
                 {
-                    egui::Tooltip::for_widget(&resp).show(|ui| ui.label(why));
+                    egui::Tooltip::for_widget(&resp).show(|ui| ui.label(crate::i18n::t(why)));
                 }
                 if resp.clicked() {
                     let _ = app.run(cmd, json!({}));
@@ -50,14 +50,14 @@ pub(super) fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
         if expanded {
             let e = s.edit.clone();
             egui::Grid::new("tx_exp").num_columns(4).show(ui, |ui| {
-                ui.label("Start");
+                ui.label(crate::i18n::t("Start"));
                 ui.label(egui::RichText::new(fmt(e.selection.start)).font(mono(11.0)));
-                ui.label("Pre-roll");
+                ui.label(crate::i18n::t("Pre-roll"));
                 ui.label(egui::RichText::new(format!("{:.2} s", s.sample_rate.seconds(e.pre_roll))).font(mono(11.0)));
                 ui.end_row();
-                ui.label("End");
+                ui.label(crate::i18n::t("End"));
                 ui.label(egui::RichText::new(fmt(e.selection.end)).font(mono(11.0)));
-                ui.label("Post-roll");
+                ui.label(crate::i18n::t("Post-roll"));
                 ui.label(egui::RichText::new(format!("{:.2} s", s.sample_rate.seconds(e.post_roll))).font(mono(11.0)));
                 ui.end_row();
             });
@@ -94,7 +94,7 @@ pub(super) fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
     if !open {
         return;
     }
-    egui::Window::new("Big Counter").open(&mut open).default_size(vec2(520.0, 110.0)).show(ctx, |ui| {
+    crate::windows::keyed("Big Counter").open(&mut open).default_size(vec2(520.0, 110.0)).show(ctx, |ui| {
         let s = app.engine.session();
         let txt = s.format_position(app.position(), s.edit.main_counter);
         let r = ui.available_rect_before_wrap();

@@ -12,6 +12,7 @@ pub mod dialogs;
 pub mod docking;
 pub mod edit_window;
 pub mod fonts;
+pub mod i18n;
 pub mod icons;
 pub mod import;
 pub mod menus;
@@ -111,6 +112,8 @@ pub struct UiState {
     /// window then always shows Edit.
     pub mix_separate: bool,
     pub show_io_setup: bool,
+    /// Setup › Audio Plug-in Manager: a placeholder until the manager itself lands.
+    pub show_plugin_manager: bool,
     pub show_shortcuts: bool,
     pub show_clip_effects: bool,
     pub show_beat_detective: bool,
@@ -176,6 +179,7 @@ impl Default for UiState {
             audio: soundcraft_playback::AudioConfig::default(),
             mix_separate: false,
             show_io_setup: false,
+            show_plugin_manager: false,
             show_shortcuts: false,
             show_clip_effects: false,
             show_beat_detective: false,
@@ -201,6 +205,31 @@ impl Default for UiState {
 /// File-system-safe folder name for a plugin id (`clap:com.x.y` → `clap_com.x.y`).
 pub fn preset_folder_name(plugin: &str) -> String {
     plugin.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
+/// A scratch folder for a test, unique to this process: beside the build, not in a `/tmp` some
+/// systems mount on a small tmpfs that a full test run fills.
+#[cfg(test)]
+pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
+    let leaf = format!("{name}-{}", std::process::id());
+    // Best effort: a caller that only joins a name still gets the path.
+    let temp = |base: std::path::PathBuf| {
+        let dir = base.join(&leaf);
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    };
+    if let Some(base) = option_env!("CARGO_TARGET_TMPDIR") {
+        return temp(std::path::PathBuf::from(base));
+    }
+    // Unit tests run from `<target>/<profile>/deps/`, so three parents give the target directory:
+    // this honours `CARGO_TARGET_DIR` and works from a read-only checkout.
+    if let Some(target) = std::env::current_exe().ok().and_then(|exe| exe.parent()?.parent()?.parent().map(std::path::Path::to_path_buf)) {
+        return temp(target.join("tmp"));
+    }
+    // Last resort: `<workspace>/target/tmp`, by walking up (`crates/<crate>` → workspace).
+    let krate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let base = krate.parent().and_then(std::path::Path::parent).map_or_else(|| krate.join("target/tmp"), |ws| ws.join("target/tmp"));
+    temp(base)
 }
 
 /// On the first frame, maximizes a window too big for the screen it opened on (sized on a larger
@@ -368,7 +397,8 @@ pub struct SoundApp {
     pub(crate) pending_open: Option<(TrackId, usize)>,
     last_rev: u64,
     fonts_ready: bool,
-    fonts_installed: bool,
+    /// The language code the installed font fallback order was built for.
+    fonts_language: Option<&'static str>,
     /// Whether the system fonts are loaded next to the bundled ones; set before the first frame.
     system_fonts: bool,
     /// The palette last applied to the context (light?), so visuals are set only on a change.

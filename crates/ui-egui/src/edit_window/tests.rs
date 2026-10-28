@@ -25,7 +25,8 @@ fn repeated_track_controls_are_named_and_valued_per_track() {
     for name in ["Kick", "Snare"] {
         let view_label = format!("Track view for {name}");
         let view = h.query_by_role_and_label(Role::ComboBox, &view_label).unwrap_or_else(|| panic!("missing track view for {name}"));
-        assert_eq!(view.value().as_deref(), Some("waveform"), "track view value for {name}");
+        // The published value is the painted label: translated like the header cell itself.
+        assert_eq!(view.value().as_deref(), Some("Waveform"), "track view value for {name}");
         let voice_label = format!("Voice for {name}");
         let voice = h.query_by_role_and_label(Role::ComboBox, &voice_label).unwrap_or_else(|| panic!("missing voice for {name}"));
         assert_eq!(voice.value().as_deref(), Some("dyn"), "voice value for {name}");
