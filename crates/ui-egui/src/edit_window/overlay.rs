@@ -2,7 +2,7 @@ use super::drag::drag_plan;
 use super::input::midi_clip_span;
 use super::layout::x_of;
 use super::scroll::{FollowFrame, follow_update};
-use super::*;
+use super::{Color32, Gesture, Rect, Samples, Shape, SoundApp, Stroke, StrokeKind, Tokens, TrackId, Ui, json, ops, pos2, rgb};
 
 /// The playback cursor is red only while recording; plain playback draws it in its own neutral
 /// grey, apart from the insertion colour of the edit cursor that stands beside it.

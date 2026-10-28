@@ -42,7 +42,9 @@ use layout::COLUMN_TITLES_H;
 #[cfg(test)]
 use layout::lane_rect;
 pub use layout::{COLUMN_W, EditLayout, HEADER_W, LANE_H, RULER_H, edit_columns, header_width, rect, sample_at, track_height, x_of};
-use overlay::{overlay, playhead_colour};
+use overlay::overlay;
+#[cfg(test)]
+use overlay::playhead_colour;
 pub use rulers::ruler_height;
 use rulers::{column_titles, draw_rulers, views_button};
 pub use scroll::zoom_toggle;
