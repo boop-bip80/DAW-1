@@ -111,7 +111,14 @@ impl NativeContextMenu {
 impl Presenter for NativeContextMenu {
     fn schedule(&self, callback: MenuJob) -> Result<(), String> {
         let _mtm = MainThreadMarker::new().ok_or("Context menus require the main thread")?;
-        let id = NEXT_JOB.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).map_err(|_| "Menu job ids exhausted")?;
+        let mut id = NEXT_JOB.load(Ordering::Relaxed);
+        loop {
+            let next = id.checked_add(1).ok_or("Menu job ids exhausted")?;
+            match NEXT_JOB.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
         MENU_JOBS.with(|jobs| {
             let mut jobs = jobs.try_borrow_mut().map_err(|_| "Native menu queue busy")?;
             if jobs.len() >= 16 {

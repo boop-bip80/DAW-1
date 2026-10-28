@@ -31,7 +31,14 @@ impl NativeUiHost {
     }
 
     pub fn new(app: SoundApp) -> Result<Self, String> {
-        let id = NEXT_HOST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).map_err(|_| "UI host ids exhausted")?;
+        let mut id = NEXT_HOST.load(Ordering::Relaxed);
+        loop {
+            let next = id.checked_add(1).ok_or("UI host ids exhausted")?;
+            match NEXT_HOST.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
         let state = Rc::new(RefCell::new(app));
         HOSTS.with(|hosts| {
             hosts.try_borrow_mut().map_err(|_| "UI host registry busy")?.insert(id, Rc::downgrade(&state));
