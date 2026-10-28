@@ -483,7 +483,7 @@ fn presets_bar(ui: &mut Ui, ed: &mut FadeEditor, presets: &mut FadePresets) {
             });
             group(ui, &mut |ui| {
                 ui.add_enabled_ui(editable, |ui| {
-                    let combo = egui::ComboBox::from_id_salt("fade_presets").selected_text("<factory default>").width(150.0);
+                    let combo = craft_ui::ComboBox::from_id_salt("fade_presets").selected_text("<factory default>").width(150.0);
                     let menu = combo.show_ui(ui, |ui| ui.selectable_label(false, "<factory default>").clicked());
                     if menu.inner == Some(true) {
                         ed.now = ed.now.with(kind, Settings::FACTORY);

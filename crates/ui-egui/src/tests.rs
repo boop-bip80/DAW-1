@@ -1387,6 +1387,56 @@ fn transport_simulation_advances_by_monotonic_elapsed_time_only() {
     app.engine.transport.playing = false;
     app.sim = None;
 }
+/// One host iteration: the raw-input hook, then logic and UI in a single pass.
+fn run_host_frame(app: &mut SoundApp, ctx: &egui::Context, mut input: egui::RawInput) {
+    app.raw_input_hook(ctx, &mut input);
+    let mut output = ctx.run_ui(input, |ui| {
+        app.logic(ui.ctx());
+        app.ui(ui);
+    });
+    output.textures_delta.clear();
+}
+
+/// Run one frame that discards its first layout pass; returns how many passes ran.
+fn run_host_frame_discarding_first_pass(app: &mut SoundApp, ctx: &egui::Context, input: egui::RawInput) -> usize {
+    let mut passes = 0;
+    let mut output = ctx.run_ui(input, |ui| {
+        app.logic(ui.ctx());
+        passes += 1;
+        if passes == 1 {
+            ui.ctx().request_discard("plugin gesture must survive a second layout pass");
+        }
+        app.ui(ui);
+    });
+    output.textures_delta.clear();
+    passes
+}
+
+/// The editor-poll fixture: each poll counts itself, takes the queued edits and, for the gestures that
+/// ended, captures the instrument state `latest` holds.
+fn poll_fixture(
+    reports: &std::rc::Rc<std::cell::RefCell<Vec<soundcraft_playback::EditorEdit>>>,
+    latest: &std::rc::Rc<std::cell::Cell<u8>>,
+    polls: &std::rc::Rc<std::cell::Cell<i32>>,
+    captures: &std::rc::Rc<std::cell::RefCell<Vec<(soundcraft_model::TrackId, usize)>>>,
+) -> super::EditorPollFixture {
+    let (poll_reports, poll_latest, poll_count, poll_captures) = (reports.clone(), latest.clone(), polls.clone(), captures.clone());
+    Box::new(move |pending| {
+        poll_count.set(poll_count.get() + 1);
+        let edits = std::mem::take(&mut *poll_reports.borrow_mut());
+        super::editor_changes(
+            pending,
+            edits,
+            Vec::new(),
+            |_| false,
+            |due| {
+                poll_captures.borrow_mut().extend_from_slice(due);
+                due.iter().map(|&(track, slot)| (track, slot, vec![poll_latest.get(), 1])).collect()
+            },
+        )
+    })
+}
+
 /// Plugin queues are drained once per host iteration, rather than once per discarded pass.
 /// The fixture replaces only native polling; the real raw hook, logic/UI, scheduler and
 /// engine state/undo commands run normally.
@@ -1400,13 +1450,7 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
     let raw = || egui::RawInput { screen_rect: Some(rect), ..Default::default() };
     for _ in 0..4 {
-        let mut input = raw();
-        app.raw_input_hook(&ctx, &mut input);
-        let mut output = ctx.run_ui(input, |ui| {
-            app.logic(ui.ctx());
-            app.ui(ui);
-        });
-        output.textures_delta.clear();
+        run_host_frame(&mut app, &ctx, raw());
     }
     let keys = app.engine.session().track_by_name("Keys").unwrap().id;
     let original = instrument_state(&app, keys);
@@ -1421,34 +1465,11 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     let latest = Rc::new(Cell::new(1u8));
     let polls = Rc::new(Cell::new(0));
     let captures = Rc::new(RefCell::new(Vec::new()));
-    let (poll_reports, poll_latest, poll_count, poll_captures) = (reports.clone(), latest.clone(), polls.clone(), captures.clone());
-    app.editor_poll_fixture = Some(Box::new(move |pending| {
-        poll_count.set(poll_count.get() + 1);
-        let edits = std::mem::take(&mut *poll_reports.borrow_mut());
-        super::editor_changes(
-            pending,
-            edits,
-            Vec::new(),
-            |_| false,
-            |due| {
-                poll_captures.borrow_mut().extend_from_slice(due);
-                due.iter().map(|&(track, slot)| (track, slot, vec![poll_latest.get(), 1])).collect()
-            },
-        )
-    }));
+    app.editor_poll_fixture = Some(poll_fixture(&reports, &latest, &polls, &captures));
     reports.borrow_mut().push((keys, soundcraft_mix::INSTRUMENT_SLOT, "cutoff".into(), 1.0));
     let mut input = raw();
     app.raw_input_hook(&ctx, &mut input);
-    let mut passes = 0;
-    let mut output = ctx.run_ui(input, |ui| {
-        app.logic(ui.ctx());
-        passes += 1;
-        if passes == 1 {
-            ui.ctx().request_discard("plugin gesture must survive a second layout pass");
-        }
-        app.ui(ui);
-    });
-    output.textures_delta.clear();
+    let passes = run_host_frame_discarding_first_pass(&mut app, &ctx, input);
     assert!(passes >= 2, "the regression must actually force a discarded pass");
     assert_eq!(polls.get(), 1, "the rerun cannot drain an empty editor queue");
     assert!(captures.borrow().is_empty(), "the ongoing gesture has not ended");
@@ -1490,7 +1511,12 @@ fn editor_gesture_polling_survives_discarded_and_hidden_host_iterations() {
     let _ = ctx.run_logic(&hidden, |ctx| app.logic(ctx));
     assert_eq!(polls.get(), 4, "a fresh empty host iteration is still live");
     assert_eq!(captures.borrow().len(), 1, "the completed gesture is captured once");
-    assert_eq!(app.engine.revision, settled_revision);
+    assert_history_unchanged(&app, settled_revision, undo, &history, &journal);
+}
+
+/// The engine's revision, undo history and journal are as they were.
+fn assert_history_unchanged(app: &SoundApp, revision: u64, undo: usize, history: &[String], journal: &[(String, serde_json::Value)]) {
+    assert_eq!(app.engine.revision, revision);
     assert_eq!(app.engine.undo_history().len(), undo);
     assert_eq!(app.engine.undo_history(), history);
     assert_eq!(app.engine.journal, journal);

@@ -1,7 +1,6 @@
 //! The Edit window: toolbar, rulers, track headers and playlists.
 
-use crate::dialogs::{Dialog, FadeTarget};
-use crate::fade_dialog::FadeEditor;
+use crate::dialogs::Dialog;
 use crate::spot::Spot;
 use crate::theme::{Tokens, bold, clip_colors, regular, rgb};
 use crate::widgets::{groove, level_pos, meter_pos, raised_key, shade};
