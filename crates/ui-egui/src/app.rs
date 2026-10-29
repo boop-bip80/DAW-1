@@ -128,10 +128,19 @@ impl SoundApp {
         self
     }
 
-    /// `<document>[ •] — <App>`, the title a host shows for the open document: its name, a bullet
-    /// when it has unsaved changes, and the app name.
+    /// `<document>[ •] — <App>`, the title a host shows for the open document: the file it opened
+    /// (or the session name for a document that was never saved), a bullet when it has unsaved
+    /// changes, and the app name.
     pub fn document_title(&self) -> String {
-        format!("{}{} — SoundCraft", self.engine.session().name, if self.engine.is_dirty() { " •" } else { "" })
+        // The name inside the session can differ from the file a host handed over, and the host
+        // checks the title to confirm which file opened (#809).
+        let name = self
+            .engine
+            .path
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .map_or_else(|| self.engine.session().name.clone(), |name| name.to_string_lossy().into_owned());
+        format!("{name}{} — SoundCraft", if self.engine.is_dirty() { " •" } else { "" })
     }
 
     /// Per-frame logic: control channel, transport, document sync.
