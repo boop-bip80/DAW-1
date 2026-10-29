@@ -742,6 +742,11 @@ pub fn clip_effects(app: &mut SoundApp, ctx: &egui::Context) {
                             .show(col);
                         v = wide as f32;
                         if (v - before).abs() > f32::EPSILON {
+                            // An Alt-click that resets the value is its own undo step, even
+                            // right after typing in the value box, which keeps the merge open.
+                            if col.input(|i| i.modifiers.alt && i.pointer.any_released()) {
+                                app.engine.end_merge();
+                            }
                             let mut m = serde_json::Map::new();
                             m.insert(key.clone(), json!(v));
                             let _ = app.engine.execute_merged(

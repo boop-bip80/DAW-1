@@ -438,8 +438,9 @@ struct FineDrag {
 }
 
 /// A horizontal slider that moves a tenth as far for the same drag while Ctrl (Command on a Mac)
-/// is held, as a [`fader`] does, on the rail and on the value box. Pressing or releasing the key
-/// during a drag on the rail leaves the value where it is, and the drag goes on from there. The
+/// is held, as a [`fader`] does, on the rail and on the value box. A press on the rail with the
+/// key held, and pressing or releasing the key during a drag on the rail, leave the value where
+/// it is, and the drag goes on from there. The
 /// value box shows the decimal places that a tenth of a point's step needs, and a drag on the
 /// rail that the key has touched rounds the value to them.
 pub fn fine_slider(ui: &mut Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>, text: &str) -> Response {
@@ -546,6 +547,7 @@ impl<'a> FineSlider<'a> {
                 *value = moved.clamp(lo, hi);
             }
         }
+        let start = *value;
         let hold = reset || drag.is_some_and(|d| d.relative);
         let speed = per_point(*value) * scale;
         let mut slider = egui::Slider::from_get_set(range, |v| {
@@ -582,6 +584,11 @@ impl<'a> FineSlider<'a> {
         }
         let rail = Rect::from_min_size(resp.rect.min, vec2(ui.spacing().slider_width, resp.rect.height()));
         let on_rail = resp.dragged() && ui.input(|i| i.pointer.press_origin()).is_some_and(|p| rail.contains(p));
+        // On the pass that starts a drag, egui has already set the value under the pointer. A drag
+        // that starts with the key held keeps the value from before the press instead.
+        if on_rail && drag.is_none() && fine {
+            *value = start;
+        }
         let next = match (on_rail, drag, x) {
             (true, Some(d), _) => Some(FineDrag { pass, ..d }),
             (true, None, Some(x)) => Some(FineDrag { x, value: *value, fine, relative: fine, pass }),

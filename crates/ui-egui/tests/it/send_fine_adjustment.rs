@@ -123,6 +123,38 @@ fn the_send_options_sliders_move_a_tenth_as_far_with_ctrl_held() {
     }
 }
 
+/// A Ctrl or Command press on the Level or Pan rail of a send's options menu leaves the value
+/// where it is, where a plain press sets the value under the pointer.
+#[test]
+fn a_ctrl_press_on_a_send_options_rail_leaves_the_value_where_it_is() {
+    let mut h = harness();
+    options_menu(&mut h);
+    let read: [(&str, fn(&Harness<SoundApp>) -> f32); 2] = [("Level", level), ("Pan", pan)];
+    for (label, read) in read {
+        let at = h.get_by_role_and_label(Role::Slider, label).rect().left_center() + vec2(4.0, 0.0);
+        for (name, modifiers) in [("plain", Modifiers::NONE), ("Ctrl", Modifiers::CTRL), ("Command", Modifiers::COMMAND)] {
+            reset(&mut h);
+            let start = read(&h);
+            hold(&mut h, modifiers);
+            move_to(&mut h, at);
+            press(&mut h, at, true, modifiers);
+            let moved = read(&h) - start;
+            // Move on before the release, so that the press ends as a drag that leaves the menu open.
+            for i in 1..=4 {
+                move_to(&mut h, at + vec2(2.0 * i as f32, 0.0));
+            }
+            press(&mut h, at + vec2(8.0, 0.0), false, modifiers);
+            hold(&mut h, Modifiers::NONE);
+            assert!(h.query_by_role_and_label(Role::CheckBox, "Pre-fader").is_some(), "{label}: the {name} drag closed the menu");
+            if modifiers.is_none() {
+                assert!(moved.abs() > 0.5, "{label}: a plain press near the rail's left end moved the value by {moved}");
+            } else {
+                assert!(moved.abs() < 1e-4, "{label}: a {name} press moved the value by {moved}");
+            }
+        }
+    }
+}
+
 fn track_pan(h: &Harness<SoundApp>) -> f32 {
     h.state().engine.session().tracks[0].mixer.pan[0]
 }

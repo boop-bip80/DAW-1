@@ -163,6 +163,45 @@ fn alt_click_returns_clip_effects_sliders_and_value_boxes_to_their_defaults() {
     }
 }
 
+/// An Alt-click on a clip effects value box that is open for typing is an undo step of its own:
+/// one undo brings back the typed value, not the value from before the typing.
+#[test]
+fn alt_click_after_typing_in_a_clip_effects_value_box_is_its_own_undo_step() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let s = app.engine.session();
+    let clip = s.track_by_name("Kick").unwrap().clips().iter().find(|c| c.is_audio()).unwrap().id;
+    app.run("edit.select", json!({"clips": [clip.0]})).unwrap();
+    app.run("clip.effects_set", json!({"clips": [clip.0], "params": {"comp.threshold": -6.0}})).unwrap();
+    app.engine.end_merge();
+    app.ui.show_clip_effects = true;
+    let mut h = harness(app);
+    let p = param("compressor", "threshold");
+    let key = format!("clip_fx.{}.comp.threshold", clip.0);
+    let read = |h: &Harness<'_, SoundApp>| h.state().engine.session().edit.values.get(&key).copied();
+    let rail = h.get_by_role_and_label(Role::Slider, "Threshold").rect();
+    let at = h
+        .query_all_by_role(Role::SpinButton)
+        .map(|n| n.rect())
+        .find(|r| r.left() > rail.right() && (r.center().y - rail.center().y).abs() < 4.0)
+        .unwrap()
+        .center();
+    move_to(&mut h, at);
+    press(&mut h, at, true, Modifiers::NONE);
+    press(&mut h, at, false, Modifiers::NONE);
+    h.run_steps(2);
+    assert!(h.ctx.egui_wants_keyboard_input(), "a plain click did not open Threshold's value box for typing");
+    let steps = undo_steps(&h);
+    h.event(Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND });
+    h.event(Event::Text("-12".into()));
+    h.run_steps(2);
+    assert_eq!(read(&h), Some(-12.0), "typing did not set Threshold");
+    alt_press(&mut h, at, 0.0);
+    assert_eq!(read(&h), Some(f64::from(p.default)), "Alt-click did not return Threshold to its default");
+    assert_eq!(undo_steps(&h), steps + 2, "the typed value and the Alt-click are not two undo steps");
+    h.state_mut().engine.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(read(&h), Some(-12.0), "Undo did not bring back the typed value");
+}
+
 #[test]
 fn alt_click_returns_audiosuite_parameter_sliders_to_their_defaults() {
     let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
