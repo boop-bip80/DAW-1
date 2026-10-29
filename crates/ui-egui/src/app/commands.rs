@@ -1,4 +1,4 @@
-use super::*;
+use super::{SoundApp, Value, bounce, menus};
 
 impl SoundApp {
     /// Run a command; errors go to the status line. Returns the result.
