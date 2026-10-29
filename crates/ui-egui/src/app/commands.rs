@@ -40,7 +40,7 @@ impl SoundApp {
                     snap.tracks.values_mut().chain([&mut snap.main]).for_each(|m| m.reset_levels());
                     self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| {
                         m.clip = false;
-                        m.hold = m.level;
+                        m.hold = [0.0; 2];
                     });
                 }
                 Ok(v)

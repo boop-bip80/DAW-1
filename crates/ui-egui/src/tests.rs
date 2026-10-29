@@ -161,6 +161,9 @@ fn clear_all_clip_indicators_clears_every_meter() {
     app.main_meter.clip = true;
     app.meters.entry(kick).or_default().hold = [0.8, 0.7];
     app.main_meter.hold = [0.9, 0.9];
+    // The display level still falls from the last peak; the held peak clears all the same.
+    app.meters.entry(kick).or_default().level = [0.8, 0.7];
+    app.main_meter.level = [1.0, 1.0];
     app.run("track.clear_clip_indicators", json!({})).unwrap();
     assert!(!app.meters[&kick].clip && !app.main_meter.clip);
     assert_eq!((app.meters[&kick].hold, app.main_meter.hold), ([0.0, 0.0], [0.0, 0.0]), "held peaks clear with the clips");
