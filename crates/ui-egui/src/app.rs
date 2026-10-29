@@ -128,6 +128,12 @@ impl SoundApp {
         self
     }
 
+    /// `<document>[ •] — <App>`, the title a host shows for the open document: its name, a bullet
+    /// when it has unsaved changes, and the app name.
+    pub fn document_title(&self) -> String {
+        format!("{}{} — SoundCraft", self.engine.session().name, if self.engine.is_dirty() { " •" } else { "" })
+    }
+
     /// Per-frame logic: control channel, transport, document sync.
     ///
     /// eframe calls this once per layout pass and also on logic-only ticks while hidden. Consumed

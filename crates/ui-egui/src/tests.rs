@@ -3,6 +3,18 @@ use serde_json::json;
 use soundcraft_model::TrackId;
 
 #[test]
+fn the_document_title_names_the_open_document_and_unsaved_changes() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    assert_eq!(app.document_title(), "Midnight Groove — SoundCraft");
+    app.run("track.new", json!({"count": 1, "format": "mono"})).unwrap();
+    assert!(app.engine.is_dirty());
+    assert_eq!(app.document_title(), "Midnight Groove • — SoundCraft");
+    app.run("session.new", json!({"name": "New Song"})).unwrap();
+    assert!(!app.engine.is_dirty());
+    assert_eq!(app.document_title(), "New Song — SoundCraft");
+}
+
+#[test]
 fn new_session_stops_playback_and_the_old_clock() {
     for (command, params) in [
         ("session.new", json!({"name": "New project", "sample_rate": 96_000})),
