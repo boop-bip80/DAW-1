@@ -27,6 +27,16 @@ fn the_document_title_names_the_opened_file_not_the_name_inside_it() {
 }
 
 #[test]
+fn the_document_title_marks_an_open_plugin_editor_gesture_as_unsaved() {
+    // An active gesture holds plugin state the session hasn't taken yet: the session itself is
+    // clean, but the title must still show unsaved work (#809).
+    let (app, dir) = app_with_editor_gesture("gesture-title", true);
+    assert!(!app.engine.is_dirty());
+    assert_eq!(app.document_title(), "Midnight Groove • — SoundCraft");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn new_session_stops_playback_and_the_old_clock() {
     for (command, params) in [
         ("session.new", json!({"name": "New project", "sample_rate": 96_000})),

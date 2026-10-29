@@ -140,7 +140,7 @@ impl SoundApp {
             .as_deref()
             .and_then(|path| std::path::Path::new(path).file_name())
             .map_or_else(|| self.engine.session().name.clone(), |name| name.to_string_lossy().into_owned());
-        format!("{name}{} — SoundCraft", if self.engine.is_dirty() { " •" } else { "" })
+        format!("{name}{} — SoundCraft", if self.has_unsaved_changes() { " •" } else { "" })
     }
 
     /// Per-frame logic: control channel, transport, document sync.
