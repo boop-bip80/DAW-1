@@ -15,6 +15,8 @@ pub mod edit;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
+#[cfg(test)]
+mod live;
 pub mod score;
 
 use serde_json::{Value, json};
@@ -25,6 +27,7 @@ use std::sync::Arc;
 
 pub use cmd::{CommandInfo, CommandSpec, command_specs, find_command};
 pub use soundcraft_model as model;
+pub use soundcraft_model::LivePlugins;
 
 /// Shuts the third-party plugin hosts down, running the module exit of every plugin binary they
 /// loaded. Call it at the end of `main`, once every plugin instance (mixer, player) is gone: a
@@ -188,6 +191,9 @@ pub struct Engine {
     merge_key: Option<String>,
     /// The key every merged gesture takes while held (see `hold_merge`).
     merge_hold: Option<String>,
+    /// True while `execute_merged` runs a command that continues the current gesture, whose
+    /// step it will drop (see `merge_snapshot_mut`).
+    merge_continuing: bool,
     /// Messages for the UI status line / agents.
     pub messages: Vec<String>,
     /// The edit selection (range, tracks) before the last change, for Restore Last Selection.
@@ -195,6 +201,8 @@ pub struct Engine {
     pub last_selection: Option<(soundcraft_time::Range, Vec<TrackId>)>,
     /// Audio decoded off the UI thread, waiting for its `file.import_audio` (see `offer_import`).
     imports: Vec<io::DecodedImport>,
+    /// Live plugin instances of the desktop player, when one is running. Empty for the CLI and MCP.
+    live_plugins: Option<Box<dyn LivePlugins>>,
 }
 
 impl Default for Engine {
@@ -223,10 +231,29 @@ impl Engine {
             dirty_at: Cell::new((0, false)),
             merge_key: None,
             merge_hold: None,
+            merge_continuing: false,
             messages: Vec::new(),
             last_selection: None,
             imports: Vec::new(),
+            live_plugins: None,
         }
+    }
+
+    /// Installs (or removes) the desktop player's live plugin instances. Commands consult them
+    /// before creating a temporary plugin to parse text or probe values.
+    pub fn set_live_plugins(&mut self, live: Option<Box<dyn LivePlugins>>) {
+        self.live_plugins = live;
+    }
+
+    /// Whether [`set_live_plugins`](Self::set_live_plugins) installed a source.
+    pub fn has_live_plugins(&self) -> bool {
+        self.live_plugins.is_some()
+    }
+
+    pub(crate) fn live_plugins_mut(&mut self) -> Option<&mut dyn LivePlugins> {
+        // `&mut dyn Trait` is invariant in the trait object's lifetime, so `as_deref_mut` will not
+        // hand back the `'static` object for this shorter borrow. The cast reborrows it.
+        self.live_plugins.as_mut().map(|live| &mut **live as &mut dyn LivePlugins)
     }
 
     /// Hands over audio [`io::decode_import`] made off the UI thread: the next `file.import_audio`
@@ -457,7 +484,9 @@ impl Engine {
         if continuing && before_len > 0 {
             self.history_limit = limit.max(before_len.saturating_add(1));
         }
+        self.merge_continuing = continuing && before_len > 0;
         let r = self.execute(id, params);
+        self.merge_continuing = false;
         self.history_limit = limit;
         let r = r?;
         if continuing && self.undo.len() == before_len + 1 && before_len > 0 {
@@ -479,6 +508,17 @@ impl Engine {
     /// The gesture `execute_merged` is continuing, if any.
     pub fn merge_key(&self) -> Option<&str> {
         self.merge_key.as_deref()
+    }
+
+    /// The pre-gesture document of the merge the running command continues, if any: only inside
+    /// an `execute_merged` call whose own undo step will be dropped. A plain `execute`, or a merged
+    /// call that starts a new gesture, gets `None` even while an earlier gesture's key is set.
+    pub(crate) fn merge_snapshot_mut(&mut self) -> Option<&mut Session> {
+        if !self.merge_continuing {
+            return None;
+        }
+        let entry = self.undo.last_mut()?;
+        Some(Arc::make_mut(&mut entry.doc))
     }
 
     /// End a gesture started with `execute_merged`.
