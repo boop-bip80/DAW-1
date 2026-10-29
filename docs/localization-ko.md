@@ -1,7 +1,7 @@
 # Korean (ko) interface
 
 SoundCraft's Korean catalog is [`crates/ui-egui/src/i18n/ko.tsv`](../crates/ui-egui/src/i18n/ko.tsv).
-It carries the same 1,168 keys as the Simplified Chinese reference catalog (a test holds the two
+It carries the same 1,185 keys as the Simplified Chinese reference catalog (a test holds the two
 key-for-key), so the menu, command, menu-path and looked-up-literal coverage gates apply to Korean
 too. The mechanism, the preference and the catalog format are in [`localization.md`](localization.md).
 

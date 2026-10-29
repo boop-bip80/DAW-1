@@ -21,8 +21,8 @@ Language 0 is always English, the fallback.
 | Language | Code | Catalog | Plural forms | Menus complete |
 |---|---|---|---|---|
 | English (source) | `en` | — (strings live in the code) | one / other | — (source) |
-| 简体中文 — Simplified Chinese | `zh-hans` | [`crates/ui-egui/src/i18n/zh-hans.tsv`](../crates/ui-egui/src/i18n/zh-hans.tsv) · 1,160 entries | one (Chinese has no plural inflection) | yes |
-| 한국어 — Korean | `ko` | [`crates/ui-egui/src/i18n/ko.tsv`](../crates/ui-egui/src/i18n/ko.tsv) · 1,168 entries | one (Korean counts with a counter word) | yes |
+| 简体中文 — Simplified Chinese | `zh-hans` | [`crates/ui-egui/src/i18n/zh-hans.tsv`](../crates/ui-egui/src/i18n/zh-hans.tsv) · 1,175 entries | one (Chinese has no plural inflection) | yes |
+| 한국어 — Korean | `ko` | [`crates/ui-egui/src/i18n/ko.tsv`](../crates/ui-egui/src/i18n/ko.tsv) · 1,185 entries | one (Korean counts with a counter word) | yes |
 
 `code` is the lowercase BCP 47 tag stored in the preference; `name` is the native name shown in the
 Appearance window; `plural` picks the form to use for a count; `complete_menus` promises that the
@@ -168,7 +168,7 @@ Rules the tests enforce:
   tests fail; the app itself never panics on a bad catalog.
 - Escapes inside source and translation: `\n`, `\t` and `\\`.
 
-The shipped Simplified Chinese catalog has **1,160 entries**: 1,144 plain, 9 `@plural` and 7 in the
+The shipped Simplified Chinese catalog has **1,175 entries**: 1,158 plain, 10 `@plural` and 7 in the
 `automation` namespace. For example `SHUFFLE` is 推移 (edit-mode toolbar), `Shuffle Lock` is
 推移锁定, and the Shuffle tooltips are 推移模式.
 
@@ -209,8 +209,8 @@ be inflated or parsed, warns and falls back to English rather than crashing.
 | Catalogs | `crates/ui-egui/src/i18n/*.tsv` |
 | Preference model and commands | `crates/engine/src/prefs.rs`, `crates/engine/src/cmd/prefs.rs` |
 | Shell wiring (persistence, fonts) | `apps/soundcraft/src/{main,config}.rs`, `apps/soundcraft-web/src/web.rs` |
-| Appearance window | `crates/ui-egui/src/extra_windows.rs` |
-| Lookups in panels | `crates/ui-egui/src/*.rs` |
+| Appearance window | `crates/ui-egui/src/panels/extra_windows.rs` |
+| Lookups in panels | `crates/ui-egui/src/panels/*.rs`, `crates/ui-egui/src/mix_window/*.rs`, `crates/ui-egui/src/edit_window/*.rs` |
 
 The current language is a thread-local in `i18n/mod.rs` (`CURRENT`, private), default English. UI
 code calls:
@@ -287,7 +287,7 @@ The localization tests live next to the code they check — `crates/ui-egui/src/
 | `bundled_catalogs_unpack_and_parse_without_errors` | every shipped catalog inflates, parses and has no malformed lines |
 | `catalogs_have_unique_keys_and_matching_placeholders` | no duplicate keys; placeholders, trailing ellipsis and colon match the English source |
 | `simplified_chinese_covers_the_composed_interface` | Simplified Chinese (the catalog with `complete_menus`) covers every menu-tree label, UI command label, engine command label and menu path segment |
-| `every_looked_up_literal_has_a_translation` | every literal UI string has an entry: a bare `t("…")` and the last argument (the tooltip) of the `icon_button` / `text_toggle` helpers |
+| `every_looked_up_literal_has_a_translation` | every literal UI string has an entry: a bare `t("…")` and the last argument (the tooltip) of the `icon_button` / `text_toggle` helpers; the scan walks every Rust source under `crates/ui-egui/src`, subdirectories included |
 | `cjk_fallback_order_follows_the_interface_language`, `every_family_puts_han_before_hangul_for_chinese` | the CJK fallback order follows the interface language (Han first except Korean) |
 | `bundled_web_font_covers_the_zh_hans_catalog`, `bundled_web_font_draws_the_zh_hans_catalog_in_every_family`, `bundled_web_font_stays_within_its_size_budget` | the bundled web font covers every catalog glyph in every family and stays inside its 2 MiB budget |
 | `every_family_draws_hangul_and_han_with_system_fonts` | both CJK fallbacks reach every family on a system that has the fonts (skipped otherwise) |

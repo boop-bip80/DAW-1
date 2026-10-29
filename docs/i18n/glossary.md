@@ -117,19 +117,19 @@ Same English word, different sense — the cross-check cannot know the context:
 
 ## 5. Corpus coverage
 
-1,078 deduplicated catalog keys compared: 175 consensus, 58 majority-differs,
-43 split, 802 no-data (SoundCraft-specific command labels — clip gain plumbing,
+1,093 deduplicated catalog keys compared: 179 consensus, 59 majority-differs,
+43 split, 812 no-data (SoundCraft-specific command labels — clip gain plumbing,
 memory locations, per-slot sends/inserts — have no counterpart in the
 corpora). The 2026-10-20 wording pass rewrote 48 catalog rows and removed 5 dead
 ones (superseded save/close strings, Middle, and a Shuffle row no code looked
 up). The review that followed landed the Shuffle decision (§3), folded the
 `@id` command-id rows into plain rows, and added the preference commands; the
-catalog now has 1,160 entries (the last dead row, `Interface Language`, was
+catalog now has 1,175 entries (the last dead row, `Interface Language`, was
 dropped when its `ui.language` command went away; a 2026-10-22 pass then added the
 remaining toolbar, send, bounce, Memory Locations and record-hint strings, which
 raised the comparable-key count from 1,032 to 1,061. A 2026-10-25 pass counts Qt
 plural forms separately instead of joining them into one string, which lifts the
-machine matches to 1,078 keys)
+machine matches to 1,078 keys; the 2026-10-27 merge with `main` re-run counts 1,093 keys)
 
 For no-data terms the glossary above and the terminology table are
 the only authority; when coining new wording, prefer §2's rationale over

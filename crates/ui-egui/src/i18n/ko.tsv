@@ -79,6 +79,7 @@
 	Big Counter	큰 카운터
 	Bounce Mix...	믹스 바운스...
 	Bounce...	바운스...
+	Bounce	바운스
 	Bring to Front	맨 앞으로 가져오기
 	Bypass	바이패스
 	Bypass Inserts	인서트 바이패스
@@ -113,6 +114,7 @@
 	Clip Groups...	클립 그룹...
 	Clip List	클립 목록
 	Close All Workspaces	모든 워크스페이스 닫기
+	Close folder	폴더 닫기
 	Close Session	세션 닫기
 	Close Window	창 닫기
 	Coalesce Clip Gain to Volume Automation	클립 게인을 볼륨 오토메이션에 병합
@@ -157,6 +159,7 @@
 	Designate as Target Playlist	대상 플레이리스트로 지정
 	Destructive Record	파괴적 녹음
 	DestructivePunch	DestructivePunch
+	Disable	비활성화
 	Disk Allocation...	디스크 할당...
 	Disk Usage	디스크 사용량
 	Display on All Channels	모든 채널에 표시
@@ -174,6 +177,7 @@
 	Dyn3 Expander/Gate	Dyn3 Expander/Gate
 	Dynamic Transport	다이내믹 트랜스포트
 	Dynamics	다이내믹스
+	Enable	활성화
 	EQ	EQ
 	EQ Curve	EQ 커브
 	EQ3 1-Band	EQ3 1-Band
@@ -225,6 +229,7 @@
 	Harmonic	하모닉
 	Heal Separation	분리 복구
 	Hide All Floating Windows	모든 플로팅 창 숨기기
+	Hide automation	오토메이션 숨기기
 	I/O	I/O
 	I/O...	I/O...
 	Identify Beat...	비트 지정...
@@ -333,6 +338,7 @@
 	Object	오브젝트
 	On Grid	그리드에서
 	Open	열기
+	Open folder	폴더 열기
 	Options	옵션
 	Original Time Stamp	원본 타임스탬프
 	Other	기타
@@ -405,6 +411,7 @@
 	S-Curve...	S자 커브...
 	Scroll Into View	보이도록 스크롤
 	Set Preferences	환경설정 적용
+	Show volume automation	볼륨 오토메이션 표시
 	SIP (Solo In Place)	SIP(솔로 인 플레이스)
 	Samples	샘플
 	SansAmp PSA-1	SansAmp PSA-1
@@ -686,6 +693,7 @@
 	Refresh devices	장치 새로 고침
 	Remove from Folder	폴더에서 제거
 	Remove send	센드 제거
+	Remove	제거
 	Rename bus…	버스 이름 변경…
 	Renders and AudioSuite processes run to completion before returning.	렌더링과 AudioSuite 처리는 끝난 뒤에 반환됩니다.
 	Reopen the audio devices with these settings	이 설정으로 오디오 장치 다시 열기
@@ -854,17 +862,21 @@ automation	trim	트림
 
 # --- Sentence glue in composite dialogs ---
 	new	개의 새
-	in	타임베이스
+	in	기준
 	bpm	BPM
 	no insert	인서트 없음
 	new bus...	새 버스...
 	OK	확인
+	Replace	바꾸기
 	Revert “{name}” to its last saved version? Your changes will be lost.	“{name}”을(를) 마지막으로 저장한 버전으로 되돌릴까요? 변경 내용은 사라집니다.
 	Close “{name}” without saving? Your changes will be lost.	“{name}”을(를) 저장하지 않고 닫을까요? 변경 내용은 사라집니다.
 	Save changes to “{name}” before closing?	닫기 전에 “{name}”의 변경 내용을 저장할까요?
 # --- Window and UI-command leaves that are not in the menu catalog ---
 	Arrange Panel	패널 배치
 	Audio Device	오디오 장치
+	Audio Plug-in Manager	오디오 플러그인 관리자
+	Audio Plug-in Manager...	오디오 플러그인 관리자...
+	Plug-in management arrives in a later update.	플러그인 관리 기능은 이후 업데이트에서 제공됩니다.
 	Bounce Mix…	믹스 바운스…
 	I/O Setup	I/O 설정
 	Keyboard Shortcuts	키보드 단축키
@@ -1001,6 +1013,7 @@ automation	trim	트림
 	{note} dotted triplet	셋잇단 점{note}
 	{value} sec	{value}초
 @plural	{n} frame|{n} frames	{n}프레임
+@plural	{n} object track|{n} object tracks	오브젝트 트랙 {n}개
 	1 msec	1밀리초
 	10 msec	10밀리초
 	100 msec	100밀리초
@@ -1200,3 +1213,7 @@ automation	trim	트림
 	Zoom preset (click to recall, Cmd-click to store)	줌 프리셋(클릭하면 불러오기, Cmd+클릭하면 저장)
 	marker	마커
 	selection	선택 영역
+	Channel format	채널 형식
+	Track kind	트랙 종류
+	Timebase	타임베이스
+	Search buses…	버스 검색…

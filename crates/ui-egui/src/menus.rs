@@ -68,6 +68,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.playback_engine", "Playback Engine", "", None),
     ("ui.audio_device", "Audio Device", "", None),
     ("window.io_setup", "I/O Setup", "", None),
+    ("window.plugin_manager", "Audio Plug-in Manager", "", None),
     ("window.shortcuts", "Keyboard Shortcuts", "", None),
     ("view.mix_section", "Mix Window View", "", None),
     ("view.scroll_into_view", "Scroll Into View", "", None),
@@ -219,6 +220,16 @@ pub fn tree() -> Vec<MenuNode> {
     }
     for (path, _) in MENU_WINDOWS {
         insert_path(&mut roots, path);
+    }
+    // Our own, in the Setup menu where the audio engine and its plugins are configured: right
+    // after I/O..., ahead of the keyboard shortcuts and preferences (Pro Tools has no such item).
+    if let Some(setup) = roots.iter_mut().find(|n| n.label == "Setup") {
+        let at = setup.children.iter().position(|n| n.path == "Setup > I/O...");
+        let from = setup.children.iter().position(|n| n.path == "Setup > Audio Plug-in Manager...");
+        if let (Some(at), Some(from)) = (at, from) {
+            let node = setup.children.remove(from);
+            setup.children.insert(at + 1, node);
+        }
     }
     roots
 }
@@ -450,6 +461,7 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Setup > Hardware...", "window.playback_engine"),
     ("Setup > Playback Engine...", "window.playback_engine"),
     ("Setup > I/O...", "window.io_setup"),
+    ("Setup > Audio Plug-in Manager...", "window.plugin_manager"),
     ("Setup > Keyboard Shortcuts...", "window.shortcuts"),
     ("Setup > Session", "setup.session"),
     ("Event > Beat Detective", "window.beat_detective"),
@@ -593,6 +605,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         "window.rtp" => toggle(&mut app.ui.show_rtp),
         "window.playback_engine" => toggle(&mut app.ui.show_playback_engine),
         "window.io_setup" => toggle(&mut app.ui.show_io_setup),
+        "window.plugin_manager" => toggle(&mut app.ui.show_plugin_manager),
         "window.shortcuts" => toggle(&mut app.ui.show_shortcuts),
         "window.color_palette" => toggle(&mut app.ui.show_color_palette),
         "window.disk_usage" => toggle(&mut app.ui.show_disk_usage),

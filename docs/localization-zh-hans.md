@@ -3,7 +3,7 @@
 SoundCraft's interface can be shown in **简体中文**. The catalog is compiled into the binary
 ([`crates/ui-egui/src/i18n/zh-hans.tsv`](../crates/ui-egui/src/i18n/zh-hans.tsv), packed and
 deflated at build time), so there is nothing to install and no locale files to find at run time.
-It has **1,160 entries**: every menu item and path segment, every command label, and every string
+It has **1,175 entries**: every menu item and path segment, every command label, and every string
 the UI looks up literally — dialogs, window titles, tooltips, status messages and UI error
 templates. Engine diagnostics and machine surfaces stay English (see
 [What is translated](#what-is-translated)).
@@ -92,13 +92,13 @@ Two details worth knowing:
 | `crates/ui-egui/src/i18n/mod.rs` | registry `LANGUAGES`, `Lang`, lookup API, plural rules, tests |
 | `crates/ui-egui/src/i18n/catalog.rs` | TSV parser and lookup tables |
 | `crates/ui-egui/src/i18n/system.rs` | locale detection from the system and environment |
-| `crates/ui-egui/src/i18n/zh-hans.tsv` | the translations (1,160 entries) — the source of truth |
+| `crates/ui-egui/src/i18n/zh-hans.tsv` | the translations (1,175 entries) — the source of truth |
 | `crates/ui-egui/build.rs` | packs the catalogs and a shared key table into `OUT_DIR/i18n/*.deflate` |
 | `crates/ui-egui/src/i18n/LICENSE-translations.txt` | the catalog's clean-room statement and licence |
 | `crates/engine/src/prefs.rs`, `crates/engine/src/cmd/prefs.rs` | `interface.language` preference and `prefs.get/set/reset` |
 | `apps/soundcraft/src/{config,main}.rs` | desktop persistence (`preferences.json`, one-time legacy migration) |
 | `apps/soundcraft-web/src/web.rs` | web persistence (`localStorage`, `navigator.languages`) |
-| `crates/ui-egui/src/extra_windows.rs` | the Appearance window (language dropdown and preview) |
+| `crates/ui-egui/src/panels/extra_windows.rs` | the Appearance window (language dropdown and preview) |
 | `crates/ui-egui/src/fonts.rs` | CJK font fallback (`system-han`, `system-hangul`; bundled Han subset on the web) |
 
 Lookups, in order of preference (the full API is in [`localization.md`](localization.md#runtime)):

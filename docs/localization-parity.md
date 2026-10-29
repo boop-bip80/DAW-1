@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Korean catalog) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-29 · **Change:** minor (Korean catalog, synced to the zh-hans tree after its `main` merges: `ko.tsv` 1,185 entries) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft ships **English** (the source language), **简体中文** and **한국어**. Every menu path segment,
 every command label, every panel title, dialog, tooltip and status message the UI draws goes
@@ -19,7 +19,7 @@ the Taiwan/HK terminology), then native-speaker review (human). Arabic and Hindi
 
 What is done:
 
-- **The catalog**: `zh-hans.tsv`, 1,160 entries — plain strings, plural forms (`@plural`) and a
+- **The catalog**: `zh-hans.tsv`, 1,175 entries — plain strings, plural forms (`@plural`) and a
   disambiguating `automation` context; parser support for command-id keys (`@id`) stays but no row
   needs it. Chinese takes one plural form.
 - **The build**: `build.rs` packs the TSV into a shared key table plus per-language marker streams
@@ -61,7 +61,7 @@ layout, IME testing, and native-speaker review of the Chinese wording.
 | Language | Code | UI strings translated | Dialogs / tooltips / help | Script support | Native review | Status | Est. to full (h) | In Pro Tools |
 |---|---|---|---|---|---|---|---:|---|
 | English | en | all (source) | ✅ | Latin ✅ | — | **full** | 0 | ✅ |
-| Simplified Chinese | zh-hans | all (1,160 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Han fallback; bundled web subset; IME untested | no | **full** (engine diagnostics stay English) | 3–5 (review) | ✅ |
+| Simplified Chinese | zh-hans | all (1,175 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Han fallback; bundled web subset; IME untested | no | **full** (engine diagnostics stay English) | 3–5 (review) | ✅ |
 | Spanish | es | 0 (0 %) — PR #143 pending | ❌ | Latin ✅ | no | none | 3–5 | ✅ |
 | Hindi | hi | 0 (0 %) | ❌ | ❌ no Devanagari font or shaping | no | none | 8–15 | ❌ |
 | Arabic | ar | 0 (0 %) | ❌ | ❌ no RTL layout, no shaping | no | none | 15–25 | ❌ |
@@ -70,7 +70,7 @@ layout, IME testing, and native-speaker review of the Chinese wording.
 | Indonesian | id | 0 (0 %) | ❌ | Latin ✅ | no | none | 3–5 | ❌ |
 | Japanese | ja | 0 (0 %) | ❌ | 🟡 Han fallback covers most glyphs; kana need the JIS face set, untested | no | none | 6–10 | ✅ |
 | German | de | 0 (0 %) | ❌ | Latin ✅ | no | none | 3–5 | ✅ |
-| Korean | ko | all (1,168 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Hangul fallback (desktop); ❌ no web Hangul face yet, so the web falls back to English; IME untested | in progress | **full** on desktop (engine diagnostics stay English) | 2–4 (web font) | ✅ |
+| Korean | ko | all (1,185 entries; menus, commands, dialogs, tooltips, status) | ✅ | ✅ Hangul fallback (desktop); ❌ no web Hangul face yet, so the web falls back to English; IME untested | in progress | **full** on desktop (engine diagnostics stay English) | 2–4 (web font) | ✅ |
 | Vietnamese | vi | 0 (0 %) | ❌ | 🟡 Latin with stacked diacritics, untested | no | none | 3–5 | ❌ |
 | Traditional Chinese | zh-hant | 0 (0 %) | ❌ | ✅ Han fallback | no | none | 6–10 | ✅ |
 
@@ -82,6 +82,8 @@ Per-language hours exclude the shared catalog and script work, which are done.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | trivial | Korean synced to the zh-hans tree after its `main` merges: the 17 keys the merges and the Plug-in Manager placeholder added are in `ko.tsv` (1,185 entries, key-for-key with zh-hans), and `in` (the New Track dialog's timebase connector, no longer the timebase itself) reads 기준 |
+| 2026-10-27 | trivial | Merged `main` (60087e0, ~46 commits: the UI crate split into `dialogs/`, `panels/`, `mix_window/`, `edit_window/`, `app/`): translated call sites moved with the code, upstream's new accessible names are translated, and the strings the merge added (`Close folder`, `Open folder`, `Hide automation`, `Show volume automation`, `Enable`, `Disable`, the object-track count, `Preset name`, `Check for Updates…`, send-level captions) are in the catalog — 1,175 entries; `cargo xtask ci` green |
 | 2026-10-26 | minor | Korean shipped: `ko.tsv` (1,168 entries, key-for-key with zh-hans; native-speaker review in progress), registry row, Korean tests; localization re-measured 25 % → 38 %; web Hangul face left open |
 | 2026-10-25 | trivial | Review pass: the icon buttons announce their translated label to screen readers, the parity table’s delimiter row matches its nine columns, `prefs.reset` trims the path it reports, the preferences file is only rewritten when a preference changed, and the cross-check counts Qt plural forms separately (1,078 keys) |
 | 2026-10-24 | trivial | Rebased onto `main` (which advanced ~230 commits): the new Clip List Auto Rename, Strip Silence Rename/Extract/Separate, Virtual Instrument/dither bounce controls and edit-mode helpers keep their Chinese labels, so the catalog grows 1,141 → 1,160 entries; `cargo xtask ci` green against the new dependency set |

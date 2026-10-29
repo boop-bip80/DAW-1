@@ -75,22 +75,6 @@ const HAN: &[(&str, u32)] = &[
 /// Font files larger than this are skipped: egui keeps the whole file in memory.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_FONT_BYTES: u64 = 64 << 20;
-/// A resolved font file: path and face index inside it.
-#[cfg(not(target_arch = "wasm32"))]
-type Resolved = Option<(String, u32)>;
-
-/// One cache per family. `fc-match` is a subprocess per call, and on Linux a child of this
-/// process keeps copies of its open files until it execs — which, in tests, can make a
-/// just-released autosave lock look taken. Resolution therefore happens once per process.
-#[cfg(not(target_arch = "wasm32"))]
-static REGULAR_CACHE: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static BOLD_CACHE: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static HANGUL_CACHE: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
-#[cfg(not(target_arch = "wasm32"))]
-static HAN_CACHE: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
-
 /// The Han-capable TrueType font bundled for the web build only: egui's default fonts carry no Han
 /// glyphs and a browser cannot reach the operating system's fonts, so Simplified Chinese labels
 /// would render as boxes. It is a Noto Sans SC (OFL-1.1) subset at weight 400 covering a superset
@@ -101,24 +85,12 @@ static HAN_CACHE: std::sync::OnceLock<Resolved> = std::sync::OnceLock::new();
 #[cfg(any(target_arch = "wasm32", test))]
 const BUNDLED_HAN: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts/NotoSansSC-SoundCraftSubset.ttf"));
 
-/// Is this a TrueType/OpenType file egui can read, and small enough to hold in memory? Type 1
-/// and bitmap fonts, which `fc-match` may return on minimal systems, are rejected here.
-#[cfg(not(target_arch = "wasm32"))]
-fn acceptable(path: &str) -> bool {
-    use std::io::Read;
-    if !std::fs::metadata(path).is_ok_and(|m| m.len() <= MAX_FONT_BYTES) {
-        return false;
-    }
-    let Ok(mut file) = std::fs::File::open(path) else { return false };
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic).is_ok() && matches!(&magic, b"\0\x01\0\0" | b"OTTO" | b"true" | b"ttcf")
-}
-
-/// Asks fontconfig for the desktop's font matching `pattern`. With `lang`, the match must support
-/// that language (`fc-match` always returns its best match, which is a Latin face when no Korean
-/// or Han font is installed).
+/// Asks fontconfig for the desktop's font matching `pattern`. Only TrueType/OpenType results are
+/// used: egui cannot read Type 1 or bitmap fonts, which `fc-match` may return on minimal systems.
+/// With `lang`, the match must support that language (`fc-match` always returns its best match,
+/// which is a Latin face when no Korean font is installed).
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn fontconfig_match(pattern: &str, lang: Option<&str>) -> Option<(String, u32)> {
+fn load_from_fontconfig(pattern: &str, lang: Option<&str>) -> Option<FontData> {
     let output = std::process::Command::new("fc-match").args(["--format=%{file}\\n%{index}\\n%{lang}\\n", pattern]).output().ok()?;
     if !output.status.success() {
         return None;
@@ -133,39 +105,46 @@ fn fontconfig_match(pattern: &str, lang: Option<&str>) -> Option<(String, u32)> 
     {
         return None;
     }
-    acceptable(path).then(|| (path.to_string(), index))
-}
-
-/// The file for one family, resolved once: fontconfig's answer first, then the built-in list.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolve(cache: &'static std::sync::OnceLock<Resolved>, cands: &[(&str, u32)], pattern: &str, lang: Option<&str>) -> Resolved {
-    cache
-        .get_or_init(|| {
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            if let Some(found) = fontconfig_match(pattern, lang) {
-                return Some(found);
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-            let _ = (pattern, lang);
-            cands.iter().find_map(|(p, idx)| acceptable(p).then(|| ((*p).to_string(), *idx)))
-        })
-        .clone()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load(cache: &'static std::sync::OnceLock<Resolved>, cands: &[(&str, u32)], pattern: &str, lang: Option<&str>) -> Option<FontData> {
-    if std::env::var_os("SOUNDCRAFT_NO_SYSTEM_FONTS").is_some() {
+    if std::fs::metadata(path).ok()?.len() > MAX_FONT_BYTES {
         return None;
     }
-    let (path, index) = resolve(cache, cands, pattern, lang)?;
-    let mut font = FontData::from_owned(std::fs::read(path).ok()?);
+    let bytes = std::fs::read(path).ok()?;
+    let sfnt = matches!(bytes.get(..4), Some(b"\0\x01\0\0" | b"OTTO" | b"true" | b"ttcf"));
+    if !sfnt {
+        return None;
+    }
+    let mut font = FontData::from_owned(bytes);
     font.index = index;
     Some(font)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn load(cands: &[(&str, u32)], pattern: &str, lang: Option<&str>, system_fonts: bool) -> Option<FontData> {
+    if !system_fonts {
+        return None;
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    if let Some(font) = load_from_fontconfig(pattern, lang) {
+        return Some(font);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = (pattern, lang);
+    for (p, idx) in cands {
+        if std::fs::metadata(p).is_ok_and(|m| m.len() > MAX_FONT_BYTES) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(p) {
+            let mut fd = FontData::from_owned(bytes);
+            fd.index = *idx;
+            return Some(fd);
+        }
+    }
+    None
+}
+
 /// The web build has no operating-system fonts: the bundled subset is the CJK fallback.
 #[cfg(target_arch = "wasm32")]
-fn load() -> FontData {
+fn bundled_han() -> FontData {
     FontData::from_static(BUNDLED_HAN)
 }
 
@@ -190,10 +169,10 @@ fn han_before_hangul(language: &str) -> bool {
     language.split(['-', '_']).next() != Some("ko")
 }
 
-/// The font definitions the UI runs with: egui's defaults, the operating system's faces where
-/// present, and (web only) the bundled Han face as the last fallback of every family. The interface
-/// language decides the order of the two CJK fallbacks.
-pub fn definitions() -> FontDefinitions {
+/// The font set: egui's bundled defaults, the operating system's faces where present and when
+/// `system_fonts` is true, and (web only) the bundled Han face as the last fallback of every
+/// family. The interface language decides the order of the two CJK fallbacks.
+pub fn definitions(system_fonts: bool) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let base: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     #[cfg(not(target_arch = "wasm32"))]
@@ -202,13 +181,13 @@ pub fn definitions() -> FontDefinitions {
     let bold_family = base.clone();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Some(reg) = load(&REGULAR_CACHE, REGULAR, "sans-serif", None) {
+        if let Some(reg) = load(REGULAR, "sans-serif", None, system_fonts) {
             fonts.font_data.insert("system-regular".into(), Arc::new(reg));
             if let Some(f) = fonts.families.get_mut(&FontFamily::Proportional) {
                 f.insert(0, "system-regular".into());
             }
         }
-        if let Some(b) = load(&BOLD_CACHE, BOLD, "sans-serif:style=Bold", None) {
+        if let Some(b) = load(BOLD, "sans-serif:style=Bold", None, system_fonts) {
             fonts.font_data.insert("system-bold".into(), Arc::new(b));
             bold_family.insert(0, "system-bold".into());
         } else if fonts.font_data.contains_key("system-regular") {
@@ -221,8 +200,8 @@ pub fn definitions() -> FontDefinitions {
         // The first face with a glyph wins, so the interface language decides whether a Han or a
         // Korean face claims the Han glyphs a Chinese interface draws (see `han_before_hangul`).
         let language = crate::i18n::current().code();
-        let hangul = load(&HANGUL_CACHE, HANGUL, "sans-serif:lang=ko", Some("ko"));
-        let han = load(&HAN_CACHE, HAN, "sans-serif:lang=zh-cn", Some("zh-cn"));
+        let hangul = load(HANGUL, "sans-serif:lang=ko", Some("ko"), system_fonts);
+        let han = load(HAN, "sans-serif:lang=zh-cn", Some("zh-cn"), system_fonts);
         let ordered = if han_before_hangul(language) {
             [("system-han", han), ("system-hangul", hangul)]
         } else {
@@ -238,13 +217,13 @@ pub fn definitions() -> FontDefinitions {
     {
         // No system fonts in the browser: the bundled Han face keeps Chinese labels (and Chinese
         // session, track and clip names) readable instead of drawing boxes.
-        add_fallback(&mut fonts, "web-han", load());
+        add_fallback(&mut fonts, "web-han", bundled_han());
     }
     fonts
 }
 
-pub fn install(ctx: &egui::Context) {
-    ctx.set_fonts(definitions());
+pub fn install(ctx: &egui::Context, system_fonts: bool) {
+    ctx.set_fonts(definitions(system_fonts));
 }
 
 #[cfg(test)]
@@ -267,7 +246,7 @@ mod tests {
     /// such font.
     #[test]
     fn every_family_draws_hangul_and_han_with_system_fonts() {
-        let defs = definitions();
+        let defs = definitions(true);
         for (key, sample) in [("system-hangul", "가한국어세션"), ("system-han", "轨道片段混音")] {
             if !defs.font_data.contains_key(key) {
                 eprintln!("skipping: no system font for {key}");
@@ -308,7 +287,7 @@ mod tests {
             return;
         };
         let _language = crate::i18n::language_scope(chinese);
-        let defs = definitions();
+        let defs = definitions(true);
         let mut compared = 0;
         for (family, family_fonts) in &defs.families {
             let han = family_fonts.iter().position(|font| font == "system-han");
@@ -320,6 +299,25 @@ mod tests {
         }
         if compared == 0 {
             eprintln!("skipping: no system Han and Hangul fonts resolved");
+        }
+    }
+
+    /// Korean names draw in every family, not as boxes; skipped when the system has no Korean font.
+    #[test]
+    fn every_family_draws_hangul_with_a_system_korean_font() {
+        let defs = definitions(true);
+        if !defs.font_data.contains_key("system-hangul") {
+            eprintln!("skipping: no Korean system font");
+            return;
+        }
+        let families: Vec<FontFamily> = defs.families.keys().cloned().collect();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(defs);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        for family in families {
+            let font = egui::FontId::new(13.0, family.clone());
+            assert!(ctx.fonts_mut(|f| f.has_glyphs(&font, "가한국어세션")), "{family:?} has no Hangul");
         }
     }
 
@@ -349,7 +347,7 @@ mod tests {
     #[test]
     fn bundled_web_font_draws_the_zh_hans_catalog_in_every_family() {
         let Some(catalog) = zh_hans_catalog() else { return };
-        let mut defs = definitions();
+        let mut defs = definitions(false);
         add_fallback(&mut defs, "web-han", FontData::from_static(BUNDLED_HAN));
         let mut sample: Vec<char> = catalog.chars().filter(|c| !['\t', '\r', '\n'].contains(c)).collect();
         sample.sort_unstable();
