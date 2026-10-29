@@ -2,10 +2,12 @@
 
 > **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-29 · **Change:** minor (Korean catalog, synced to the zh-hans tree after its `main` merges: `ko.tsv` 1,185 entries) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
-SoundCraft ships **English** (the source language), **简体中文** and **한국어**. Every menu path segment,
-every command label, every panel title, dialog, tooltip and status message the UI draws goes
-through a catalog compiled into the binary (`crates/ui-egui/src/i18n/`), and the Chinese and Korean
-catalogs cover all of them; engine-side diagnostics (audio trouble text, health-report issue text, plugin
+SoundCraft ships **English** (the source language), **简体中文** and **한국어**. Menu path segments,
+command labels, panel titles, dialogs, tooltips and status messages go through a catalog compiled
+into the binary (`crates/ui-egui/src/i18n/`), and the Chinese and Korean catalogs carry every key
+the UI looks up (1,185 entries, gated by tests). A few strings still bypass the lookup and draw in
+English: the *About SoundCraft*, *MIDI Real-Time Properties* and *Check for Updates* window titles
+and the audio device selector's `Default (…)` option. Engine-side diagnostics (audio trouble text, health-report issue text, plugin
 names) stay English because the control channel, the CLI and MCP report the same strings. Pro Tools
 ships its UI in **8 languages** (bundle `.lproj` folders: English, German, Spanish, French,
 Japanese, Korean, Simplified Chinese, Traditional Chinese).

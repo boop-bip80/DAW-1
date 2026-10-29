@@ -211,7 +211,7 @@ fn ui_customization(app: &mut SoundApp, ctx: &egui::Context) {
             crate::widgets::checkbox(ui, &mut app.extra.auto_update_config, crate::i18n::t("Auto-update configuration"));
             let automatic = draft.eq_ignore_ascii_case("auto");
             let mut chosen: Option<String> = None;
-            let auto_label = crate::i18n::fmt(crate::i18n::t("Auto ({name})"), &[("name", crate::i18n::system_lang().name())]);
+            let auto_label = crate::i18n::fmt(crate::i18n::t("Auto ({name})"), &[("name", crate::i18n::Lang::from_pref("auto").name())]);
             let selected = if automatic { auto_label.clone() } else { crate::i18n::Lang::from_pref(&draft).name().to_string() };
             craft_ui::ComboBox::from_label(crate::i18n::t("Language")).selected_text(selected).show_ui(ui, |ui| {
                 if ui.selectable_label(automatic, &auto_label).clicked() {
