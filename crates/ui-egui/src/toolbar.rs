@@ -272,7 +272,7 @@ fn counters(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().text(pos2(r.min.x + 10.0, y), Align2::LEFT_CENTER, "Sub", regular(11.0), t.counter_label);
     ui.painter().text(pos2(r.min.x + 150.0, y), Align2::RIGHT_CENTER, fmt_pos(app, pos, sub_fmt), mono(11.0), t.counter_text);
     let st = if app.engine.is_dirty() { "modified" } else { "saved" };
-    let dev = app.player.as_ref().map_or("no audio engine", |p| if p.silent { "silent clock" } else { "audio on" });
+    let dev = app.player().map_or("no audio engine", |p| if p.silent { "silent clock" } else { "audio on" });
     ui.painter().text(pos2(r.max.x - 8.0, y), Align2::RIGHT_CENTER, format!("{st} · {dev}"), regular(10.0), t.text_dim);
 }
 

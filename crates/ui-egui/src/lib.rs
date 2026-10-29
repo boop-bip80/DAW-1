@@ -250,7 +250,7 @@ pub struct SoundApp {
     recent_changed: bool,
     /// When the recent sessions were last checked for existence, which list, and the result.
     recent_checked: Option<(f64, Vec<String>, Vec<bool>)>,
-    pub player: Option<Player>,
+    player: Option<Player>,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
     record_start: Samples,
@@ -394,6 +394,10 @@ pub struct SoundApp {
     /// Tests supply drained editor reports at the native polling boundary without an audio device.
     #[cfg(test)]
     editor_poll_fixture: Option<EditorPollFixture>,
+    /// Instrument parameters changed in their editors that the session also holds (set by
+    /// command): stored with the instrument's state (see `store_plugin_states`), or by
+    /// `mix.insert_params` when a due capture returns no state.
+    editor_instrument_params: Vec<(TrackId, String, f32)>,
     pub frame_ms: f32,
     last_frame: Option<f64>,
     last_meter_poll: f64,
@@ -413,7 +417,8 @@ pub struct SoundApp {
 }
 
 #[cfg(test)]
-type EditorPollFixture = Box<dyn FnMut(&mut Vec<(TrackId, usize)>) -> (Vec<soundcraft_playback::EditorEdit>, soundcraft_playback::PluginStates)>;
+type EditorPollFixture =
+    Box<dyn FnMut(&mut Vec<(TrackId, usize)>) -> (Vec<soundcraft_playback::EditorEdit>, soundcraft_playback::PluginStates, Vec<TrackId>)>;
 
 #[cfg(test)]
 mod tests;

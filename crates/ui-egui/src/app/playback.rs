@@ -296,6 +296,7 @@ impl SoundApp {
                     self.punch = None;
                     self.gesture = None;
                     self.touched.clear();
+                    self.editor_instrument_params.clear();
                     self.last_write_at = i64::MIN;
                     self.edit_layout.follow_hold = false;
                     self.meters.clear();
