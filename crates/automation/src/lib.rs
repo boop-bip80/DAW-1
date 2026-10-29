@@ -157,6 +157,7 @@ impl RemoteError {
                     | io::ErrorKind::ConnectionAborted
                     | io::ErrorKind::TimedOut
                     | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::InvalidData
             ),
             _ => false,
         }
@@ -325,6 +326,8 @@ mod tests {
         Late,
         /// Write this line as the reply, whatever the request id is.
         Raw(&'static str),
+        /// Write bytes that aren't UTF-8 as the reply.
+        NotUtf8,
     }
 
     /// Fake app: accepts one connection per entry in `replies`, counts the request line it reads,
@@ -355,6 +358,9 @@ mod tests {
                         }
                         FakeReply::Raw(line) => {
                             let _ = writeln!(sock, "{line}");
+                        }
+                        FakeReply::NotUtf8 => {
+                            let _ = sock.write_all(&[0xff, 0xfe, b'\n']);
                         }
                     }
                 }
@@ -488,6 +494,28 @@ mod tests {
         let mut r = Remote::new(&addr);
         r.connection().unwrap();
         r.conn.as_mut().unwrap().0.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let v = r.request("session.inspect", json!({})).unwrap();
+        assert_eq!(v["done"], true);
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn remote_does_not_confirm_a_mutation_after_a_non_utf8_reply() {
+        let (addr, seen) = fake_app_with(vec![FakeReply::NotUtf8]);
+        let mut r = Remote::new(&addr);
+        let err = r.request("engine.execute", json!({"command": "track.new"})).unwrap_err();
+        assert!(matches!(&err, RemoteError::Unconfirmed { .. }), "{err:?}");
+        if let RemoteError::Unconfirmed { source, .. } = err {
+            assert!(matches!(*source, RemoteError::Io(ref e) if e.kind() == io::ErrorKind::InvalidData), "{source:?}");
+        }
+        assert!(r.conn.is_none(), "a non-UTF-8 reply drops the connection");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn remote_retries_a_read_after_a_non_utf8_reply() {
+        let (addr, seen) = fake_app_with(vec![FakeReply::NotUtf8, FakeReply::Ok]);
+        let mut r = Remote::new(&addr);
         let v = r.request("session.inspect", json!({})).unwrap();
         assert_eq!(v["done"], true);
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
