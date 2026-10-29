@@ -90,7 +90,7 @@ impl SoundApp {
                 edited = taken;
             }
             if !self.execute_in_gesture("mix.insert_state", &params) {
-                self.editor_instrument_params.extend(edited);
+                self.requeue_held_instrument_params(edited);
             }
         }
     }
@@ -122,9 +122,21 @@ impl SoundApp {
             let values: serde_json::Map<String, Value> = edited.iter().map(|(_, k, v)| (k.clone(), json!(*v))).collect();
             let params = json!({"track": t.0, "slot": "instrument", "params": values});
             if !self.execute_in_gesture("mix.insert_params", &params) {
-                self.editor_instrument_params.extend(edited);
+                self.requeue_held_instrument_params(edited);
             }
         }
+    }
+
+    /// Puts back values of a failed store, except those whose track, instrument or parameter is gone.
+    fn requeue_held_instrument_params(&mut self, edited: Vec<(TrackId, String, f32)>) {
+        let keep: Vec<_> = {
+            let session = self.engine.session();
+            edited
+                .into_iter()
+                .filter(|(t, k, _)| session.track(*t).and_then(|tr| tr.instrument.as_ref()).is_some_and(|i| i.params.contains_key(k)))
+                .collect()
+        };
+        self.editor_instrument_params.extend(keep);
     }
 
     /// Runs a command that stores what a plugin editor changed. While a knob is dragged (or a pass
