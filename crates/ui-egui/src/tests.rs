@@ -166,6 +166,43 @@ fn clear_all_clip_indicators_clears_every_meter() {
     assert_eq!((app.meters[&kick].hold, app.main_meter.hold), ([0.0, 0.0], [0.0, 0.0]), "held peaks clear with the clips");
 }
 
+#[test]
+fn peaks_taken_before_a_clear_do_not_light_the_meters_again() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let kick = app.engine.session().track_by_name("Kick").unwrap().id;
+    let holds = (MeterHold::ThreeSeconds, MeterHold::Infinite);
+    app.meter_snapshot.tracks.entry(kick).or_default().peak = [1.0, 1.0];
+    app.meter_snapshot.main.peak = [1.0, 1.0];
+    // Every frame feeds the last snapshot until the next poll takes new peaks.
+    let feed = |app: &mut SoundApp, now: f64| {
+        let peak = app.meter_snapshot.tracks[&kick].peak;
+        feed_meter(app.meters.entry(kick).or_default(), peak, 0.0, 0.016, now, holds);
+        let main = app.meter_snapshot.main.peak;
+        feed_meter(&mut app.main_meter, main, 0.0, 0.016, now, holds);
+    };
+    feed(&mut app, 1.0);
+    assert!(app.meters[&kick].clip && app.main_meter.clip);
+    app.run("track.clear_clip_indicators", json!({})).unwrap();
+    feed(&mut app, 1.016);
+    assert!(!app.meters[&kick].clip && !app.main_meter.clip, "the clips stay cleared");
+    assert_eq!((app.meters[&kick].hold_at[0], app.main_meter.hold_at[0]), (1.0, 1.0), "the held peaks do not start again");
+}
+
+#[test]
+fn a_new_peak_after_a_three_second_hold_ends_is_held_for_three_seconds() {
+    let holds = (MeterHold::ThreeSeconds, MeterHold::Off);
+    let mut d = MeterDisplay::default();
+    feed_meter(&mut d, [1.0, 1.0], 0.0, 0.1, 0.0, holds);
+    for i in 1..=30 {
+        feed_meter(&mut d, [0.0, 0.0], 0.0, 0.1, f64::from(i) / 10.0, holds);
+    }
+    feed_meter(&mut d, [0.5, 0.5], 0.0, 0.1, 3.1, holds);
+    for i in 32..=50 {
+        feed_meter(&mut d, [0.0, 0.0], 0.0, 0.1, f64::from(i) / 10.0, holds);
+    }
+    assert_eq!(d.hold[0], 0.5, "the 0.5 peak from 3.1 s is still held at 5 s");
+}
+
 /// Feeds `peak` once, then silence for `secs` in 0.1 s steps; returns (held peak, clip lit).
 fn after_peak(peak: f32, secs: f32, holds: (MeterHold, MeterHold)) -> (f32, bool) {
     let mut d = MeterDisplay::default();

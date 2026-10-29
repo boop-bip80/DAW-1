@@ -138,6 +138,15 @@ pub(crate) fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32,
         if let Some(x) = d.level.get_mut(c) {
             *x = if nv < 1e-5 { 0.0 } else { nv };
         }
+        // An ended hold lets go first, so a lower peak arriving now starts a hold of its own.
+        let hold_over = match peak_hold {
+            MeterHold::ThreeSeconds => now - d.hold_at.get(c).copied().unwrap_or(now) > METER_HOLD_SECS,
+            MeterHold::Infinite => false,
+            MeterHold::Off => true,
+        };
+        if hold_over && let (Some(h), Some(l)) = (d.hold.get_mut(c), d.level.get(c)) {
+            *h = *l;
+        }
         if v > 0.0 && v >= d.hold.get(c).copied().unwrap_or(0.0) {
             if let Some(h) = d.hold.get_mut(c) {
                 *h = v;
@@ -148,14 +157,6 @@ pub(crate) fn feed_meter(d: &mut MeterDisplay, peak: [f32; 2], gr: f32, dt: f32,
         }
         if v >= 1.0 {
             clipped = true;
-        }
-        let hold_over = match peak_hold {
-            MeterHold::ThreeSeconds => now - d.hold_at.get(c).copied().unwrap_or(now) > METER_HOLD_SECS,
-            MeterHold::Infinite => false,
-            MeterHold::Off => true,
-        };
-        if hold_over && let (Some(h), Some(l)) = (d.hold.get_mut(c), d.level.get(c)) {
-            *h = *l;
         }
     }
     if clipped {

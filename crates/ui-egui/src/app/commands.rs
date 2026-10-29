@@ -31,6 +31,13 @@ impl SoundApp {
                     self.edit_layout.follow_hold = false;
                 }
                 if id == "track.clear_clip_indicators" {
+                    // Peaks measured before the clear, taken or still pending, must not light the
+                    // meters again: every frame feeds the last snapshot until the next poll.
+                    if let Some(p) = &self.player {
+                        p.take_meters(&mut self.meter_snapshot);
+                    }
+                    let snap = &mut self.meter_snapshot;
+                    snap.tracks.values_mut().chain([&mut snap.main]).for_each(|m| m.reset_levels());
                     self.meters.values_mut().chain([&mut self.main_meter]).for_each(|m| {
                         m.clip = false;
                         m.hold = m.level;
