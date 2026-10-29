@@ -61,3 +61,8 @@ display_name = "Matt Smith-Burlage"
 
 [people.ProdByBuddha]
 sync_github_name = true
+
+[people.sanderdewijs]
+real_name = "Sander de Wijs"
+display_name = "Sander de Wijs"
+sync_github_name = false
