@@ -738,6 +738,7 @@ pub fn clip_effects(app: &mut SoundApp, ctx: &egui::Context) {
                         let mut wide = f64::from(v);
                         crate::widgets::FineSlider::new(&mut wide, f64::from(p.min)..=f64::from(p.max))
                             .text(p.name)
+                            .logarithmic(p.taper == soundcraft_dsp::Taper::Log && p.min > 0.0)
                             .default_value(f64::from(p.default))
                             .show(col);
                         v = wide as f32;

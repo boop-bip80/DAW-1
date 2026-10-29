@@ -171,6 +171,26 @@ fn clip_effects_sliders_move_a_tenth_as_far_with_ctrl_held() {
 }
 
 #[test]
+fn clip_effects_log_taper_sliders_use_a_logarithmic_rail() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let s = app.engine.session();
+    let clip = s.track_by_name("Kick").unwrap().clips().iter().find(|c| c.is_audio()).unwrap().id;
+    app.run("edit.select", json!({"clips": [clip.0]})).unwrap();
+    app.ui.show_clip_effects = true;
+    let mut h = harness(app);
+    let ratio = slider_params("compressor")[1];
+    assert_eq!(ratio.id, "ratio");
+    let rail = h.get_by_role_and_label(Role::Slider, ratio.name).rect();
+    move_to(&mut h, rail.center());
+    press(&mut h, rail.center(), true, Modifiers::NONE);
+    press(&mut h, rail.center(), false, Modifiers::NONE);
+    let key = format!("clip_fx.{}.comp.ratio", clip.0);
+    let v = h.state().engine.session().edit.values.get(&key).copied().unwrap();
+    // The middle of a 1 to 100 log rail is 10; a linear rail puts it near 50.
+    assert!((7.0..=14.0).contains(&v), "a click in the middle of the Ratio rail set {v}");
+}
+
+#[test]
 fn fallback_audiosuite_sliders_move_a_tenth_as_far_with_ctrl_held() {
     for (process, label, id) in
         [("normalize", "Peak dB", "target_db"), ("time_stretch", "Length ratio", "ratio"), ("pitch_shift", "Semitones", "semitones")]
