@@ -127,13 +127,21 @@ impl SoundApp {
         }
     }
 
-    /// Puts back values of a failed store, except those whose track, instrument or parameter is gone.
-    fn requeue_held_instrument_params(&mut self, edited: Vec<(TrackId, String, f32)>) {
+    /// Puts back values of a failed store, except those whose track or instrument is gone or whose
+    /// instrument has no such parameter. Asks the plugin's parameter list, as `mix.insert_params`
+    /// does, not the session: a hosted instrument stores only the values set so far.
+    pub(crate) fn requeue_held_instrument_params(&mut self, edited: Vec<(TrackId, String, f32)>) {
         let keep: Vec<_> = {
             let session = self.engine.session();
             edited
                 .into_iter()
-                .filter(|(t, k, _)| session.track(*t).and_then(|tr| tr.instrument.as_ref()).is_some_and(|i| i.params.contains_key(k)))
+                .filter(|(t, k, _)| {
+                    session
+                        .track(*t)
+                        .and_then(|tr| tr.instrument.as_ref())
+                        .and_then(|i| mix_window::plugin_info(&i.plugin))
+                        .is_some_and(|info| info.params.iter().any(|p| p.id == k.as_str()))
+                })
                 .collect()
         };
         self.editor_instrument_params.extend(keep);

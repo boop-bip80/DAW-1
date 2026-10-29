@@ -444,6 +444,17 @@ fn failed_store_drops_queued_instrument_params_the_session_no_longer_holds() {
 }
 
 #[test]
+fn a_failed_store_requeues_a_parameter_the_session_has_not_stored_yet() {
+    let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+    let lead = app.engine.session().track_by_name("Lead").unwrap().id;
+    if let Some(ins) = app.engine.session_mut().track_mut(lead).and_then(|t| t.instrument.as_mut()) {
+        ins.params.remove("cutoff");
+    }
+    app.requeue_held_instrument_params(vec![(lead, "cutoff".to_string(), 70.0), (lead, "no_such_param".to_string(), 1.0)]);
+    assert_eq!(app.editor_instrument_params, vec![(lead, "cutoff".to_string(), 70.0)], "the plugin's own parameter is retried");
+}
+
+#[test]
 fn a_player_installs_live_plugins_and_reconnect_keeps_them() {
     let engine = soundcraft_engine::Engine::default();
     assert!(!engine.has_live_plugins());
