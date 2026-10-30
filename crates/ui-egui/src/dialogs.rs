@@ -37,6 +37,8 @@ pub enum Dialog {
     RenameClip { id: ClipId, name: String },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
     ClearClips { clips: Vec<ClipId>, sources: Vec<SourceId>, message: String },
+    // Clip › Unloop…: the clips `clip.unloop` would take when it opened.
+    Unloop { clips: Vec<ClipId> },
     PathPrompt { cmd: String, title: String, path: String, key: String },
     Number { cmd: String, title: String, key: String, value: f64, suffix: String },
     TempoChange { at: Samples, bpm: f64 }, // from double-clicking the tempo ruler
@@ -79,6 +81,8 @@ pub struct Dialogs {
     pub strip_names: StripNames,
     /// The Strip Silence rectangles the Edit window draws while Strip Silence is open.
     strip_rectangles: StripRectangles,
+    /// True while a dialog was drawn on the previous frame.
+    shown: bool,
 }
 
 impl Dialogs {
@@ -91,6 +95,7 @@ impl Dialogs {
             Dialog::RenameClip { .. } => "rename_clip",
             Dialog::RenameMarker { .. } => "rename_marker",
             Dialog::ClearClips { .. } => "clear_clips",
+            Dialog::Unloop { .. } => "unloop",
             Dialog::PathPrompt { .. } => "path",
             Dialog::Number { .. } => "number",
             Dialog::TempoChange { .. } => "tempo_change",
@@ -118,15 +123,15 @@ impl Dialogs {
     }
 
     pub fn open_rename_track(&mut self, id: TrackId, name: &str) {
-        self.open = Some(Dialog::RenameTrack { id, name: name.to_string() });
+        self.set(Dialog::RenameTrack { id, name: name.to_string() });
     }
 
     pub fn open_rename_clip(&mut self, id: ClipId, name: &str) {
-        self.open = Some(Dialog::RenameClip { id, name: name.to_string() });
+        self.set(Dialog::RenameClip { id, name: name.to_string() });
     }
 
     pub fn open_rename_marker(&mut self, id: soundcraft_model::MarkerId, name: &str) {
-        self.open = Some(Dialog::RenameMarker { id, name: name.to_string() });
+        self.set(Dialog::RenameMarker { id, name: name.to_string() });
     }
 
     /// Groups list › Modify Group…: the creation dialog, pre-filled from an existing group. False
@@ -135,15 +140,22 @@ impl Dialogs {
         let s = e.session();
         let Some(g) = s.group(id) else { return false };
         let members = s.tracks.iter().map(|t| (t.id.0, t.name.clone(), g.members.contains(&t.id))).collect();
-        self.open = Some(Dialog::Group { id: Some(id), name: g.name.clone(), edit: g.edit, mix: g.mix, members });
+        self.set(Dialog::Group { id: Some(id), name: g.name.clone(), edit: g.edit, mix: g.mix, members });
         true
     }
 
     /// Clip List › Clear: confirm before clips and files leave the session. False when there is nothing to clear.
     pub fn open_clear(&mut self, e: &Engine, clips: Vec<ClipId>, sources: Vec<SourceId>) -> bool {
         let Some(message) = clear_message(e.session(), &clips, &sources) else { return false };
-        self.open = Some(Dialog::ClearClips { clips, sources, message });
+        self.set(Dialog::ClearClips { clips, sources, message });
         true
+    }
+
+    /// Opens `d` in place of any open dialog. Its first frame clears the keyboard focus and ignores Enter, as for a
+    /// dialog opened when none was open.
+    fn set(&mut self, d: Dialog) {
+        self.open = Some(d);
+        self.shown = false;
     }
 
     /// Clip List › Auto Rename: the clips' naming scheme, filled in from the first clip's. False
@@ -152,7 +164,7 @@ impl Dialogs {
         let s = e.session();
         let Some((_, first)) = clips.iter().find_map(|id| s.find_clip(*id)) else { return false };
         let names = first.auto_name.and_then(|k| s.auto_names.get(&k)).map_or_else(StripNames::default, StripNames::from);
-        self.open = Some(Dialog::AutoRename { clips, names });
+        self.set(Dialog::AutoRename { clips, names });
         true
     }
 
@@ -161,10 +173,17 @@ impl Dialogs {
         self.after_save = None;
         let home = default_dir();
         let name = e.session().name.clone();
-        self.open = Some(match id {
+        let d = match id {
             "clip.clear" => {
                 let ed = &e.session().edit;
                 return self.open_clear(e, ed.selected_clips.clone(), ed.selected_sources.clone());
+            }
+            "clip.unloop" => {
+                let clips = soundcraft_engine::cmd::clip_ids_param(e, &json!({}));
+                if !clips.iter().any(|&c| soundcraft_engine::cmd::is_looped(e.session(), c)) {
+                    return false;
+                }
+                Dialog::Unloop { clips }
             }
             "track.new" => {
                 Dialog::NewTracks { count: 1, format: "Mono".into(), kind: "audio".into(), timebase: "samples".into(), name: "Audio".into() }
@@ -241,7 +260,8 @@ impl Dialogs {
                 Some(d) => d,
                 None => return false,
             },
-        });
+        };
+        self.set(d);
         true
     }
 }
@@ -459,7 +479,16 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     if !matches!(app.dialogs.open, Some(Dialog::StripSilence { .. } | Dialog::StripSilenceRename { .. })) {
         app.dialogs.strip_rectangles = StripRectangles::default();
     }
-    let Some(mut d) = app.dialogs.open.take() else { return };
+    let Some(mut d) = app.dialogs.open.take() else {
+        app.dialogs.shown = false;
+        return;
+    };
+    // On the first frame a dialog is drawn, clear the keyboard focus a widget outside it may still hold, and ignore Enter:
+    // an Enter in that frame is the one that opened the dialog from a menu item or the command palette.
+    let first_frame = !std::mem::replace(&mut app.dialogs.shown, true);
+    if first_frame {
+        ctx.memory_mut(|m| m.stop_text_input());
+    }
     let mut keep = true;
     let mut action: Option<(String, Value)> = None;
     let mut save_first: Option<(String, Value)> = None;
@@ -476,6 +505,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::RenameClip { .. } => "Rename Clip",
         Dialog::RenameMarker { .. } => "Rename Marker",
         Dialog::ClearClips { .. } => "Clear",
+        Dialog::Unloop { .. } => "Unloop",
         Dialog::PathPrompt { title, .. } | Dialog::Number { title, .. } => title.as_str(),
         Dialog::TempoChange { .. } => "Tempo Change (BPM)",
         Dialog::Spot(_) => "Spot",
@@ -491,7 +521,11 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::SaveChanges { .. } => "Unsaved Changes",
     }
     .to_string();
-    let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+    // egui treats Enter on a focused button, checkbox, radio button or combo box as a click, so Enter presses the default
+    // button only when no widget has the keyboard focus or a text field has it. A held Enter's repeats do not press it.
+    let fresh_enter =
+        |i: &egui::InputState| i.events.iter().any(|e| matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat: false, .. }));
+    let enter = !first_frame && ctx.input(fresh_enter) && (ctx.memory(|m| m.focused().is_none()) || ctx.text_edit_focused());
     let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     egui::Window::new(egui::RichText::new(&title).font(bold(13.0)))
         .collapsible(false)
@@ -581,6 +615,20 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     if buttons(ui, "Remove", enter) {
                         action = Some(("clip.clear".into(), json!({"clips": clips, "sources": sources, "with_clips": true})));
                     }
+                }
+                Dialog::Unloop { clips } => {
+                    ui.set_max_width(340.0);
+                    ui.label("Remove deletes the loop iterations and keeps the source clip. Flatten keeps each loop iteration as its own clip.");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Flatten").clicked() {
+                            action = Some(unloop_action(clips, false));
+                        }
+                        // A Flatten click in the same frame as Enter wins.
+                        if buttons(ui, "Remove", enter && action.is_none()) {
+                            action = Some(unloop_action(clips, true));
+                        }
+                    });
                 }
                 Dialog::PathPrompt { cmd, path, key, .. } => {
                     if let Some(c) = path_prompt_form(app, ui, cmd, path, key, enter) {
@@ -871,6 +919,11 @@ fn name_field(ui: &mut egui::Ui, name: &mut String) {
     }
 }
 
+/// The command the Unloop dialog runs: Remove (`remove`) or Flatten.
+fn unloop_action(clips: &[ClipId], remove: bool) -> (String, Value) {
+    ("clip.unloop".into(), json!({"clips": clips, "mode": if remove { "remove" } else { "flatten" }}))
+}
+
 /// The command the tempo-change dialog runs on OK.
 fn tempo_change_action(at: Samples, bpm: f64) -> (String, Value) {
     ("event.tempo".into(), json!({"bpm": bpm, "at": at}))
@@ -952,6 +1005,37 @@ mod tests {
         assert!(!takes_path("edit.copy"));
         assert!(d.open_for_command(&e, "file.score_setup"));
         assert!(matches!(d.open, Some(Dialog::ScoreSetup { bars_per_system: 4, .. })));
+    }
+
+    #[test]
+    fn clip_unloop_opens_unloop_and_sends_the_chosen_mode() {
+        let mut e = soundcraft_engine::demo::demo_engine();
+        let mut d = Dialogs::default();
+        e.execute("edit.select_none", &json!({})).unwrap();
+        assert!(!d.open_for_command(&e, "clip.unloop"));
+        let track = e.session().track_by_name("Snare").unwrap().id;
+        let clip = e.session().track(track).unwrap().clips()[0].id;
+        e.execute("edit.select", &json!({"clips": [clip.0]})).unwrap();
+        assert!(!d.open_for_command(&e, "clip.unloop"), "a clip that is not looped opens no dialog");
+        assert!(d.open.is_none());
+        e.execute("clip.loop", &json!({"clip": clip.0, "count": 3})).unwrap();
+        e.execute("edit.select", &json!({"clips": [clip.0]})).unwrap();
+        assert!(d.open_for_command(&e, "clip.unloop"));
+        assert_eq!(d.open_name(), Some("unloop"));
+        let Some(Dialog::Unloop { clips }) = d.open.take() else { panic!("Unloop… did not open the Unloop dialog") };
+        assert_eq!(clips, vec![clip]);
+        let count = |e: &Engine| e.session().track(track).map_or(0, |t| t.clips().len());
+        let before = count(&e);
+        let (cmd, params) = unloop_action(&clips, false);
+        assert_eq!(params["mode"], "flatten");
+        e.execute(&cmd, &params).unwrap();
+        assert_eq!(count(&e), before, "Flatten keeps every iteration");
+        assert!(e.session().track(track).unwrap().clips().iter().all(|c| c.loop_id.is_none()));
+        e.execute("edit.undo", &json!({})).unwrap();
+        let (cmd, params) = unloop_action(&clips, true);
+        assert_eq!(params["mode"], "remove");
+        e.execute(&cmd, &params).unwrap();
+        assert_eq!(count(&e), before - 2, "Remove keeps only the source clip");
     }
 
     #[test]
