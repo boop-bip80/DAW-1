@@ -203,10 +203,9 @@ mod tests {
         // A symlink to a regular binary remains a candidate, so two aliases are ambiguous.
         assert_eq!(bundle_executable(&d.join("Types.clap")), None);
         std::fs::remove_file(&link).unwrap();
-        let socket = std::os::unix::net::UnixListener::bind(macos.join("control.sock")).unwrap();
-        // Nonregular socket files are not executable candidates.
+        // A directory named like a file is not an executable fallback candidate.
+        std::fs::create_dir(macos.join("control.sock")).unwrap();
         assert_eq!(bundle_executable(&d.join("Types.clap")), Some(original));
-        drop(socket);
         let _ = std::fs::remove_dir_all(&d);
     }
 
