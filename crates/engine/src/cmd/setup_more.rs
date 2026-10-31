@@ -241,6 +241,8 @@ fn disk_allocation(e: &mut Engine, p: &Value) -> Result<Value> {
     let t = track_param(e, id, p, "track")?;
     let s = e.session_mut();
     if let Some(path) = str_param(p, "path") {
+        // Recordings are written there.
+        crate::file_access::check_write(path).map_err(EngineError::Io)?;
         let key = t.map_or_else(|| "disk.root".to_string(), |t| format!("disk.track.{}", t.0));
         set_text(&mut s.edit, &key, Some(path));
     }
