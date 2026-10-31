@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-25 · **Change:** trivial (Auto Pan stereo balance; previously minor: AudioSuite speed ramps (speed_ramp); Auto Pan; Subharmonic; previously minor: Ring Modulator; VST3 host messages: IMessage and IAttributeList; previously trivial: Sampler ping-pong loop phase (#463); previously trivial: mix.instrument sets built-in instrument parameters in params (#265); previously minor: plugin editors on Windows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** trivial (CLAP/VST3 MIDI release-queue and transport-stop reliability; catalog breadth unchanged) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -35,6 +35,8 @@ User report #152: a saved instrument level does not reach the bounce.
 
 ## Third-party plugin hosting
 
+**Reliability update (2026-10-31):** The CLAP and VST3 event queues now prioritize note releases under saturation, preserve held-note bookkeeping and prevent scheduled notes from retriggering after transport stop. Regression tests cover these cases. A native MIDI device-capture API exists, but it is not connected to plugin instruments; real-world plugin compatibility and AU editor gaps remain. The macOS library-validation entitlement needed for third-party VST3 hosting is pending an explicit owner security decision.
+
 | Feature | Pro Tools | SoundCraft | Notes |
 |---|---|---|---|
 | Plugin format | AAX only (Native and DSP) | CLAP, VST3, Audio Units (macOS) | Users' libraries mostly ship VST3/AU too. AAX (#109) needs Avid's SDK licence and PACE signing: owner decision, likely never |
@@ -58,6 +60,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-31 | trivial | CLAP/VST3 release priority, held notes and transport-stop regressions; breadth unchanged |
 | 2026-10-25 | trivial | Auto Pan: constant-power balance of the left and right channels; stereo passes unchanged at the center |
 | 2026-10-24 | minor | AudioSuite speed ramps (`speed_ramp`): down to a stop and up from one, Fit To or Extend, fades on or off |
 | 2026-10-24 | minor | Auto Pan: LFO and envelope panning of stereo tracks; built-in count 27 processors + 3 instruments |

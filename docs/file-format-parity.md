@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-10-19 · **Last updated:** 2026-10-19 · **Change:** trivial (Float32 file headroom, #791) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (audio-only OpenTimelineIO JSON export added; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every format Pro Tools reads or writes, and ours. The Pro Tools list comes from the document types
 its bundle declares (`CFBundleDocumentTypes` in Info.plist: names only, nothing else read) and its
@@ -22,6 +22,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | AAF (Advanced Authoring Format) | import/export | ❌ | ❌ | #40. The post-production handoff from picture editors (G-03) |
 | OMF | import/export | ❌ | ❌ | Legacy, still delivered by some editors |
 | Media Composer–compatible session | export | ❌ | ❌ | AAF variant |
+| OpenTimelineIO `.otio` audio timeline | not a native Pro Tools session format | ❌ | 🟡 | `file.export_otio` exports eligible audio tracks, clips, gaps and source trims; rejects unsupported overlap, unsaved/offline/stretched media |
 | ADM BWF (Dolby Atmos master) | import/export | ❌ | ❌ | G-12 |
 | SoundCraft session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
 | Import Session Data (from another session) | Pro Tools sessions | 🟡 | — | From `.scraft` only |
@@ -80,6 +81,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-31 | minor | Added OTIO audio-only export; AAF, OMF and Pro Tools sessions remain unsupported |
 | 2026-10-19 | trivial | WAV and AIFF-C Float32 encoders retain finite headroom (#791); whole-file, streaming and bounce regression tests |
 | 2026-10-13 | trivial | WAV: empty data chunk with trailing metadata (#466) |
 | 2026-10-13 | minor | Fade curvature round-trips in sessions with a zero default for older files. Format version and readiness estimate unchanged |
