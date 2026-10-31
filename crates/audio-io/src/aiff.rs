@@ -63,7 +63,7 @@ pub(crate) fn parse(b: &[u8]) -> Result<AiffParse> {
         return Err(AudioError::Malformed("not an AIFF/AIFF-C file".into()));
     }
     let is_aifc = tag(b, 8).is_some_and(|t| &t == b"AIFC");
-    let mut comm: Option<(i16, u32, i16, f64, [u8; 4])> = None;
+    let mut comm: Option<(u16, u32, i16, f64, [u8; 4])> = None;
     let mut ssnd: Option<(usize, usize)> = None;
 
     let mut pos: usize = 12;
@@ -81,7 +81,7 @@ pub(crate) fn parse(b: &[u8]) -> Result<AiffParse> {
         match &id {
             b"COMM" => {
                 let short = || AudioError::Malformed("COMM chunk too short".into());
-                let channels = be_u16(c, 0).ok_or_else(short)? as i16;
+                let channels = be_u16(c, 0).ok_or_else(short)?;
                 let frames = be_u32(c, 2).ok_or_else(short)?;
                 let bits = be_u16(c, 6).ok_or_else(short)? as i16;
                 let rate = extended_to_f64(c.get(8..18).ok_or_else(short)?).ok_or_else(|| AudioError::Malformed("invalid sample rate".into()))?;
@@ -106,7 +106,7 @@ pub(crate) fn parse(b: &[u8]) -> Result<AiffParse> {
     }
 
     let (channels, frames, bits, rate, compression) = comm.ok_or_else(|| AudioError::Malformed("AIFF has no COMM chunk".into()))?;
-    if channels <= 0 {
+    if channels == 0 {
         return Err(AudioError::Malformed("AIFF declares zero or negative channels".into()));
     }
     if !(1.0..=MAX_SAMPLE_RATE).contains(&rate) {
@@ -137,7 +137,7 @@ pub(crate) fn parse(b: &[u8]) -> Result<AiffParse> {
     let block = kind.bytes().saturating_mul(channels as usize).max(1);
     let frames = u64::from(frames).min((data_len / block) as u64);
     Ok(AiffParse::Native(AiffLayout {
-        info: AudioInfo { format: FileFormat::Aiff, sample_format, sample_rate, channels: channels as u16, frames, bwf: None },
+        info: AudioInfo { format: FileFormat::Aiff, sample_format, sample_rate, channels, frames, bwf: None },
         kind,
         data_start,
         data_len,
