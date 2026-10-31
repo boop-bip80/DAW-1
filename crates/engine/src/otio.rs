@@ -68,10 +68,8 @@ fn file_url(path: &Path) -> Result<String> {
     }
     if cfg!(windows) {
         // canonicalize adds \\?\ on Windows. UNC paths need their server to remain the authority.
-        let plain = raw
-            .strip_prefix(r"\\?\UNC\")
-            .map(|rest| format!(r"\\{rest}"))
-            .unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(raw).to_string());
+        let plain =
+            raw.strip_prefix(r"\\?\UNC\").map(|rest| format!(r"\\{rest}")).unwrap_or_else(|| raw.strip_prefix(r"\\?\").unwrap_or(raw).to_string());
         let slash = plain.replace('\\', "/");
         if slash.starts_with("//") {
             return Ok(format!("file:{}", percent_encode_path(&slash)));
@@ -218,11 +216,19 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let media = folder.join("drums #1.wav");
         std::fs::write(&media, b"placeholder").unwrap();
-        let mut s = Session::default();
-        s.folder = Some(folder);
+        let mut s = Session { folder: Some(folder), ..Session::default() };
         let id = SourceId(s.alloc());
-        s.sources.push(Source { id, name: "Drums".into(), path: "drums #1.wav".into(), channels: 1, frames: 480_000,
-            sample_rate: 48_000, format: FileFormat::Wav, time_reference: 0, unsaved: false });
+        s.sources.push(Source {
+            id,
+            name: "Drums".into(),
+            path: "drums #1.wav".into(),
+            channels: 1,
+            frames: 480_000,
+            sample_rate: 48_000,
+            format: FileFormat::Wav,
+            time_reference: 0,
+            unsaved: false,
+        });
         let first = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Percussion"));
         let second = s.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Overdub"));
         let cid = s.new_clip_id();
