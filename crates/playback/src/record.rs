@@ -315,9 +315,7 @@ impl Recorder {
         }
         // The writer normally runs until `finish` disarms capture. An early exit means
         // the take files are no longer receiving audio, even if the input device is healthy.
-        if self.shared.armed.load(Ordering::Acquire)
-            && self.writer.as_ref().is_some_and(|(writer, _)| writer.is_finished())
-        {
+        if self.shared.armed.load(Ordering::Acquire) && self.writer.as_ref().is_some_and(|(writer, _)| writer.is_finished()) {
             return Some(Trouble::Disk("the audio take writer stopped unexpectedly; check the files on disk".into()));
         }
         let name = &self.device_name;
@@ -344,10 +342,7 @@ impl Recorder {
         let (takes, problem) = match self.writer.take() {
             Some((writer, _)) => match writer.join() {
                 Ok(result) => result,
-                Err(_) => (
-                    Vec::new(),
-                    Some("the audio take writer panicked; check the files on disk for recoverable audio".into()),
-                ),
+                Err(_) => (Vec::new(), Some("the audio take writer panicked; check the files on disk for recoverable audio".into())),
             },
             None => (Vec::new(), None),
         };
