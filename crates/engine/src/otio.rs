@@ -5,7 +5,7 @@
 //! consumer must have access to the referenced audio files. MIDI, buses, automation and plug-in
 //! processing do not have an equivalent representation in this audio-only export.
 
-use crate::{EngineError, Result, file_access};
+use crate::{EngineError, Result};
 use serde_json::{Value, json};
 use soundcraft_model::{ClipContent, Session, Source, TrackKind};
 use std::path::{Path, PathBuf};
@@ -93,12 +93,8 @@ fn media_url(session: &Session, source: &Source) -> Result<String> {
         let folder = session.folder.as_ref().ok_or_else(|| unsupported("the session has no media folder; save it first"))?;
         folder.join(path)
     };
-    // Honour automation read confinement before touching the media path or revealing its details.
-    file_access::check_read(&absolute).map_err(EngineError::Io)?;
-    let actual = std::fs::canonicalize(&absolute).map_err(|e| EngineError::Io(format!("source `{}` is offline: {e}", source.name)))?;
-    if !actual.is_file() {
-        return Err(unsupported(format!("source `{}` is not an audio file", source.name)));
-    }
+    // IO helpers enforce read-root confinement before probing or resolving the source.
+    let actual = crate::io::checked_media_path(&absolute).map_err(|err| EngineError::Io(format!("source `{}` is offline: {err}", source.name)))?;
     file_url(&actual)
 }
 
@@ -286,6 +282,17 @@ mod tests {
         assert!(rational_time(MAX_EXACT_SAMPLE, 48_000).is_ok());
         assert!(rational_time(MAX_EXACT_SAMPLE + 1, 48_000).is_err());
         assert!(rational_time(-1, 48_000).is_err());
+    }
+
+    #[test]
+    fn respects_media_read_root_before_resolving_paths() {
+        let (session, media) = fixture();
+        let allowed = media.parent().unwrap().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let roots = crate::file_access::AutomationRoots::new(&[allowed.as_path()], &[]).unwrap().unwrap();
+        let result = crate::file_access::confine(Some(&roots), || export_audio(&session));
+        assert!(matches!(result, Err(EngineError::Io(message)) if message.contains("outside the read root")));
+        std::fs::remove_file(media).unwrap();
     }
 
     #[test]
