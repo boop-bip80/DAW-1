@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (delay compensation includes the master faders' inserts (#351); previously minor: bounces stream to disk) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (native MIDI port-capture adapter and recording input fallback added to hardware/take-writer architecture) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -52,11 +52,16 @@ bounces offline (`RangeRender`, streamed to the file block by block) and realtim
 (`soundcraft_playback::Player`, which owns it on the audio thread and receives new session
 snapshots through a channel).
 
-Device I/O today is the system's *default* output and *default* input device, opened as two
-separate cpal streams; the mix renders 512-sample blocks and resamples to the device rate when
-they differ. There is no device or buffer-size selection, no ASIO, and no MIDI device layer yet
-(see [`hardware-parity.md`](hardware-parity.md)). Sources are decoded whole into the `SourcePool`
-and recordings are captured in memory until stop.
+Device I/O uses selectable output and input devices, sample rate and buffer size, still opened
+as separate cpal streams (without a shared duplex clock or full physical-channel routing). The
+mix renders 512-sample blocks and resamples when the device rate differs; ASIO is opt-in on
+Windows. Recording input startup retries with the device-default buffer if a requested one
+fails during stream build or play. The `soundcraft-midi::device` native adapter uses `midir` to
+discover and open input ports, then forwards timestamped events from `soundcraft-midi::live`
+through a preallocated bounded callback queue. It is not wired to track recording or live
+instruments yet (see [`hardware-parity.md`](hardware-parity.md)). Decoded playback sources are held in the
+`SourcePool`, while active recording takes stream to WAV from a bounded input ring on a writer
+thread, with periodic header updates and writer-failure reporting.
 
 `soundcraft-video` holds our own H.264, ProRes and Motion JPEG decoders and the ISO-BMFF demuxer
 for the video track. Hosted plugins (`clap-host`, `vst3-host`, `au-host`) are scanned, created and
@@ -78,6 +83,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-31 | minor | Corrected device and direct-to-disk recording architecture, added input buffer fallback and MIDI native capture API; DAW routing remains missing |
 | 2026-10-13 | trivial | delay compensation includes the master faders' inserts (#351) |
 | 2026-10-10 | minor | Added video, vst3-host and au-host to the layer diagram; documented device I/O limits and in-memory media |
 | 2026-10-05 | major | First architecture overview |
