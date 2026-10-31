@@ -207,6 +207,12 @@ fn push_release(notes: &mut Vec<NoteEvent>, e: NoteEvent) -> bool {
     push_sorted(notes, e)
 }
 
+/// A stop must cancel notes scheduled later in the same block, or a release at frame zero
+/// could be followed by a new note-on and leave the instrument sounding after transport stops.
+fn cancel_pending_starts(notes: &mut Vec<NoteEvent>) {
+    notes.retain(|e| !matches!(e, NoteEvent::On { .. }));
+}
+
 /// Keeps only the pending releases, one per key and moved to the start of the next block, so at
 /// most 128 remain and `all_notes_off` always has room in the queue.
 fn keep_releases(notes: &mut Vec<NoteEvent>) {
@@ -423,6 +429,7 @@ impl Plugin for Vst3Plugin {
     }
 
     fn all_notes_off(&mut self) {
+        cancel_pending_starts(&mut self.notes);
         for k in 0..128u8 {
             if self.held.get(k as usize).copied().unwrap_or(false) {
                 self.note_off(0, k);
@@ -585,6 +592,19 @@ mod tests {
         assert_eq!(notes.capacity(), 4);
         assert!(notes.iter().any(|n| matches!(n, NoteEvent::Off { key: 42, .. })));
         assert!(notes.windows(2).all(|w| w[0].time() <= w[1].time()));
+    }
+
+    #[test]
+    fn transport_stop_discards_future_note_ons() {
+        let mut notes = vec![
+            NoteEvent::On { time: 10, key: 60, velocity: 0.5 },
+            NoteEvent::Pressure { time: 15, key: 60, pressure: 0.5 },
+            NoteEvent::Off { time: 20, key: 60 },
+        ];
+        cancel_pending_starts(&mut notes);
+        assert_eq!(notes.len(), 2);
+        assert!(!notes.iter().any(|e| matches!(e, NoteEvent::On { .. })));
+        assert!(notes.iter().any(|e| matches!(e, NoteEvent::Off { key: 60, .. })));
     }
 
     #[test]
