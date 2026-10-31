@@ -66,12 +66,15 @@ pub fn export_midi(e: &Engine, only: Option<&[TrackId]>) -> Result<Vec<u8>> {
         for c in t.clips() {
             if let ClipContent::Midi { sequence } = &c.content {
                 let base = s.tempo.samples_to_ticks(c.start, s.sample_rate);
-                for n in &sequence.notes {
+                // Only what plays: notes starting inside the clip, cut at its end.
+                let clip_end = s.tempo.samples_to_ticks(c.end(), s.sample_rate);
+                for n in sequence.notes.iter().filter(|n| n.start.saturating_add(base) < clip_end) {
                     let mut n = *n;
                     n.start = n.start.saturating_add(base);
+                    n.length = n.length.min(clip_end - n.start).max(1);
                     seq.notes.push(n);
                 }
-                for ev in &sequence.ctrls {
+                for ev in sequence.ctrls.iter().filter(|ev| ev.tick.saturating_add(base) < clip_end) {
                     let mut ev = *ev;
                     ev.tick = ev.tick.saturating_add(base);
                     seq.ctrls.push(ev);

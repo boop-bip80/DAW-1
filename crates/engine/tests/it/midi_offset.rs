@@ -28,3 +28,25 @@ fn midi_track_offset_moves_the_notes_like_moving_the_clip() {
     e.execute("edit.move_clips", &json!({"clip": clip, "by": 24_000})).unwrap();
     assert!(render(&e) == offset, "the offset must match moving the clip by 24000 samples");
 }
+
+#[test]
+fn export_midi_leaves_out_what_a_trimmed_clip_no_longer_plays() {
+    let mut e = Engine::default();
+    let r = e.execute("track.new", &json!({"kind": "instrument", "name": "Trim", "instrument": "subtractive_synth"})).unwrap();
+    let track = r["tracks"][0].as_u64().unwrap();
+    let r = e.execute("midi.new_clip", &json!({"track": track, "start": 0, "length": 96_000})).unwrap();
+    let clip = r["clip"].as_u64().unwrap();
+    e.execute("midi.note_add", &json!({"clip": clip, "pitch": 60, "start_ticks": 0, "length_ticks": 960, "velocity": 100})).unwrap();
+    e.execute("midi.note_add", &json!({"clip": clip, "pitch": 62, "start_ticks": 800, "length_ticks": 960, "velocity": 100})).unwrap();
+    e.execute("midi.note_add", &json!({"clip": clip, "pitch": 64, "start_ticks": 2000, "length_ticks": 960, "velocity": 100})).unwrap();
+    // 24000 samples is 960 ticks at 120 bpm.
+    let id = e.session().tracks[0].clips()[0].id;
+    e.session_mut().find_clip_mut(id).unwrap().trim_end_to(24_000);
+
+    let bytes = soundcraft_engine::io::export_midi(&e, None).unwrap();
+    let smf = soundcraft_midi::read_smf(&bytes).unwrap();
+    let notes = &smf.tracks[0].sequence.notes;
+    assert_eq!(notes.len(), 2, "only notes starting inside the clip are exported");
+    let late = notes.iter().find(|n| n.pitch == 62).unwrap();
+    assert_eq!(late.start + late.length, 960, "a note running past the clip end is cut at it");
+}
