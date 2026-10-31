@@ -97,11 +97,7 @@ impl ClapPlugin {
 fn release_index(e: &Event) -> Option<usize> {
     let (channel, key) = match *e {
         Event::NoteOff { key, .. } => (0, key),
-        Event::Midi { data, .. }
-            if data[0] & 0xF0 == 0x80 || (data[0] & 0xF0 == 0x90 && data[2] == 0) =>
-        {
-            (data[0] & 0x0F, data[1] & 0x7F)
-        }
+        Event::Midi { data, .. } if data[0] & 0xF0 == 0x80 || (data[0] & 0xF0 == 0x90 && data[2] == 0) => (data[0] & 0x0F, data[1] & 0x7F),
         _ => return None,
     };
     Some(usize::from(channel) * 128 + usize::from(key))
@@ -127,9 +123,7 @@ fn push_sorted(queue: &mut Vec<Event>, e: Event, prioritize_release: bool) -> bo
         }
         let eviction = queue.iter().rposition(|q| release_index(q).is_none()).or_else(|| {
             let mut seen = [false; 16 * 128];
-            queue.iter().position(|q| {
-                release_index(q).and_then(|i| seen.get_mut(i)).is_some_and(|seen| std::mem::replace(seen, true))
-            })
+            queue.iter().position(|q| release_index(q).and_then(|i| seen.get_mut(i)).is_some_and(|seen| std::mem::replace(seen, true)))
         });
         let Some(i) = eviction else { return false };
         queue.remove(i);
