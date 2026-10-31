@@ -343,6 +343,7 @@ fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
     let importing = id.contains("import") || id.contains("open");
     let ext = match id {
         "file.export_midi" => ".mid",
+        "file.export_otio" => ".otio",
         "file.export_sibelius" => ".musicxml",
         "file.print_score" => ".svg",
         "file.export_clip_groups" => ".scgrp",
@@ -583,8 +584,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::PathPrompt { cmd, path, key, .. } => {
                     crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), "Path");
                     if let Some(pick) = &app.services.pick_open
-                        && cmd != "session.save_as"
-                        && cmd != "session.save_copy"
+                        && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio")
                         && key != "dir"
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, &[])
@@ -599,7 +599,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         *path = p;
                     }
                     if let Some(pick) = &app.services.pick_save
-                        && (cmd == "session.save_as" || cmd == "session.save_copy")
+                        && matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio")
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, path)
                     {
@@ -1183,7 +1183,12 @@ mod tests {
     fn file_commands_get_path_prompts_with_sensible_names() {
         let e = soundcraft_engine::demo::demo_engine();
         let mut d = Dialogs::default();
-        for (id, ext) in [("file.export_sibelius", ".musicxml"), ("file.print_score", ".svg"), ("file.export_clip_groups", ".scgrp")] {
+        for (id, ext) in [
+            ("file.export_sibelius", ".musicxml"),
+            ("file.print_score", ".svg"),
+            ("file.export_clip_groups", ".scgrp"),
+            ("file.export_otio", ".otio"),
+        ] {
             assert!(takes_path(id), "{id}");
             assert!(d.open_for_command(&e, id), "{id}");
             match d.open.take() {
