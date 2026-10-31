@@ -13,14 +13,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soundcraft-headless-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("soundcraft-headless-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -58,12 +52,7 @@ fn write_original_tone(path: &Path) {
         let phase = (i as f32) * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32;
         *sample = 0.4 * phase.sin();
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     let wav = soundcraft_audio_io::encode(&audio, &options).unwrap();
     std::fs::write(path, wav).unwrap();
 }
@@ -74,14 +63,8 @@ fn read_bounce(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, SAMPLE_RATE, "bounce sample rate changed");
     assert_eq!(audio.frames(), FRAMES, "bounce duration changed");
     assert!(!audio.channels.is_empty(), "bounce has no channels");
-    assert!(
-        audio.channels.iter().flatten().all(|sample| sample.is_finite()),
-        "bounce contains a NaN or infinity"
-    );
-    assert!(
-        audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01),
-        "bounce is unexpectedly silent"
-    );
+    assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()), "bounce contains a NaN or infinity");
+    assert!(audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01), "bounce is unexpectedly silent");
     audio
 }
 
@@ -96,10 +79,7 @@ fn imported_audio_survives_save_reopen_and_a_second_bounce() {
 
     // CLI arguments are transported as real argv entries, with the path safely
     // JSON-escaped. This crosses command dispatch, import, mixing, bounce and save.
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"path": source.to_string_lossy()})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"path": source.to_string_lossy()}));
     let result = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .arg("--bounce")
@@ -111,46 +91,26 @@ fn imported_audio_survives_save_reopen_and_a_second_bounce() {
         .unwrap();
     assert_success("import/bounce/save", &result);
     assert!(session.is_file(), "save did not write a session file");
-    assert!(
-        std::fs::metadata(&session).unwrap().len() > 100,
-        "session file is unexpectedly empty"
-    );
+    assert!(std::fs::metadata(&session).unwrap().len() > 100, "session file is unexpectedly empty");
 
     let audio_folder = dir.file("Audio Files");
     assert!(
-        std::fs::read_dir(&audio_folder)
-            .unwrap()
-            .flatten()
-            .any(|entry| entry.path().extension().and_then(std::ffi::OsStr::to_str) == Some("wav")),
+        std::fs::read_dir(&audio_folder).unwrap().flatten().any(|entry| entry.path().extension().and_then(std::ffi::OsStr::to_str) == Some("wav")),
         "save did not persist imported media in Audio Files"
     );
 
     // A saved session must be independent of the original import location.
     std::fs::remove_file(&source).unwrap();
-    let result = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&session)
-        .arg("--bounce")
-        .arg(&after)
-        .args(["--start", "0", "--end", "0.25"])
-        .output()
-        .unwrap();
+    let result = cli().arg("run").arg("--in").arg(&session).arg("--bounce").arg(&after).args(["--start", "0", "--end", "0.25"]).output().unwrap();
     assert_success("reopen/rebounce", &result);
-    assert!(
-        !String::from_utf8_lossy(&result.stderr).contains("warning: missing media"),
-        "saved session still references the deleted original input"
-    );
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("warning: missing media"), "saved session still references the deleted original input");
 
     let a = read_bounce(&before);
     let b = read_bounce(&after);
     assert_eq!(a.num_channels(), b.num_channels());
     for (first, second) in a.channels.iter().zip(&b.channels) {
         for (x, y) in first.iter().zip(second) {
-            assert!(
-                (x - y).abs() < 0.001,
-                "reopened session changed the mix by more than 0.001"
-            );
+            assert!((x - y).abs() < 0.001, "reopened session changed the mix by more than 0.001");
         }
     }
 }
