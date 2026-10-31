@@ -107,6 +107,16 @@ fn release_index(e: &Event) -> Option<usize> {
     Some(usize::from(channel) * 128 + usize::from(key))
 }
 
+/// A stop must cancel scheduled note starts. Otherwise a note-on later in this block could
+/// immediately retrigger a voice after `all_notes_off` has already sent its release.
+fn is_note_start(e: &Event) -> bool {
+    match *e {
+        Event::NoteOn { .. } => true,
+        Event::Midi { data, .. } => data[0] & 0xF0 == 0x90 && data[2] != 0,
+        _ => false,
+    }
+}
+
 /// Stable time ordering, with releases favored when full. First discard a lower-priority
 /// event; when the queue consists entirely of releases, only discard a duplicate release.
 /// If every release is unique, report failure so held-note bookkeeping is retained.
@@ -284,6 +294,10 @@ impl Plugin for ClapPlugin {
         if note > 127 {
             return;
         }
+        if velocity == 0 {
+            self.note_off(offset, note);
+            return;
+        }
         let time = u32::try_from(offset).unwrap_or(u32::MAX);
         let vel = velocity.min(127);
         let queued = match self.notes {
@@ -323,6 +337,7 @@ impl Plugin for ClapPlugin {
     }
 
     fn all_notes_off(&mut self) {
+        self.queue.retain(|e| !is_note_start(e));
         for k in 0..128u8 {
             if self.held.get(k as usize).copied().unwrap_or(false) {
                 self.note_off(0, k);
@@ -434,6 +449,19 @@ mod tests {
         assert_eq!(release_index(&Event::Midi { time: 0, data: [0x91, 60, 0] }), Some(128 + 60));
         assert_eq!(release_index(&Event::Midi { time: 0, data: [0x81, 60, 1] }), Some(128 + 60));
         assert_eq!(release_index(&Event::Midi { time: 0, data: [0x91, 60, 100] }), None);
+    }
+
+    #[test]
+    fn stop_cancels_scheduled_notes_before_sending_releases() {
+        let mut queue = vec![
+            Event::NoteOn { time: 10, key: 60, velocity: 0.8 },
+            Event::Midi { time: 20, data: [0x91, 61, 100] },
+            Event::Midi { time: 25, data: [0x91, 61, 0] },
+            Event::NoteOff { time: 30, key: 60 },
+        ];
+        queue.retain(|e| !is_note_start(e));
+        assert_eq!(queue.len(), 2);
+        assert!(queue.iter().all(|e| release_index(e).is_some()));
     }
 
     #[test]
