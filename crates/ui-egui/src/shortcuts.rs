@@ -51,7 +51,31 @@ fn mods_match(want: Modifiers, got: Modifiers, mac: bool) -> bool {
 
 /// Cmd+Ctrl+S opens Search. Off macOS Ctrl+S is Save (Cmd+S), so Search is reached from the Window menu.
 fn search_chord(m: Modifiers, mac: bool) -> bool {
-    mac && m.command && m.ctrl
+    mac && mods_match(Modifiers::COMMAND | Modifiers::CTRL, m, mac)
+}
+
+/// Global transport chords must not swallow unrelated modifier combinations.
+fn transport_chord(m: Modifiers, mac: bool) -> Option<&'static str> {
+    if !m.command && !m.ctrl && !m.alt {
+        Some(if m.shift { "transport.half_speed" } else { "transport.toggle" })
+    } else if mods_match(Modifiers::COMMAND, m, mac) {
+        Some("transport.record")
+    } else {
+        None
+    }
+}
+
+fn mix_edit_chord(key: Key, m: Modifiers, mac: bool) -> bool {
+    key == Key::Equals && mods_match(Modifiers::COMMAND, m, mac)
+}
+
+/// Unmodified +/- is Edit nudge; modified variants belong to the grid, zoom or command registry.
+fn plain_nudge_chord(key: Key, m: Modifiers) -> bool {
+    matches!(key, Key::Plus | Key::Equals | Key::Minus)
+        && !m.command
+        && !m.ctrl
+        && !m.alt
+        && !m.shift
 }
 
 /// Dispatch global keyboard shortcuts once no text field or dialog wants input, ignoring non-scripted auto-repeats
@@ -116,20 +140,19 @@ fn command_for(key: Key, mods: Modifiers, mac: bool) -> Option<&'static str> {
 fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
     let plain = !m.command && !m.alt && !m.ctrl && !m.shift;
     match key {
-        Key::Space if !m.command && !m.alt => {
-            let id = if m.shift { "transport.half_speed" } else { "transport.toggle" };
-            let _ = app.run(id, json!({}));
-            true
-        }
-        Key::Space if m.command => {
-            let _ = app.run("transport.record", json!({}));
-            true
+        Key::Space => {
+            if let Some(id) = transport_chord(m, mac) {
+                let _ = app.run(id, json!({}));
+                true
+            } else {
+                false
+            }
         }
         Key::S if search_chord(m, mac) => {
             let _ = app.run("window.search", json!({}));
             true
         }
-        Key::Equals if m.command && !(mac && m.ctrl) => {
+        Key::Equals if mix_edit_chord(key, m, mac) => {
             let _ = app.run("window.toggle_mix_edit", json!({}));
             true
         }
@@ -180,7 +203,7 @@ fn fixed(app: &mut SoundApp, key: Key, m: Modifiers, mac: bool) -> bool {
         // `=` is what a bare press of the unlabeled +/- key reports (it has no shift held, so it
         // can never be `Key::Plus`); `Key::Plus` is kept for a keyboard that does send it (e.g. a
         // numpad +). `!m.alt` leaves Alt+= to `window.event_list`'s registered shortcut.
-        Key::Plus | Key::Equals | Key::Minus if !m.command && !m.alt && app.ui.window == MainWindow::Edit => {
+        Key::Plus | Key::Equals | Key::Minus if plain_nudge_chord(key, m) && app.ui.window == MainWindow::Edit => {
             let dir = if key == Key::Minus { -1 } else { 1 };
             let _ = app.run("edit.nudge", json!({"direction": dir}));
             true
@@ -434,7 +457,9 @@ mod label_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_for, mods_match, parse, search_chord};
+    use super::{
+        command_for, mix_edit_chord, mods_match, parse, plain_nudge_chord, search_chord, transport_chord,
+    };
     use egui::{Key, Modifiers};
 
     /// Ctrl held on Windows or Linux, as egui reports it.
@@ -464,6 +489,47 @@ mod tests {
         assert!(!mods_match(want("Cmd+X"), Modifiers { ctrl: true, ..MAC_CMD }, true), "Cmd+Ctrl+X is not Cut");
         assert!(!search_chord(MAC_CMD, true));
         assert!(search_chord(Modifiers { ctrl: true, ..MAC_CMD }, true));
+    }
+
+    #[test]
+    fn transport_chords_require_exact_modifiers() {
+        assert_eq!(transport_chord(Modifiers::NONE, true), Some("transport.toggle"));
+        assert_eq!(transport_chord(Modifiers::SHIFT, true), Some("transport.half_speed"));
+        assert_eq!(transport_chord(MAC_CMD, true), Some("transport.record"));
+        assert_eq!(transport_chord(PC_CTRL, false), Some("transport.record"));
+        assert_eq!(transport_chord(Modifiers::CTRL, true), None);
+        assert_eq!(transport_chord(Modifiers::ALT, true), None);
+        assert_eq!(transport_chord(Modifiers { shift: true, ..MAC_CMD }, true), None);
+        assert_eq!(transport_chord(Modifiers { alt: true, ..PC_CTRL }, false), None);
+    }
+
+    #[test]
+    fn mix_edit_only_uses_exact_cmd_equals_and_ctrl_equals() {
+        assert!(mix_edit_chord(Key::Equals, MAC_CMD, true));
+        assert!(mix_edit_chord(Key::Equals, PC_CTRL, false));
+        assert!(!mix_edit_chord(Key::Equals, Modifiers { shift: true, ..MAC_CMD }, true));
+        assert!(!mix_edit_chord(Key::Equals, Modifiers { alt: true, ..MAC_CMD }, true));
+        assert!(!mix_edit_chord(Key::Equals, Modifiers { ctrl: true, ..MAC_CMD }, true));
+        assert!(!mix_edit_chord(Key::Equals, Modifiers { alt: true, ..PC_CTRL }, false));
+        assert!(!mix_edit_chord(Key::Plus, MAC_CMD, true));
+    }
+
+    #[test]
+    fn plain_nudge_leaves_modified_keys_for_other_commands() {
+        for key in [Key::Plus, Key::Equals, Key::Minus] {
+            assert!(plain_nudge_chord(key, Modifiers::NONE));
+            assert!(!plain_nudge_chord(key, Modifiers::SHIFT));
+            assert!(!plain_nudge_chord(key, Modifiers::CTRL));
+            assert!(!plain_nudge_chord(key, Modifiers::ALT));
+            assert!(!plain_nudge_chord(key, MAC_CMD));
+            assert!(!plain_nudge_chord(key, PC_CTRL));
+        }
+    }
+
+    #[test]
+    fn search_does_not_steal_extra_modified_chords() {
+        assert!(!search_chord(Modifiers { shift: true, ctrl: true, ..MAC_CMD }, true));
+        assert!(!search_chord(Modifiers { alt: true, ctrl: true, ..MAC_CMD }, true));
     }
 
     #[test]
