@@ -62,6 +62,24 @@ pub fn file_found(path: impl AsRef<Path>) -> bool {
     crate::file_access::check_read(path).is_ok() && path.is_file()
 }
 
+/// Resolve a media reference for exporting a session to another application. The caller gets a
+/// canonical absolute path only after the same read-root check as [`read_file`] has approved it.
+/// The target must be a regular file; directories and special files are never exported as media.
+///
+/// This does not read the contents (recordings can be many gigabytes). As with other checked file
+/// operations, another process could swap a symlink after the check, so the caller must not use
+/// this as an authority to read the resolved file later without another root check.
+pub fn checked_media_path(path: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    let err = |err: std::io::Error| EngineError::Io(format!("{}: {err}", path.display()));
+    let resolved = std::fs::canonicalize(path).map_err(err)?;
+    if !std::fs::metadata(&resolved).map_err(err)?.is_file() {
+        return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
+    }
+    Ok(resolved)
+}
+
 /// The file a path stored in the session file `session` refers to, or why it is not opened.
 ///
 /// Every path a session names (audio sources, movies) goes through here before it reaches the
@@ -1338,7 +1356,7 @@ pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
         "session.save" | "session.save_as" | "session.save_copy" => {
             file.exists() && !e.path.as_deref().is_some_and(|own| same_path(Path::new(own), file))
         }
-        "session.save_template" | "file.export_selected_tracks_as_session" | "file.export_session_text" => file.exists(),
+        "session.save_template" | "file.export_selected_tracks_as_session" | "file.export_session_text" | "file.export_otio" => file.exists(),
         _ => false,
     }
 }

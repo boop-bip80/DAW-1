@@ -80,11 +80,15 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
 /// Extra catalog mappings handled by the UI layer.
 pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     let mut v: Vec<(&str, &str)> = UI_COMMANDS.iter().filter(|c| !c.2.is_empty()).map(|c| (c.2, c.0)).collect();
+    v.push((OTIO_EXPORT_MENU, "file.export_otio"));
     v.extend(mix_view_aliases().iter().copied());
     v.extend(AUDIOSUITE.iter().map(|(p, _)| (*p, "audiosuite.process")));
     v.extend(MENU_WINDOWS.iter().copied());
     v
 }
+
+/// SoundCraft-specific open interchange; the incumbent menu catalog has no OTIO item.
+const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
 
 /// Mix-view menu paths, allocated once. Rebuilding them on every menu draw leaked a copy per frame.
 fn mix_view_aliases() -> &'static [(&'static str, &'static str)] {
@@ -205,6 +209,7 @@ pub fn tree() -> Vec<MenuNode> {
     for line in catalog::catalog() {
         insert_path(&mut roots, line);
     }
+    insert_path(&mut roots, OTIO_EXPORT_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
     // Not in the observed catalog either; Pro Tools lists it right under Identify Sync Point.
     if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
@@ -733,6 +738,20 @@ mod tests {
         let b = second.iter().find(|(path, _)| path.contains("Mix Window Views > All")).map(|(path, _)| *path).unwrap();
         assert!(std::ptr::eq(a, b));
         assert_eq!(first.iter().filter(|(path, _)| path.contains("Mix Window Views")).count(), 14);
+    }
+
+    #[test]
+    fn open_timeline_io_export_is_in_the_file_menu_and_opens_a_save_prompt() {
+        let file = tree().into_iter().find(|n| n.label == "File").unwrap();
+        let export = file.children.iter().find(|n| n.label == "Export").unwrap();
+        let otio = export.children.iter().find(|n| n.path == OTIO_EXPORT_MENU).unwrap();
+        assert_eq!(otio.label, "OpenTimelineIO Audio...");
+        assert_eq!(command_for_path(&otio.path, &ui_aliases()).as_deref(), Some("file.export_otio"));
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, "file.export_otio", OTIO_EXPORT_MENU);
+        assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, path, .. })
+            if cmd == "file.export_otio" && path.ends_with(".otio")));
     }
 
     #[test]

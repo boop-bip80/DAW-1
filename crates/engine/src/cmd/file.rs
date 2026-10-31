@@ -113,6 +113,20 @@ pub fn specs() -> Vec<CommandSpec> {
             crate::io::write_file(&path, &bytes)?;
             Ok(json!({"path": path, "bytes": bytes.len()}))
         }),
+        cmd!(noundo "file.export_otio", "OpenTimelineIO Audio...", ["File", "Export"], None,
+            "{path, replace?: false} — audio tracks, gaps, source trims and file references as .otio JSON; MIDI, mixing and plug-in processing are not portable",
+            always, |e, p| {
+                let path = str_param(p, "path").ok_or_else(|| bad("file.export_otio", "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("otio") {
+                    return Err(bad("file.export_otio", "output path must end in .otio"));
+                }
+                refuse_replacing(e, "file.export_otio", std::path::Path::new(&path), p)?;
+                let output = crate::otio::export_audio(e.session())?;
+                crate::io::write_file(&path, &output.json)?;
+                Ok(json!({"path": path, "bytes": output.json.len(), "audio_tracks": output.tracks,
+                    "audio_clips": output.clips, "clips_with_nonportable_processing": output.processing_metadata_clips}))
+            }
+        ),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?, replace?: false}", always, |e, p| {
             let text = crate::inspect::session_text(e);
             if let Some(path) = str_param(p, "path") {
