@@ -101,6 +101,18 @@ fn read_ui(path: &std::path::Path, recover_docking: bool) -> Result<Option<sound
 
 const MAX_UI_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Control sessions can save other preferences, but must preserve the user's window geometry.
+pub fn save_ui_with_window_policy(path: &Path, ui: &soundcraft_ui_egui::UiState, persist_window: bool) -> Result<(), String> {
+    if persist_window {
+        return save_ui(path, ui);
+    }
+    let previous = load_ui(path)?.unwrap_or_default();
+    let mut saved = ui.clone();
+    saved.window_size = previous.window_size;
+    saved.window_maximized = previous.window_maximized;
+    save_ui(path, &saved)
+}
+
 /// Write settings atomically. Preserve an unreadable or malformed existing file for recovery.
 pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Result<(), String> {
     use std::io::Write as _;
@@ -137,6 +149,28 @@ pub fn save_ui(path: &std::path::Path, ui: &soundcraft_ui_egui::UiState) -> Resu
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn control_run_saves_preserve_the_users_geometry_and_other_preference_changes() {
+        use soundcraft_ui_egui::UiState;
+        let directory = std::env::temp_dir().join(format!("soundcraft-control-window-prefs-{}", std::process::id()));
+        let path = directory.join("ui.json");
+        let _ = std::fs::remove_dir_all(&directory);
+        let saved = UiState { window_size: [1100.0, 700.0], window_maximized: true, ..Default::default() };
+        save_ui(&path, &saved).unwrap();
+        let control = UiState { window_size: [1900.0, 1050.0], window_maximized: false, ui_scale: 1.5, ..Default::default() };
+        save_ui_with_window_policy(&path, &control, false).unwrap();
+        let reloaded = load_ui(&path).unwrap().unwrap();
+        assert_eq!((reloaded.window_size, reloaded.window_maximized, reloaded.ui_scale), ([1100.0, 700.0], true, 1.5));
+        save_ui_with_window_policy(&path, &control, true).unwrap();
+        let reloaded = load_ui(&path).unwrap().unwrap();
+        assert_eq!((reloaded.window_size, reloaded.window_maximized), ([1900.0, 1050.0], false));
+        std::fs::remove_file(&path).unwrap();
+        save_ui_with_window_policy(&path, &control, false).unwrap();
+        let reloaded = load_ui(&path).unwrap().unwrap();
+        assert_eq!((reloaded.window_size, reloaded.window_maximized), ([1600.0, 1000.0], false));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn native_file_reload_preserves_edit_mix_and_hidden_floating_panels() {

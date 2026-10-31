@@ -28,7 +28,7 @@ use soundcraft_engine::Engine;
 use soundcraft_ui_egui::{Services, SoundApp, UiState, dialogs};
 use std::sync::Arc;
 
-struct App(SoundApp, Option<&'static logging::AppLogger>, Env, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
+struct App(SoundApp, Option<&'static logging::AppLogger>, Env, bool, #[cfg(target_os = "macos")] Option<native_menu::NativeMenu>);
 
 /// Sends the title only when it changes, remembered here as X11 and Wayland can't read it back.
 fn set_title(ctx: &egui::Context, title: String) {
@@ -40,6 +40,11 @@ fn set_title(ctx: &egui::Context, title: String) {
 }
 
 impl eframe::App for App {
+    // Preferences have their own store; eframe persists only the native window.
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     /// Per-frame app logic: report audio-thread logs, run the shared app logic with the macOS menu driven around it,
     /// then handle dropped paths, quit/close requests, window geometry, recent-list persistence and the window title.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -48,12 +53,12 @@ impl eframe::App for App {
             logger.report_audio_thread();
         }
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.3 {
+        if let Some(menu) = &mut self.4 {
             menu.process(&mut self.0);
         }
         self.0.guarded(|app| app.logic(ctx));
         #[cfg(target_os = "macos")]
-        if let Some(menu) = &mut self.3 {
+        if let Some(menu) = &mut self.4 {
             menu.sync(&self.0);
         }
         // Files dropped on the window: audio on an instrument track or a Sampler window loads
@@ -77,7 +82,7 @@ impl eframe::App for App {
         self.0.ui.ui_scale = self.0.extra.ui_scale;
         // Saved now rather than at exit: the recent list matters most after a crash.
         if self.0.take_recent_changed() {
-            save_prefs(&self.2, &self.0.ui);
+            save_prefs(&self.2, &self.0.ui, self.3);
         }
         // With the system menu bar there is no egui bar showing the window and dirty state, so the
         // title carries them; elsewhere the egui menu bar already does.
@@ -103,7 +108,7 @@ impl eframe::App for App {
     }
     fn on_exit(&mut self) {
         self.0.close_autosave();
-        save_prefs(&self.2, &self.0.ui);
+        save_prefs(&self.2, &self.0.ui, self.3);
         if let Some(logger) = self.1 {
             logger.report_audio_thread();
         }
@@ -133,12 +138,13 @@ fn load_prefs(env: &Env) -> Option<UiState> {
     }
 }
 
-fn save_prefs(env: &Env, ui: &UiState) {
+/// Save preferences while keeping control-run geometry out of the user's window settings.
+fn save_prefs(env: &Env, ui: &UiState, persist_window: bool) {
     if !env.prefs_enabled() {
         return;
     }
     if let Some(path) = prefs_path(env)
-        && let Err(error) = config::save_ui(&path, ui)
+        && let Err(error) = config::save_ui_with_window_policy(&path, ui, persist_window)
     {
         log::warn!("{error}");
     }
@@ -182,6 +188,8 @@ fn app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("app icon: {e}")).ok()
 }
 
+/// Start the native audio app with preferences and window storage from the selected profile.
+/// Control and no-preferences sessions leave the user's saved native geometry alone.
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
@@ -218,7 +226,9 @@ fn main() -> eframe::Result {
     }
 
     let engine = if demo { soundcraft_engine::demo::demo_engine() } else { Engine::default() };
-    let prefs = load_prefs(&env).unwrap_or_default();
+    let persistence_path = window_persistence_path(&env, control_port);
+    let persist_window = persistence_path.is_some();
+    let prefs = starting_prefs(load_prefs(&env).unwrap_or_default(), persist_window);
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SoundCraft")
@@ -227,6 +237,10 @@ fn main() -> eframe::Result {
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true)
             .with_app_id("ai.storyteller.soundcraft"),
+        // No-preferences and control-channel runs neither restore nor save the native window, so
+        // control-channel screenshots start from the same window every time.
+        persist_window,
+        persistence_path,
         ..Default::default()
     };
     if let Some(icon) = app_icon() {
@@ -282,11 +296,30 @@ fn main() -> eframe::Result {
                 app,
                 logger,
                 env,
+                persist_window,
                 #[cfg(target_os = "macos")]
                 menu,
             )))
         }),
     )
+}
+
+/// Native geometry belongs to the same selected profile as the other preferences.
+fn window_persistence_path(env: &Env, control_port: Option<u16>) -> Option<std::path::PathBuf> {
+    if !env.prefs_enabled() || control_port.is_some() {
+        return None;
+    }
+    env.config_dir.as_ref().map(|dir| dir.join("app.ron"))
+}
+
+/// Automation starts from fixed geometry while retaining the other interface preferences.
+fn starting_prefs(mut prefs: UiState, persist_window: bool) -> UiState {
+    if !persist_window {
+        let defaults = UiState::default();
+        prefs.window_size = defaults.window_size;
+        prefs.window_maximized = defaults.window_maximized;
+    }
+    prefs
 }
 
 /// A saved window size, or the default when the prefs file holds nonsense (NaN, negative, tiny).
@@ -297,6 +330,49 @@ fn sane_window_size([w, h]: [f32; 2]) -> [f32; 2] {
 #[cfg(test)]
 mod tests {
     use super::set_title;
+
+    #[test]
+    fn native_window_state_is_isolated_in_the_selected_profile() {
+        let profile = |name: &str| super::Env { config_dir: Some(std::path::PathBuf::from(name)), ..Default::default() };
+        let first = profile("profile-one");
+        let second = profile("profile-two");
+        assert_eq!(super::window_persistence_path(&first, None), Some(std::path::PathBuf::from("profile-one/app.ron")));
+        assert_ne!(super::window_persistence_path(&first, None), super::window_persistence_path(&second, None));
+        assert_eq!(super::window_persistence_path(&first, Some(1234)), None);
+        assert_eq!(super::window_persistence_path(&super::Env::default(), None), None);
+        assert_eq!(super::window_persistence_path(&super::Env { no_prefs: super::switch::Switch::On, ..first }, None), None);
+    }
+
+    #[test]
+    fn captured_environment_preserves_control_geometry_and_disables_preference_io() {
+        let directory = std::env::temp_dir().join(format!("soundcraft-captured-window-policy-{}", std::process::id()));
+        let env = super::Env { config_dir: Some(directory.clone()), ..Default::default() };
+        let path = directory.join("ui.json");
+        let original = super::UiState { window_size: [1100.0, 700.0], window_maximized: true, ..Default::default() };
+        super::save_prefs(&env, &original, true);
+        let controlled = super::UiState { window_size: [1900.0, 1050.0], window_maximized: false, ui_scale: 1.5, ..Default::default() };
+        super::save_prefs(&env, &controlled, false);
+        let reloaded = super::load_prefs(&env).unwrap();
+        assert_eq!((reloaded.window_size, reloaded.window_maximized, reloaded.ui_scale), ([1100.0, 700.0], true, 1.5));
+        let disabled = super::Env { no_prefs: super::switch::Switch::On, ..env.clone() };
+        assert!(super::load_prefs(&disabled).is_none());
+        let before = std::fs::read(&path).unwrap();
+        super::save_prefs(&disabled, &original, true);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        super::save_prefs(&env, &controlled, true);
+        let reloaded = super::load_prefs(&env).unwrap();
+        assert_eq!((reloaded.window_size, reloaded.window_maximized), ([1900.0, 1050.0], false));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn control_runs_start_at_the_default_geometry_without_losing_other_preferences() {
+        let saved = super::UiState { window_size: [1100.0, 700.0], window_maximized: true, ui_scale: 1.5, ..Default::default() };
+        let normal = super::starting_prefs(saved.clone(), true);
+        assert_eq!((normal.window_size, normal.window_maximized, normal.ui_scale), ([1100.0, 700.0], true, 1.5));
+        let controlled = super::starting_prefs(saved, false);
+        assert_eq!((controlled.window_size, controlled.window_maximized, controlled.ui_scale), ([1600.0, 1000.0], false, 1.5));
+    }
 
     #[test]
     fn the_title_is_sent_only_when_it_changes() {

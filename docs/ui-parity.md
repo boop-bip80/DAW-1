@@ -1,6 +1,10 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-25 · **Change:** minor (Tracks and Groups and Clips in dock columns) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Upstream integration (2026-10-28):** Retained native-window persistence and control-run geometry isolation across the clap startup and captured-environment refactor. Preference I/O uses the captured settings directory and no-preferences switch. Parity scores and estimates are unchanged.
+>
+> **Review follow-up (2026-10-26):** Control-channel runs start at the default window size and preserve the user's saved window geometry when saving other preferences. Regression coverage added; parity scores and estimates unchanged.
+>
+> **Last reviewed:** 2026-10-25 · **Last updated:** 2026-10-29 · **Change:** minor (window size and maximized state survive restarts at any interface size; caption buttons on native GNOME Wayland windows, `SOUNDCRAFT_WAYLAND=1`, storytold/egui#3; Tracks and Groups and Clips in dock columns) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -69,6 +73,10 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | trivial | Native window state stays in the selected settings profile (app.ron); absent settings directories, no-preferences and control runs disable native persistence. Profile-isolation regression added; scores and estimates unchanged. |
+| 2026-10-28 | trivial | Retain native-window persistence and control-run preference isolation across the upstream clap startup and captured-environment refactor. New captured-environment and window-policy regression passed; parity estimates unchanged. |
+| 2026-10-26 | trivial | Control-channel runs start at the default window size and preserve the user's saved window geometry when saving other preferences. Scores and estimates unchanged. |
+| 2026-10-26 | trivial | Window size and maximized state survive restarts at any interface size; standard caption buttons on native GNOME Wayland windows, `SOUNDCRAFT_WAYLAND=1` (storytold/egui#3) |
 | 2026-10-25 | minor | Edit and Mix windows: Tracks and Groups and Clips in full-height dock columns. Readiness estimate unchanged |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
 | 2026-10-13 | minor | A plugin opens when it's inserted (#486) |

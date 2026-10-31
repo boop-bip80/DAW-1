@@ -20,7 +20,7 @@ pub(crate) const RUST_LOG: &str = "RUST_LOG";
 pub(crate) const VARS: &[(&str, &str)] = &[
     // Read by clap (`env =` on `--control`), not by `Env`.
     ("SOUNDCRAFT_CONTROL_PORT", "The --control fallback: a port or host:port, ignored for another host"),
-    (CONFIG_DIR, "The settings folder (ui.json, Autosave, Presets, logs); empty: none (unlike the others, where empty counts as unset)"),
+    (CONFIG_DIR, "The settings folder (ui.json, app.ron, Autosave, Presets, logs); empty: none (unlike the others, where empty counts as unset)"),
     (NO_PREFS, "1 doesn't read or write preferences and logs to stderr only; 0 or unset is off"),
     (NO_SYSTEM_FONTS, "1 uses the built-in fonts only; 0 or unset is off"),
     (WAYLAND, "Linux: 1 keeps the native Wayland backend instead of XWayland; 0 or unset is off"),
