@@ -307,4 +307,19 @@ mod tests {
         assert!(!file.exists());
         std::fs::remove_file(media).unwrap();
     }
+
+    #[test]
+    fn export_command_needs_replace_before_overwriting_a_file() {
+        let (session, media) = fixture();
+        let path = media.with_extension("otio");
+        let path_str = path.to_str().unwrap();
+        let mut engine = crate::Engine::new(session);
+        engine.execute("file.export_otio", &json!({"path": path_str})).unwrap();
+        assert!(
+            matches!(engine.execute("file.export_otio", &json!({"path": path_str})), Err(EngineError::BadParams(_, message)) if message.contains("replace"))
+        );
+        engine.execute("file.export_otio", &json!({"path": path_str, "replace": true})).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
 }
