@@ -169,11 +169,7 @@ impl Vst3Plugin {
     /// Bounded and time-sorted. A note-off can replace a lower-priority event so even
     /// a saturated note queue has room to stop voices.
     fn push_note(&mut self, e: NoteEvent) -> bool {
-        if matches!(e, NoteEvent::Off { .. }) {
-            push_release(&mut self.notes, e)
-        } else {
-            push_sorted(&mut self.notes, e)
-        }
+        if matches!(e, NoteEvent::Off { .. }) { push_release(&mut self.notes, e) } else { push_sorted(&mut self.notes, e) }
     }
 }
 
