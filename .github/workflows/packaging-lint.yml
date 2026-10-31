@@ -4,7 +4,7 @@ name: Packaging lint
 
 on:
   push:
-    branches: [main, release]
+    branches: [build/craft-update-495e597, release]
     paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**"]
   pull_request:
     paths: [".github/workflows/**", "packaging/**", "assets/app-icon/**"]
