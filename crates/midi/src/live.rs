@@ -20,14 +20,39 @@ const NOTE_SLOTS: usize = 16 * 128;
 /// MIDI channel-voice and system realtime events. Channels use zero-based MIDI numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveMidiMessage {
-    NoteOn { channel: u8, pitch: u8, velocity: u8 },
-    NoteOff { channel: u8, pitch: u8, velocity: u8 },
-    PolyPressure { channel: u8, pitch: u8, pressure: u8 },
-    ControlChange { channel: u8, controller: u8, value: u8 },
-    ProgramChange { channel: u8, program: u8 },
-    ChannelPressure { channel: u8, pressure: u8 },
+    NoteOn {
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    NoteOff {
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+    },
+    PolyPressure {
+        channel: u8,
+        pitch: u8,
+        pressure: u8,
+    },
+    ControlChange {
+        channel: u8,
+        controller: u8,
+        value: u8,
+    },
+    ProgramChange {
+        channel: u8,
+        program: u8,
+    },
+    ChannelPressure {
+        channel: u8,
+        pressure: u8,
+    },
     /// Signed pitch bend, centered at zero, from -8192 through +8191.
-    PitchBend { channel: u8, value: i16 },
+    PitchBend {
+        channel: u8,
+        value: i16,
+    },
     /// Realtime wire status (0xF8 clock, 0xFA start, 0xFB continue, 0xFC stop,
     /// 0xFE active sensing, 0xFF reset).
     Realtime(u8),
@@ -54,12 +79,7 @@ pub struct MidiEventBatch<const N: usize> {
 
 impl<const N: usize> Default for MidiEventBatch<N> {
     fn default() -> Self {
-        Self {
-            events: [None; N],
-            len: 0,
-            dropped: 0,
-            overflowed: false,
-        }
+        Self { events: [None; N], len: 0, dropped: 0, overflowed: false }
     }
 }
 
@@ -133,8 +153,7 @@ impl LiveMidiParser {
     /// Decode one wire byte. At most one message is returned.
     pub fn push_byte(&mut self, byte: u8) -> Option<LiveMidiMessage> {
         if byte >= 0xF8 {
-            return matches!(byte, 0xF8 | 0xFA | 0xFB | 0xFC | 0xFE | 0xFF)
-                .then_some(LiveMidiMessage::Realtime(byte));
+            return matches!(byte, 0xF8 | 0xFA | 0xFB | 0xFC | 0xFE | 0xFF).then_some(LiveMidiMessage::Realtime(byte));
         }
 
         if self.sysex {
@@ -197,12 +216,7 @@ impl LiveMidiParser {
     ///
     /// If a driver supplies an excessively long packet, only its prefix is parsed, the parser
     /// resets, and batch.overflowed becomes true. Callers must treat that as data loss.
-    pub fn push_packet<const N: usize>(
-        &mut self,
-        timestamp_micros: u64,
-        bytes: &[u8],
-        batch: &mut MidiEventBatch<N>,
-    ) {
+    pub fn push_packet<const N: usize>(&mut self, timestamp_micros: u64, bytes: &[u8], batch: &mut MidiEventBatch<N>) {
         for &byte in bytes.iter().take(MAX_LIVE_PACKET_BYTES) {
             if let Some(message) = self.push_byte(byte) {
                 batch.push(TimedMidiMessage { timestamp_micros, message });
@@ -313,8 +327,7 @@ impl LiveMidiTake {
                 }
                 Ok(())
             }
-            LiveMidiMessage::NoteOff { channel, pitch, velocity } =>
-                self.close(channel, pitch, tick, velocity),
+            LiveMidiMessage::NoteOff { channel, pitch, velocity } => self.close(channel, pitch, tick, velocity),
             LiveMidiMessage::PolyPressure { channel, pitch, pressure } => {
                 note_slot(channel, pitch)?;
                 valid_data(pressure)?;
@@ -346,9 +359,7 @@ impl LiveMidiTake {
     /// Translate a device timestamp using a constant tempo and record the message. For a tempo
     /// map, the caller should convert timestamps to musical ticks itself and use record().
     /// bpm_milli = BPM x 1000, for example 120000 for 120 BPM.
-    pub fn record_timed(&mut self, event: TimedMidiMessage, origin_micros: u64, start_tick: i64, bpm_milli: u32)
-        -> Result<(), MidiError>
-    {
+    pub fn record_timed(&mut self, event: TimedMidiMessage, origin_micros: u64, start_tick: i64, bpm_milli: u32) -> Result<(), MidiError> {
         let elapsed = event.timestamp_micros.saturating_sub(origin_micros);
         let tick = start_tick.saturating_add(micros_to_ticks(elapsed, bpm_milli)?);
         self.record(tick, event.message)
@@ -375,10 +386,7 @@ pub fn micros_to_ticks(elapsed_micros: u64, bpm_milli: u32) -> Result<i64, MidiE
     if bpm_milli == 0 {
         return Err(invalid("MIDI recording tempo must be positive"));
     }
-    let ticks = u128::from(elapsed_micros)
-        .saturating_mul(u128::from(bpm_milli))
-        .saturating_mul(u128::from(PPQ))
-        / 60_000_000_000u128;
+    let ticks = u128::from(elapsed_micros).saturating_mul(u128::from(bpm_milli)).saturating_mul(u128::from(PPQ)) / 60_000_000_000u128;
     Ok(i64::try_from(ticks).unwrap_or(i64::MAX))
 }
 
