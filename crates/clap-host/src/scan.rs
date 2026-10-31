@@ -109,9 +109,11 @@ pub fn bundle_executable(path: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file()).take(64).collect();
-    files.sort();
-    files.into_iter().next()
+    // Never guess which of multiple binaries/helpers is the plug-in. The bundle executable
+    // should normally match its stem; only a single fallback candidate is unambiguous.
+    let mut files = std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file());
+    let only = files.next()?;
+    files.next().is_none().then_some(only)
 }
 
 /// Maps CLAP feature strings to a SoundCraft insert-menu category.
@@ -179,6 +181,10 @@ mod tests {
         std::fs::create_dir_all(d.join("X.clap/Contents/MacOS")).unwrap();
         std::fs::write(d.join("X.clap/Contents/MacOS/other"), b"x").unwrap();
         assert_eq!(bundle_executable(&d.join("X.clap")), Some(d.join("X.clap/Contents/MacOS/other")));
+        // Two candidate files with no bundle-named executable are ambiguous: loading the
+        // alphabetically first one might instead execute a helper or unrelated binary.
+        std::fs::write(d.join("X.clap/Contents/MacOS/helper"), b"x").unwrap();
+        assert_eq!(bundle_executable(&d.join("X.clap")), None);
         std::fs::create_dir_all(d.join("Empty.clap")).unwrap();
         assert_eq!(bundle_executable(&d.join("Empty.clap")), None);
         let _ = std::fs::remove_dir_all(&d);
