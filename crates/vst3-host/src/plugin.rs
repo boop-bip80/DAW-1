@@ -166,19 +166,47 @@ impl Vst3Plugin {
         }
     }
 
-    /// Inserts keeping the queue time-sorted; drops the event when the queue is full (never
-    /// allocates on the audio thread).
-    fn push_note(&mut self, e: NoteEvent) {
-        push_sorted(&mut self.notes, e);
+    /// Bounded and time-sorted. A note-off can replace a lower-priority event so even
+    /// a saturated note queue has room to stop voices.
+    fn push_note(&mut self, e: NoteEvent) -> bool {
+        if matches!(e, NoteEvent::Off { .. }) { push_release(&mut self.notes, e) } else { push_sorted(&mut self.notes, e) }
     }
 }
 
-fn push_sorted(notes: &mut Vec<NoteEvent>, e: NoteEvent) {
+fn push_sorted(notes: &mut Vec<NoteEvent>, e: NoteEvent) -> bool {
     if notes.len() >= notes.capacity() {
-        return;
+        return false;
     }
     let pos = notes.iter().rposition(|q| q.time() <= e.time()).map_or(0, |i| i + 1);
     notes.insert(pos, e);
+    true
+}
+
+/// Prioritize note-offs without allocating on the audio thread. Evict a note-on or pressure
+/// event first; if the queue contains only releases, a duplicate release can be replaced.
+/// Never discard a unique release, and let the caller keep its held-note bookkeeping on failure.
+fn push_release(notes: &mut Vec<NoteEvent>, e: NoteEvent) -> bool {
+    if notes.len() >= notes.capacity() {
+        let eviction = notes.iter().rposition(|q| !matches!(q, NoteEvent::Off { .. })).or_else(|| {
+            let mut seen = [false; 128];
+            notes.iter().position(|q| {
+                if let NoteEvent::Off { key, .. } = *q {
+                    seen.get_mut(usize::from(key)).is_some_and(|seen| std::mem::replace(seen, true))
+                } else {
+                    false
+                }
+            })
+        });
+        let Some(i) = eviction else { return false };
+        notes.remove(i);
+    }
+    push_sorted(notes, e)
+}
+
+/// A stop must cancel notes scheduled later in the same block, or a release at frame zero
+/// could be followed by a new note-on and leave the instrument sounding after transport stops.
+fn cancel_pending_starts(notes: &mut Vec<NoteEvent>) {
+    notes.retain(|e| !matches!(e, NoteEvent::On { .. }));
 }
 
 /// Keeps only the pending releases, one per key and moved to the start of the next block, so at
@@ -354,9 +382,13 @@ impl Plugin for Vst3Plugin {
         if note > 127 || !self.event_input {
             return;
         }
+        if velocity == 0 {
+            self.note_off(offset, note);
+            return;
+        }
         let time = u32::try_from(offset).unwrap_or(u32::MAX);
-        self.push_note(NoteEvent::On { time, key: note, velocity: f32::from(velocity.min(127)) / 127.0 });
-        if let Some(h) = self.held.get_mut(note as usize) {
+        let queued = self.push_note(NoteEvent::On { time, key: note, velocity: f32::from(velocity.min(127)) / 127.0 });
+        if queued && let Some(h) = self.held.get_mut(note as usize) {
             *h = true;
         }
     }
@@ -366,8 +398,8 @@ impl Plugin for Vst3Plugin {
             return;
         }
         let time = u32::try_from(offset).unwrap_or(u32::MAX);
-        self.push_note(NoteEvent::Off { time, key: note });
-        if let Some(h) = self.held.get_mut(note as usize) {
+        let queued = self.push_note(NoteEvent::Off { time, key: note });
+        if queued && let Some(h) = self.held.get_mut(note as usize) {
             *h = false;
         }
     }
@@ -393,6 +425,7 @@ impl Plugin for Vst3Plugin {
     }
 
     fn all_notes_off(&mut self) {
+        cancel_pending_starts(&mut self.notes);
         for k in 0..128u8 {
             if self.held.get(k as usize).copied().unwrap_or(false) {
                 self.note_off(0, k);
@@ -541,6 +574,51 @@ impl PluginEditor for Vst3Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saturated host queue must prioritize release events without allocating.
+    #[test]
+    fn releases_replace_note_ons_and_keep_time_order() {
+        let mut notes = Vec::with_capacity(4);
+        for i in 0..4u8 {
+            assert!(push_sorted(&mut notes, NoteEvent::On { time: u32::from(i), key: i, velocity: 1.0 }));
+        }
+        assert!(!push_sorted(&mut notes, NoteEvent::On { time: 4, key: 99, velocity: 1.0 }));
+        assert!(push_release(&mut notes, NoteEvent::Off { time: 1, key: 42 }));
+        assert_eq!(notes.len(), 4);
+        assert_eq!(notes.capacity(), 4);
+        assert!(notes.iter().any(|n| matches!(n, NoteEvent::Off { key: 42, .. })));
+        assert!(notes.windows(2).all(|w| w[0].time() <= w[1].time()));
+    }
+
+    #[test]
+    fn transport_stop_discards_future_note_ons() {
+        let mut notes = vec![
+            NoteEvent::On { time: 10, key: 60, velocity: 0.5 },
+            NoteEvent::Pressure { time: 15, key: 60, pressure: 0.5 },
+            NoteEvent::Off { time: 20, key: 60 },
+        ];
+        cancel_pending_starts(&mut notes);
+        assert_eq!(notes.len(), 2);
+        assert!(!notes.iter().any(|e| matches!(e, NoteEvent::On { .. })));
+        assert!(notes.iter().any(|e| matches!(e, NoteEvent::Off { key: 60, .. })));
+    }
+
+    #[test]
+    fn only_duplicate_releases_are_evicted_when_the_queue_is_all_releases() {
+        let mut notes = Vec::with_capacity(4);
+        for time in 0..4 {
+            assert!(push_sorted(&mut notes, NoteEvent::Off { time, key: 60 }));
+        }
+        assert!(push_release(&mut notes, NoteEvent::Off { time: 4, key: 61 }));
+        assert!(notes.iter().any(|n| matches!(n, NoteEvent::Off { key: 60, .. })));
+        assert!(notes.iter().any(|n| matches!(n, NoteEvent::Off { key: 61, .. })));
+
+        let mut unique = Vec::with_capacity(2);
+        assert!(push_sorted(&mut unique, NoteEvent::Off { time: 0, key: 1 }));
+        assert!(push_sorted(&mut unique, NoteEvent::Off { time: 0, key: 2 }));
+        assert!(!push_release(&mut unique, NoteEvent::Off { time: 0, key: 3 }));
+        assert_eq!(unique.len(), 2);
+    }
 
     /// A queue full of releases still has room to release every held key after a reset.
     #[test]
