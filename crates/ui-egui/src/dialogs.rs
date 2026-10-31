@@ -410,10 +410,10 @@ fn strip_silence_form(
     let mut rename_from = None;
     let [threshold, min_ms, pre_ms, post_ms] = values;
     let before = [*threshold, *min_ms, *pre_ms, *post_ms];
-    ui.add(egui::Slider::new(threshold, -96.0..=0.0).text("Threshold dB"));
-    ui.add(egui::Slider::new(min_ms, 0.0..=4000.0).text("Min strip duration ms"));
-    ui.add(egui::Slider::new(pre_ms, 0.0..=500.0).text("Clip start pad ms"));
-    ui.add(egui::Slider::new(post_ms, 0.0..=2000.0).text("Clip end pad ms"));
+    crate::widgets::fine_slider(ui, threshold, -96.0..=0.0, "Threshold dB");
+    crate::widgets::fine_slider(ui, min_ms, 0.0..=4000.0, "Min strip duration ms");
+    crate::widgets::fine_slider(ui, pre_ms, 0.0..=500.0, "Clip start pad ms");
+    crate::widgets::fine_slider(ui, post_ms, 0.0..=2000.0, "Clip end pad ms");
     let values = [*threshold, *min_ms, *pre_ms, *post_ms];
     // The Edit window is drawn before this window, so it draws the rectangles for new values in the next frame.
     if values != before {
@@ -463,6 +463,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     let mut keep = true;
     let mut action: Option<(String, Value)> = None;
     let mut save_first: Option<(String, Value)> = None;
+    let mut bounce: Option<Value> = None;
     let confirmed = matches!(d, Dialog::SaveChanges { .. });
     // Strip Silence's Rename button, and the naming scheme its dialog's OK keeps.
     let mut rename_from: Option<[f64; 4]> = None;
@@ -550,9 +551,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     );
                     if buttons(ui, "Bounce", enter) {
                         let p = std::path::Path::new(path.as_str()).with_extension(format.default_extension());
-                        crate::bounce::start(
-                            app,
-                            &json!({"path": p.to_string_lossy(), "format": format.default_extension(), "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"}),
+                        bounce = Some(
+                            json!({"path": p.to_string_lossy(), "format": format.default_extension(), "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"}),
                         );
                         keep = false;
                     }
@@ -749,7 +749,8 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             if ui.button("Don't Save").clicked() {
                                 action = Some(then.clone());
                             }
-                            if buttons(ui, "Save", enter) {
+                            // Enter on a focused Don't Save clicks it, so Enter presses Save only when it was not clicked.
+                            if buttons(ui, "Save", enter) && action.is_none() {
                                 save_first = Some(then.clone());
                             }
                         });
@@ -757,15 +758,18 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 }
             }
         });
+    // Enter on a focused Cancel also presses OK, so Cancel drops the command, the bounce and the save that OK asked for.
     if esc || ctx.memory(|m| m.data.get_temp::<bool>(egui::Id::unique("dlg_cancel")).unwrap_or(false)) {
         keep = false;
+        action = None;
+        save_first = None;
+        bounce = None;
         app.dialogs.after_save = None;
         app.dialogs.pending_session = None;
         ctx.memory_mut(|m| m.data.remove::<bool>(egui::Id::unique("dlg_cancel")));
     }
-    // Enter on a focused Cancel also presses OK. In Auto Rename, the dialog then closes without running the command.
-    if !keep && matches!(d, Dialog::AutoRename { .. }) {
-        action = None;
+    if let Some(params) = bounce {
+        crate::bounce::start(app, &params);
     }
     if let Some(strip) = rename_from
         && keep
