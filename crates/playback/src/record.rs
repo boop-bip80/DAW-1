@@ -208,6 +208,21 @@ fn pick_input_config(configs: &[cpal::SupportedStreamConfigRange], rate: u32) ->
         .map(|(_, _, config)| config)
 }
 
+/// Try the requested device buffer first, then the device default. A stream can build
+/// successfully but fail to start; that failure must also release the stream and retry.
+/// When no fixed buffer was requested, the default is attempted only once.
+fn first_started_input<S, E: std::fmt::Display>(
+    preferred: cpal::StreamConfig,
+    build: impl FnMut(&cpal::StreamConfig) -> Result<S, E>,
+    start: impl Fn(&S) -> bool,
+) -> Option<(cpal::StreamConfig, S)> {
+    let mut attempts = vec![preferred];
+    if preferred.buffer_size != cpal::BufferSize::Default {
+        attempts.push(cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..preferred });
+    }
+    crate::first_started(attempts, build, start)
+}
+
 impl Recorder {
     /// Open the default input device. Errors when there is none (the caller shows a message).
     pub fn open() -> Result<Recorder, String> {
@@ -219,7 +234,7 @@ impl Recorder {
     /// drivers usually are) are converted to f32.
     #[cfg(not(target_os = "freebsd"))]
     pub fn open_with(audio: &crate::AudioConfig) -> Result<Recorder, String> {
-        use cpal::traits::{DeviceTrait, StreamTrait};
+        use cpal::traits::DeviceTrait;
         let host = crate::devices::host(audio);
         let device = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
         let name = crate::devices::device_name(&device).unwrap_or_else(|| "Input".into());
@@ -256,17 +271,11 @@ impl Recorder {
             cpal::SampleFormat::I16 => build_input::<i16>(&device, config, &shared, &monitor),
             _ => build_input::<f32>(&device, config, &shared, &monitor),
         };
-        // The chosen buffer size first; if the device refuses it, its default.
-        let stream = match build(config) {
-            Ok(s) => s,
-            Err(e) if config.buffer_size != cpal::BufferSize::Default => {
-                log::warn!("cannot open the input with buffer {:?}: {e}; using the device default", config.buffer_size);
-                config.buffer_size = cpal::BufferSize::Default;
-                build(config).map_err(|e| e.to_string())?
-            }
-            Err(e) => return Err(e.to_string()),
-        };
-        stream.play().map_err(|e| e.to_string())?;
+        // A device may accept a fixed buffer during construction but reject it when the
+        // stream starts. Try the selected low-latency size first, then a fresh default
+        // stream after either kind of failure.
+        let (config, stream) = first_started_input(config, |attempt| build(*attempt), crate::start_stream)
+            .ok_or_else(|| format!("cannot open or start audio input device \"{name}\""))?;
         let seen = (0, Instant::now());
         Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate, channels, writer: None, seen })
     }
@@ -518,6 +527,72 @@ mod tests {
         let c = pick_input_config(&configs, 48_000).unwrap();
         assert_eq!((c.sample_rate(), c.channels(), c.sample_format()), (48_000, 8, cpal::SampleFormat::F32), "more channels win in the same format");
         assert!(pick_input_config(&configs, 192_001).is_none(), "an unsupported rate falls back to the device default");
+    }
+
+    #[test]
+    fn failed_input_start_releases_stream_before_retrying_default_buffer() {
+        use std::cell::Cell;
+
+        struct MockStream<'a> {
+            buffer: cpal::BufferSize,
+            drops: &'a Cell<usize>,
+        }
+        impl Drop for MockStream<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+
+        let preferred = cpal::StreamConfig { channels: 2, sample_rate: 48_000, buffer_size: cpal::BufferSize::Fixed(128) };
+        let drops = Cell::new(0);
+        let mut attempted = Vec::new();
+        let (chosen, stream) = first_started_input(
+            preferred,
+            |cfg| {
+                attempted.push(cfg.buffer_size);
+                if cfg.buffer_size == cpal::BufferSize::Default {
+                    assert_eq!(drops.get(), 1, "the failed fixed-buffer stream must be dropped first");
+                }
+                Ok::<_, &'static str>(MockStream { buffer: cfg.buffer_size, drops: &drops })
+            },
+            |stream| stream.buffer == cpal::BufferSize::Default,
+        )
+        .expect("the default-buffer stream starts");
+        assert_eq!(attempted, [cpal::BufferSize::Fixed(128), cpal::BufferSize::Default]);
+        assert_eq!(chosen.buffer_size, cpal::BufferSize::Default);
+        assert_eq!(drops.get(), 1);
+        drop(stream);
+        assert_eq!(drops.get(), 2);
+    }
+
+    #[test]
+    fn failed_input_build_retries_default_buffer_but_default_is_not_duplicated() {
+        let preferred = cpal::StreamConfig { channels: 2, sample_rate: 48_000, buffer_size: cpal::BufferSize::Fixed(128) };
+        let mut attempted = Vec::new();
+        let (chosen, _) = first_started_input(
+            preferred,
+            |cfg| {
+                attempted.push(cfg.buffer_size);
+                if cfg.buffer_size == cpal::BufferSize::Default { Ok(cpal::BufferSize::Default) } else { Err("fixed buffer rejected") }
+            },
+            |_| true,
+        )
+        .expect("the default-buffer stream starts");
+        assert_eq!(chosen.buffer_size, cpal::BufferSize::Default);
+        assert_eq!(attempted, [cpal::BufferSize::Fixed(128), cpal::BufferSize::Default]);
+
+        let mut default_attempts = 0;
+        let default = cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..preferred };
+        let none = first_started_input(
+            default,
+            |_| {
+                default_attempts += 1;
+                Err::<(), _>("default buffer rejected")
+            },
+            |_| true,
+        );
+        assert!(none.is_none());
+        assert_eq!(default_attempts, 1);
     }
 
     fn recorder(shared: &Arc<Shared>) -> Recorder {
