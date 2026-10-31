@@ -307,10 +307,18 @@ impl Recorder {
     }
 
     /// Why the input can't go on, if it can't: the device went away or, while recording, stopped
-    /// sending audio; its callback hit a bug; or writing a take failed (reported once).
+    /// sending audio; its callback hit a bug; or writing a take failed (reported once) or stopped
+    /// unexpectedly.
     pub fn trouble(&mut self) -> Option<Trouble> {
         if let Some(e) = self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner).take() {
             return Some(Trouble::Disk(e));
+        }
+        // The writer normally runs until `finish` disarms capture. An early exit means
+        // the take files are no longer receiving audio, even if the input device is healthy.
+        if self.shared.armed.load(Ordering::Acquire)
+            && self.writer.as_ref().is_some_and(|(writer, _)| writer.is_finished())
+        {
+            return Some(Trouble::Disk("the audio take writer stopped unexpectedly; check the files on disk".into()));
         }
         let name = &self.device_name;
         match self.shared.fault.load(Ordering::Relaxed) {
@@ -333,7 +341,16 @@ impl Recorder {
 
     pub fn finish(&mut self) -> Takes {
         self.shared.armed.store(false, Ordering::Release);
-        let (takes, problem) = self.writer.take().and_then(|(w, _)| w.join().ok()).unwrap_or_default();
+        let (takes, problem) = match self.writer.take() {
+            Some((writer, _)) => match writer.join() {
+                Ok(result) => result,
+                Err(_) => (
+                    Vec::new(),
+                    Some("the audio take writer panicked; check the files on disk for recoverable audio".into()),
+                ),
+            },
+            None => (Vec::new(), None),
+        };
         let lost = self.shared.dropped.swap(0, Ordering::Relaxed) / self.channels.max(1);
         let slow =
             (lost > 0).then(|| format!("{} ms of input lost: the disk was too slow", lost.saturating_mul(1000) / self.sample_rate.max(1) as usize));
@@ -545,6 +562,27 @@ mod tests {
         let gone = Arc::new(Shared::new(CaptureRing::new(64)));
         gone.fault.store(GONE, Ordering::Relaxed);
         assert_eq!(recorder(&gone).trouble(), Some(Trouble::Device("“Mic In” is unavailable".into())));
+    }
+
+    /// A writer that exits unexpectedly must not leave the recording UI claiming that capture
+    /// is still succeeding, or return success when the user stops the take.
+    #[test]
+    fn a_panicked_writer_reports_trouble_and_a_failed_take() {
+        let shared = Arc::new(Shared::new(CaptureRing::new(64)));
+        let mut r = recorder(&shared);
+        let writer = std::thread::spawn(|| -> Takes { std::panic::panic_any("synthetic take writer failure") });
+        while !writer.is_finished() {
+            std::thread::yield_now();
+        }
+        shared.armed.store(true, Ordering::Release);
+        r.writer = Some((writer, Vec::new()));
+        assert!(matches!(r.trouble(), Some(Trouble::Disk(e)) if e.contains("writer stopped unexpectedly")));
+
+        let (takes, problem) = r.finish();
+        assert!(takes.is_empty());
+        assert!(problem.is_some_and(|e| e.contains("writer panicked") && e.contains("recoverable audio")));
+        assert!(!shared.armed.load(Ordering::Acquire));
+        assert!(r.writer.is_none());
     }
 
     #[test]
