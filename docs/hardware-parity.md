@@ -1,10 +1,10 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-13 · **Change:** trivial (bounces of a bus fed by an aux compensate its latency (#246); previously minor: audio device, rate and buffer choice; ASIO feature) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (native MIDI port discovery and bounded input capture added; disk-take writer evidence corrected) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 A DAW is judged by how it drives audio interfaces, MIDI gear, control surfaces and sync. This is
-SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal) and the absence of
-any MIDI-device or control-surface code; Pro Tools' from its documentation and Setup menus.
+SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal) and the new MIDI input-capture adapter and the absence of
+wired MIDI routing or control-surface code; Pro Tools' from its documentation and Setup menus.
 
 **Hardware: ~12 % ready** (estimated). **Performance: ~35 %** (estimated; nothing benchmarked
 against Pro Tools). Remaining ≈ 110–180 h for hardware, 40–70 h for performance.
@@ -25,13 +25,15 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 | Latency reporting and record offset compensation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Sample rate follows the session; resample when it can't | ✅ (switches device) | 🟡 resamples (input pitch bug fixed, #28) | 🟡 | 🟡 | 🟡 | 🟡 |
 | Avid HDX / HD Native DSP, Hybrid Engine DSP mode | ✅ | ❌ (out of reach: Avid hardware) | ❌ | ❌ | ❌ | ❌ |
-| Disk allocation / record to disk | ✅ | ❌ recording into RAM (PR #84) | ❌ | ❌ | ❌ | ❌ |
+| Disk allocation / record to disk | ✅ | 🟡 WAV takes stream to disk through a background writer; hardware unverified | 🟡 same writer | 🟡 same writer | ❌ | ❌ |
 
 ## MIDI
 
+A bounded MIDI 1.0 decoder, timestamped event buffer and take assembler exist in `soundcraft-midi::live`. A native `midir` adapter now discovers input ports and captures timestamped bytes through a preallocated bounded queue (`soundcraft-midi::device`, Linux/macOS/Windows). It is **not** connected to armed tracks, live instruments or MIDI playback, and no physical keyboard was tested. Web has no native adapter; hardware readiness percentages remain unchanged.
+
 | Feature | Pro Tools | SoundCraft (all platforms) |
 |---|---|---|
-| MIDI input devices (keyboards, pads) | ✅ | ❌ no MIDI device layer at all (`setup.midi_input_devices` stores names) |
+| MIDI input devices (keyboards, pads) | ✅ | 🟡 native port discovery and bounded input capture API; not routed to tracks/instruments; unverified on hardware |
 | MIDI output to external gear | ✅ | ❌ |
 | MIDI Thru, input filter | ✅ | ❌ (stored flags only) |
 | MIDI Beat Clock out, MTC generate/chase | ✅ | ❌ |
@@ -72,6 +74,7 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-31 | minor | Native MIDI port discovery and capture API added but not wired to playback or armed tracks; corrected WAV take-to-disk evidence; hardware and duplex tests remain open |
 | 2026-10-13 | trivial | bounces of a bus fed by an aux compensate its latency (#246) |
 | 2026-10-12 | minor | Audio device settings: system, output, input, sample rate and buffer size; opt-in ASIO |
 | 2026-10-10 | major | Created: audit of audio interface, MIDI, control-surface, sync and performance support against Pro Tools 2026.4.1 |
