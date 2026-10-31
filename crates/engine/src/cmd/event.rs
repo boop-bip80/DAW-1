@@ -427,6 +427,34 @@ mod tests {
     use crate::demo::demo_engine;
     use serde_json::json;
 
+    /// `start` is optional for insert/cut time: it defaults to the selection start, then `end`/`length` apply.
+    #[test]
+    fn insert_and_cut_time_without_start_use_selection_start() {
+        use soundcraft_time::Range;
+        let mut e = demo_engine();
+        let a = e.session().edit.selection.start;
+        let run = |e: &mut crate::Engine, sel: Range, id: &str, params: serde_json::Value| {
+            e.session_mut().edit.selection = sel;
+            e.execute(id, &params).unwrap()
+        };
+        // Point selection.
+        assert_eq!(run(&mut e, Range::point(a), "event.insert_time", json!({"length": 48000}))["inserted"], 48000);
+        assert_eq!(run(&mut e, Range::point(a), "event.cut_time", json!({"end": a + 5000}))["removed"], 5000);
+        assert_eq!(run(&mut e, Range::point(a), "event.cut_time", json!({"length": 700}))["removed"], 700);
+        // A non-empty selection must not override the given `end`/`length`.
+        let sel = Range::new(a, a + 100);
+        assert_eq!(run(&mut e, sel, "event.insert_time", json!({"length": 48000}))["inserted"], 48000);
+        assert_eq!(run(&mut e, sel, "event.insert_time", json!({"end": a + 2000}))["inserted"], 2000);
+        assert_eq!(run(&mut e, sel, "event.cut_time", json!({"end": a + 5000}))["removed"], 5000);
+        // A null `start` takes the same path.
+        assert_eq!(run(&mut e, sel, "event.cut_time", json!({"start": null, "end": a + 3000}))["removed"], 3000);
+        assert_eq!(run(&mut e, sel, "event.insert_time", json!({"start": null, "length": 900}))["inserted"], 900);
+        // An explicit `start` still wins over the selection.
+        let r = run(&mut e, sel, "event.cut_time", json!({"start": a + 1000, "end": a + 3000}));
+        assert_eq!(r["removed"], 2000);
+        assert_eq!(run(&mut e, sel, "event.insert_time", json!({"start": a + 1000, "length": 500}))["inserted"], 500);
+    }
+
     /// The tempo-ruler dialog runs `event.tempo` with `bpm` and `at`; the change must land at that position.
     #[test]
     fn tempo_change_at_position_is_applied() {
