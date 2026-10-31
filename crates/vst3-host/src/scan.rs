@@ -311,9 +311,9 @@ mod tests {
         std::os::unix::fs::symlink(&actual, &link).unwrap();
         assert_eq!(bundle_binary_for(Os::Unix, &d.join("Types.vst3")), None, "two regular candidate paths");
         std::fs::remove_file(&link).unwrap();
-        let socket = std::os::unix::net::UnixListener::bind(folder.join("not-code.so")).unwrap();
+        // A nonregular directory with the right extension must not become a binary candidate.
+        std::fs::create_dir(folder.join("not-code.so")).unwrap();
         assert_eq!(bundle_binary_for(Os::Unix, &d.join("Types.vst3")), Some(actual));
-        drop(socket);
         let _ = std::fs::remove_dir_all(&d);
     }
 
