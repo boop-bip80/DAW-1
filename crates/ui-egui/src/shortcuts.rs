@@ -71,11 +71,7 @@ fn mix_edit_chord(key: Key, m: Modifiers, mac: bool) -> bool {
 
 /// Unmodified +/- is Edit nudge; modified variants belong to the grid, zoom or command registry.
 fn plain_nudge_chord(key: Key, m: Modifiers) -> bool {
-    matches!(key, Key::Plus | Key::Equals | Key::Minus)
-        && !m.command
-        && !m.ctrl
-        && !m.alt
-        && !m.shift
+    matches!(key, Key::Plus | Key::Equals | Key::Minus) && !m.command && !m.ctrl && !m.alt && !m.shift
 }
 
 /// Dispatch global keyboard shortcuts once no text field or dialog wants input, ignoring non-scripted auto-repeats
@@ -457,9 +453,7 @@ mod label_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        command_for, mix_edit_chord, mods_match, parse, plain_nudge_chord, search_chord, transport_chord,
-    };
+    use super::{command_for, mix_edit_chord, mods_match, parse, plain_nudge_chord, search_chord, transport_chord};
     use egui::{Key, Modifiers};
 
     /// Ctrl held on Windows or Linux, as egui reports it.
