@@ -158,7 +158,10 @@ impl AutomationLane {
                 if matches!(self.param, AutoParam::Mute | AutoParam::SendMute(_)) {
                     return a.value;
                 }
-                a.value + (b.value - a.value) * ((at - a.at) as f32 / (b.at - a.at) as f32)
+                // Widen so far-apart breakpoints cannot overflow i64.
+                let span = i128::from(b.at) - i128::from(a.at);
+                let off = i128::from(at) - i128::from(a.at);
+                a.value + (b.value - a.value) * (off as f64 / span as f64) as f32
             }
             (Some(a), _) => a.value,
             _ => default,
@@ -254,6 +257,17 @@ impl AutomationLane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_at_far_apart_points_does_not_overflow() {
+        let mut l = AutomationLane::new(AutoParam::Volume);
+        l.set_point(-1, 0.0);
+        l.set_point(i64::MAX, -10.0);
+        let v = l.value_at(5, 0.0);
+        assert!(v.is_finite() && (-10.0..=0.0).contains(&v));
+        let w = l.value_at(i64::MAX - 1, 0.0);
+        assert!(w.is_finite() && (-10.0..=0.0).contains(&w));
+    }
 
     #[test]
     fn pan_label_max_does_not_overflow() {
