@@ -239,8 +239,13 @@ fn engine_settings(e: &mut Engine, p: &Value, id: &str) -> Result<Value> {
 fn disk_allocation(e: &mut Engine, p: &Value) -> Result<Value> {
     let id = "setup.disk_allocation";
     let t = track_param(e, id, p, "track")?;
+    let path = str_param(p, "path");
+    // Checked before `session_mut` so a refused path leaves the session untouched.
+    if let Some(path) = path {
+        crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    }
     let s = e.session_mut();
-    if let Some(path) = str_param(p, "path") {
+    if let Some(path) = path {
         let key = t.map_or_else(|| "disk.root".to_string(), |t| format!("disk.track.{}", t.0));
         set_text(&mut s.edit, &key, Some(path));
     }

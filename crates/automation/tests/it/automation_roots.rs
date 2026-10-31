@@ -182,6 +182,7 @@ fn writes(dir: &Path) -> Vec<(&'static str, Value)> {
         ("file.print_score", json!({"path": p("k.svg")})),
         ("file.export_clip_groups", json!({"path": p("l.scgrp"), "clips": [clip]})),
         ("track.save_preset", json!({"path": p("m.json"), "tracks": ["Kick"]})),
+        ("setup.disk_allocation", json!({"path": p("recordings")})),
     ]
 }
 
@@ -301,6 +302,7 @@ fn links_out_of_the_roots_are_refused() {
     refused(&mut srv, "file.bounce_mix", json!({"path": s(f.write.join("away/x.wav"))}), "outside the write root");
     refused(&mut srv, "file.bounce_stems", json!({"dir": s(f.write.join("away/stems"))}), "outside the write root");
     refused(&mut srv, "session.save_as", json!({"path": s(f.write.join("away/x.scraft"))}), "outside the write root");
+    refused(&mut srv, "setup.disk_allocation", json!({"path": s(f.write.join("away/rec"))}), "outside the write root");
     refused(&mut srv, "file.bounce_mix", json!({"path": s(f.write.join("dangling.wav"))}), "a link that leads nowhere");
     assert_eq!(listing(&f.outside), before, "nothing was written through a link");
     assert!(!f.outside.join("not-yet.wav").exists());
