@@ -80,7 +80,8 @@ impl AutoParam {
     }
     /// Parse ids like `volume`, `pan`, `pan2`, `mute`, `send_a_level`, `plugin:a:threshold`.
     pub fn parse(s: &str) -> Option<AutoParam> {
-        let s = s.trim().to_ascii_lowercase();
+        let orig = s.trim();
+        let s = orig.to_ascii_lowercase();
         match s.as_str() {
             "volume" | "vol" => return Some(AutoParam::Volume),
             "pan" | "pan1" => return Some(AutoParam::Pan(0)),
@@ -100,6 +101,8 @@ impl AutoParam {
         }
         if let Some(rest) = s.strip_prefix("plugin:") {
             let (slot, param) = rest.split_once(':')?;
+            // ASCII lowercasing keeps byte offsets, so take the param from the original.
+            let param = orig.get(orig.len() - param.len()..)?;
             return Some(AutoParam::Plugin { slot: letter_slot(slot)?, param: param.to_string() });
         }
         None
@@ -254,6 +257,15 @@ impl AutomationLane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_keeps_plugin_param_case() {
+        let p = AutoParam::Plugin { slot: 0, param: "Cutoff".into() };
+        assert_eq!(AutoParam::parse("plugin:a:Cutoff"), Some(p));
+        assert_eq!(AutoParam::parse("Plugin:B:Mix"), Some(AutoParam::Plugin { slot: 1, param: "Mix".into() }));
+        assert_eq!(AutoParam::parse("Volume"), Some(AutoParam::Volume));
+        assert_eq!(AutoParam::parse("SEND_B_LEVEL"), Some(AutoParam::SendLevel(1)));
+    }
 
     #[test]
     fn pan_label_max_does_not_overflow() {
