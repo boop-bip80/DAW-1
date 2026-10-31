@@ -4,6 +4,8 @@ use crate::SoundApp;
 use crate::theme::{Tokens, mono, rgb};
 use egui::{Color32, Sense, vec2};
 use serde_json::json;
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_midi::device::{self, MidiInputPortInfo};
 use soundcraft_model::{AutomationMode, ClipContent};
 use soundcraft_playback::AudioConfig;
 use soundcraft_playback::devices::{AudioSystem, DeviceInfo};
@@ -465,6 +467,78 @@ fn number_combo(ui: &mut egui::Ui, id: &str, name: &str, value: &mut Option<u32>
     combo.response.accessible_name(name);
 }
 
+/// Cached MIDI scan, separate from the session's enabled-device preferences. Hardware probing
+/// happens on window opening or a deliberate Rescan, never in the per-frame render path.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default)]
+struct MidiInputScan {
+    ports: Vec<MidiInputPortInfo>,
+    error: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_input_ports(ctx: &egui::Context, refresh: bool) -> Arc<MidiInputScan> {
+    let id = egui::Id::unique("midi_input_ports");
+    if !refresh && let Some(scan) = ctx.data(|d| d.get_temp::<Arc<MidiInputScan>>(id)) {
+        return scan;
+    }
+    let scan = match device::input_ports() {
+        Ok(ports) => MidiInputScan { ports, error: None },
+        Err(err) => MidiInputScan { ports: Vec::new(), error: Some(err.to_string()) },
+    };
+    let scan = Arc::new(scan);
+    ctx.data_mut(|d| d.insert_temp(id, Arc::clone(&scan)));
+    scan
+}
+
+/// Matches the engine command's sanitized preference key for a native MIDI port name.
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_device_key(name: &str) -> String {
+    let sanitized: String = name.chars().filter(|c| !c.is_control() && *c != '=').take(64).collect();
+    format!("midi.input.{}", sanitized.trim())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputScan, rescan: &mut bool) {
+    ui.separator();
+    ui.heading("MIDI input devices");
+    if ui.button("Rescan MIDI inputs").on_hover_text("Check for connected MIDI keyboards and controllers").clicked() {
+        *rescan = true;
+    }
+    if let Some(err) = &scan.error {
+        ui.colored_label(Tokens::current().rec, format!("MIDI discovery unavailable: {err}"));
+    } else if scan.ports.is_empty() {
+        ui.label("No MIDI input ports found. Connect a controller, then Rescan MIDI inputs.");
+    } else {
+        egui::ScrollArea::vertical().max_height(136.0).show(ui, |ui| {
+            for port in &scan.ports {
+                let key = midi_device_key(&port.name);
+                let usable = key != "midi.input.";
+                let mut enabled = usable && app.engine.session().edit.flag(&key);
+                let label = if port.name.trim().is_empty() {
+                    format!("Unnamed input (port {})", port.index)
+                } else {
+                    format!("{} (port {})", port.name, port.index)
+                };
+                let response = ui
+                    .add_enabled(usable, egui::Checkbox::new(&mut enabled, label))
+                    .on_hover_text("Store whether this MIDI input is enabled in the session");
+                if response.changed() {
+                    let params = if enabled { json!({"enable": [&port.name]}) } else { json!({"disable": [&port.name]}) };
+                    if let Err(err) = app.run("setup.midi_input_devices", params) {
+                        app.ui.status = err;
+                    }
+                }
+            }
+        });
+    }
+    ui.label(
+        egui::RichText::new("Selections are saved with the session. Live MIDI capture, monitoring and track routing are not connected yet.")
+            .small()
+            .color(Tokens::current().text_dim),
+    );
+}
+
 /// Setup › Playback Engine / Hardware: choose the audio system, devices, rate and buffer size.
 pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_playback_engine;
@@ -475,6 +549,10 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     let mut draft = ctx.data(|d| d.get_temp::<AudioConfig>(draft_id)).unwrap_or_else(|| app.ui.audio.clone());
     let mut refresh = false;
     let mut apply = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut rescan_midi = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    let midi_scan = midi_input_ports(ctx, false);
     let systems = audio_systems(ctx, false);
     win(ctx, &mut open, "Playback Engine", vec2(460.0, 360.0), |ui| {
         let t = Tokens::current();
@@ -560,12 +638,24 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         if ui.button("Reconnect audio device").clicked() {
             app.reconnect_audio();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        midi_input_controls(ui, app, &midi_scan, &mut rescan_midi);
+        #[cfg(target_arch = "wasm32")]
+        {
+            ui.separator();
+            ui.heading("MIDI input devices");
+            ui.label("Native MIDI input discovery is unavailable in the web build.");
+        }
     });
     if refresh {
         audio_systems(ctx, true);
     }
     if apply && let Err(e) = app.apply_audio_config(draft.clone()) {
         app.ui.status = e;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if rescan_midi {
+        midi_input_ports(ctx, true);
     }
     if open {
         ctx.data_mut(|d| d.insert_temp(draft_id, draft));
@@ -574,6 +664,8 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         ctx.data_mut(|d| {
             d.remove_temp::<AudioConfig>(draft_id);
             d.remove_temp::<Arc<Vec<AudioSystem>>>(egui::Id::unique("audio_systems"));
+            #[cfg(not(target_arch = "wasm32"))]
+            d.remove_temp::<Arc<MidiInputScan>>(egui::Id::unique("midi_input_ports"));
         });
     }
     app.ui.show_playback_engine = open;
@@ -774,5 +866,75 @@ mod audio_health_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| audio_health(&mut app, ui.ctx()));
         output.textures_delta.clear();
         assert!(app.audio_health_report.is_some());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::unwrap_used)]
+mod midi_input_tests {
+    use super::*;
+
+    fn fake_scan() -> Arc<MidiInputScan> {
+        Arc::new(MidiInputScan {
+            ports: vec![MidiInputPortInfo { index: 0, name: "Studio Keyboard".into() }, MidiInputPortInfo { index: 1, name: "".into() }],
+            error: None,
+        })
+    }
+
+    fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn playback_engine_opens_and_lists_synthetic_midi_ports_without_probing_hardware() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("window.playback_engine", json!({"value": true})).unwrap();
+        assert!(app.ui.show_playback_engine);
+
+        let ctx = egui::Context::default();
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::unique("midi_input_ports"), fake_scan());
+            data.insert_temp(egui::Id::unique("audio_systems"), Arc::new(Vec::<AudioSystem>::new()));
+        });
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| playback_engine(&mut app, ui.ctx()));
+        let text = painted_text(&output);
+        output.textures_delta.clear();
+        assert!(text.iter().any(|s| s.contains("MIDI input devices")), "MIDI selector unreachable: {text:?}");
+        assert!(text.iter().any(|s| s.contains("Studio Keyboard")), "scanned MIDI port not painted: {text:?}");
+        assert!(text.iter().any(|s| s.contains("Rescan MIDI inputs")), "refresh action missing: {text:?}");
+        assert!(text.iter().any(|s| s.contains("not connected yet")), "live routing limitation not disclosed: {text:?}");
+        assert!(!app.engine.is_dirty(), "a read-only device scan must not modify the session");
+    }
+
+    #[test]
+    fn port_name_keys_match_engine_persistence_and_skip_unusable_names() {
+        assert_eq!(midi_device_key(" Keys=\u{0000}USB\n "), "midi.input.KeysUSB");
+        assert_eq!(midi_device_key("="), "midi.input.");
+        assert_eq!(midi_device_key(&"X".repeat(100)), format!("midi.input.{}", "X".repeat(64)));
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("setup.midi_input_devices", json!({"enable": [" Keys=USB "]})).unwrap();
+        assert!(app.engine.session().edit.flag(&midi_device_key(" Keys=USB ")));
+    }
+
+    #[test]
+    fn midi_backend_failure_and_no_ports_have_distinct_honest_empty_states() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        for (scan, expected) in [
+            (MidiInputScan { ports: Vec::new(), error: Some("synthetic backend unavailable".into()) }, "MIDI discovery unavailable"),
+            (MidiInputScan::default(), "No MIDI input ports found"),
+        ] {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| midi_input_controls(ui, &mut app, &scan, &mut false));
+            let text = painted_text(&output);
+            output.textures_delta.clear();
+            assert!(text.iter().any(|s| s.contains(expected)), "missing status {expected}: {text:?}");
+        }
     }
 }
