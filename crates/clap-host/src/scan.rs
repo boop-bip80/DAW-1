@@ -94,7 +94,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, budget: &mut usize) {
 }
 
 /// The loadable binary of a plugin: the file itself, or for a macOS bundle directory
-/// `Contents/MacOS/<name>` (the executable named like the bundle, else the only/first file there).
+/// `Contents/MacOS/<name>` (the executable named like the bundle, else the only regular candidate).
 pub fn bundle_executable(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
@@ -187,6 +187,26 @@ mod tests {
         assert_eq!(bundle_executable(&d.join("X.clap")), None);
         std::fs::create_dir_all(d.join("Empty.clap")).unwrap();
         assert_eq!(bundle_executable(&d.join("Empty.clap")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_handles_symlinks_but_never_selects_nonregular_files() {
+        let d = tmp("file-types");
+        let macos = d.join("Types.clap/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let original = macos.join("actual");
+        std::fs::write(&original, b"x").unwrap();
+        let link = macos.join("other");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        // A symlink to a regular binary remains a candidate, so two aliases are ambiguous.
+        assert_eq!(bundle_executable(&d.join("Types.clap")), None);
+        std::fs::remove_file(&link).unwrap();
+        let socket = std::os::unix::net::UnixListener::bind(macos.join("control.sock")).unwrap();
+        // Nonregular socket files are not executable candidates.
+        assert_eq!(bundle_executable(&d.join("Types.clap")), Some(original));
+        drop(socket);
         let _ = std::fs::remove_dir_all(&d);
     }
 
