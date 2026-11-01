@@ -347,6 +347,7 @@ fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
         "file.export_midi" => ".mid",
         "file.export_edl" => ".edl",
         "file.export_otio" => ".otio",
+        "file.export_otioz" => ".otioz",
         "file.export_sibelius" => ".musicxml",
         "file.print_score" => ".svg",
         "file.export_clip_groups" => ".scgrp",
@@ -585,9 +586,10 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::PathPrompt { cmd, path, key, .. } => {
-                    crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), "Path");
+                    let label = if cmd == "file.export_otioz" { "OpenTimelineIO bundle path (.otioz)" } else { "Path" };
+                    crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), label);
                     if let Some(pick) = &app.services.pick_open
-                        && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_edl")
+                        && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_otioz" | "file.export_edl")
                         && key != "dir"
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, &[])
@@ -602,7 +604,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         *path = p;
                     }
                     if let Some(pick) = &app.services.pick_save
-                        && matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_edl")
+                        && matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_otioz" | "file.export_edl")
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, path)
                     {
@@ -1181,6 +1183,7 @@ fn loop_length(s: &Session, text: &str, format: soundcraft_time::TimeFormat, sta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
 
     #[test]
     fn file_commands_get_path_prompts_with_sensible_names() {
@@ -1192,6 +1195,7 @@ mod tests {
             ("file.export_clip_groups", ".scgrp"),
             ("file.export_edl", ".edl"),
             ("file.export_otio", ".otio"),
+            ("file.export_otioz", ".otioz"),
         ] {
             assert!(takes_path(id), "{id}");
             assert!(d.open_for_command(&e, id), "{id}");
@@ -1209,6 +1213,28 @@ mod tests {
         assert!(!takes_path("edit.copy"));
         assert!(d.open_for_command(&e, "file.score_setup"));
         assert!(matches!(d.open, Some(Dialog::ScoreSetup { bars_per_system: 4, .. })));
+    }
+
+    #[test]
+    fn otioz_export_dialog_has_an_accessible_filename_and_uses_the_save_picker() {
+        let services = crate::Services {
+            pick_save: Some(Box::new(|purpose, default| {
+                assert_eq!(purpose, "file.export_otioz");
+                assert!(default.ends_with(".otioz"), "{default}");
+                Some("/tmp/portable-timeline.otioz".into())
+            })),
+            ..Default::default()
+        };
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, services);
+        assert!(app.dialogs.open_for_command(&app.engine, "file.export_otioz"));
+        let mut harness = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(harness.get_by_label("OpenTimelineIO bundle path (.otioz)").rect().width() > 0.0);
+        harness.get_by_label("Browse…").click();
+        harness.run_steps(2);
+        assert!(matches!(&harness.state().dialogs.open, Some(Dialog::PathPrompt { cmd, path, .. })
+            if cmd == "file.export_otioz" && path == "/tmp/portable-timeline.otioz"));
+        assert!(!harness.state().engine.is_dirty(), "picking an export filename is not a session edit");
     }
 
     #[test]
