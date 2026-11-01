@@ -584,7 +584,8 @@ fn recording_latency_control(ui: &mut egui::Ui, app: &mut SoundApp) {
     ui.horizontal(|ui| {
         let label = ui.label("Manual recording offset");
         let response = ui
-            .add(egui::Slider::new(&mut milliseconds, -500.0..=500.0).text("ms").fixed_decimals(2))
+            // Do not round existing sub-centisecond sample offsets just by painting the slider.
+            .add(egui::Slider::new(&mut milliseconds, -500.0..=500.0).text("ms").fixed_decimals(2).clamping(egui::SliderClamping::Edits))
             .labelled_by(label.id)
             .accessible_name("Manual recording offset")
             .on_hover_text("Positive values place new audio recordings earlier; negative values place them later.");
@@ -961,6 +962,18 @@ mod recording_latency_tests {
         assert_eq!(soundcraft_engine::io::record_latency_samples(h.state().engine.session()), -12_000);
         assert!(!h.state().engine.is_dirty(), "rendering an existing offset must not edit the session");
         assert!(!h.state().engine.can_undo());
+    }
+
+    #[test]
+    fn displaying_a_one_sample_offset_does_not_round_it_into_a_session_edit() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("setup.record_latency", json!({"samples": 1})).unwrap();
+        app.engine.mark_clean();
+
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert_eq!(soundcraft_engine::io::record_latency_samples(h.state().engine.session()), 1);
+        assert!(!h.state().engine.is_dirty(), "display precision cannot change the stored sample offset");
     }
 
     #[test]
