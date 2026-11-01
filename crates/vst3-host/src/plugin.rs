@@ -57,6 +57,9 @@ pub struct Vst3Plugin {
     midi_map: Vec<Option<u32>>,
     /// Controller points for the next block: (time, param id, normalized value). Bounded.
     controls: Vec<(u32, u32, f64)>,
+    /// ParamID of the last accepted MIDI CC64=0 not superseded by a later write.
+    /// This proves provenance: another zero-valued controller may alias the same ParamID.
+    sustain_release: Option<u32>,
     inputs: BusBuffers,
     outputs: BusBuffers,
     has_input: bool,
@@ -103,6 +106,7 @@ impl Vst3Plugin {
             notes: Vec::with_capacity(EVENT_CAP),
             midi_map: Vec::new(),
             controls: Vec::with_capacity(EVENT_CAP),
+            sustain_release: None,
             inputs: BusBuffers::new(&[], 0),
             outputs: BusBuffers::new(&[], 0),
             has_input: false,
@@ -233,6 +237,49 @@ fn keep_releases(notes: &mut Vec<NoteEvent>) {
     }
 }
 
+/// A newer accepted write to the same ParamID supersedes a previous pedal-up.
+/// Never infer sustain provenance from the value alone: distinct MIDI CCs may alias.
+fn supersede_sustain_release(sustain_release: &mut Option<u32>, id: u32) {
+    if *sustain_release == Some(id) {
+        *sustain_release = None;
+    }
+}
+
+/// Queue mapped MIDI without allocating. Pedal-up can replace the last queued
+/// controller point when saturated; ordinary controllers cannot evict releases.
+/// Only a truly accepted CC64=0 establishes retry provenance.
+fn queue_mapped_control(controls: &mut Vec<(u32, u32, f64)>, sustain_release: &mut Option<u32>, control: (u32, u32, f64), sustain_off: bool) -> bool {
+    if controls.len() >= controls.capacity() {
+        if !sustain_off || controls.is_empty() {
+            return false;
+        }
+        let _ = controls.pop();
+    }
+    controls.push(control);
+    if sustain_off {
+        *sustain_release = Some(control.1);
+    } else {
+        supersede_sustain_release(sustain_release, control.1);
+    }
+    true
+}
+
+/// Finalize only after the entire process call, not after each successful
+/// sub-block: later-timestamped controllers still need their native chunk.
+/// On error/reset, retry exactly one idempotent sustain-up at frame zero;
+/// discard all other controllers that may have been partially consumed.
+fn finish_mapped_controls(controls: &mut Vec<(u32, u32, f64)>, sustain_release: &mut Option<u32>, retry: bool) {
+    let release = if retry { *sustain_release } else { None };
+    controls.clear();
+    *sustain_release = None;
+    if let Some(id) = release
+        && controls.len() < controls.capacity()
+    {
+        controls.push((0, id, 0.0));
+        *sustain_release = Some(id);
+    }
+}
+
 /// Keep the visible parameter cache and deferred controller-state value in sync with the
 /// actual event queue. A saturated queue must not claim a change the processor will never see.
 fn queue_param_update(
@@ -316,7 +363,7 @@ impl Plugin for Vst3Plugin {
         // Keep pending releases and release whatever is still held, so the processor's voices stop
         // on the next block instead of sounding on while the host forgets them.
         keep_releases(&mut self.notes);
-        self.controls.clear();
+        finish_mapped_controls(&mut self.controls, &mut self.sustain_release, true);
         self.all_notes_off();
         self.held = [false; 128];
     }
@@ -326,7 +373,11 @@ impl Plugin for Vst3Plugin {
         let (Some(pi), Some(&vid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
         let v = pi.clamp(value);
         let Some(n) = self.normalized_from_plain(i, v) else { return false };
-        queue_param_update(&mut self.pending, &mut self.values, self.unsynced.as_ref(), i, vid, v, n)
+        let accepted = queue_param_update(&mut self.pending, &mut self.values, self.unsynced.as_ref(), i, vid, v, n);
+        if accepted {
+            supersede_sustain_release(&mut self.sustain_release, vid);
+        }
+        accepted
     }
 
     fn param(&self, id: &str) -> Option<f32> {
@@ -356,6 +407,7 @@ impl Plugin for Vst3Plugin {
             c.0 = c.0.min(last);
         }
         let mut start = 0usize;
+        let mut failed = false;
         while start < frames {
             let n = (frames - start).min(self.max_block);
             let end = u32::try_from(start + n).unwrap_or(u32::MAX);
@@ -383,7 +435,7 @@ impl Plugin for Vst3Plugin {
                     self.transport.as_ref(),
                 )
             });
-            let failed = r.is_err();
+            let chunk_failed = r.is_err();
             self.position = self.position.saturating_add(i64::try_from(n).unwrap_or(0));
             match r {
                 Ok(()) if self.has_output => {
@@ -405,13 +457,14 @@ impl Plugin for Vst3Plugin {
                 _ => {}
             }
             start += n;
-            if failed {
+            if chunk_failed {
                 // Do not try another sub-block after native failure. The next call retries only
-                // coalesced parameter writes and distinct release events at frame zero.
+                // coalesced parameter writes, note-offs and accepted sustain-pedal releases at time zero.
+                failed = true;
                 break;
             }
         }
-        self.controls.clear();
+        finish_mapped_controls(&mut self.controls, &mut self.sustain_release, failed);
     }
 
     fn latency(&self) -> usize {
@@ -465,10 +518,8 @@ impl Plugin for Vst3Plugin {
             }
             _ => return,
         };
-        if let Some(&Some(id)) = self.midi_map.get(ctrl)
-            && self.controls.len() < self.controls.capacity()
-        {
-            self.controls.push((time, id, value));
+        if let Some(&Some(id)) = self.midi_map.get(ctrl) {
+            queue_mapped_control(&mut self.controls, &mut self.sustain_release, (time, id, value), ctrl == 64 && d2 == 0);
         }
     }
 
@@ -669,6 +720,122 @@ mod tests {
         assert!(pending.is_empty());
         assert!(notes.is_empty());
         assert_eq!((pending.capacity(), notes.capacity()), (param_capacity, note_capacity));
+    }
+
+    #[test]
+    fn mapped_sustain_release_and_note_off_retry_after_native_error_then_clear_on_success() {
+        let mut pending = vec![(7, 0.75)];
+        let mut notes = Vec::with_capacity(4);
+        notes.extend([NoteEvent::On { time: 1, key: 60, velocity: 0.8 }, NoteEvent::Off { time: 2, key: 60 }]);
+        let mut controls = Vec::with_capacity(3);
+        let mut sustain_release = None;
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 12, 0.5), false));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (2, 64, 0.0), true));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (3, 17, 0.25), false));
+        let capacity = controls.capacity();
+        let failed = process_pending_chunk(&mut pending, &mut notes, 2, |params, events| {
+            assert_eq!(params, &[(7, 0.75)]);
+            assert_eq!(events.len(), 2);
+            assert_eq!(controls.as_slice(), &[(1, 12, 0.5), (2, 64, 0.0), (3, 17, 0.25)]);
+            Err(Vst3Error::EventBufferBusy)
+        });
+        finish_mapped_controls(&mut controls, &mut sustain_release, failed.is_err());
+        assert_eq!(failed, Err(Vst3Error::EventBufferBusy));
+        assert_eq!(pending.as_slice(), &[(7, 0.75)]);
+        assert_eq!(notes.as_slice(), &[NoteEvent::Off { time: 0, key: 60 }]);
+        assert_eq!(controls.as_slice(), &[(0, 64, 0.0)], "only a proven pedal-up may be retried");
+        assert_eq!(sustain_release, Some(64));
+        assert_eq!(controls.capacity(), capacity, "native failure must not allocate");
+
+        let retry = process_pending_chunk(&mut pending, &mut notes, 1, |params, events| {
+            assert_eq!(params, &[(7, 0.75)]);
+            assert_eq!(events, &[NoteEvent::Off { time: 0, key: 60 }]);
+            assert_eq!(controls.as_slice(), &[(0, 64, 0.0)]);
+            Ok(())
+        });
+        finish_mapped_controls(&mut controls, &mut sustain_release, retry.is_err());
+        assert_eq!(retry, Ok(()));
+        assert!(pending.is_empty());
+        assert!(notes.is_empty());
+        assert!(controls.is_empty());
+        assert_eq!(sustain_release, None, "successful native processing consumes the release marker");
+        assert_eq!(controls.capacity(), capacity);
+    }
+
+    #[test]
+    fn reset_retains_only_distinct_note_offs_and_the_last_mapped_sustain_up() {
+        let mut notes =
+            vec![NoteEvent::On { time: 1, key: 60, velocity: 0.8 }, NoteEvent::Off { time: 2, key: 60 }, NoteEvent::Off { time: 3, key: 60 }];
+        let mut controls = Vec::with_capacity(4);
+        let mut sustain_release = None;
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 3, 0.9), false));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (2, 72, 0.0), true));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (3, 11, 0.0), false));
+        keep_releases(&mut notes);
+        finish_mapped_controls(&mut controls, &mut sustain_release, true);
+        assert_eq!(notes, vec![NoteEvent::Off { time: 0, key: 60 }]);
+        assert_eq!(controls.as_slice(), &[(0, 72, 0.0)]);
+        assert_eq!(sustain_release, Some(72));
+        finish_mapped_controls(&mut controls, &mut sustain_release, true);
+        assert_eq!(controls.as_slice(), &[(0, 72, 0.0)], "repeated reset must not duplicate a release");
+        assert_eq!(controls.capacity(), 4);
+    }
+
+    #[test]
+    fn mapped_sustain_provenance_rejects_aliased_zero_cc_and_newer_param_write() {
+        let mut controls = Vec::with_capacity(3);
+        let mut sustain_release = None;
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 70, 0.0), true));
+        assert_eq!(sustain_release, Some(70));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (2, 70, 0.0), false));
+        assert_eq!(sustain_release, None, "CC7=0 mapped to the same ParamID is not CC64-off");
+        finish_mapped_controls(&mut controls, &mut sustain_release, true);
+        assert!(controls.is_empty(), "an aliased zero controller cannot be mistaken for sustain release");
+
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (3, 70, 0.0), true));
+        let mut pending = Vec::with_capacity(1);
+        let mut values = [0.0f32];
+        let unsynced = [AtomicU64::new(SYNCED)];
+        assert!(queue_param_update(&mut pending, &mut values, &unsynced, 0, 70, 0.5, 0.5));
+        supersede_sustain_release(&mut sustain_release, 70);
+        finish_mapped_controls(&mut controls, &mut sustain_release, true);
+        assert!(controls.is_empty(), "a newer accepted UI parameter write must not replay stale pedal-up");
+        assert_eq!(pending.as_slice(), &[(70, 0.5)]);
+    }
+
+    #[test]
+    fn saturated_mapped_controls_prioritize_sustain_off_without_allocating() {
+        let mut controls = Vec::with_capacity(1);
+        let mut sustain_release = None;
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 7, 0.8), false));
+        assert!(!queue_mapped_control(&mut controls, &mut sustain_release, (2, 8, 0.5), false));
+        assert_eq!(controls.as_slice(), &[(1, 7, 0.8)]);
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (3, 64, 0.0), true));
+        assert_eq!(controls.as_slice(), &[(3, 64, 0.0)]);
+        assert_eq!(sustain_release, Some(64));
+        assert!(!queue_mapped_control(&mut controls, &mut sustain_release, (4, 64, 1.0), false));
+        assert_eq!(sustain_release, Some(64), "a rejected edit cannot supersede a queued release");
+        finish_mapped_controls(&mut controls, &mut sustain_release, true);
+        assert_eq!(controls.as_slice(), &[(0, 64, 0.0)]);
+        assert_eq!(controls.capacity(), 1);
+    }
+
+    #[test]
+    fn two_successful_subblocks_keep_later_mapped_controls_until_outer_completion() {
+        let mut pending = vec![(7, 0.75)];
+        let mut notes = Vec::with_capacity(2);
+        let mut controls = Vec::with_capacity(2);
+        let mut sustain_release = None;
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 8, 0.5), false));
+        assert!(queue_mapped_control(&mut controls, &mut sustain_release, (12, 64, 0.0), true));
+        let first = process_pending_chunk(&mut pending, &mut notes, 0, |_params, _events| Ok(()));
+        assert_eq!(first, Ok(()));
+        assert_eq!(controls.as_slice(), &[(1, 8, 0.5), (12, 64, 0.0)], "first chunk must not drain a future controller");
+        let second = process_pending_chunk(&mut pending, &mut notes, 0, |_params, _events| Ok(()));
+        assert_eq!(second, Ok(()));
+        finish_mapped_controls(&mut controls, &mut sustain_release, false);
+        assert!(controls.is_empty());
+        assert_eq!(sustain_release, None);
     }
 
     #[test]
