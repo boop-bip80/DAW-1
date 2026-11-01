@@ -619,8 +619,7 @@ impl Bounce {
             return Err(EngineError::BadParams("file.bounce_mix".into(), "bounces are limited to 4 hours".into()));
         }
         let (fmt, channels, fold) = bounce_layout(&s, bus, fold_stereo);
-        let name = path.file_name().map_or_else(|| "bounce".into(), |n| n.to_string_lossy().into_owned());
-        let part = path.with_file_name(format!("{name}.part"));
+        let part = bounce_sidecar_path(path);
         crate::file_access::check_write(path).map_err(EngineError::Io)?;
         crate::file_access::check_write(&part).map_err(EngineError::Io)?;
         let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
@@ -887,8 +886,95 @@ fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str)
         .collect()
 }
 
+/// The fixed staging name a single bounce would reserve for `output`.
+fn bounce_sidecar_path(output: &Path) -> PathBuf {
+    let name = output.file_name().map_or_else(|| "bounce".into(), |n| n.to_string_lossy().into_owned());
+    output.with_file_name(format!("{name}.part"))
+}
+
+/// Refuse every occupied stem destination and its .part sibling before rendering anything.
+/// symlink_metadata also recognizes dangling links, which Path::exists silently ignores.
+fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
+    for output in paths {
+        for path in [output.clone(), bounce_sidecar_path(output)] {
+            crate::file_access::check_write(&path).map_err(EngineError::Io)?;
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => return Err(EngineError::Io(format!("{} already exists: choose an empty stem export directory", path.display()))),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(EngineError::Io(format!("{}: {err}", path.display()))),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An exclusively created, same-filesystem staging directory and the complete files this
+/// batch linked into its destination. Failure/cancellation removes only files this batch
+/// published; the private staging directory is always cleaned.
+struct StemBatch {
+    staging: PathBuf,
+    published: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl StemBatch {
+    fn reserve(dir: &Path) -> Result<Self> {
+        // Bounded retries cover concurrent exports, restarted processes and abandoned names
+        // without following or deleting anything at an occupied private-directory path.
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        for attempt in 0..64u32 {
+            let staging = dir.join(format!(".scstems-{:x}-{nonce:x}-{attempt:x}", std::process::id()));
+            if create_private_dir(&staging)? {
+                return Ok(Self { staging, published: Vec::new(), committed: false });
+            }
+        }
+        Err(EngineError::Io(format!("{}: could not reserve a private stem export directory", dir.display())))
+    }
+}
+
+impl Drop for StemBatch {
+    fn drop(&mut self) {
+        if !self.committed {
+            for path in self.published.iter().rev() {
+                // A later symlink or directory at our former output must not be removed.
+                if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file()) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.staging);
+    }
+}
+
+fn render_stem(s: &Session, id: TrackId, path: &Path, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<()> {
+    let mut solo = s.clone();
+    for t in &mut solo.tracks {
+        t.mixer.solo = t.id == id;
+    }
+    Bounce::new(Arc::new(solo), path, r, opts, None, false, fold_stereo)?.run()?;
+    Ok(())
+}
+
 /// [`bounce_stems`] in the main format, or folded down to stereo when `fold_stereo`.
+///
+/// Native export fails closed on occupied final or .part paths. Every stem is rendered into
+/// an owned private directory before completed files are published via no-replace hard links.
+/// Recoverable failures roll back newly published names; multi-file publication is not
+/// crash-atomic if the process terminates mid-commit.
 pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<Vec<String>> {
+    bounce_stems_with_publisher(e, dir, r, opts, fold_stereo, std::fs::hard_link)
+}
+
+/// Publisher injection is used only by tests to deterministically emulate a path appearing
+/// between preflight and no-replace publication; production always uses std::fs::hard_link.
+fn bounce_stems_with_publisher(
+    e: &Engine,
+    dir: &str,
+    r: Range,
+    opts: &EncodeOptions,
+    fold_stereo: bool,
+    mut publish: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<Vec<String>> {
     let s = e.session();
     if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
         return Err(EngineError::BadParams("file.bounce_stems".into(), "bounces are limited to 4 hours".into()));
@@ -898,29 +984,49 @@ pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, 
         FileFormat::Flac => "flac",
         _ => "wav",
     };
-    let mut out = Vec::new();
     let stems: Vec<(TrackId, String)> = s
         .tracks
         .iter()
         .filter(|t| matches!(t.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Midi) && !t.inactive && !t.mixer.mute)
         .map(|t| (t.id, t.name.clone()))
         .collect();
-    // Distinct user-visible track names can sanitize to the same filename
-    // (e.g. "Kick/Room" and "Kick?Room"). Give every colliding member a
-    // stable TrackId suffix; never allow a later stem to overwrite an earlier
-    // one in the same export. Unambiguous legacy filenames stay unchanged.
-    let names = stem_output_names(&s.name, &stems, ext)?;
-    make_dir(dir)?;
-    for ((id, _), name) in stems.into_iter().zip(names) {
-        let mut solo = s.clone();
-        for t in &mut solo.tracks {
-            t.mixer.solo = t.id == id;
-        }
-        let path = Path::new(dir).join(name);
-        Bounce::new(Arc::new(solo), &path, r, opts, None, false, fold_stereo)?.run()?;
-        out.push(path.to_string_lossy().into_owned());
+    if stems.len() > 4_096 {
+        return Err(EngineError::BadParams("file.bounce_stems".into(), "stem export is limited to 4096 tracks".into()));
     }
-    Ok(out)
+    // Keep legacy names for noncolliding tracks, and stable TrackId suffixes for collisions.
+    let names = stem_output_names(&s.name, &stems, ext)?;
+    let files: Vec<PathBuf> = names.iter().map(|name| Path::new(dir).join(name)).collect();
+    let paths: Vec<String> = files.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+    if stems.is_empty() {
+        return Ok(paths);
+    }
+    if cfg!(target_arch = "wasm32") {
+        // Browser exports deliver one file at a time through their host hook; there is no
+        // native filesystem or atomic multi-file publication to stage.
+        make_dir(dir)?;
+        for ((id, _), file) in stems.iter().zip(&files) {
+            render_stem(s, *id, file, r, opts, fold_stereo)?;
+        }
+        return Ok(paths);
+    }
+
+    preflight_stem_paths(&files)?;
+    make_dir(dir)?;
+    let mut batch = StemBatch::reserve(Path::new(dir))?;
+    for ((id, _), file) in stems.iter().zip(&files) {
+        let staged = batch.staging.join(file.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?);
+        render_stem(s, *id, &staged, r, opts, fold_stereo)?;
+    }
+    // Catch a destination or sidecar that appeared during rendering, before publishing any.
+    preflight_stem_paths(&files)?;
+    for file in &files {
+        let staged = batch.staging.join(file.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?);
+        publish(&staged, file).map_err(|err| EngineError::Io(format!("{}: cannot publish stem without replacing existing files: {err}", file.display())))?;
+        batch.published.push(file.clone());
+    }
+    sync_dir(Path::new(dir));
+    batch.committed = true;
+    Ok(paths)
 }
 
 /// Limit a range used for rendering to the track's material (plus a second), so a huge
@@ -2939,6 +3045,168 @@ mod bounce_sidecar_tests {
         assert_eq!(std::fs::read(&unrelated).unwrap(), marker);
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod stem_batch_tests {
+    use super::*;
+
+    fn two_tracks() -> Engine {
+        let mut e = Engine::default();
+        for name in ["First stem", "Second stem"] {
+            e.execute("track.new", &serde_json::json!({"name": name, "format": "mono"})).unwrap();
+        }
+        e
+    }
+
+    fn outputs(e: &Engine, dir: &Path) -> Vec<PathBuf> {
+        let tracks: Vec<_> = e.session().tracks.iter().map(|t| (t.id, t.name.clone())).collect();
+        stem_output_names(&e.session().name, &tracks, "wav").unwrap().into_iter().map(|name| dir.join(name)).collect()
+    }
+
+    fn bounce(e: &Engine, dir: &Path) -> Result<Vec<String>> {
+        bounce_stems_with(e, &dir.to_string_lossy(), Range::new(0, 4_800), &EncodeOptions::default(), false)
+    }
+
+    #[test]
+    fn second_stem_destination_or_part_collision_preflights_before_any_output() {
+        let root = std::env::temp_dir().join(format!("soundcraft-stem-batch-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let e = two_tracks();
+        for (label, sidecar) in [("output", false), ("part", true)] {
+            let dir = root.join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            let files = outputs(&e, &dir);
+            assert_eq!(files.len(), 2);
+            let occupied = if sidecar { bounce_sidecar_path(&files[1]) } else { files[1].clone() };
+            let sentinel = b"important user data in the later stem's path";
+            std::fs::write(&occupied, sentinel).unwrap();
+
+            let err = bounce(&e, &dir).unwrap_err();
+            assert!(err.to_string().contains("already exists"), "{err}");
+            assert_eq!(std::fs::read(&occupied).unwrap(), sentinel);
+            assert!(!files[0].exists(), "the first stem must not be written before second-path validation");
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no private stage should be created on a known collision");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_stems_publish_complete_audio_and_refuse_a_rerun_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stem-batch-success-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = two_tracks();
+        let files = outputs(&e, &dir);
+        let returned = bounce(&e, &dir).unwrap();
+        assert_eq!(returned.len(), 2);
+        assert_eq!(returned, files.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>());
+        let original: Vec<_> = files.iter().map(|path| std::fs::read(path).unwrap()).collect();
+        for (path, bytes) in files.iter().zip(&original) {
+            let (_, audio) = soundcraft_audio_io::decode(bytes, None).unwrap();
+            assert_eq!(audio.frames(), 4_800);
+            assert!(!bounce_sidecar_path(path).exists());
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "completed export must remove its private staging directory");
+
+        let err = bounce(&e, &dir).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        for (path, prior) in files.iter().zip(&original) {
+            assert_eq!(&std::fs::read(path).unwrap(), prior, "rerunning must preserve completed stems");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn publication_race_on_second_stem_rolls_back_first_without_replacing_new_file() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stem-batch-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = two_tracks();
+        let files = outputs(&e, &dir);
+        let mut published = 0;
+        let sentinel = b"second output appeared after full-batch preflight";
+        let err = bounce_stems_with_publisher(
+            &e,
+            &dir.to_string_lossy(),
+            Range::new(0, 4_800),
+            &EncodeOptions::default(),
+            false,
+            |from, to| {
+                published += 1;
+                if published == 2 {
+                    std::fs::write(to, sentinel).unwrap();
+                }
+                std::fs::hard_link(from, to)
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot publish stem"), "{err}");
+        assert_eq!(published, 2);
+        assert!(!files[0].exists(), "the first newly published stem must be rolled back");
+        assert_eq!(std::fs::read(&files[1]).unwrap(), sentinel, "late user file must survive no-replace publication");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "private stage must be cleaned on publish failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interrupted_second_publication_rolls_back_all_outputs_and_private_stage() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stem-batch-interrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = two_tracks();
+        let files = outputs(&e, &dir);
+        let mut published = 0;
+        let err = bounce_stems_with_publisher(
+            &e,
+            &dir.to_string_lossy(),
+            Range::new(0, 4_800),
+            &EncodeOptions::default(),
+            false,
+            |from, to| {
+                published += 1;
+                if published == 2 {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                std::fs::hard_link(from, to)
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot publish stem"), "{err}");
+        assert_eq!(published, 2);
+        assert!(files.iter().all(|path| !path.exists()));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "interrupted batch must remove owned temporary files");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn second_stem_symlink_and_dangling_sidecar_link_are_not_replaced() {
+        let root = std::env::temp_dir().join(format!("soundcraft-stem-batch-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let e = two_tracks();
+        for (label, sidecar, dangling) in [("final", false, false), ("sidecar", true, true)] {
+            let dir = root.join(label);
+            std::fs::create_dir_all(&dir).unwrap();
+            let files = outputs(&e, &dir);
+            let occupied = if sidecar { bounce_sidecar_path(&files[1]) } else { files[1].clone() };
+            let target = dir.join("protected.txt");
+            let sentinel = b"never replace this target via a symlink";
+            if !dangling {
+                std::fs::write(&target, sentinel).unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &occupied).unwrap();
+
+            assert!(bounce(&e, &dir).is_err());
+            assert!(std::fs::symlink_metadata(&occupied).unwrap().file_type().is_symlink());
+            if !dangling {
+                assert_eq!(std::fs::read(&target).unwrap(), sentinel);
+            } else {
+                assert!(!target.exists(), "dangling sidecar link's target must not be created");
+            }
+            assert!(!files[0].exists(), "an occupied later path must prevent the entire batch");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
