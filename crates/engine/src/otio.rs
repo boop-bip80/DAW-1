@@ -341,7 +341,7 @@ fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
     Ok(parent.join(referenced))
 }
 
-fn clip_media(clip: &Value) -> Result<&str> {
+fn clip_media(clip: &Value) -> Result<(&str, Option<&Value>)> {
     let media = match clip.get("OTIO_SCHEMA").and_then(Value::as_str) {
         Some("Clip.1") => clip.get("media_reference"),
         Some("Clip.2") => {
@@ -352,7 +352,8 @@ fn clip_media(clip: &Value) -> Result<&str> {
     }
     .ok_or_else(|| invalid_import("clip has no active media reference"))?;
     expect_schema(media, "ExternalReference.1")?;
-    media.get("target_url").and_then(Value::as_str).ok_or_else(|| invalid_import("clip has no external media URL"))
+    let url = media.get("target_url").and_then(Value::as_str).ok_or_else(|| invalid_import("clip has no external media URL"))?;
+    Ok((url, media.get("available_range")))
 }
 
 fn reject_nontrivial_metadata(value: &Value) -> Result<()> {
@@ -466,7 +467,27 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         .checked_add(duration)
                         .filter(|v| *v <= MAX_EXACT_SAMPLE)
                         .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
-                    let url = clip_media(child)?;
+                    let source_end = offset.checked_add(duration).ok_or_else(|| invalid_import("source trim overflows"))?;
+                    let (url, available_range) = clip_media(child)?;
+                    // OTIO's Clip.source_range uses the same media-timecode coordinates as
+                    // ExternalReference.available_range. A WAV's first decoded frame corresponds
+                    // to the available range's start, not necessarily media-timecode zero.
+                    // Without this subtraction a valid 01:00:00-origin edit plays the wrong
+                    // samples even though every file and JSON range is otherwise well formed.
+                    let media_offset = if let Some(available) = available_range.filter(|range| !range.is_null()) {
+                        let (available_start, available_duration) = sample_range(available, rate)?;
+                        if available_duration <= 0 {
+                            return Err(invalid_import("media available range must have a positive duration"));
+                        }
+                        let available_end =
+                            available_start.checked_add(available_duration).ok_or_else(|| invalid_import("media available range overflows"))?;
+                        if offset < available_start || source_end > available_end {
+                            return Err(invalid_import("clip source trim lies outside the media available range"));
+                        }
+                        offset.checked_sub(available_start).ok_or_else(|| invalid_import("media source offset underflows"))?
+                    } else {
+                        offset
+                    };
                     let referenced = reference_path(url, document)?;
                     let media = crate::io::checked_media_path(&referenced)?;
                     let source = if let Some(&index) = source_index.get(&media) {
@@ -516,8 +537,8 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         index
                     };
                     let src = &sources[source];
-                    let source_end = offset.checked_add(duration).ok_or_else(|| invalid_import("source trim overflows"))?;
-                    if source_end > i64::try_from(src.audio.frames()).unwrap_or(i64::MAX) {
+                    let media_end = media_offset.checked_add(duration).ok_or_else(|| invalid_import("decoded media offset overflows"))?;
+                    if media_end > i64::try_from(src.audio.frames()).unwrap_or(i64::MAX) {
                         return Err(invalid_import(format!(
                             "clip `{}` exceeds the available media duration",
                             child.get("name").and_then(Value::as_str).unwrap_or("Audio")
@@ -527,7 +548,7 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                     track.clips.push(ImportedClip {
                         name: child.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("Audio").to_owned(),
                         source,
-                        offset,
+                        offset: media_offset,
                         start: cursor,
                         length: duration,
                         muted: child.get("enabled").and_then(Value::as_bool) == Some(false),
@@ -784,6 +805,80 @@ mod tests {
         assert_eq!((clip.start, clip.length), (10, 20));
         assert_eq!(clip.name, "Clip from OTIO");
         assert!(matches!(&clip.content, ClipContent::Audio { offset: 5, .. }));
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn clip_one_and_clip_two_media_timecode_origins_preserve_trimmed_waveforms_and_undo() {
+        let (session, media) = decodable_fixture();
+        let ramp = (0..480_000).map(|frame| frame as f32 / 960_000.0).collect::<Vec<_>>();
+        let wav = soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![ramp.clone()] }, &EncodeOptions::default()).unwrap();
+        std::fs::write(&media, wav).unwrap();
+        let document = media.with_extension("otio");
+        let mut timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        // Both edits refer to one physical WAV that starts at timecode sample 10,000.
+        // Clip.1 uses media timecode 12,000 (file frame 2,000); Clip.2 uses 96,000
+        // (file frame 86,000). Offsets must not be used as raw file-frame indices.
+        for track in timeline["tracks"]["children"].as_array_mut().unwrap() {
+            for clip in track["children"].as_array_mut().unwrap() {
+                if clip["OTIO_SCHEMA"] == "Clip.1" {
+                    clip["media_reference"]["available_range"]["start_time"]["value"] = json!(10_000.0);
+                    clip["media_reference"]["available_range"]["duration"]["value"] = json!(470_000.0);
+                }
+            }
+        }
+        let clip_two = &mut timeline["tracks"]["children"][1]["children"][0];
+        let reference = clip_two.as_object_mut().unwrap().remove("media_reference").unwrap();
+        clip_two["OTIO_SCHEMA"] = json!("Clip.2");
+        clip_two["media_references"] = json!({"DEFAULT_MEDIA": reference});
+        clip_two["active_media_reference_key"] = json!("DEFAULT_MEDIA");
+        std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let result = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        let percussion = engine.session().tracks.iter().find(|t| t.name == "Percussion").unwrap();
+        let overdub = engine.session().tracks.iter().find(|t| t.name == "Overdub").unwrap();
+        assert!(matches!(&percussion.clips()[0].content, ClipContent::Audio { offset: 2_000, .. }));
+        assert!(matches!(&overdub.clips()[0].content, ClipContent::Audio { offset: 86_000, .. }));
+        let first = soundcraft_mix::render_clips(engine.session(), percussion.id, soundcraft_time::Range::new(48_000, 48_001));
+        let second = soundcraft_mix::render_clips(engine.session(), overdub.id, soundcraft_time::Range::new(0, 1));
+        assert!((first[0][0] - ramp[2_000]).abs() < 0.000001, "Clip.1 read from the wrong media frame");
+        assert!((second[0][0] - ramp[86_000]).abs() < 0.000001, "Clip.2 read from the wrong media frame");
+        assert!(engine.can_undo());
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn inconsistent_media_available_ranges_fail_without_partial_import_or_file_changes() {
+        let (session, media) = decodable_fixture();
+        let original_media = std::fs::read(&media).unwrap();
+        let document = media.with_extension("otio");
+        let exported: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let cases = [(13_000.0, 470_000.0), (10_000.0, 1_000.0), (10_000.0, 0.0)];
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (available_start, available_duration) in cases {
+            let mut timeline = exported.clone();
+            let reference = &mut timeline["tracks"]["children"][0]["children"][1]["media_reference"]["available_range"];
+            reference["start_time"]["value"] = json!(available_start);
+            reference["duration"]["value"] = json!(available_duration);
+            std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+            let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains("available range"), "unexpected inconsistent-range error: {error}");
+            assert_eq!(*engine.session(), before);
+            assert!(!engine.can_undo());
+            assert_eq!(std::fs::read(&media).unwrap(), original_media);
+        }
+        std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
 
