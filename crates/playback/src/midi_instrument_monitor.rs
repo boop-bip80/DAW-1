@@ -12,7 +12,7 @@ use soundcraft_mix::LiveInstrumentEvent;
 use soundcraft_model::{Session, TrackId, TrackKind};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
 
@@ -49,7 +49,8 @@ struct QueuedEvent {
 
 #[derive(Default)]
 struct MonitorState {
-    enabled: AtomicBool,
+    /// One atomic word: low bit is enabled; all higher bits form a generation. Splitting
+    /// those fields would let stale worker A turn off freshly armed route B between writes.
     epoch: AtomicU64,
     dropped: AtomicU64,
 }
@@ -113,8 +114,44 @@ impl MonitorPort {
     /// Stop all routing immediately and request callback-side note cleanup via the atomic epoch.
     /// No queue slot is required, so even a full queue cannot prevent the panic signal.
     pub fn invalidate(&self) {
-        self.state.enabled.store(false, Ordering::Release);
-        self.state.epoch.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let old = self.state.epoch.load(Ordering::Acquire);
+            let next = old.wrapping_add(2) & !1;
+            if self.state.epoch.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                break;
+            }
+        }
+    }
+
+    /// Close only the route that owns this exact enabled generation. A delayed Stop or Drop
+    /// for A cannot close B, even if both use the same input and channel selections.
+    pub fn invalidate_if(&self, armed_epoch: u64) -> Option<u64> {
+        if armed_epoch & 1 == 0 {
+            return None;
+        }
+        let next = armed_epoch.wrapping_add(2) & !1;
+        self.state.epoch.compare_exchange(armed_epoch, next, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| next)
+    }
+
+    /// The current disabled generation identifies an already-requested overflow panic; an
+    /// older active generation must never be substituted for that later cancellation. No
+    /// value returned here acknowledges that a plugin actually released its notes.
+    pub fn cancel_owned(&self, armed_epoch: u64) -> u64 {
+        if let Some(next) = self.invalidate_if(armed_epoch) {
+            return next;
+        }
+        let current = self.state.epoch.load(Ordering::Acquire);
+        if current & 1 == 0 { current } else { armed_epoch }
+    }
+
+    fn arm_new(&self) -> u64 {
+        loop {
+            let old = self.state.epoch.load(Ordering::Acquire);
+            let next = old.wrapping_add(2) | 1;
+            if self.state.epoch.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return next;
+            }
+        }
     }
 
     pub fn dropped(&self) -> u64 {
@@ -122,7 +159,7 @@ impl MonitorPort {
     }
 
     pub fn enabled(&self) -> bool {
-        self.state.enabled.load(Ordering::Acquire)
+        self.state.epoch.load(Ordering::Acquire) & 1 != 0
     }
 
     /// A pure preflight with provided, **already verified** enabled source identities. This
@@ -157,14 +194,26 @@ impl MonitorPort {
         if routes.is_empty() {
             return Err(MonitorError::NoRoutes);
         }
-        self.invalidate();
-        let epoch = self.state.epoch.load(Ordering::Acquire);
-        self.state.enabled.store(true, Ordering::Release);
+        let epoch = self.arm_new();
         Ok(MonitorRouter { port: self.clone(), epoch, sources: enabled_sources.to_vec(), routes })
     }
 }
 
 impl MonitorRouter {
+    /// Exact normalized source names that passed the control-thread route preflight.
+    pub fn enabled_sources(&self) -> &[String] {
+        &self.sources
+    }
+
+    /// Only request producer-side invalidation. This is **not** a callback/plugin release ACK.
+    pub fn stop(&self) -> u64 {
+        self.port.cancel_owned(self.epoch)
+    }
+
+    pub fn armed_epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Call from a native device/control worker, never the audio callback. The route scan and
     /// fixed-size `try_send` require no allocation. Any dropped event disables the entire
     /// monitor and schedules priority note cleanup, including a dropped NoteOff or sustain CC.
@@ -173,7 +222,7 @@ impl MonitorRouter {
             return Err(MonitorError::Invalidated);
         }
         let Some(source_index) = self.sources.iter().position(|name| name == source) else {
-            self.port.invalidate();
+            let _ = self.port.invalidate_if(self.epoch);
             return Err(MonitorError::UnknownSource(source.to_owned()));
         };
         let Some(channel) = valid_channel(message)? else { return Ok(0) };
@@ -187,12 +236,18 @@ impl MonitorRouter {
                 Ok(()) => sent += 1,
                 Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                     self.port.state.dropped.fetch_add(1, Ordering::Relaxed);
-                    self.port.invalidate();
+                    let _ = self.port.invalidate_if(self.epoch);
                     return Err(MonitorError::Overflow);
                 }
             }
         }
         Ok(sent)
+    }
+}
+
+impl Drop for MonitorRouter {
+    fn drop(&mut self) {
+        let _ = self.stop();
     }
 }
 
@@ -223,7 +278,7 @@ impl MonitorReader {
     }
 
     pub fn enabled(&self) -> bool {
-        self.state.enabled.load(Ordering::Acquire)
+        self.state.epoch.load(Ordering::Acquire) & 1 != 0
     }
 
     /// At most one queue capacity per block. Discard stale events even if a new route was
@@ -292,6 +347,33 @@ mod tests {
         assert_eq!(drained[0].track, a);
         assert_eq!(drained[1].track, b);
         assert!(!receiver.epoch_changed());
+    }
+
+    #[test]
+    fn obsolete_router_stop_and_drop_cannot_disable_new_arm() {
+        let (port, _receiver) = monitor_pair();
+        let (s, _, _) = session();
+        let old = port.arm(&s, &["Keys A".into(), "Keys B".into()]).unwrap();
+        let new = port.arm(&s, &["Keys A".into(), "Keys B".into()]).unwrap();
+        assert_eq!(old.stop(), old.armed_epoch());
+        drop(old);
+        assert!(port.enabled());
+        assert_eq!(new.try_send("Keys A", note(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn overflow_stop_preserves_latest_disabled_epoch_without_claiming_release() {
+        let (port, _receiver) = monitor_pair();
+        let (s, _, _) = session();
+        let router = port.arm(&s, &["Keys A".into(), "Keys B".into()]).unwrap();
+        for _ in 0..MAX_MONITOR_EVENTS {
+            assert_eq!(router.try_send("Keys A", note(1)).unwrap(), 1);
+        }
+        assert_eq!(router.try_send("Keys A", note(1)), Err(MonitorError::Overflow));
+        let token = router.stop();
+        assert_eq!(token & 1, 0);
+        assert!(token > router.armed_epoch());
+        assert!(!port.enabled());
     }
 
     #[test]
