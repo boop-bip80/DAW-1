@@ -74,6 +74,23 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"tracks": tracks}))
         }),
         cmd!(
+            "file.import_otio",
+            "OpenTimelineIO Audio...",
+            ["File", "Import"],
+            None,
+            "{path} — append local audio-only .otio tracks, clips, gaps and source trims as one undoable edit; unsupported OTIO structures fail without changes",
+            always,
+            |e, p| {
+                let path = str_param(p, "path").ok_or_else(|| bad("file.import_otio", "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("otio") {
+                    return Err(bad("file.import_otio", "input path must end in .otio"));
+                }
+                let bytes = crate::io::read_file_limited(&path, 4 * 1024 * 1024)?;
+                let imported = crate::otio::import_audio(e, std::path::Path::new(&path), &bytes)?;
+                Ok(json!({"path": path, "audio_tracks": imported.tracks, "audio_clips": imported.clips, "media_sources": imported.sources}))
+            }
+        ),
+        cmd!(
             "file.import_video",
             "Video...",
             ["File", "Import"],
