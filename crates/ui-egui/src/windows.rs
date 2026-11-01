@@ -24,6 +24,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
     workspace(app, ctx);
     configurations(app, ctx);
     playback_engine(app, ctx);
+    midi_input_filter_window(app, ctx);
     io_setup(app, ctx);
     shortcuts_window(app, ctx);
     clip_effects(app, ctx);
@@ -573,6 +574,57 @@ fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputSc
     );
 }
 
+/// The input runtime snapshots these eight flags when a native MIDI take begins. Never call the
+/// settings command merely to render the dialog: a no-argument command is not a UI query.
+const MIDI_FILTER_TYPES: &[(&str, &str, &str)] = &[
+    ("notes", "Notes", "Ignore Note On and Note Off messages"),
+    ("pitch_bend", "Pitch bend", "Ignore per-channel pitch-bend messages"),
+    ("mono_aftertouch", "Channel aftertouch", "Ignore channel-pressure messages"),
+    ("poly_aftertouch", "Polyphonic aftertouch", "Ignore per-note pressure messages"),
+    ("program", "Program changes", "Ignore patch/program-change messages"),
+    ("cc", "Control changes (CC)", "Ignore continuous controller messages"),
+    ("sysex", "SysEx (not currently captured)", "Native MIDI input does not currently decode SysEx data; this setting is reserved"),
+    ("realtime", "Realtime (clock and transport)", "Ignore timing-clock and transport messages; these are not stored as clip notes"),
+];
+
+fn midi_input_filter_window(app: &mut SoundApp, ctx: &egui::Context) {
+    let mut open = app.ui.show_midi_filter;
+    win(ctx, &mut open, "MIDI Input Filter", vec2(520.0, 360.0), |ui| {
+        let t = Tokens::current();
+        ui.heading("Exclude message types from MIDI recording");
+        ui.label("Checked types are discarded when supported; unchecked types may be recorded. Existing MIDI clips are unchanged.");
+        let recording = app.engine.transport.recording;
+        if recording {
+            ui.colored_label(t.rec, "Stop recording before changing input filters.");
+        }
+        ui.add_enabled_ui(!recording, |ui| {
+            for (id, label, explanation) in MIDI_FILTER_TYPES {
+                let key = format!("midi.filter.{id}");
+                let mut excluded = app.engine.session().edit.flag(&key);
+                if ui.checkbox(&mut excluded, *label).on_hover_text(*explanation).changed() {
+                    let params = if excluded { json!({"filter": [id]}) } else { json!({"allow": [id]}) };
+                    if let Err(error) = app.run("setup.midi_input_filter", params) {
+                        app.ui.status = format!("Could not update MIDI input filter: {error}");
+                    }
+                }
+            }
+        });
+        ui.separator();
+        ui.label(
+            egui::RichText::new(
+                "Settings are saved with this session and read when the next native MIDI recording starts; they do not change a take already in progress.",
+            )
+            .small()
+            .color(t.text_dim),
+        );
+        #[cfg(target_arch = "wasm32")]
+        ui.label(
+            egui::RichText::new("Native MIDI capture is unavailable in the browser. These settings can still be saved for desktop use.").small(),
+        );
+    });
+    app.ui.show_midi_filter = open;
+}
+
 /// Manual placement correction for future audio takes; never a hardware latency measurement.
 fn recording_latency_control(ui: &mut egui::Ui, app: &mut SoundApp) {
     let sample_rate = f64::from(app.engine.session().sample_rate.hz());
@@ -997,6 +1049,69 @@ mod recording_latency_tests {
         let query = h.state_mut().run("setup.record_latency", json!({})).unwrap();
         assert_eq!(query["samples"].as_i64(), Some(saved));
         assert_eq!(query["measured"], false, "UI must not imply automatic device calibration");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod midi_filter_tests {
+    use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn harness(mut app: SoundApp) -> Harness<'static, SoundApp> {
+        app.ui.show_midi_filter = true;
+        Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(920.0, 780.0))
+            .build_ui_state(|ui, app: &mut SoundApp| midi_input_filter_window(app, ui.ctx()), app)
+    }
+
+    #[test]
+    fn input_filter_opens_with_persisted_settings_without_mutating_a_session() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("setup.midi_input_filter", json!({"filter": ["notes"]})).unwrap();
+        app.engine.mark_clean();
+
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert!(h.get_by_role_and_label(Role::CheckBox, "Notes").rect().width() > 0.0);
+        assert!(h.get_by_role_and_label(Role::CheckBox, "Control changes (CC)").rect().width() > 0.0);
+        assert!(h.query_by_label_contains("SysEx (not currently captured)").is_some());
+        assert!(h.query_by_label_contains("next native MIDI recording starts").is_some());
+        assert!(h.state().engine.session().edit.flag("midi.filter.notes"));
+        assert!(!h.state().engine.is_dirty(), "opening and painting the filter dialog must not change persisted settings");
+    }
+
+    #[test]
+    fn checkbox_clicks_filter_or_allow_only_the_chosen_message_type() {
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty());
+        h.get_by_role_and_label(Role::CheckBox, "Notes").click();
+        h.run_steps(2);
+        assert!(h.state().engine.session().edit.flag("midi.filter.notes"));
+        assert!(!h.state().engine.session().edit.flag("midi.filter.cc"));
+        assert!(h.state().engine.is_dirty());
+
+        h.get_by_role_and_label(Role::CheckBox, "Notes").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.session().edit.flag("midi.filter.notes"));
+        assert!(!h.state().engine.is_dirty(), "restoring the saved flags should leave the document clean");
+    }
+
+    #[test]
+    fn filters_cannot_be_changed_during_an_active_take() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.transport.recording = true;
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("Stop recording before changing").is_some());
+        h.get_by_role_and_label(Role::CheckBox, "Notes").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.session().edit.flag("midi.filter.notes"));
+        assert!(!h.state().engine.is_dirty());
     }
 }
 
