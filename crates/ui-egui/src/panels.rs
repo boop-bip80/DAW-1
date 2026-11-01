@@ -929,12 +929,13 @@ mod tests {
         let mut h = transport_harness(app);
         h.run_steps(3);
         let undo_before = h.state().engine.undo_history().len();
+        let original_post_roll = h.state().engine.session().edit.post_roll;
         h.get_by_label("Pre-roll presets").click();
         h.run_steps(2);
         h.get_by_label("Pre-roll 2 s").click();
         h.run_steps(2);
         assert_eq!(h.state().engine.session().edit.pre_roll, 96_000, "Pre-roll command saves selected two-second duration");
-        assert_eq!(h.state().engine.session().edit.post_roll, 0, "changing pre-roll cannot alter post-roll");
+        assert_eq!(h.state().engine.session().edit.post_roll, original_post_roll, "changing pre-roll cannot alter post-roll");
         assert!(h.state().engine.is_dirty(), "user-selected roll duration must persist in the document");
         assert_eq!(h.state().engine.undo_history().len(), undo_before, "engine roll settings are intentionally non-undoable");
 
@@ -957,11 +958,12 @@ mod tests {
     fn roll_controls_are_disabled_during_recording_and_limits_are_enforced() {
         let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
         let sr = app.engine.session().sample_rate;
+        let original_post_roll = app.engine.session().edit.post_roll;
         set_transport_roll(&mut app, TransportRoll::Pre, 60_000.0);
         assert_eq!(app.engine.session().edit.pre_roll, sr.samples(MAX_ROLL_SECONDS), "clamp oversized edited seconds to ten minutes");
         app.engine.mark_clean();
         set_transport_roll(&mut app, TransportRoll::Post, f64::NAN);
-        assert_eq!(app.engine.session().edit.post_roll, 0);
+        assert_eq!(app.engine.session().edit.post_roll, original_post_roll);
         assert!(!app.engine.is_dirty(), "invalid duration must not change session");
         app.engine.transport.recording = true;
         let mut h = transport_harness(app);
@@ -972,6 +974,7 @@ mod tests {
         h.get_by_label("Pre-roll presets").click();
         h.run_steps(2);
         assert_eq!(h.state().engine.session().edit.pre_roll, sr.samples(MAX_ROLL_SECONDS));
+        assert_eq!(h.state().engine.session().edit.post_roll, original_post_roll);
         assert!(!h.state().engine.is_dirty());
     }
 
