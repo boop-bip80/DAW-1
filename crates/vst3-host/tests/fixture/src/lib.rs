@@ -13,6 +13,8 @@
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
 //!   MIDI CC 7 through `IMidiMapping` (hidden parameter 1), set it to their value too.
+//!   MIDI CC64 controls sustain (hidden parameter 2); a test-only CC119 mapping makes one
+//!   native process call return kResultFalse so the host must retry a pending pedal release.
 //!
 //! The module checks the host's module lifecycle the way real plugins depend on it (see "module
 //! lifecycle" below) and aborts the process when it is broken.
@@ -429,6 +431,8 @@ impl IEditControllerTrait for GainController {
 
 struct Synth {
     level: AtomicU32,
+    held: AtomicBool,
+    sustain: AtomicBool,
     _live: Live,
 }
 
@@ -436,17 +440,25 @@ impl Class for Synth {
     type Interfaces = (IComponent, IAudioProcessor, IEditController, IMidiMapping);
 }
 
-/// The synth's hidden parameter that MIDI CC 7 drives.
+/// Hidden parameters driven by the fixture's MIDI controller mappings.
 const VOLUME_PARAM: ParamID = 1;
+const SUSTAIN_PARAM: ParamID = 2;
+/// A test-only failure signal. The host must not retry this non-release controller.
+const FAIL_PROCESS_PARAM: ParamID = 4;
 
 impl IMidiMappingTrait for Synth {
     unsafe fn getMidiControllerAssignment(&self, bus: i32, channel: i16, ctrl: CtrlNumber, id: *mut ParamID) -> tresult {
-        if bus == 0 && channel == 0 && ctrl == 7 {
-            unsafe { *id = VOLUME_PARAM };
-            kResultOk
-        } else {
-            kResultFalse
+        if bus != 0 || channel != 0 {
+            return kResultFalse;
         }
+        let mapped = match ctrl {
+            7 => VOLUME_PARAM,
+            64 => SUSTAIN_PARAM,
+            119 => FAIL_PROCESS_PARAM,
+            _ => return kResultFalse,
+        };
+        unsafe { *id = mapped };
+        kResultOk
     }
 }
 
@@ -552,24 +564,55 @@ impl IAudioProcessorTrait for Synth {
             }
         }
         let mut volume = None;
+        let mut sustain = None;
+        let mut fail_native_call = false;
         if let Some(changes) = unsafe { ComRef::from_raw(d.inputParameterChanges) } {
             for i in 0..unsafe { changes.getParameterCount() } {
                 let Some(q) = (unsafe { ComRef::from_raw(changes.getParameterData(i)) }) else { continue };
+                let id = unsafe { q.getParameterId() };
+                if id != VOLUME_PARAM && id != SUSTAIN_PARAM && id != FAIL_PROCESS_PARAM {
+                    continue;
+                }
                 let (mut at, mut v) = (0i32, 0f64);
-                if unsafe { q.getParameterId() } == VOLUME_PARAM && unsafe { q.getPoint(0, &mut at, &mut v) } == kResultOk {
-                    volume = Some((at.max(0) as usize, v as f32));
+                if unsafe { q.getPoint(0, &mut at, &mut v) } != kResultOk {
+                    continue;
+                }
+                match id {
+                    VOLUME_PARAM => volume = Some((at.max(0) as usize, v as f32)),
+                    SUSTAIN_PARAM => sustain = Some((at.max(0) as usize, v >= 0.5)),
+                    FAIL_PROCESS_PARAM => fail_native_call = v >= 0.5,
+                    _ => {}
                 }
             }
         }
+        // Deliberate fixture-only native failure *before* any synth state or output mutation.
+        // The host must discard this non-release CC119 and retry the mapped CC64-off separately.
+        if fail_native_call {
+            return kResultFalse;
+        }
         let outs = unsafe { channels(&*d.outputs, frames) };
         let mut level = f32::from_bits(self.level.load(Ordering::Relaxed));
+        let mut held = self.held.load(Ordering::Relaxed);
+        let mut sustain_on = self.sustain.load(Ordering::Relaxed);
         let mut out = vec![0.0f32; frames];
         for (i, o) in out.iter_mut().enumerate() {
+            if let Some((at, on)) = sustain
+                && at == i
+            {
+                sustain_on = on;
+                if !sustain_on && !held {
+                    level = 0.0;
+                }
+            }
             for e in events.iter().filter(|e| e.sampleOffset as usize == i) {
                 if e.r#type == Event_::EventTypes_::kNoteOnEvent as u16 {
+                    held = true;
                     level = unsafe { e.__field0.noteOn.velocity };
                 } else if e.r#type == Event_::EventTypes_::kNoteOffEvent as u16 {
-                    level = 0.0;
+                    held = false;
+                    if !sustain_on {
+                        level = 0.0;
+                    }
                 } else if e.r#type == Event_::EventTypes_::kPolyPressureEvent as u16 {
                     level = unsafe { e.__field0.polyPressure.pressure };
                 }
@@ -582,6 +625,8 @@ impl IAudioProcessorTrait for Synth {
             *o = level;
         }
         self.level.store(level.to_bits(), Ordering::Relaxed);
+        self.held.store(held, Ordering::Relaxed);
+        self.sustain.store(sustain_on, Ordering::Relaxed);
         for ch in outs {
             ch.copy_from_slice(&out);
         }
@@ -691,7 +736,8 @@ impl IPluginFactoryTrait for Factory {
             })
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH_CID {
-            ComWrapper::new(Synth { level: AtomicU32::new(0), _live: Live::new(&OBJECTS) }).to_com_ptr::<FUnknown>()
+            let synth = Synth { level: AtomicU32::new(0), held: AtomicBool::new(false), sustain: AtomicBool::new(false), _live: Live::new(&OBJECTS) };
+            ComWrapper::new(synth).to_com_ptr::<FUnknown>()
         } else {
             None
         };

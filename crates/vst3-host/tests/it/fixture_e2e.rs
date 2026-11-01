@@ -186,6 +186,59 @@ fn reset_after_all_notes_off_still_releases_held_voices() {
 }
 
 #[test]
+fn synth_mapped_sustain_release_survives_reset_after_the_note_was_released() {
+    let mut p = soundcraft_vst3_host::create(&id_of("Fixture Synth")).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    let mut io = vec![vec![0.0f32; 64]; 2];
+    p.midi(0, [0xB0, 64, 127]);
+    p.note_on(0, 60, 127);
+    p.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 1.0).abs() < 1e-6));
+
+    // The note-off has reached the native plugin, but sustain keeps the voice sounding.
+    p.note_off(0, 60);
+    p.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 1.0).abs() < 1e-6), "fixture pedal did not latch the voice");
+
+    // No note remains held by the host; only the queued CC64=0 can silence this voice.
+    p.midi(0, [0xB0, 64, 0]);
+    p.reset();
+    for channel in &mut io {
+        channel.fill(9.0);
+    }
+    p.process(&mut io, 64);
+    assert!(io.iter().flatten().all(|x| x.abs() < 1e-6), "reset discarded the pending native sustain release");
+}
+
+#[test]
+fn synth_native_process_error_retries_only_the_mapped_sustain_release() {
+    let mut p = soundcraft_vst3_host::create(&id_of("Fixture Synth")).unwrap();
+    p.prepare(48_000.0, 64, 2);
+    let mut io = vec![vec![0.0f32; 64]; 2];
+    p.midi(0, [0xB0, 64, 127]);
+    p.note_on(0, 60, 127);
+    p.process(&mut io, 64);
+    p.note_off(0, 60);
+    p.process(&mut io, 64);
+    assert!(io[0].iter().all(|&x| (x - 1.0).abs() < 1e-6), "voice must remain sustained before the failing block");
+
+    // The fixture maps CC119 to a test-only native kResultFalse response. The host must
+    // discard that non-idempotent trigger but retain the accepted mapped CC64 release.
+    p.midi(0, [0xB0, 64, 0]);
+    p.midi(0, [0xB0, 119, 127]);
+    let mut failed_io = vec![vec![5.0f32; 64]; 2];
+    p.process(&mut failed_io, 64);
+    assert!(failed_io.iter().flatten().all(|&x| x == 5.0), "failed native process must not publish output");
+
+    let mut retry_io = vec![vec![9.0f32; 64]; 2];
+    p.process(&mut retry_io, 64);
+    assert!(
+        retry_io.iter().flatten().all(|x| x.abs() < 1e-6),
+        "native retry did not deliver CC64=0 (or replayed the failure controller)"
+    );
+}
+
+#[test]
 fn many_instances_create_and_drop_cleanly() {
     let (g, s) = (id_of("Fixture Gain"), id_of("Fixture Synth"));
     for _ in 0..50 {
