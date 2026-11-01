@@ -108,6 +108,10 @@ pub enum Vst3Error {
     Instantiate(String, String),
     #[error("VST3 processing: {0}")]
     Process(String),
+    /// A retained plugin-side event list is busy; skip native processing rather than replaying
+    /// events from another block. The static error carries no audio-thread allocation.
+    #[error("VST3 processing: event list busy")]
+    EventBufferBusy,
     #[error("VST3 plugins are not supported on this platform")]
     Unsupported,
 }
