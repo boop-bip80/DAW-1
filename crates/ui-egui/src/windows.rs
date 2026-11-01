@@ -573,6 +573,37 @@ fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputSc
     );
 }
 
+/// Manual placement correction for future audio takes; never a hardware latency measurement.
+fn recording_latency_control(ui: &mut egui::Ui, app: &mut SoundApp) {
+    let sample_rate = f64::from(app.engine.session().sample_rate.hz());
+    let samples = soundcraft_engine::io::record_latency_samples(app.engine.session());
+    let mut milliseconds = samples as f64 * 1_000.0 / sample_rate;
+
+    ui.separator();
+    ui.heading("Recording latency (manual)");
+    ui.horizontal(|ui| {
+        let label = ui.label("Manual recording offset");
+        let response = ui
+            .add(egui::Slider::new(&mut milliseconds, -500.0..=500.0).text("ms").fixed_decimals(2))
+            .labelled_by(label.id)
+            .accessible_name("Manual recording offset")
+            .on_hover_text("Positive values place new audio recordings earlier; negative values place them later.");
+        if response.changed()
+            && let Err(error) = app.run("setup.record_latency", json!({"milliseconds": milliseconds}))
+        {
+            app.ui.status = format!("Could not set recording offset: {error}");
+        }
+    });
+    ui.label(format!("Current offset: {milliseconds:+.2} ms (allowed −500 to +500 ms)"));
+    ui.label(
+        egui::RichText::new(
+            "Manual calibration only; SoundCraft has not measured device latency. Positive moves new recorded audio earlier, negative later.",
+        )
+        .small()
+        .color(Tokens::current().text_dim),
+    );
+}
+
 /// Setup › Playback Engine / Hardware: choose the audio system, devices, rate and buffer size.
 pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_playback_engine;
@@ -669,6 +700,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         if crate::widgets::checkbox(ui, &mut dc, "Delay compensation").changed() {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
+        recording_latency_control(ui, app);
         if ui.button("Reconnect audio device").clicked() {
             app.reconnect_audio();
         }
@@ -900,6 +932,58 @@ mod audio_health_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| audio_health(&mut app, ui.ctx()));
         output.textures_delta.clear();
         assert!(app.audio_health_report.is_some());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod recording_latency_tests {
+    use super::*;
+    use egui::{Event, Modifiers, PointerButton, accesskit::Role};
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn harness(app: SoundApp) -> Harness<'static, SoundApp> {
+        Harness::builder().with_size(vec2(800.0, 260.0)).build_ui_state(|ui, app: &mut SoundApp| recording_latency_control(ui, app), app)
+    }
+
+    #[test]
+    fn opening_manual_latency_control_does_not_change_a_clean_session() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("setup.record_latency", json!({"milliseconds": -250.0})).unwrap();
+        app.engine.mark_clean();
+
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("Recording latency (manual)").is_some());
+        assert!(h.query_by_label_contains("Current offset: -250.00 ms").is_some());
+        assert!(h.query_by_label_contains("has not measured device latency").is_some());
+        assert!(h.get_by_role_and_label(Role::Slider, "Manual recording offset").rect().width() > 0.0);
+        assert_eq!(soundcraft_engine::io::record_latency_samples(h.state().engine.session()), -12_000);
+        assert!(!h.state().engine.is_dirty(), "rendering an existing offset must not edit the session");
+        assert!(!h.state().engine.can_undo());
+    }
+
+    #[test]
+    fn moving_the_slider_updates_the_engine_and_is_bounded() {
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let mut h = harness(app);
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty());
+
+        let rect = h.get_by_role_and_label(Role::Slider, "Manual recording offset").rect();
+        let point = egui::pos2(rect.min.x + rect.width() * 0.72, rect.center().y);
+        h.hover_at(point);
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos: point, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            h.step();
+        }
+        h.run_steps(2);
+        let saved = soundcraft_engine::io::record_latency_samples(h.state().engine.session());
+        assert!(saved > 0 && saved <= 24_000, "slider should adjust a signed offset within ±500 ms: {saved}");
+        assert!(h.state().engine.is_dirty());
+        let query = h.state_mut().run("setup.record_latency", json!({})).unwrap();
+        assert_eq!(query["samples"].as_i64(), Some(saved));
+        assert_eq!(query["measured"], false, "UI must not imply automatic device calibration");
     }
 }
 
