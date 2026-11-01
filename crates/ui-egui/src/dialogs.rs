@@ -4,6 +4,8 @@ use crate::SoundApp;
 use crate::theme::{Tokens, bold};
 use egui::{Align2, vec2};
 use serde_json::{Value, json};
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_audio_io::{BitDepth, EncodeOptions, FileFormat};
 use soundcraft_engine::Engine;
 use soundcraft_engine::io::StripNames;
 use soundcraft_model::{ClipId, GroupId, Session, SourceId, TrackId};
@@ -15,6 +17,7 @@ pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
     NewSession { name: String, sample_rate: u32, demo: bool },
     Bounce { path: String, format: String, bit_depth: String, normalize: bool, dither: bool },
+    BounceStems { dir: String, format: String, bit_depth: String, dither: bool, fold_stereo: bool, full_session: bool },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
@@ -53,6 +56,9 @@ pub enum LoopBy {
 #[derive(Default)]
 pub struct Dialogs {
     pub open: Option<Dialog>,
+    /// Native export is advanced in bounded UI-frame slices. Dropping it cancels owned staging.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) stem_bounce: Option<soundcraft_engine::stem_bounce::StemBounceJob>,
     /// Runs once the session has been saved from `SaveChanges`.
     after_save: Option<(String, Value)>,
     /// A session the browser read while the open one had changes, waiting for `SaveChanges`.
@@ -100,6 +106,7 @@ impl Dialogs {
             Dialog::NewTracks { .. } => "new_tracks",
             Dialog::NewSession { .. } => "new_session",
             Dialog::Bounce { .. } => "bounce",
+            Dialog::BounceStems { .. } => "bounce_stems",
             Dialog::RenameTrack { .. } => "rename_track",
             Dialog::RenameClip { .. } => "rename_clip",
             Dialog::RenameMarker { .. } => "rename_marker",
@@ -196,6 +203,22 @@ impl Dialogs {
                     bit_depth: "24".into(),
                     normalize: false,
                     dither: false,
+                }
+            }
+            "file.bounce_stems" => {
+                let dir = e
+                    .path
+                    .as_deref()
+                    .and_then(|path| std::path::Path::new(path).parent())
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .map_or(home, |parent| parent.display().to_string());
+                Dialog::BounceStems {
+                    dir: format!("{dir}/{name} Stems"),
+                    format: "wav".into(),
+                    bit_depth: "24".into(),
+                    dither: true,
+                    fold_stereo: false,
+                    full_session: e.session().edit.selection.is_empty(),
                 }
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
@@ -427,6 +450,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
         Dialog::NewTracks { .. } => "New Tracks",
         Dialog::NewSession { .. } => "New Session",
         Dialog::Bounce { .. } => "Bounce Mix",
+        Dialog::BounceStems { .. } => "Bounce Stems",
         Dialog::RenameTrack { .. } => "Rename Track",
         Dialog::RenameClip { .. } => "Rename Clip",
         Dialog::RenameMarker { .. } => "Rename Marker",
@@ -560,6 +584,101 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                             app,
                             &json!({"path": p.to_string_lossy(), "format": format, "bit_depth": bit_depth, "normalize": normalize, "dither": *dither && bit_depth.as_str() != "32f"}),
                         );
+                        keep = false;
+                    }
+                }
+                Dialog::BounceStems { dir, format, bit_depth, dither, fold_stereo, full_session } => {
+                    ui.horizontal(|ui| {
+                        ui.label("Export folder");
+                        crate::widgets::named_text_field(
+                            ui.add(egui::TextEdit::singleline(dir).desired_width(410.0)),
+                            "Stem export destination folder",
+                        );
+                        if let Some(pick) = &app.services.pick_folder
+                            && ui.button("Browse for stem folder…").clicked()
+                            && let Some(folder) = pick(dir)
+                        {
+                            *dir = folder;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_label("Stem audio format").selected_text(format.to_uppercase()).show_ui(ui, |ui| {
+                            for f in ["wav", "aiff", "flac"] {
+                                ui.selectable_value(format, f.to_owned(), f.to_uppercase());
+                            }
+                        });
+                        egui::ComboBox::from_label("Stem bit depth").selected_text(format!("{bit_depth}-bit")).show_ui(ui, |ui| {
+                            for b in ["16", "24", "32f"] {
+                                ui.add_enabled_ui(format.as_str() != "flac" || b != "32f", |ui| {
+                                    ui.selectable_value(bit_depth, b.to_owned(), format!("{b}-bit"));
+                                });
+                            }
+                        });
+                    });
+                    ui.add_enabled_ui(bit_depth.as_str() != "32f", |ui| {
+                        crate::widgets::checkbox(ui, dither, "Apply TPDF dither to integer stems")
+                            .on_hover_text("Dither applies only when writing 16- or 24-bit integer audio; floating-point stems are not dithered.");
+                    });
+                    crate::widgets::checkbox(ui, fold_stereo, "Fold surround stems down to stereo");
+                    let session = app.engine.session();
+                    let selection = session.edit.selection;
+                    let full_range = soundcraft_time::Range::new(0, session.content_end().max(1));
+                    ui.horizontal(|ui| {
+                        ui.label("Export range:");
+                        ui.add_enabled_ui(!selection.is_empty(), |ui| {
+                            ui.radio_value(full_session, false, "Edit selection");
+                        });
+                        ui.radio_value(full_session, true, "Whole session");
+                    });
+                    let range = if *full_session { full_range } else { selection };
+                    ui.label(format!(
+                        "Range: {:.2}–{:.2} seconds",
+                        session.sample_rate.seconds(range.start),
+                        session.sample_rate.seconds(range.end)
+                    ));
+                    let eligible = session
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            matches!(
+                                track.kind,
+                                soundcraft_model::TrackKind::Audio | soundcraft_model::TrackKind::Instrument | soundcraft_model::TrackKind::Midi
+                            ) && !track.inactive
+                                && !track.mixer.mute
+                        })
+                        .count();
+                    ui.label(format!("{eligible} active, unmuted audio, instrument, or MIDI tracks will be exported."));
+                    ui.label(
+                        egui::RichText::new("Existing stem files are never overwritten. Cancel removes unfinished export files, not other folder contents.")
+                            .small()
+                            .color(Tokens::current().text_dim),
+                    );
+                    let absolute = std::path::Path::new(dir.trim()).is_absolute();
+                    if !absolute {
+                        ui.colored_label(Tokens::current().meter_yellow, "Choose an absolute destination folder before starting.");
+                    }
+                    if format.as_str() == "flac" && bit_depth.as_str() == "32f" {
+                        ui.colored_label(Tokens::current().meter_yellow, "FLAC cannot store floating-point audio; choose 16- or 24-bit stems.");
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let options = stem_encode_options(format, bit_depth, *dither);
+                    #[cfg(target_arch = "wasm32")]
+                    let options: Option<()> = None;
+                    if cfg!(target_arch = "wasm32") {
+                        ui.label("Stem export to local folders is unavailable in the browser.");
+                    }
+                    let ready = absolute
+                        && eligible > 0
+                        && !range.is_empty()
+                        && options.is_some()
+                        && !app.engine.transport.recording
+                        && app.bounce.is_none()
+                        && !crate::bounce::stem_running(app);
+                    if buttons_enabled(ui, "Export Stems", enter, ready) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(options) = options {
+                            crate::bounce::start_stems(app, dir, range, &options, *fold_stereo);
+                        }
                         keep = false;
                     }
                 }
@@ -1067,6 +1186,25 @@ fn buttons_enabled(ui: &mut egui::Ui, ok: &str, enter: bool, ready: bool) -> boo
     pressed
 }
 
+/// The GUI exposes exactly the codecs and bit depths accepted by the registered stem command.
+/// In particular, FLAC has no floating-point representation and 32f never needs TPDF dither.
+#[cfg(not(target_arch = "wasm32"))]
+fn stem_encode_options(format: &str, bit_depth: &str, dither: bool) -> Option<EncodeOptions> {
+    let format = match format {
+        "wav" => FileFormat::Wav,
+        "aiff" => FileFormat::Aiff,
+        "flac" => FileFormat::Flac,
+        _ => return None,
+    };
+    let bit_depth = match bit_depth {
+        "16" => BitDepth::Int16,
+        "24" => BitDepth::Int24,
+        "32f" if format != FileFormat::Flac => BitDepth::Float32,
+        _ => return None,
+    };
+    Some(EncodeOptions { format, bit_depth, dither: dither && bit_depth != BitDepth::Float32, bwf: None })
+}
+
 /// A name field that takes the focus with its text selected, so typing replaces the old name.
 fn name_field(ui: &mut egui::Ui, name: &mut String) {
     let mut out = egui::TextEdit::singleline(name).show(ui);
@@ -1190,7 +1328,138 @@ fn loop_length(s: &Session, text: &str, format: soundcraft_time::TimeFormat, sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct StemTestFolder(std::path::PathBuf);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
+    impl StemTestFolder {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!("soundcraft-stem-dialog-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            std::fs::create_dir(&path).expect("isolated test destination");
+            Self(path)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+
+        fn contents(&self) -> Vec<std::ffi::OsString> {
+            std::fs::read_dir(&self.0).expect("inspect test destination").map(|entry| entry.expect("directory entry").file_name()).collect()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for StemTestFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stem_test_engine() -> Engine {
+        let mut engine = Engine::default();
+        engine.session_mut().add_track(soundcraft_model::TrackKind::Audio, soundcraft_model::ChannelFormat::Mono, Some("Guitar"));
+        engine.session_mut().add_track(soundcraft_model::TrackKind::Instrument, soundcraft_model::ChannelFormat::Stereo, Some("Keys"));
+        engine.mark_clean();
+        engine
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stem_dialog_is_accessible_browse_is_explicit_and_paint_cannot_start_export() {
+        use std::{cell::Cell, rc::Rc};
+        let folder = StemTestFolder::new();
+        let picked = Rc::new(Cell::new(0));
+        let picked_in_service = Rc::clone(&picked);
+        let chosen = folder.path();
+        let services = crate::Services {
+            pick_folder: Some(Box::new(move |_| {
+                picked_in_service.set(picked_in_service.get() + 1);
+                Some(chosen.clone())
+            })),
+            ..Default::default()
+        };
+        let mut app = SoundApp::new(stem_test_engine(), None, services);
+        assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        let journal = app.engine.journal.clone();
+        let document = app.engine.session().to_json();
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1170.0, 800.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(harness.get_by_label("Stem export destination folder").rect().width() > 0.0);
+        assert!(!harness.get_by_label("Export Stems").accesskit_node().is_disabled(), "valid tracks and folder enable explicit export");
+        assert_eq!(picked.get(), 0, "painting must not invoke the native folder picker");
+        assert!(harness.state().dialogs.stem_bounce.is_none(), "painting must not create an incremental export job");
+        assert_eq!(harness.state().engine.session().to_json(), document);
+        assert_eq!(harness.state().engine.journal, journal);
+        assert!(!harness.state().engine.is_dirty());
+
+        harness.get_by_label("Browse for stem folder…").click();
+        harness.run_steps(2);
+        assert_eq!(picked.get(), 1);
+        assert!(matches!(&harness.state().dialogs.open, Some(Dialog::BounceStems { dir, .. }) if dir == &folder.path()));
+        assert!(harness.state().dialogs.stem_bounce.is_none(), "picking a folder must not start exporting");
+        assert!(folder.contents().is_empty(), "no staging or audio files before Start");
+        assert_eq!(harness.state().engine.journal, journal);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn stem_dialog_disables_export_with_no_signal_tracks_and_rejects_float_flac() {
+        let mut app = SoundApp::new(Engine::default(), None, crate::Services::default());
+        assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1170.0, 800.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(harness.get_by_label("Export Stems").accesskit_node().is_disabled());
+        assert!(harness.state().dialogs.stem_bounce.is_none());
+        assert!(harness.state().engine.journal.is_empty());
+        assert!(!harness.state().engine.is_dirty());
+        assert!(stem_encode_options("flac", "32f", true).is_none());
+        assert!(!stem_encode_options("wav", "32f", true).expect("float WAV is valid").dither);
+        assert!(stem_encode_options("flac", "24", true).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stem_dialog_start_then_escape_cancels_staging_without_journaling() {
+        let folder = StemTestFolder::new();
+        let mut app = SoundApp::new(stem_test_engine(), None, crate::Services::default());
+        assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        if let Some(Dialog::BounceStems { dir, .. }) = app.dialogs.open.as_mut() {
+            *dir = folder.path();
+        }
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1170.0, 800.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(!harness.get_by_label("Export Stems").accesskit_node().is_disabled());
+        harness.get_by_label("Export Stems").click();
+        harness.run_steps(2);
+        assert!(harness.state().dialogs.stem_bounce.is_some(), "only Start may allocate a stem job");
+        assert!(harness.state().dialogs.open.is_none(), "options dialog closes on Start");
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        assert!(harness.state().dialogs.stem_bounce.is_none(), "Escape must cancel ongoing stem export");
+        assert!(folder.contents().is_empty(), "cancel must remove owned staging");
+        assert!(harness.state().engine.journal.is_empty(), "canceled export must not journal");
+        assert!(!harness.state().engine.is_dirty());
+        assert!(!harness.state().engine.can_undo());
+    }
 
     #[test]
     fn file_commands_get_path_prompts_with_sensible_names() {

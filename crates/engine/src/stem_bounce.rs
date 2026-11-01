@@ -7,7 +7,7 @@
 
 use crate::io::{self, Bounce, StemBatch};
 use crate::{Engine, EngineError, Result};
-use soundcraft_audio_io::{EncodeOptions, FileFormat};
+use soundcraft_audio_io::{BitDepth, EncodeOptions, FileFormat};
 use soundcraft_model::{Session, TrackId, TrackKind};
 use soundcraft_time::Range;
 use std::path::{Path, PathBuf};
@@ -116,6 +116,44 @@ impl StemBounceJob {
     /// `Some(paths)` means the entire batch was committed successfully.
     pub fn step(&mut self, more: impl FnMut() -> bool) -> Result<Option<Vec<String>>> {
         self.step_with_publisher(more, io::publish_stem_link_no_replace)
+    }
+
+    /// Record a completed GUI export without running `file.bounce_stems` a second time.
+    /// Consuming the job prevents duplicate journal entries. Unfinished or failed jobs cannot
+    /// claim success; dropping them still rolls back their owned staging and published links.
+    pub fn record_completed(mut self, engine: &mut Engine) -> Result<Vec<String>> {
+        if !self.finished || self.failed {
+            return Err(EngineError::Io("cannot journal an unfinished stem export".into()));
+        }
+        if !Arc::ptr_eq(&self.session, &engine.session_arc()) {
+            return Err(EngineError::BadParams(
+                "file.bounce_stems".into(),
+                "the session changed during stem export; completed files remain but cannot be journaled to a different session".into(),
+            ));
+        }
+        let format = match self.options.format {
+            FileFormat::Wav => "wav",
+            FileFormat::Aiff => "aiff",
+            FileFormat::Flac => "flac",
+            _ => return Err(EngineError::BadParams("file.bounce_stems".into(), "unsupported completed stem file format".into())),
+        };
+        let bit_depth = match self.options.bit_depth {
+            BitDepth::Int16 => "16",
+            BitDepth::Int24 => "24",
+            BitDepth::Float32 => "32f",
+            _ => return Err(EngineError::BadParams("file.bounce_stems".into(), "unsupported completed stem bit depth".into())),
+        };
+        let params = serde_json::json!({
+            "dir": self.destination_dir.to_string_lossy(),
+            "start": self.range.start,
+            "end": self.range.end,
+            "format": format,
+            "bit_depth": bit_depth,
+            "dither": self.options.dither,
+            "fold_down": if self.fold_stereo { "stereo" } else { "none" },
+        });
+        engine.journal.push(("file.bounce_stems".into(), params));
+        Ok(std::mem::take(&mut self.paths))
     }
 
     /// Publisher injection preserves the synchronous command's existing race/rollback tests.
@@ -399,5 +437,72 @@ mod tests {
         assert_eq!(engine.undo_history().len(), undo_before, "noundo command creates no undo entry");
         assert_eq!(engine.journal.len(), journal_before + 1, "noundo command is still journaled");
         assert_eq!(engine.journal.last().map(|(id, _)| id.as_str()), Some("file.bounce_stems"));
+    }
+
+    #[test]
+    fn gui_completion_requires_committed_batch_and_journals_normalized_export_once() {
+        let dir = TestDir::new("gui-journal");
+        let mut engine = engine();
+        let undo_before = engine.undo_history().len();
+        let mut unfinished = start(&engine, &dir);
+        assert!(unfinished.step(|| false).expect("partial render").is_none());
+        assert!(unfinished.record_completed(&mut engine).is_err(), "an unfinished export cannot claim success");
+        assert!(engine.journal.is_empty(), "cancellation must not add a journal entry");
+        assert!(dir.entries().is_empty(), "unfinished job still rolls back staging on drop");
+
+        let mut job = start(&engine, &dir);
+        loop {
+            if job.step(|| false).expect("bounded render").is_some() {
+                break;
+            }
+        }
+        let files = job.record_completed(&mut engine).expect("committed batch may be journaled");
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().all(|path| Path::new(path).is_file()), "completed outputs persist");
+        assert_eq!(engine.journal.len(), 1, "one export records one event");
+        assert_eq!(
+            engine.journal[0],
+            (
+                "file.bounce_stems".to_owned(),
+                serde_json::json!({
+                    "dir": dir.as_str(), "start": 0, "end": 4_800, "format": "wav",
+                    "bit_depth": "24", "dither": false, "fold_down": "none"
+                }),
+            )
+        );
+        assert!(!engine.is_dirty(), "export must not edit the session");
+        assert_eq!(engine.undo_history().len(), undo_before, "completed export is not undoable");
+    }
+
+    #[test]
+    fn completed_export_cannot_be_journaled_into_another_or_replaced_session() {
+        let dir = TestDir::new("foreign-engine");
+        let origin = engine();
+        let mut job = start(&origin, &dir);
+        loop {
+            if job.step(|| false).expect("complete export").is_some() {
+                break;
+            }
+        }
+        let mut other = engine();
+        let error = job.record_completed(&mut other).expect_err("another engine must not claim the finished export");
+        assert!(error.to_string().contains("session changed"), "{error}");
+        assert!(other.journal.is_empty(), "different engine cannot receive a fabricated completion event");
+        assert!(origin.journal.is_empty(), "the source session cannot be journaled by a different engine");
+        assert_eq!(dir.entries().len(), 2, "already committed files are not deleted on journal rejection");
+
+        let replaced_dir = TestDir::new("replaced-engine");
+        let mut engine = engine();
+        let mut job = start(&engine, &replaced_dir);
+        loop {
+            if job.step(|| false).expect("complete export").is_some() {
+                break;
+            }
+        }
+        engine.replace_session(Session::default());
+        let error = job.record_completed(&mut engine).expect_err("replaced session must refuse completed export journal");
+        assert!(error.to_string().contains("session changed"), "{error}");
+        assert!(engine.journal.is_empty());
+        assert_eq!(replaced_dir.entries().len(), 2, "finished files survive replacement without mis-journaling");
     }
 }
