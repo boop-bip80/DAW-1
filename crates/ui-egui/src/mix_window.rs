@@ -173,6 +173,12 @@ pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
     if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) }
 }
 
+/// Polarity is an audible DSP operation on tracks that produce or route audio.
+/// MIDI-only, VCA, folder and video tracks have no audio path to invert.
+fn has_audio_polarity(kind: TrackKind) -> bool {
+    matches!(kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Aux | TrackKind::Master)
+}
+
 /// The input or output menu under `resp`. It closes only on a click outside, so its bus search
 /// field can be typed in.
 pub(crate) fn route_popup(app: &mut SoundApp, resp: &egui::Response, id: TrackId, input: bool) {
@@ -328,17 +334,32 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         section_label(ui, sec, "I / O", narrow);
         let in_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 15.0), vec2(inner_w - 4.0, 16.0));
         let out_r = Rect::from_min_size(pos2(x0 + 2.0, sec.min.y + 33.0), vec2(inner_w - 4.0, 16.0));
-        let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-input", id.0)).max_rect(in_r));
+        // Keep phase reversal visible in the default I/O view: the optional PREAMP
+        // section is hidden on a new install. Reserve 18 pt plus a 2 pt gap beside
+        // the input selector, including in narrow strips.
+        let polarity = has_audio_polarity(track.kind);
+        let input_selector_r = if polarity { in_r.with_max_x(in_r.max.x - 20.0) } else { in_r };
+        let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-input", id.0)).max_rect(input_selector_r));
         let input = input_name(app, track);
         let resp = selector_box_named(
             &mut c,
-            in_r.width(),
-            in_r.height(),
+            input_selector_r.width(),
+            input_selector_r.height(),
             &input,
             t.text,
             SelectorLabels { name: &format!("Input for {}", track.name), value: &input, tooltip: "Input" },
         );
         route_popup(app, &resp, id, true);
+        if polarity {
+            let polarity_r = Rect::from_min_size(pos2(in_r.max.x - 18.0, in_r.min.y), vec2(18.0, in_r.height()));
+            let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-polarity", id.0)).max_rect(polarity_r));
+            let label = format!("Invert polarity for {}", track.name);
+            if text_toggle(&mut c, polarity_r.size(), "Ø", track.mixer.phase_invert, t.mode_on, &label).clicked()
+                && let Err(error) = app.run("mix.phase_invert", json!({"tracks": [id.0], "value": !track.mixer.phase_invert}))
+            {
+                app.ui.status = format!("Could not change track polarity: {error}");
+            }
+        }
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-output", id.0)).max_rect(out_r));
         let output = output_name(app, track);
         let resp = selector_box_named(
@@ -1679,14 +1700,75 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        MidiOutputScan, Readout, distinct_output_names, dragged_send_db, editable_readout, input_name, input_route_choices, midi_input_route_menu,
-        midi_output_route_menu_with_scan, output_name, parse_db, parse_pan, route_menu,
+        MidiOutputScan, Readout, distinct_output_names, dragged_send_db, editable_readout, has_audio_polarity, input_name, input_route_choices,
+        midi_input_route_menu, midi_output_route_menu_with_scan, output_name, parse_db, parse_pan, route_menu,
     };
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
     use egui_kittest::{
         Harness,
         kittest::{NodeT, Queryable},
     };
+
+    #[test]
+    fn polarity_toggle_is_reachable_in_default_mix_view_and_undoable() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Kick"));
+        assert!(app.ui.mix_views.iter().any(|section| section == "io"), "new sessions expose Mix I/O by default");
+        assert!(!app.ui.mix_views.iter().any(|section| section == "mic_preamps"), "PREAMP is optional; polarity must still be reachable");
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(620.0, 820.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::strip(app, ui, id, None, false), app);
+        h.run_steps(3);
+        assert!(h.get_by_label("Invert polarity for Kick").rect().width() >= 17.0, "polarity control must be reachable in default Mix");
+        assert!(h.get_by_label("Input for Kick").rect().width() >= 30.0, "input route remains accessible alongside polarity");
+        assert!(!h.state().engine.session().track(id).expect("track").mixer.phase_invert);
+        assert!(!h.state().engine.is_dirty(), "showing the polarity state must not mutate session");
+        let undo_before = h.state().engine.undo_history().len();
+
+        h.get_by_label("Invert polarity for Kick").click();
+        h.run_steps(2);
+        assert!(h.state().engine.session().track(id).expect("track").mixer.phase_invert, "click must execute real phase-invert command");
+        assert!(h.state().engine.is_dirty());
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "phase inversion must add one undo step");
+
+        h.state_mut().run("edit.undo", serde_json::json!({})).expect("undo phase inversion");
+        h.run_steps(2);
+        assert!(!h.state().engine.session().track(id).expect("track").mixer.phase_invert);
+        h.state_mut().run("edit.redo", serde_json::json!({})).expect("redo phase inversion");
+        h.run_steps(2);
+        assert!(h.state().engine.session().track(id).expect("track").mixer.phase_invert);
+        h.state_mut().engine.mark_clean();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty(), "painting selected polarity button must not create another edit");
+    }
+
+    #[test]
+    fn polarity_toggle_keeps_narrow_input_usable_and_excludes_non_audio_tracks() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        for kind in [TrackKind::Audio, TrackKind::Instrument, TrackKind::Aux, TrackKind::Master] {
+            assert!(has_audio_polarity(kind), "audio-producing {kind:?} should support polarity inversion");
+        }
+        for kind in [TrackKind::Midi, TrackKind::Vca, TrackKind::Folder, TrackKind::Video] {
+            assert!(!has_audio_polarity(kind), "non-audio {kind:?} must not show a misleading polarity button");
+        }
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        app.ui.narrow_mix = true;
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(500.0, 820.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::strip(app, ui, id, None, false), app);
+        h.run_steps(3);
+        let input = h.get_by_label("Input for Guitar").rect();
+        let polarity = h.get_by_label("Invert polarity for Guitar").rect();
+        assert!(input.width() >= 30.0, "input selector must retain a clickable narrow-strip width: {input:?}");
+        assert!(polarity.width() >= 17.0 && polarity.min.x >= input.max.x, "polarity must not overlap input selector: {input:?} {polarity:?}");
+        assert!(!h.state().engine.is_dirty());
+    }
 
     fn synthetic_outputs(names: &[&str]) -> MidiOutputScan {
         MidiOutputScan { ports: names.iter().map(|name| (*name).to_string()).collect(), error: None }
