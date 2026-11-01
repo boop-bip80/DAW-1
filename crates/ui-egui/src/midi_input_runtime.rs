@@ -15,6 +15,7 @@ use soundcraft_midi::{
     live::{LiveMidiMessage, TimedMidiMessage},
 };
 use soundcraft_time::Samples;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Keep multiple input-device selections bounded, even for hostile session preferences.
@@ -78,12 +79,35 @@ fn matching_ports(selected: &[String], available: &[MidiInputPortInfo]) -> Resul
         if ports.is_empty() {
             return Err(format!("selected MIDI input '{selected_name}' is unavailable; rescan MIDI Inputs in Setup > Playback Engine"));
         }
+        if ports.len() > 1 {
+            return Err(format!(
+                "MIDI input '{selected_name}' is ambiguous: multiple ports share this name; disambiguate the devices before recording"
+            ));
+        }
         matching.extend(ports);
         if matching.len() > MAX_OPEN_PORTS {
             return Err(format!("at most {MAX_OPEN_PORTS} simultaneous MIDI input ports can be recorded"));
         }
     }
     Ok(matching)
+}
+
+fn validate_track_routes(engine: &Engine, selected: &[String]) -> Result<(), String> {
+    for track in engine.session().tracks.iter().filter(|track| track.kind.is_midi() && track.mixer.record_arm && !track.inactive) {
+        let route = &track.midi_input;
+        if route.channel.is_some_and(|channel| !(1..=16).contains(&channel)) {
+            return Err(format!("track '{}' has an invalid MIDI channel; choose All or 1..16", track.name));
+        }
+        if let Some(port) = &route.port {
+            if port.is_empty() || port_key(port) != *port {
+                return Err(format!("track '{}' has an invalid saved MIDI port name", track.name));
+            }
+            if !selected.contains(port) {
+                return Err(format!("track '{}' uses MIDI input '{port}', which is not enabled under Setup > Playback Engine", track.name));
+            }
+        }
+    }
+    Ok(())
 }
 
 enum InputSource {
@@ -114,7 +138,10 @@ impl InputSource {
 }
 
 struct MidiPortFeed {
+    /// Full OS name for connection/status reporting.
     name: String,
+    /// Stable normalized name for matching the saved track route.
+    key: String,
     source: InputSource,
     /// First event timestamp on this source, and the transport-relative microseconds when
     /// it was first observed. Each input connection has its own unspecified timestamp epoch.
@@ -133,6 +160,7 @@ impl MidiInputSources {
         if selected.is_empty() {
             return Err("no MIDI input selected; enable a port under Setup > Playback Engine > MIDI Inputs".into());
         }
+        validate_track_routes(engine, &selected)?;
         let available = device::input_ports().map_err(|e| format!("scan MIDI inputs: {e}"))?;
         let matching = matching_ports(&selected, &available)?;
         let feeds = matching
@@ -143,7 +171,7 @@ impl MidiInputSources {
                 if port_key(&stream.port().name) != port_key(&port.name) {
                     return Err(format!("MIDI input '{}' changed during opening; rescan and retry", port.name));
                 }
-                Ok(MidiPortFeed { name: port.name.clone(), source: InputSource::Native(stream), anchor: None })
+                Ok(MidiPortFeed { name: port.name.clone(), key: port_key(&port.name), source: InputSource::Native(stream), anchor: None })
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(Self { feeds })
@@ -151,7 +179,7 @@ impl MidiInputSources {
 
     #[cfg(test)]
     pub(crate) fn fake(name: &str, queue: MidiCaptureQueue, present: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
-        Self { feeds: vec![MidiPortFeed { name: name.to_owned(), source: InputSource::Fake { queue, present }, anchor: None }] }
+        Self { feeds: vec![MidiPortFeed { name: name.to_owned(), key: port_key(name), source: InputSource::Fake { queue, present }, anchor: None }] }
     }
 
     #[cfg(test)]
@@ -160,12 +188,19 @@ impl MidiInputSources {
             .into_iter()
             .map(|(name, queue)| MidiPortFeed {
                 name: name.to_owned(),
+                key: port_key(name),
                 source: InputSource::Fake { queue, present: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)) },
                 anchor: None,
             })
             .collect();
         Self { feeds }
     }
+}
+
+#[derive(Clone, Copy)]
+struct SourcedMidiEvent {
+    source_index: usize,
+    event: TimedMidiMessage,
 }
 
 pub(crate) struct MidiInputRuntime {
@@ -175,13 +210,31 @@ pub(crate) struct MidiInputRuntime {
     sample_rate_hz: u64,
     last_emitted_micros: u64,
     last_rescan: Instant,
-    batch: Vec<TimedMidiMessage>,
+    batch: Vec<SourcedMidiEvent>,
 }
 
 impl MidiInputRuntime {
     pub(crate) fn begin(engine: &Engine, sources: MidiInputSources) -> Result<Self, String> {
         if sources.feeds.is_empty() || sources.feeds.len() > MAX_OPEN_PORTS {
             return Err("MIDI recording requires 1 to 16 selected input ports".into());
+        }
+        let selected = selected_names(engine);
+        validate_track_routes(engine, &selected)?;
+        let mut opened = HashSet::new();
+        for feed in &sources.feeds {
+            if feed.key.is_empty() || !opened.insert(feed.key.as_str()) {
+                return Err(format!("MIDI input '{}' is ambiguous or has a blank name", feed.name));
+            }
+            if !selected.contains(&feed.key) {
+                return Err(format!("MIDI input '{}' is not globally enabled", feed.name));
+            }
+        }
+        for track in engine.session().tracks.iter().filter(|track| track.kind.is_midi() && track.mixer.record_arm && !track.inactive) {
+            if let Some(port) = &track.midi_input.port
+                && !opened.contains(port.as_str())
+            {
+                return Err(format!("track '{}' MIDI input '{port}' is not connected", track.name));
+            }
         }
         let mut bridge = MidiRecordBridge::begin(engine).map_err(|e| e.to_string())?;
         bridge.set_anchor(0, bridge.start_sample()).map_err(|e| e.to_string())?;
@@ -222,7 +275,7 @@ impl MidiInputRuntime {
         let mut consumed = 0;
         while consumed < limit {
             let mut received = false;
-            for feed in &mut self.feeds {
+            for (source_index, feed) in self.feeds.iter_mut().enumerate() {
                 if consumed >= limit {
                     break;
                 }
@@ -237,17 +290,18 @@ impl MidiInputRuntime {
                     return Err(format!("MIDI input '{}' timestamp moved backwards", feed.name));
                 }
                 event.timestamp_micros = at_micros.saturating_add(event.timestamp_micros - origin);
-                self.batch.push(event);
+                self.batch.push(SourcedMidiEvent { source_index, event });
             }
             if !received {
                 break;
             }
         }
-        self.batch.sort_by_key(|event| event.timestamp_micros);
-        for event in &mut self.batch {
-            event.timestamp_micros = event.timestamp_micros.max(self.last_emitted_micros);
-            self.bridge.record_event(*event).map_err(|e| e.to_string())?;
-            self.last_emitted_micros = event.timestamp_micros;
+        self.batch.sort_by_key(|sourced| sourced.event.timestamp_micros);
+        for sourced in &mut self.batch {
+            sourced.event.timestamp_micros = sourced.event.timestamp_micros.max(self.last_emitted_micros);
+            let name = &self.feeds.get(sourced.source_index).ok_or_else(|| "MIDI input source disappeared during queue drain".to_owned())?.key;
+            self.bridge.record_sourced_event(name, sourced.event).map_err(|e| e.to_string())?;
+            self.last_emitted_micros = sourced.event.timestamp_micros;
         }
         if check_presence && self.last_rescan.elapsed() >= PORT_RESCAN_INTERVAL {
             self.last_rescan = Instant::now();
@@ -441,6 +495,55 @@ mod tests {
         assert_eq!(matching_ports(&["Keys B".into()], &available).unwrap(), vec![available[1].clone()]);
         assert!(matching_ports(&["Disconnected Keys".into()], &available).unwrap_err().contains("unavailable"));
         assert!(matching_ports(&[], &available).unwrap_err().contains("no MIDI input selected"));
+        let duplicate_names = vec![MidiInputPortInfo { name: "Keys= A".into(), index: 0 }, MidiInputPortInfo { name: "Keys A".into(), index: 1 }];
+        assert!(matching_ports(&["Keys A".into()], &duplicate_names).unwrap_err().contains("ambiguous"));
+    }
+
+    #[test]
+    fn native_record_stop_routes_by_port_and_one_based_channel() {
+        let (mut app, all) = armed_midi_app();
+        let routed_a = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Only A ch1"));
+        let routed_b = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Only B ch16"));
+        app.engine.execute("mix.record_arm", &json!({"tracks": [routed_a.0, routed_b.0], "value": true})).unwrap();
+        app.engine.execute("setup.midi_input_devices", &json!({"enable": ["Second Keyboard"]})).unwrap();
+        app.engine.execute("track.midi_input", &json!({"track": routed_a.0, "port": "Fake Keyboard", "channel": 1})).unwrap();
+        app.engine.execute("track.midi_input", &json!({"track": routed_b.0, "port": "Second Keyboard", "channel": 16})).unwrap();
+        let (mut first, q1) = device::capture_channel(16).unwrap();
+        let (mut second, q2) = device::capture_channel(16).unwrap();
+        app.midi_test_sources = Some(MidiInputSources::fake_many(vec![("Fake Keyboard", q1), ("Second Keyboard", q2)]));
+        request_record(&mut app);
+        first.push_packet(100, &[0x90, 60, 100, 0xB0, 7, 90]);
+        second.push_packet(5_000_000, &[0x9F, 65, 96, 0xBF, 7, 75]);
+        app.poll_midi_input();
+        first.push_packet(500_100, &[0x80, 60, 64]);
+        second.push_packet(5_500_000, &[0x8F, 65, 64]);
+        app.engine.transport.position = 72_000;
+        app.poll_midi_input();
+        request_stop(&mut app, 96_000);
+        let summary = |id| {
+            let clips = app.engine.session().track(id).unwrap().clips();
+            let ClipContent::Midi { sequence } = &clips[0].content else { panic!("MIDI clip expected") };
+            (sequence.notes.iter().map(|n| n.pitch).collect::<Vec<_>>(), sequence.ctrls.len())
+        };
+        assert_eq!(summary(all), (vec![60, 65], 2));
+        assert_eq!(summary(routed_a), (vec![60], 1));
+        assert_eq!(summary(routed_b), (vec![65], 1));
+    }
+
+    #[test]
+    fn stale_disabled_named_route_and_ambiguous_fake_ports_fail_preflight() {
+        let (mut app, track) = armed_midi_app();
+        app.engine.session_mut().track_mut(track).unwrap().midi_input.port = Some("Unplugged Keys".into());
+        let selected = selected_names(&app.engine);
+        assert!(validate_track_routes(&app.engine, &selected).unwrap_err().contains("not enabled"));
+        app.engine.session_mut().track_mut(track).unwrap().midi_input.port = None;
+        let (_, first) = device::capture_channel(8).unwrap();
+        let (_, second) = device::capture_channel(8).unwrap();
+        app.midi_test_sources = Some(MidiInputSources::fake_many(vec![("Fake Keyboard", first), ("Fake Keyboard", second)]));
+        app.start_recording();
+        assert!(!app.engine.transport.recording);
+        assert!(app.ui.status.contains("ambiguous"));
+        assert!(app.engine.session().track(track).unwrap().clips().is_empty());
     }
 
     #[test]
