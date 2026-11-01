@@ -86,7 +86,7 @@ fn file_url(path: &Path) -> Result<String> {
     Ok(format!("file://{}", percent_encode_path(raw)))
 }
 
-fn media_url(session: &Session, source: &Source) -> Result<String> {
+pub(crate) fn media_url(session: &Session, source: &Source) -> Result<String> {
     if source.unsaved {
         return Err(unsupported(format!("source `{}` has unsaved audio; save the session first", source.name)));
     }
