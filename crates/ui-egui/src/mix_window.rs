@@ -1,5 +1,7 @@
 //! The Mix window: one channel strip per track.
 
+use std::sync::Arc;
+
 use crate::SoundApp;
 use crate::theme::{Tokens, bold, regular, rgb};
 use crate::widgets::{
@@ -143,6 +145,21 @@ pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
         Route::Bus(b) => app.engine.session().bus(*b).map_or_else(|| "bus?".into(), |b| b.name.clone()),
         Route::Hardware(h) => h.clone(),
     }
+}
+
+/// A pure MIDI track's output is an explicit external MIDI route, not its unused audio bus.
+/// Instruments still send audio to their mixer output and expose MIDI output separately.
+pub(crate) fn output_name(app: &SoundApp, track: &Track) -> String {
+    if track.kind == TrackKind::Midi {
+        return track.midi_output.as_ref().map_or_else(
+            || "No MIDI output".to_string(),
+            |route| match route.channel {
+                Some(channel) => format!("{} · ch {channel}", route.port),
+                None => route.port.clone(),
+            },
+        );
+    }
+    route_name(app, &track.mixer.output)
 }
 
 pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
@@ -323,7 +340,7 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
         );
         route_popup(app, &resp, id, true);
         let mut c = ui.new_child(egui::UiBuilder::new().id_salt(("mix-output", id.0)).max_rect(out_r));
-        let output = route_name(app, &track.mixer.output);
+        let output = output_name(app, track);
         let resp = selector_box_named(
             &mut c,
             out_r.width(),
@@ -1361,6 +1378,153 @@ fn input_route_choices(opened_channels: Option<usize>) -> usize {
     opened_channels.unwrap_or(8).clamp(1, 64)
 }
 
+/// The native scan may block on an OS driver, so only refresh on the first opened popup
+/// or an explicit user request. Never probe as part of painting a closed strip.
+#[derive(Debug, Clone, Default)]
+struct MidiOutputScan {
+    /// Only stable, session-persistable port names cross this UI boundary; native driver
+    /// indices/identities have no meaning to a saved track or a WASM build.
+    ports: Vec<String>,
+    error: Option<String>,
+}
+
+fn output_scan_id() -> egui::Id {
+    egui::Id::unique("mix_midi_output_ports")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn discover_output_ports() -> MidiOutputScan {
+    match soundcraft_midi::output::output_ports() {
+        Ok(ports) => MidiOutputScan { ports: ports.into_iter().map(|port| port.name).collect(), error: None },
+        Err(err) => MidiOutputScan { ports: Vec::new(), error: Some(err.to_string()) },
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn discover_output_ports() -> MidiOutputScan {
+    MidiOutputScan { ports: Vec::new(), error: Some("Native MIDI output selection is unavailable in the web app.".into()) }
+}
+
+fn output_scan(ctx: &egui::Context, refresh: bool) -> Arc<MidiOutputScan> {
+    let id = output_scan_id();
+    if !refresh && let Some(cached) = ctx.data(|data| data.get_temp::<Arc<MidiOutputScan>>(id)) {
+        return cached;
+    }
+    let scan = Arc::new(discover_output_ports());
+    ctx.data_mut(|data| data.insert_temp(id, Arc::clone(&scan)));
+    scan
+}
+
+/// Display an ambiguous exact port name once, but prevent it from being selected: the
+/// persisted route contains a name, not a transient driver index or device identity.
+fn distinct_output_names(scan: &MidiOutputScan) -> Vec<(&str, bool)> {
+    let mut names: Vec<&str> = scan.ports.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    let mut unique: Vec<(&str, bool)> = Vec::new();
+    for name in names {
+        if let Some((last, ambiguous)) = unique.last_mut()
+            && *last == name
+        {
+            *ambiguous = true;
+            continue;
+        }
+        unique.push((name, false));
+    }
+    unique
+}
+
+fn midi_output_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+    // This function is called only by the open popup, not the per-frame strip painter.
+    let mut scan = output_scan(ui.ctx(), false);
+    if ui.button("Refresh MIDI output ports").clicked() {
+        scan = output_scan(ui.ctx(), true);
+    }
+    midi_output_route_menu_with_scan(app, ui, id, &scan);
+}
+
+fn midi_output_route_menu_with_scan(app: &mut SoundApp, ui: &mut Ui, id: TrackId, scan: &MidiOutputScan) {
+    let Some(track) = app.engine.session().track(id) else { return };
+    if !track.kind.is_midi() {
+        return;
+    }
+    let track_name = track.name.clone();
+    let selected_port = track.midi_output.as_ref().map(|route| route.port.clone());
+    let selected_channel = track.midi_output.as_ref().and_then(|route| route.channel);
+    let busy = app.engine.transport.playing || app.engine.transport.recording;
+    let ports = distinct_output_names(scan);
+
+    ui.strong(format!("External MIDI output for {track_name}"));
+    ui.label(format!("Selected: {}", selected_port.as_deref().unwrap_or("No external MIDI output")));
+    if busy {
+        ui.label("Stop playback or recording before changing external MIDI routing.");
+    }
+    ui.add_enabled_ui(!busy, |ui| {
+        let none_selected = selected_port.is_none();
+        if ui.selectable_label(none_selected, "No external MIDI output").clicked() && !none_selected {
+            if let Err(error) = app.run("track.midi_output", json!({"track": id.0, "port": null})) {
+                app.ui.status = format!("Could not disconnect external MIDI output: {error}");
+            } else {
+                ui.close();
+            }
+        }
+        if ports.is_empty() {
+            ui.label("No external MIDI output ports were found on this computer.");
+        }
+        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+            for (port, ambiguous) in &ports {
+                let selected = selected_port.as_deref() == Some(*port);
+                let label = if *ambiguous { format!("{port} (duplicate name — unavailable)") } else { (*port).to_string() };
+                let response = ui
+                    .add_enabled(!ambiguous, egui::Button::selectable(selected, label))
+                    .on_disabled_hover_text("Multiple MIDI output devices have this exact name. They cannot be selected safely.");
+                if response.clicked() && !selected {
+                    if let Err(error) = app.run("track.midi_output", json!({"track": id.0, "port": port})) {
+                        app.ui.status = format!("Could not select external MIDI output: {error}");
+                    } else {
+                        ui.close();
+                    }
+                }
+            }
+        });
+        ui.add_enabled_ui(selected_port.is_some(), |ui| {
+            let channel_label = selected_channel.map_or_else(|| "Original".into(), |channel| channel.to_string());
+            ui.menu_button(format!("Output MIDI channel: {channel_label}"), |ui| {
+                for choice in 0u8..=16 {
+                    let channel = (choice != 0).then_some(choice);
+                    let selected = selected_channel == channel;
+                    let label = channel.map_or_else(|| "Original MIDI channels".into(), |value| format!("Channel {value}"));
+                    if ui.selectable_label(selected, label).clicked() && !selected {
+                        let value = channel.map_or_else(|| json!("original"), |value| json!(value));
+                        if let Err(error) = app.run("track.midi_output", json!({"track": id.0, "channel": value})) {
+                            app.ui.status = format!("Could not change external MIDI output channel: {error}");
+                        } else {
+                            ui.close();
+                        }
+                    }
+                }
+            });
+        });
+    });
+    if let Some(port) = &selected_port {
+        match ports.iter().find(|(name, _)| *name == port.as_str()) {
+            None => {
+                ui.colored_label(
+                    Tokens::current().rec,
+                    format!("Saved output '{port}' is not currently detected. The route is retained; select None to clear it."),
+                );
+            }
+            Some((_, true)) => {
+                ui.colored_label(Tokens::current().rec, format!("Saved output '{port}' is ambiguous: more than one connected port has this name."));
+            }
+            Some((_, false)) => {}
+        }
+    }
+    if let Some(error) = &scan.error {
+        ui.colored_label(Tokens::current().rec, format!("MIDI output discovery: {}", error.chars().take(240).collect::<String>()));
+    }
+    ui.label(egui::RichText::new("External MIDI routes are saved only. Playback transmission to MIDI hardware is not wired yet.").small());
+}
+
 /// The same input selector serves MIDI and instrument tracks in the Mix strip and Edit header.
 /// Offer only session-enabled port names; actual native connection is checked when recording.
 fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
@@ -1374,6 +1538,7 @@ fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     enabled_ports.sort();
     enabled_ports.dedup();
     let recording = app.engine.transport.recording;
+    let instrument = track.kind == TrackKind::Instrument;
 
     ui.strong(format!("MIDI input for {name}"));
     ui.label(format!(
@@ -1455,6 +1620,10 @@ fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         let _ = app.run("window.playback_engine", json!({"value": true}));
         ui.close();
     }
+    if instrument {
+        ui.separator();
+        ui.menu_button("External MIDI output", |ui| midi_output_route_menu(app, ui, id));
+    }
 }
 
 /// Input or output menu: no route and buses on both, plus the main output (outputs) or
@@ -1462,6 +1631,10 @@ fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
 fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     if input && app.engine.session().track(id).is_some_and(|track| track.kind.is_midi()) {
         midi_input_route_menu(app, ui, id);
+        return;
+    }
+    if !input && app.engine.session().track(id).is_some_and(|track| track.kind == TrackKind::Midi) {
+        midi_output_route_menu(app, ui, id);
         return;
     }
     let key = if input { "input" } else { "output" };
@@ -1505,9 +1678,159 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use super::{Readout, dragged_send_db, editable_readout, input_name, input_route_choices, midi_input_route_menu, parse_db, parse_pan};
+    use super::{
+        MidiOutputScan, Readout, distinct_output_names, dragged_send_db, editable_readout, input_name, input_route_choices, midi_input_route_menu,
+        midi_output_route_menu_with_scan, output_name, parse_db, parse_pan, route_menu,
+    };
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
+
+    fn synthetic_outputs(names: &[&str]) -> MidiOutputScan {
+        MidiOutputScan { ports: names.iter().map(|name| (*name).to_string()).collect(), error: None }
+    }
+
+    #[test]
+    fn external_midi_output_is_none_by_default_and_preserves_instrument_audio_output() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let midi = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+        let instrument = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Synth"));
+        let audio = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Vocal"));
+
+        assert_eq!(output_name(&app, app.engine.session().track(midi).expect("MIDI track")), "No MIDI output");
+        for id in [instrument, audio] {
+            let track = app.engine.session().track(id).expect("audio-output track");
+            assert_eq!(output_name(&app, track), super::route_name(&app, &track.mixer.output));
+        }
+
+        app.run("track.midi_output", serde_json::json!({"track": midi.0, "port": "Offline DIN", "channel": 12})).expect("save MIDI output");
+        app.run("track.midi_output", serde_json::json!({"track": instrument.0, "port": "External Synth"}))
+            .expect("save separate instrument MIDI output");
+        assert_eq!(output_name(&app, app.engine.session().track(midi).expect("MIDI track")), "Offline DIN · ch 12");
+        let track = app.engine.session().track(instrument).expect("instrument track");
+        assert_eq!(output_name(&app, track), super::route_name(&app, &track.mixer.output), "instrument Output must remain audio");
+
+        app.run("track.midi_output", serde_json::json!({"track": midi.0, "port": null})).expect("clear MIDI output");
+        assert_eq!(output_name(&app, app.engine.session().track(midi).expect("MIDI track")), "No MIDI output");
+    }
+
+    #[test]
+    fn discovered_duplicate_names_are_unselectable_and_never_saved_as_indices() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let scan = synthetic_outputs(&["Twin DIN", "Unique Synth", "Twin DIN"]);
+        assert_eq!(distinct_output_names(&scan), [("Twin DIN", true), ("Unique Synth", false)]);
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(800.0, 700.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| midi_output_route_menu_with_scan(app, ui, id, &scan), app);
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "opening output menu must not record a journal entry");
+        assert!(h.get_by_label("Twin DIN (duplicate name — unavailable)").accesskit_node().is_disabled());
+        h.get_by_label("Unique Synth").click();
+        h.run_steps(2);
+        assert_eq!(
+            h.state_mut().run("midi.output_route", serde_json::json!({"track": id.0})).expect("query output route"),
+            serde_json::json!({"port": "Unique Synth", "channel": "original"})
+        );
+        assert!(h.state().engine.is_dirty(), "a user-selected route must be journaled");
+
+        h.state_mut().engine.mark_clean();
+        h.get_by_label("Unique Synth").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty(), "reselecting the current port must not mutate the session");
+
+        h.get_by_label("Output MIDI channel: Original").click();
+        h.run_steps(2);
+        h.get_by_label("Channel 9").click();
+        h.run_steps(2);
+        assert_eq!(
+            h.state_mut().run("midi.output_route", serde_json::json!({"track": id.0})).expect("query channel"),
+            serde_json::json!({"port": "Unique Synth", "channel": 9})
+        );
+    }
+
+    #[test]
+    fn pure_midi_output_popup_is_reachable_and_offline_route_remains_removable() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+        app.run("track.midi_output", serde_json::json!({"track": id.0, "port": "Saved Offline"})).expect("store offline route");
+        app.engine.mark_clean();
+        let mut h = Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(800.0, 700.0)).build_ui_state(
+            move |ui, app: &mut crate::SoundApp| {
+                ui.ctx().data_mut(|data| data.insert_temp(super::output_scan_id(), std::sync::Arc::new(synthetic_outputs(&[]))));
+                route_menu(app, ui, id, false);
+            },
+            app,
+        );
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty(), "reading a saved offline route is read-only");
+        assert!(h.query_by_label("No external MIDI output ports were found on this computer.").is_some());
+        assert!(h.query_by_label_contains("Saved output 'Saved Offline' is not currently detected").is_some());
+        assert!(h.query_by_label_contains("Playback transmission to MIDI hardware is not wired yet").is_some());
+
+        h.get_by_label("No external MIDI output").click();
+        h.run_steps(2);
+        assert_eq!(
+            h.state_mut().run("midi.output_route", serde_json::json!({"track": id.0})).expect("route after clearing"),
+            serde_json::json!({"port": null, "channel": "original"})
+        );
+        assert!(h.state().engine.is_dirty(), "removing an offline route is a real edit");
+    }
+
+    #[test]
+    fn instrument_input_popup_exposes_separate_external_midi_output_submenu() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Synth"));
+        app.engine.mark_clean();
+        let mut h = Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(800.0, 700.0)).build_ui_state(
+            move |ui, app: &mut crate::SoundApp| {
+                ui.ctx().data_mut(|data| data.insert_temp(super::output_scan_id(), std::sync::Arc::new(synthetic_outputs(&["DIN Out"]))));
+                midi_input_route_menu(app, ui, id);
+            },
+            app,
+        );
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty());
+        h.get_by_label("External MIDI output").click();
+        h.run_steps(2);
+        assert!(h.query_by_label("DIN Out").is_some(), "instrument MIDI output route must be user reachable");
+        h.get_by_label("DIN Out").click();
+        h.run_steps(2);
+        assert_eq!(
+            h.state_mut().run("midi.output_route", serde_json::json!({"track": id.0})).expect("instrument MIDI output"),
+            serde_json::json!({"port": "DIN Out", "channel": "original"})
+        );
+        let track = h.state().engine.session().track(id).expect("instrument track");
+        assert_eq!(output_name(h.state(), track), super::route_name(h.state(), &track.mixer.output));
+    }
+
+    #[test]
+    fn output_route_changes_are_disabled_while_transport_is_active() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        for recording in [false, true] {
+            let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+            let id = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+            app.engine.transport.playing = true;
+            app.engine.transport.recording = recording;
+            app.engine.mark_clean();
+            let scan = synthetic_outputs(&["USB Synth"]);
+            let mut h = Harness::builder()
+                .with_context_setup(crate::fonts::install)
+                .build_ui_state(move |ui, app: &mut crate::SoundApp| midi_output_route_menu_with_scan(app, ui, id, &scan), app);
+            h.run_steps(2);
+            assert!(h.get_by_label("USB Synth").accesskit_node().is_disabled(), "cannot change output while transport is running");
+            assert!(h.query_by_label_contains("Stop playback or recording").is_some());
+            assert!(!h.state().engine.is_dirty());
+        }
+    }
 
     #[test]
     fn midi_and_instrument_input_selectors_show_port_and_channel_controls() {

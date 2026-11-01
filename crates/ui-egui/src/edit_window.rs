@@ -1444,7 +1444,7 @@ fn io_column(app: &mut SoundApp, ui: &mut Ui, track: &Track, r: Rect) {
     if let Some(out) = row(21.0, 17.0) {
         let (sel, fader) = (out.with_max_x(out.max.x - 11.0), out.with_min_x(out.max.x - 11.0));
         let resp = ui.interact(sel, ui.scope_id().with(("out", id.0)), Sense::click());
-        let output_name = crate::mix_window::route_name(app, &track.mixer.output);
+        let output_name = crate::mix_window::output_name(app, track);
         resp.widget_info(|| {
             let mut info = egui::WidgetInfo::labeled(egui::accesskit::Role::ComboBox, ui.is_enabled(), format!("Output for {}", track.name));
             info.current_text_value = Some(output_name.clone());
@@ -3046,6 +3046,50 @@ mod tests {
         h.run();
         assert!(h.query_by_role_and_label(Role::ComboBox, "Track view").is_some());
         assert!(h.query_by_role_and_label(Role::ComboBox, "Automation mode").is_some());
+    }
+
+    /// Edit and Mix must identify the same external MIDI destination; on instrument tracks
+    /// the Edit Output remains the audio route, even when a MIDI output is selected separately.
+    #[test]
+    fn edit_output_selector_matches_mix_for_midi_and_instrument_tracks() {
+        use soundcraft_model::ChannelFormat;
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let midi = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+        let instrument = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Synth"));
+        let audio = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Vocal"));
+        app.run("track.midi_output", json!({"track": midi.0, "port": "Offline DIN", "channel": 7})).expect("save offline route");
+        app.run("track.midi_output", json!({"track": instrument.0, "port": "External Synth"})).expect("save instrument MIDI route");
+        app.engine.mark_clean();
+
+        let mut h = Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(800.0, 400.0)).build_ui_state(
+            move |ui, app: &mut SoundApp| {
+                for (index, id) in [midi, instrument, audio].iter().enumerate() {
+                    let Some(track) = app.engine.session().track(*id).cloned() else { continue };
+                    let r = Rect::from_min_size(pos2(20.0, index as f32 * 100.0 + 10.0), vec2(220.0, 80.0));
+                    io_column(app, ui, &track, r);
+                }
+            },
+            app,
+        );
+        h.run_steps(2);
+        for id in [midi, instrument, audio] {
+            let track = h.state().engine.session().track(id).expect("output track");
+            let expected = crate::mix_window::output_name(h.state(), track);
+            let label = format!("Output for {}", track.name);
+            let node = h.query_by_role_and_label(Role::ComboBox, &label).expect("accessible Edit output selector");
+            assert_eq!(node.value().as_deref(), Some(expected.as_str()), "Edit output differs from Mix's shared label for {}", track.name);
+        }
+        assert_eq!(crate::mix_window::output_name(h.state(), h.state().engine.session().track(midi).expect("MIDI track")), "Offline DIN · ch 7");
+        let synth = h.state().engine.session().track(instrument).expect("instrument track");
+        assert_eq!(crate::mix_window::output_name(h.state(), synth), crate::mix_window::route_name(h.state(), &synth.mixer.output));
+        assert!(!h.state().engine.is_dirty(), "painting Edit I/O must not journal a route change");
+
+        h.state_mut().run("track.midi_output", json!({"track": midi.0, "port": null})).expect("remove route");
+        h.state_mut().engine.mark_clean();
+        h.run_steps(2);
+        let node = h.query_by_role_and_label(Role::ComboBox, "Output for Keys").expect("accessible Edit MIDI output selector");
+        assert_eq!(node.value().as_deref(), Some("No MIDI output"));
+        assert!(!h.state().engine.is_dirty(), "showing an unset MIDI output must not journal a route change");
     }
 
     /// Repeated per-track selectors and toggles must name their track and publish their current
