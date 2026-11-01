@@ -195,10 +195,7 @@ fn note_mode(p: Option<NotePort>) -> NoteMode {
 
 /// An old restart request is consumed only when reactivation works. Clear it before the native
 /// activate call so a *new* request raised during activation remains observable afterwards.
-fn activate_preserving_restart(
-    state: &HostState,
-    activate: impl FnOnce() -> Result<(), ClapError>,
-) -> Result<(), ClapError> {
+fn activate_preserving_restart(state: &HostState, activate: impl FnOnce() -> Result<(), ClapError>) -> Result<(), ClapError> {
     let previous = state.restart.swap(false, Ordering::AcqRel);
     let result = activate();
     if result.is_err() && previous {
