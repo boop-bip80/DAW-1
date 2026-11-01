@@ -1004,9 +1004,9 @@ impl IParameterChangesTrait for ParamChanges {
     }
 }
 
-/// A bounded event list (`IEventList`). Only ever touched by one thread at a time (the host
-/// fills it, then the plugin reads it inside `process`), so the lock is never contended; the
-/// plugin side uses `try_lock` and never blocks.
+/// A bounded event list (`IEventList`). Normally the host fills it and the plugin reads it
+/// inside `process`; the plugin side uses `try_lock` and never blocks. A plugin retaining the
+/// interface across calls can contend, so the host must not process stale lists on lock failure.
 pub(crate) struct EventList {
     events: Mutex<Vec<sv::Event>>,
     cap: usize,
@@ -1027,6 +1027,34 @@ impl EventList {
             Err(std::sync::TryLockError::WouldBlock) => None,
         }
     }
+}
+
+/// Populate both event lists before entering native processing. A plugin that retains an
+/// `IEventList` pointer can access it concurrently; if either try-lock fails, do not call the
+/// processor with stale notes from the previous block. Neither path waits or allocates.
+fn with_prepared_events<R>(
+    input: &EventList,
+    output: &EventList,
+    event_input: bool,
+    notes: &[NoteEvent],
+    offset: u32,
+    native_process: impl FnOnce() -> R,
+) -> Result<R, Vst3Error> {
+    let input_ready = input
+        .with(|events| {
+            events.clear();
+            if event_input {
+                for note in notes.iter().take(input.cap.min(EVENT_CAP)) {
+                    events.push(note.to_raw(offset));
+                }
+            }
+        })
+        .is_some();
+    let output_ready = output.with(Vec::clear).is_some();
+    if !input_ready || !output_ready {
+        return Err(Vst3Error::EventBufferBusy);
+    }
+    Ok(native_process())
 }
 
 impl IEventListTrait for EventList {
@@ -1683,16 +1711,6 @@ impl Instance {
             }
         }
         self.out_params.clear();
-        let event_in = self.event_in;
-        self.in_events.with(|v| {
-            v.clear();
-            if event_in {
-                for n in notes.iter().take(EVENT_CAP) {
-                    v.push(n.to_raw(offset));
-                }
-            }
-        });
-        self.out_events.with(Vec::clear);
         inputs.refresh();
         outputs.refresh();
         self.context.continousTimeSamples = project_time;
@@ -1718,7 +1736,7 @@ impl Instance {
         // f32s owned by `inputs`/`outputs`, borrowed for the whole call; the bus tables, the
         // parameter/event objects and the context are owned by `self` and untouched until the
         // call returns.
-        let r = unsafe { p.process(&mut data) };
+        let r = with_prepared_events(&self.in_events, &self.out_events, self.event_in, notes, offset, || unsafe { p.process(&mut data) })?;
         if ok(r) { Ok(()) } else { Err(Vst3Error::Process(format!("process returned {r}"))) }
     }
 }
@@ -2384,6 +2402,52 @@ mod window {
 mod tests {
     use super::*;
     use sv::{IAttributeListTrait as _, IMessageTrait as _};
+
+    #[test]
+    fn contended_event_lists_skip_native_processing_until_clean_retry() {
+        let input = EventList::new(2);
+        let output = EventList::new(2);
+        let notes = [NoteEvent::On { time: 4, key: 60, velocity: 0.75 }];
+        let mut native_calls = 0;
+
+        // A retained plugin-side reference holds the input list: never process a block
+        // against its previous contents, and do not block the audio thread.
+        let input_lock = input.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let busy_input = with_prepared_events(&input, &output, true, &notes, 0, || {
+            native_calls += 1;
+        });
+        assert_eq!(busy_input, Err(Vst3Error::EventBufferBusy));
+        assert_eq!(native_calls, 0);
+        drop(input_lock);
+
+        let retried = with_prepared_events(&input, &output, true, &notes, 0, || {
+            native_calls += 1;
+            assert_eq!(input.with(|events| events.len()), Some(1));
+            assert_eq!(input.with(|events| events[0].sampleOffset), Some(4));
+        });
+        assert_eq!(retried, Ok(()));
+        assert_eq!(native_calls, 1);
+
+        // Even with an unlocked input, a busy output list must prevent the native call.
+        // The following successful block has no notes: the old note-on cannot replay.
+        assert!(output.with(|events| events.push(notes[0].to_raw(0))).is_some());
+        let output_lock = output.events.lock().unwrap_or_else(PoisonError::into_inner);
+        let busy_output = with_prepared_events(&input, &output, true, &[], 0, || {
+            native_calls += 1;
+        });
+        assert_eq!(busy_output, Err(Vst3Error::EventBufferBusy));
+        assert_eq!(native_calls, 1);
+        drop(output_lock);
+        let recovered = with_prepared_events(&input, &output, true, &[], 0, || {
+            native_calls += 1;
+            assert_eq!(input.with(|events| events.len()), Some(0));
+            assert_eq!(output.with(|events| events.len()), Some(0));
+        });
+        assert_eq!(recovered, Ok(()));
+        assert_eq!(native_calls, 2);
+        assert_eq!(input.cap, 2);
+        assert_eq!(output.cap, 2);
+    }
 
     fn tuid(iid: [u8; 16]) -> sb::TUID {
         iid.map(|b| b as c_char)
