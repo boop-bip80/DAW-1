@@ -254,6 +254,9 @@ struct PluginSlot {
     /// Last values pushed to the plugin, in the insert's parameter-map order.
     applied: Vec<f32>,
     failed: bool,
+    /// A restart park has stopped native processing on the audio thread. Until an explicit
+    /// resume, do not invoke the Plugin trait on this instance.
+    parked: bool,
 }
 
 struct Strip {
@@ -450,9 +453,9 @@ struct SlotCtx<'a> {
 impl SlotCtx<'_> {
     fn retire(&mut self, slot: Option<PluginSlot>) {
         if let Some(mut s) = slot {
-            if self.external {
+            if self.external && !s.parked {
                 // The audio/render thread must stop native processing before this instance is
-                // handed to the UI to deactivate and destroy.
+                // handed to the UI to deactivate and destroy. Parked slots were already stopped.
                 s.plugin.suspend();
             }
             self.retired.push(s.plugin);
@@ -482,7 +485,7 @@ impl SlotCtx<'_> {
             let state = if third { ins.state_bytes() } else { None };
             create_instance(&ins.plugin, state.as_deref(), self.sr, self.mb, ch).map(|n| n.plugin)
         }?;
-        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false })
+        Some(PluginSlot { id: ins.plugin.clone(), ch, plugin, applied: Vec::new(), failed: false, parked: false })
     }
 }
 
@@ -535,6 +538,50 @@ impl MixEngine {
         self.synced = (usize::MAX, usize::MAX, usize::MAX);
     }
 
+    /// Stop one specific live instance at an audio callback boundary without giving up its
+    /// ownership. A control-thread restart can later proceed only after the separate ACK.
+    /// The token rejects requests for a replaced instance with the same id/slot. This operation
+    /// neither allocates nor deactivates or drops native code.
+    pub fn park_external_for_restart(&mut self, track: TrackId, slot: usize, expected_token: u64) -> bool {
+        if !self.external || expected_token == 0 {
+            return false;
+        }
+        let Some(strip) = self.strips.get_mut(&track) else { return false };
+        let target = if slot == INSTRUMENT_SLOT { strip.instrument.as_mut() } else { strip.plugins.get_mut(slot).and_then(Option::as_mut) };
+        let Some(target) = target else { return false };
+        if target.parked || target.plugin.restart_instance_token() != Some(expected_token) {
+            return false;
+        }
+        target.parked = true;
+        target.plugin.suspend();
+        if slot == INSTRUMENT_SLOT {
+            // Native stop_processing may kill voices; when resumed, chase controllers anew.
+            strip.held.clear();
+            strip.chase = true;
+        }
+        true
+    }
+
+    /// Explicit cancellation of a temporary park. Never calls native start_processing here:
+    /// the next normal CLAP process starts it on the audio thread. A stale token cannot resume
+    /// a replacement slot, and a retired slot cannot be resurrected.
+    pub fn resume_external_for_restart(&mut self, track: TrackId, slot: usize, expected_token: u64) -> bool {
+        if !self.external || expected_token == 0 {
+            return false;
+        }
+        let Some(strip) = self.strips.get_mut(&track) else { return false };
+        let target = if slot == INSTRUMENT_SLOT { strip.instrument.as_mut() } else { strip.plugins.get_mut(slot).and_then(Option::as_mut) };
+        let Some(target) = target else { return false };
+        if !target.parked || target.plugin.restart_instance_token() != Some(expected_token) {
+            return false;
+        }
+        target.parked = false;
+        if slot == INSTRUMENT_SLOT {
+            strip.chase = true;
+        }
+        true
+    }
+
     /// Instances taken out of service since the last call (drop them off the audio thread).
     /// Does not allocate.
     pub fn take_retired(&mut self) -> Vec<Box<dyn Plugin>> {
@@ -550,9 +597,9 @@ impl MixEngine {
         for st in self.strips.values_mut() {
             for slot in st.plugins.iter_mut().filter_map(Option::take).chain(st.instrument.take()) {
                 let mut plugin = slot.plugin;
-                if external {
-                    // These slots may still be processing; already-retired slots in `out`
-                    // have been suspended once and must not be suspended again.
+                if external && !slot.parked {
+                    // These slots may still be processing; parked slots were already stopped
+                    // and must not receive even a redundant native lifecycle callback.
                     plugin.suspend();
                 }
                 out.push(plugin);
@@ -582,12 +629,16 @@ impl MixEngine {
     pub fn reset(&mut self) {
         for s in self.strips.values_mut() {
             for p in s.plugins.iter_mut().flatten() {
-                p.plugin.reset();
+                if !p.parked {
+                    p.plugin.reset();
+                }
                 p.failed = false;
             }
             if let Some(i) = &mut s.instrument {
-                i.plugin.all_notes_off();
-                i.plugin.reset();
+                if !i.parked {
+                    i.plugin.all_notes_off();
+                    i.plugin.reset();
+                }
                 i.failed = false;
             }
             s.held.clear();
@@ -701,7 +752,9 @@ impl MixEngine {
         if pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
-                if let Some(i) = &mut st.instrument {
+                if let Some(i) = &mut st.instrument
+                    && !i.parked
+                {
                     i.plugin.all_notes_off();
                 }
                 st.held.clear();
@@ -842,6 +895,7 @@ impl MixEngine {
                         && ins.active
                         && !ins.bypass
                         && !slot.failed
+                        && !slot.parked
                     {
                         apply_params(slot, ins, t, i, pos);
                         slot.plugin.set_transport(&transport);
@@ -1063,7 +1117,7 @@ fn process_strip(
             }
         }
         TrackKind::Instrument | TrackKind::Midi => {
-            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed) {
+            if let Some(inst) = strip.instrument.as_mut().filter(|i| !i.failed && !i.parked) {
                 // #152: push the instrument's stored parameter values into the live plugin
                 // before processing, the same way inserts do below. Without this, the values
                 // loaded from a session (or set via `mix.insert_state`) never reach the plugin
@@ -1107,7 +1161,7 @@ fn process_strip(
     let mut latency = 0usize;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
-        if !ins.active || ins.bypass || slot.failed {
+        if !ins.active || ins.bypass || slot.failed || slot.parked {
             continue;
         }
         apply_params(slot, ins, t, i, pos);
@@ -1859,7 +1913,9 @@ fn sync_sample(strip: &mut Strip, want: Option<&soundcraft_model::Insert>, s: &S
     if same {
         return;
     }
-    if let Some(inst) = strip.instrument.as_mut() {
+    if let Some(inst) = strip.instrument.as_mut()
+        && !inst.parked
+    {
         let shared = audio.map(|a| Arc::new(PoolSample(Arc::clone(a))) as Arc<dyn SampleSource>);
         inst.plugin.set_sample(shared);
     }
@@ -1871,7 +1927,7 @@ fn note_insert_latency(t: &Track, strip: &mut Strip, pos: Samples) {
     let mut latency = 0usize;
     for (i, ins) in t.mixer.inserts.iter().enumerate() {
         let (Some(ins), Some(Some(slot))) = (ins, strip.plugins.get_mut(i)) else { continue };
-        if !ins.active || ins.bypass || slot.failed {
+        if !ins.active || ins.bypass || slot.failed || slot.parked {
             continue;
         }
         apply_params(slot, ins, t, i, pos);
@@ -3021,6 +3077,9 @@ mod tests {
         inner: Box<dyn Plugin>,
         stopped: Arc<std::sync::atomic::AtomicUsize>,
         stop_count_at_drop: Arc<std::sync::atomic::AtomicUsize>,
+        token: u64,
+        processed: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        reset_calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     impl Drop for SuspensionProbe {
@@ -3038,10 +3097,16 @@ mod tests {
             self.inner.prepare(sr, mb, ch);
         }
         fn reset(&mut self) {
+            if let Some(count) = &self.reset_calls {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             self.inner.reset();
         }
         fn suspend(&mut self) {
             self.stopped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn restart_instance_token(&self) -> Option<u64> {
+            (self.token != 0).then_some(self.token)
         }
         fn set_param(&mut self, id: &str, value: f32) -> bool {
             self.inner.set_param(id, value)
@@ -3050,6 +3115,9 @@ mod tests {
             self.inner.param(id)
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            if let Some(count) = &self.processed {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             self.inner.process(io, frames);
         }
     }
@@ -3066,7 +3134,7 @@ mod tests {
         let fake = |stopped: Arc<AtomicUsize>, dropped: Arc<AtomicUsize>| -> Box<dyn Plugin> {
             let mut inner = soundcraft_dsp::create("gain").unwrap();
             inner.prepare(48_000.0, 512, 1);
-            Box::new(SuspensionProbe { inner, stopped, stop_count_at_drop: dropped })
+            Box::new(SuspensionProbe { inner, stopped, stop_count_at_drop: dropped, token: 0, processed: None, reset_calls: None })
         };
         let old_stopped = Arc::new(AtomicUsize::new(0));
         let old_dropped = Arc::new(AtomicUsize::new(NOT_DROPPED));
@@ -3105,6 +3173,120 @@ mod tests {
         assert_eq!(new_stopped.load(Ordering::SeqCst), 1, "old-engine drain also suspends live slots");
         drop(rest);
         assert_eq!(new_dropped.load(Ordering::SeqCst), 1, "drained instance must be stopped before destruction");
+    }
+
+    #[test]
+    fn parked_external_plugin_is_skipped_until_explicit_audio_resume_and_replacement_is_identity_guarded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut session, track) = session_with_dc(0.5, 48_000);
+        session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.restart"));
+        let mut engine = MixEngine::new(48_000.0, 512);
+        engine.set_external_instances(true);
+
+        let old_stopped = Arc::new(AtomicUsize::new(0));
+        let old_processed = Arc::new(AtomicUsize::new(0));
+        let old_resets = Arc::new(AtomicUsize::new(0));
+        let old_dropped = Arc::new(AtomicUsize::new(usize::MAX));
+        let inner = soundcraft_dsp::create("gain").unwrap();
+        engine.adopt(vec![PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.restart".into(),
+            ch: 1,
+            plugin: Box::new(SuspensionProbe {
+                inner,
+                stopped: Arc::clone(&old_stopped),
+                stop_count_at_drop: Arc::clone(&old_dropped),
+                token: 51,
+                processed: Some(Arc::clone(&old_processed)),
+                reset_calls: Some(Arc::clone(&old_resets)),
+            }),
+        }]);
+        let _ = render_block(&mut engine, &session, 0);
+        let before = old_processed.load(Ordering::SeqCst);
+        assert!(before > 0);
+        assert!(!engine.park_external_for_restart(track, 0, 52), "wrong generation cannot stop the current instance");
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 0);
+        assert!(engine.park_external_for_restart(track, 0, 51));
+        assert!(!engine.park_external_for_restart(track, 0, 51), "one native suspend per park");
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(old_dropped.load(Ordering::SeqCst), usize::MAX);
+
+        engine.reset();
+        let _ = render_block(&mut engine, &session, 512);
+        assert_eq!(old_processed.load(Ordering::SeqCst), before, "parked plugins are not processed");
+        assert_eq!(old_resets.load(Ordering::SeqCst), 0, "transport stop must not call a parked native instance");
+        assert!(!engine.resume_external_for_restart(track, 0, 52));
+        assert!(engine.resume_external_for_restart(track, 0, 51));
+        assert!(!engine.resume_external_for_restart(track, 0, 51));
+        let _ = render_block(&mut engine, &session, 1024);
+        assert!(old_processed.load(Ordering::SeqCst) > before, "an explicit audio resume restores normal processing");
+
+        assert!(engine.park_external_for_restart(track, 0, 51));
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 2);
+        let new_stopped = Arc::new(AtomicUsize::new(0));
+        engine.adopt(vec![PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.restart".into(),
+            ch: 1,
+            plugin: Box::new(SuspensionProbe {
+                inner: soundcraft_dsp::create("gain").unwrap(),
+                stopped: Arc::clone(&new_stopped),
+                stop_count_at_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+                token: 52,
+                processed: None,
+                reset_calls: None,
+            }),
+        }]);
+        let _ = render_block(&mut engine, &session, 1536);
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 2, "retirement must not suspend an already parked instance twice");
+        assert!(!engine.resume_external_for_restart(track, 0, 51), "stale request cannot resume the new same-ID instance");
+        assert!(!engine.park_external_for_restart(track, 0, 51), "stale request cannot park the new same-ID instance");
+        assert!(engine.park_external_for_restart(track, 0, 52));
+        assert_eq!(new_stopped.load(Ordering::SeqCst), 1);
+        let retired = engine.take_retired();
+        assert_eq!(retired.len(), 1);
+        drop(retired);
+        assert_eq!(old_dropped.load(Ordering::SeqCst), 2, "UI retirement follows the original native stop");
+        drop(engine.drain_plugins());
+        assert_eq!(new_stopped.load(Ordering::SeqCst), 1, "draining a parked slot does not call native stop again");
+    }
+
+    #[test]
+    fn a_never_started_external_plugin_can_be_parked_while_transport_is_stopped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut session, track) = session_with_dc(0.5, 48_000);
+        session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.restart"));
+        let processed = Arc::new(AtomicUsize::new(0));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let mut engine = MixEngine::new(48_000.0, 512);
+        engine.set_external_instances(true);
+        engine.adopt(vec![PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.restart".into(),
+            ch: 1,
+            plugin: Box::new(SuspensionProbe {
+                inner: soundcraft_dsp::create("gain").unwrap(),
+                stopped: Arc::clone(&stopped),
+                stop_count_at_drop: Arc::new(AtomicUsize::new(usize::MAX)),
+                token: 90,
+                processed: Some(Arc::clone(&processed)),
+                reset_calls: Some(Arc::clone(&resets)),
+            }),
+        }]);
+        engine.ensure_synced(&session); // Adoption is complete even though no block has played.
+        assert!(engine.park_external_for_restart(track, 0, 90));
+        engine.reset();
+        assert_eq!(processed.load(Ordering::SeqCst), 0);
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert!(engine.resume_external_for_restart(track, 0, 90));
+        let _ = render_block(&mut engine, &session, 0);
+        assert!(processed.load(Ordering::SeqCst) > 0);
+        drop(engine.drain_plugins());
     }
 
     #[test]
