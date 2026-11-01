@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (native MIDI port-capture adapter and recording input fallback added to hardware/take-writer architecture) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (MIDI recording bridge, bounded input channel routing and audio-only OTIO import) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a Cargo workspace of small crates with enforced layering (`cargo xtask layers`).
 Nothing below the UI knows about egui, so the interface can be replaced.
@@ -56,12 +56,15 @@ Device I/O uses selectable output and input devices, sample rate and buffer size
 as separate cpal streams (without a shared duplex clock or full physical-channel routing). The
 mix renders 512-sample blocks and resamples when the device rate differs; ASIO is opt-in on
 Windows. Recording input startup retries with the device-default buffer if a requested one
-fails during stream build or play. The `soundcraft-midi::device` native adapter uses `midir` to
-discover and open input ports, then forwards timestamped events from `soundcraft-midi::live`
-through a preallocated bounded callback queue. It is not wired to track recording or live
-instruments yet (see [`hardware-parity.md`](hardware-parity.md)). Decoded playback sources are held in the
-`SourcePool`, while active recording takes stream to WAV from a bounded input ring on a writer
-thread, with periodic header updates and writer-failure reporting.
+fails during stream build or play. Per-track physical input routes are validated before take
+creation, and unavailable monitor inputs remain silent. The `soundcraft-midi::device` native
+adapter discovers and opens input ports, forwarding timestamped events through a bounded queue.
+`MidiRecordBridge` translates an explicitly anchored device timestamp to session ticks and can
+commit one undoable armed-track take, but desktop record/stop and instrument monitoring are not
+connected to it (see [`hardware-parity.md`](hardware-parity.md)). Decoded playback sources live
+in `SourcePool`; active recording takes stream through a bounded ring to a WAV writer thread,
+with periodic headers and writer-failure reporting. `file.import_otio` validates and decodes
+local audio-only OTIO media before an atomic, undoable session edit.
 
 `soundcraft-video` holds our own H.264, ProRes and Motion JPEG decoders and the ISO-BMFF demuxer
 for the video track. Hosted plugins (`clap-host`, `vst3-host`, `au-host`) are scanned, created and
@@ -83,6 +86,7 @@ app as an MCP server. See `control-protocol.md` and `mcp.md`.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Added bounded physical input-route preflight, native MIDI selector/undoable take bridge and atomic OTIO audio import; desktop MIDI record lifecycle still missing |
 | 2026-10-31 | minor | Corrected device and direct-to-disk recording architecture, added input buffer fallback and MIDI native capture API; DAW routing remains missing |
 | 2026-10-13 | trivial | delay compensation includes the master faders' inserts (#351) |
 | 2026-10-10 | minor | Added video, vst3-host and au-host to the layer diagram; documented device I/O limits and in-memory media |
