@@ -132,6 +132,13 @@ pub(crate) fn unit_from_label(units: &str) -> Unit {
     }
 }
 
+/// VST3 controllers use f64 plain values, while SoundCraft parameter travel is f32.
+/// Revert to normalized 0..1 if narrowing would collapse or overflow its f32 span.
+fn usable_plain_f32_range(lo: f64, hi: f64) -> bool {
+    let (min, max) = (lo as f32, hi as f32);
+    lo.is_finite() && hi.is_finite() && hi > lo && min.is_finite() && max.is_finite() && max > min && (max - min).is_finite()
+}
+
 fn param_info(inst: &Instance, p: &RawParam) -> ParamInfo {
     let name = if p.title.is_empty() { format!("Param {}", p.id) } else { p.title.clone() };
     let base = ParamInfo {
@@ -162,7 +169,7 @@ fn param_info(inst: &Instance, p: &RawParam) -> ParamInfo {
     // Continuous (or too many steps for a menu): plain range from the controller.
     let unit = unit_from_label(&p.units);
     match (inst.to_plain(p.id, 0.0), inst.to_plain(p.id, 1.0)) {
-        (Some(lo), Some(hi)) if hi > lo && (lo as f32).is_finite() && (hi as f32).is_finite() && (hi as f32) > (lo as f32) => {
+        (Some(lo), Some(hi)) if usable_plain_f32_range(lo, hi) => {
             let default = inst.to_plain(p.id, p.default_normalized).map_or(lo, |d| d.clamp(lo, hi));
             // A logarithmic plugin mapping (frequency knobs) shows its geometric mean at mid travel.
             let taper = match inst.to_plain(p.id, 0.5) {
@@ -257,6 +264,18 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_plain_range_requires_a_finite_noncollapsed_f32_span() {
+        assert!(usable_plain_f32_range(0.0, 1.0));
+        assert!(usable_plain_f32_range(-1.0, 1.0));
+        assert!(usable_plain_f32_range(0.0, f64::from(f32::MAX)), "exact f32 limit remains valid");
+        assert!(!usable_plain_f32_range(-f64::from(f32::MAX), f64::from(f32::MAX)), "finite endpoints can have infinite f32 span");
+        assert!(!usable_plain_f32_range(0.0, f64::MAX), "finite f64 endpoint can overflow f32");
+        assert!(!usable_plain_f32_range(0.0, f64::MIN_POSITIVE), "nonzero f64 range can collapse into zero f32 width");
+        assert!(!usable_plain_f32_range(2.0, 1.0));
+        assert!(!usable_plain_f32_range(f64::NAN, 1.0));
+    }
 
     #[test]
     fn unit_labels_map() {
