@@ -94,7 +94,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, budget: &mut usize) {
 }
 
 /// The loadable binary of a plugin: the file itself, or for a macOS bundle directory
-/// `Contents/MacOS/<name>` (the executable named like the bundle, else the only/first file there).
+/// `Contents/MacOS/<name>` (the executable named like the bundle, else the only regular candidate).
 pub fn bundle_executable(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
@@ -109,9 +109,11 @@ pub fn bundle_executable(path: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file()).take(64).collect();
-    files.sort();
-    files.into_iter().next()
+    // Never guess which of multiple binaries/helpers is the plug-in. The bundle executable
+    // should normally match its stem; only a single fallback candidate is unambiguous.
+    let mut files = std::fs::read_dir(&macos).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file());
+    let only = files.next()?;
+    files.next().is_none().then_some(only)
 }
 
 /// Maps CLAP feature strings to a SoundCraft insert-menu category.
@@ -179,8 +181,31 @@ mod tests {
         std::fs::create_dir_all(d.join("X.clap/Contents/MacOS")).unwrap();
         std::fs::write(d.join("X.clap/Contents/MacOS/other"), b"x").unwrap();
         assert_eq!(bundle_executable(&d.join("X.clap")), Some(d.join("X.clap/Contents/MacOS/other")));
+        // Two candidate files with no bundle-named executable are ambiguous: loading the
+        // alphabetically first one might instead execute a helper or unrelated binary.
+        std::fs::write(d.join("X.clap/Contents/MacOS/helper"), b"x").unwrap();
+        assert_eq!(bundle_executable(&d.join("X.clap")), None);
         std::fs::create_dir_all(d.join("Empty.clap")).unwrap();
         assert_eq!(bundle_executable(&d.join("Empty.clap")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_handles_symlinks_but_never_selects_nonregular_files() {
+        let d = tmp("file-types");
+        let macos = d.join("Types.clap/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let original = macos.join("actual");
+        std::fs::write(&original, b"x").unwrap();
+        let link = macos.join("other");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        // A symlink to a regular binary remains a candidate, so two aliases are ambiguous.
+        assert_eq!(bundle_executable(&d.join("Types.clap")), None);
+        std::fs::remove_file(&link).unwrap();
+        // A directory named like a file is not an executable fallback candidate.
+        std::fs::create_dir(macos.join("control.sock")).unwrap();
+        assert_eq!(bundle_executable(&d.join("Types.clap")), Some(original));
         let _ = std::fs::remove_dir_all(&d);
     }
 

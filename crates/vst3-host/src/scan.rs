@@ -148,7 +148,7 @@ fn arch_dirs(os: Os) -> &'static [&'static str] {
 
 /// The loadable binary of a plugin for this OS: a single-file `.vst3` itself, or inside a bundle
 /// directory `Contents/MacOS/<name>` (macOS), `Contents/x86_64-win/<name>.vst3` (Windows) or
-/// `Contents/x86_64-linux/<name>.so` (Linux/BSD), falling back to the only/first fitting file there.
+/// `Contents/x86_64-linux/<name>.so` (Linux/BSD), falling back only to an unambiguous fitting file.
 pub fn bundle_binary(path: &Path) -> Option<PathBuf> {
     bundle_binary_for(Os::current(), path)
 }
@@ -177,16 +177,15 @@ pub fn bundle_binary_for(os: Os, path: &Path) -> Option<PathBuf> {
             return Some(named);
         }
         let Ok(rd) = std::fs::read_dir(&folder) else { continue };
-        let mut files: Vec<PathBuf> = rd
+        // If the expected executable name is absent, never select an arbitrary helper or
+        // secondary binary just because it sorts first. A single candidate is unambiguous.
+        let mut files = rd
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_file())
-            .filter(|p| ext.is_none_or(|e| p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| x.eq_ignore_ascii_case(e))))
-            .take(64)
-            .collect();
-        files.sort();
-        if let Some(f) = files.into_iter().next() {
-            return Some(f);
+            .filter(|p| ext.is_none_or(|e| p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| x.eq_ignore_ascii_case(e))));
+        if let Some(only) = files.next() {
+            return files.next().is_none().then_some(only);
         }
     }
     None
@@ -266,12 +265,18 @@ mod tests {
         std::fs::create_dir_all(d.join("N.vst3/Contents/MacOS")).unwrap();
         std::fs::write(d.join("N.vst3/Contents/MacOS/other"), b"x").unwrap();
         assert_eq!(bundle_binary_for(Os::MacOs, &d.join("N.vst3")), Some(d.join("N.vst3/Contents/MacOS/other")));
+        std::fs::write(d.join("N.vst3/Contents/MacOS/another"), b"x").unwrap();
+        assert_eq!(bundle_binary_for(Os::MacOs, &d.join("N.vst3")), None, "ambiguous bundle fallback must fail closed");
         // Windows
         let win = arch_dirs(Os::Windows)[0];
         std::fs::create_dir_all(d.join(format!("W.vst3/Contents/{win}"))).unwrap();
         std::fs::write(d.join(format!("W.vst3/Contents/{win}/W.vst3")), b"x").unwrap();
         std::fs::write(d.join(format!("W.vst3/Contents/{win}/helper.dll")), b"x").unwrap();
         assert_eq!(bundle_binary_for(Os::Windows, &d.join("W.vst3")), Some(d.join(format!("W.vst3/Contents/{win}/W.vst3"))));
+        std::fs::create_dir_all(d.join(format!("Ambiguous.vst3/Contents/{win}"))).unwrap();
+        std::fs::write(d.join(format!("Ambiguous.vst3/Contents/{win}/A.vst3")), b"x").unwrap();
+        std::fs::write(d.join(format!("Ambiguous.vst3/Contents/{win}/B.vst3")), b"x").unwrap();
+        assert_eq!(bundle_binary_for(Os::Windows, &d.join("Ambiguous.vst3")), None);
         // Linux
         let lin = arch_dirs(Os::Unix)[0];
         std::fs::create_dir_all(d.join(format!("L.vst3/Contents/{lin}"))).unwrap();
@@ -279,6 +284,8 @@ mod tests {
         assert_eq!(bundle_binary_for(Os::Unix, &d.join("L.vst3")), None, "only .so files qualify");
         std::fs::write(d.join(format!("L.vst3/Contents/{lin}/Renamed.so")), b"x").unwrap();
         assert_eq!(bundle_binary_for(Os::Unix, &d.join("L.vst3")), Some(d.join(format!("L.vst3/Contents/{lin}/Renamed.so"))));
+        std::fs::write(d.join(format!("L.vst3/Contents/{lin}/Alternate.so")), b"x").unwrap();
+        assert_eq!(bundle_binary_for(Os::Unix, &d.join("L.vst3")), None, "ambiguous Linux .so fallback");
         std::fs::write(d.join(format!("L.vst3/Contents/{lin}/L.so")), b"x").unwrap();
         assert_eq!(bundle_binary_for(Os::Unix, &d.join("L.vst3")), Some(d.join(format!("L.vst3/Contents/{lin}/L.so"))));
         // Single-file plugin, wrong layout, missing.
@@ -288,6 +295,25 @@ mod tests {
         assert_eq!(bundle_binary_for(Os::MacOs, &d.join("nope.vst3")), None);
         std::fs::create_dir_all(d.join("Empty.vst3")).unwrap();
         assert_eq!(bundle_binary(&d.join("Empty.vst3")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonregular_files_are_skipped_and_symlinked_binaries_are_candidates() {
+        let d = tmp("file-types");
+        let lin = arch_dirs(Os::Unix)[0];
+        let folder = d.join(format!("Types.vst3/Contents/{lin}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let actual = folder.join("actual.so");
+        std::fs::write(&actual, b"x").unwrap();
+        let link = folder.join("alias.so");
+        std::os::unix::fs::symlink(&actual, &link).unwrap();
+        assert_eq!(bundle_binary_for(Os::Unix, &d.join("Types.vst3")), None, "two regular candidate paths");
+        std::fs::remove_file(&link).unwrap();
+        // A nonregular directory with the right extension must not become a binary candidate.
+        std::fs::create_dir(folder.join("not-code.so")).unwrap();
+        assert_eq!(bundle_binary_for(Os::Unix, &d.join("Types.vst3")), Some(actual));
         let _ = std::fs::remove_dir_all(&d);
     }
 
