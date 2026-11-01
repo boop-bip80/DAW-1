@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (disabled-by-default native MIDI playback bridge/UI, recording and export integrity, official OTIO timecode compatibility and CLAP restart observation; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (separate opt-in live external MIDI thru, safer multi-stem publication, recording/monitoring diagnostics, exact OTIO timeline boundaries and editing-menu reachability; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -44,12 +44,15 @@ Mix/Edit and pass synthetic tests; a Setup MIDI Input Filter window exposes save
 flags. Named external MIDI output routes and channel selectors are saved in Mix/Edit;
 the native transport-driven output scheduler is now connected through a separate **per-launch,
 disabled-by-default** Playback Engine switch, with cancellation, cleanup acknowledgement and
-failure reporting tested against fake ports. Physical MIDI output timing, keyboard capture
-and live instrument audition remain unverified; MIDI thru and sync are still missing.
+failure reporting tested against fake ports. A second, per-launch opt-in switch enables native
+**idle external MIDI thru** with bounded input queues, transport cleanup acknowledgement and
+synthetic tests; saved routes do not enable either switch. Physical MIDI output/input timing and
+keyboard operation remain unverified; live software-instrument audition and MIDI sync are missing.
 Audio-only OpenTimelineIO `.otio` import/export, portable `.otioz` **import/export**, and restricted
 mono `A`, linked-stereo `AA`, and two independent mono `A1`/`A2` CMX3600 EDL lanes work;
 the `.otioz` importer requires a saved target session and accepts a supported audio subset,
-including official Clip.2 media-reference timecode origins and literal-percent filenames.
+including official Clip.2 media-reference timecode origins, literal-percent filenames and
+cumulative 29.97 fps record boundaries without progressive rounding drift.
 AAF, OMF and `.ptx` interchange with Pro Tools remain absent.
 Readiness (~40 %) sits right at the alpha bar, but a gate failure keeps the app pre-alpha. The
 2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence. This one
@@ -116,7 +119,7 @@ Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-p
 Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadmap.md](docs/roadmap.md).
 
 1. **Alpha blocker:** audio interfaces: full physical-channel I/O matrix, one-clock duplex monitoring, measured latency compensation and hardware testing (G-01); manual record offset, per-track input bounds and take-to-disk now work, source streaming/recovery remain separate (G-06). Estimated gate 35–55 h, not re-calibrated.
-2. **Alpha blocker:** verify native MIDI Record/Stop and explicitly enabled transport-driven MIDI output with physical controllers/ports, measure scheduling latency, then add live instrument monitoring, thru and clock (G-02). 20–35 h, not re-calibrated.
+2. **Alpha blocker:** verify native MIDI Record/Stop, explicitly enabled transport output and separately enabled external thru on physical controllers/ports, measure scheduling latency, then add live software-instrument audition and MIDI clock/MTC (G-02). 20–35 h, not re-calibrated.
 3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
 4. Obtain explicit owner approval for macOS third-party native-plugin library-validation entitlement (#153), then AU editors (G-05). 15–25 h plus the security decision.
 5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
@@ -128,13 +131,16 @@ Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadm
 Property tests drive random edit sequences (with full undo), mutated session files and hostile
 command parameters through the engine and mixer; they have caught fade, overflow and
 unbounded-allocation bugs. Every command also runs with empty parameters on empty and demo
-sessions. Hosted plugins live in isolated unsafe crates (`clap-host`, `vst3-host`, `au-host`) and
-are created, loaded and destroyed off the audio thread. The video decoders survive hundreds of
+sessions. Hosted plugins use isolated unsafe crates (`clap-host`, `vst3-host`, `au-host`); silent-clock
+shutdown now joins and reclaims plugin state on the control thread. Hardware CPAL callbacks
+still own live plugin-bearing audio state, so active-plugin shutdown has **no general main-thread
+destruction guarantee**. The video decoders survive hundreds of
 mutated and truncated movies. Field reports from the first public week are tracked in
 [gaps.md](docs/gaps.md) (G-04).
 
 ## Progress log
 
+- **2026-11-01:** PRs #103–#116 passed the complete local Linux `cargo xtask ci` gate together in two integration batches, each verified byte-for-byte against the pushed default-branch Git tree. Multi-stem bounce now stages all outputs before no-replace publication and rolls back recoverable partial batches (not crash-atomic). Native monitoring FIFO counters separate dropped monitor audio from WAV capture loss; recording warns on capture pressure. Idle external MIDI thru now requires its own explicit per-launch consent in Playback Engine and stops on transport discontinuities, with synthetic ACK tests only. Mix exposes undoable Clear all solos/mutes; Edit exposes Paste Special Clip Gain/Effects. OTIO at 29.97 fps rounds cumulative record boundaries once, and mixed timecode origins retain media-relative sample precision. Silent-clock plugin shutdown and a hardware retired-mailbox lifetime safeguard landed; active hardware-plugin teardown is still unresolved. No physical hardware, hosted three-OS Actions, AAF/OMF or PTX parity is claimed; pre-alpha/readiness estimates unchanged.
 - **2026-11-01:** External MIDI transport windows now reach native output ports through a separate, per-launch disabled-by-default Playback Engine control; fake-device tests cover cancellation, overflow and disconnected ports, but no physical-device/timing test exists. Stem names avoid silent collisions; MIDI/EDL export refuses unrequested overwrite; errored WAVs are preserved with bounded recovery notices, though automatic-stop UI notice retention remains open. CLAP stops processing before retirement and restart requests are observable, not yet automatically executed. Official OTIO media origins (positive/negative), literal `%` filenames and strict archive checks pass synthetic/official fixtures. Full local Linux `cargo xtask ci` and exact merged-tree equality passed; pre-alpha/readiness estimates unchanged.
 - **2026-11-01:** Portable audio-only OTIOZ now imports as well as exports, with strict archive validation, saved-recipient requirement, File-menu UI and a CLI reopen/rebounce regression after deleting the original archive/media. Mix/Edit persist opt-in named MIDI output routes, and the native output worker gained bounded cancellation and held-note cleanup (not DAW playback). Recording-monitor stale audio is discarded; independent CPAL stream-rate diagnostics are observable; accessible Transport pre/post-roll controls and stricter CLAP/VST3 failure behavior landed. A public MIDI file persistence regression passes. Full local Linux quality gate and exact GitHub source-tree comparison passed; pre-alpha, AAF/OMF/PTX, hardware and hosted CI limitations remain.
 - **2026-11-01:** `file.export_otioz` and the File-menu bundle path now export portable, media-inclusive audio-only OTIOZ archives (no `.otioz` import). Setup has a persistent MIDI Input Filter window; a bounded native MIDI output-port worker exists without DAW track playback or physical testing. Release packaging is configured to wait on three-OS `cargo xtask ci`, but no GitHub Actions runs have occurred. Pre-alpha readiness, estimates and AAF/OMF/PTX blockers unchanged.
