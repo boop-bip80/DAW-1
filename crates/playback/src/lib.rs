@@ -151,9 +151,18 @@ enum Cmd {
     Session(Arc<Session>, Vec<PreparedInstance>),
     /// Nonautomatic restart prerequisite: stop exactly this live instance on the audio thread,
     /// leave ownership in the mix and publish a lock-free acknowledgment.
-    ParkRestart { track: TrackId, slot: usize, token: u64, ack: Arc<AtomicU8> },
+    ParkRestart {
+        track: TrackId,
+        slot: usize,
+        token: u64,
+        ack: Arc<AtomicU8>,
+    },
     /// Cancellation/RAII release of a park; stale tokens never revive a replacement instance.
-    ResumeRestart { track: TrackId, slot: usize, token: u64 },
+    ResumeRestart {
+        track: TrackId,
+        slot: usize,
+        token: u64,
+    },
     /// Where the callback sends the snapshots it replaces (freeing one takes thousands of frees).
     OldSessions(SyncSender<Arc<Session>>),
     Input(Arc<record::InputRing>),
