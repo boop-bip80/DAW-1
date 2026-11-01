@@ -576,6 +576,8 @@ pub struct Bounce {
     session: Arc<Session>,
     path: PathBuf,
     part: PathBuf,
+    /// The native staging file is ours only from exclusive creation until completion.
+    part_owned: bool,
     range: Range,
     bus: Option<BusId>,
     fold: Option<ChannelFormat>,
@@ -621,21 +623,28 @@ impl Bounce {
         let part = path.with_file_name(format!("{name}.part"));
         crate::file_access::check_write(path).map_err(EngineError::Io)?;
         crate::file_access::check_write(&part).map_err(EngineError::Io)?;
+        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
+        let meter = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
+        // Reserve the sidecar before assuming cleanup ownership. If a previous bounce or
+        // unrelated file (including a symlink) already owns it, never truncate or unlink it.
+        let out = Out::create(&part).map_err(|err| EngineError::Io(format!("{}: {err}", part.display())))?;
         let enc = (|| -> std::result::Result<_, soundcraft_audio_io::AudioError> {
-            let enc = soundcraft_audio_io::FileEncoder::new(Out::create(&part)?, opts, channels, s.sample_rate.hz(), Some(fmt.channel_mask()))?;
+            let enc = soundcraft_audio_io::FileEncoder::new(out, opts, channels, s.sample_rate.hz(), Some(fmt.channel_mask()))?;
             enc.check_room(u64::try_from(r.len()).unwrap_or(0))?;
             Ok(enc)
         })()
         .map_err(|err| {
-            let _ = std::fs::remove_file(&part);
+            // Out::create succeeded: only now is the native sidecar ours to remove.
+            if !cfg!(target_arch = "wasm32") {
+                let _ = std::fs::remove_file(&part);
+            }
             EngineError::Io(format!("{}: {err}", path.display()))
         })?;
-        let render = soundcraft_mix::RangeRender::new(&s, bus, r, 1024);
-        let meter = soundcraft_dsp::meter::LoudnessMeter::new(s.sample_rate.as_f64() as f32, channels);
         Ok(Bounce {
             session: s,
             path: path.to_path_buf(),
             part,
+            part_owned: !cfg!(target_arch = "wasm32"),
             range: r,
             bus,
             fold,
@@ -711,7 +720,14 @@ impl Bounce {
 
     fn finish(&mut self) -> Result<Bounced> {
         let bytes = match self.enc.take() {
-            Some(enc) => enc.finish().map_err(|err| EngineError::Io(format!("{}: {err}", self.path.display())))?.complete(&self.part, &self.path)?,
+            Some(enc) => {
+                let out = enc.finish().map_err(|err| EngineError::Io(format!("{}: {err}", self.path.display())))?;
+                // complete renames the owned sidecar to its final output or cleans it on
+                // failure. A later file at the old .part name must survive Bounce::drop.
+                let result = out.complete(&self.part, &self.path);
+                self.part_owned = false;
+                result?
+            }
             None => 0,
         };
         Ok(Bounced {
@@ -724,10 +740,12 @@ impl Bounce {
 }
 
 impl Drop for Bounce {
-    /// Removes the part file unless the bounce completed (which renamed it).
+    /// Removes only a sidecar this bounce still owns after cancellation or render failure.
     fn drop(&mut self) {
         drop(self.enc.take());
-        let _ = std::fs::remove_file(&self.part);
+        if self.part_owned {
+            let _ = std::fs::remove_file(&self.part);
+        }
     }
 }
 
@@ -742,7 +760,8 @@ impl Out {
         if cfg!(target_arch = "wasm32") {
             return Ok(Out::Memory(std::io::Cursor::new(Vec::new())));
         }
-        Ok(Out::File(std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(part)?)))
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(part)?;
+        Ok(Out::File(std::io::BufWriter::with_capacity(1 << 20, file)))
     }
 
     /// Puts the finished file at `path` and returns its size: the part file is synced and renamed
@@ -2792,6 +2811,133 @@ mod pipe_tests {
         let (imported, opened) = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert!(!imported);
         assert_eq!(opened.unwrap(), [fifo.display().to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bounce_sidecar_tests {
+    use super::*;
+
+    fn stage(path: &Path) -> PathBuf {
+        path.with_file_name(format!("{}.part", path.file_name().unwrap().to_string_lossy()))
+    }
+
+    fn bounce(e: &Engine, path: &Path) -> Result<Bounce> {
+        Bounce::new(e.session_arc(), path, Range::new(0, 4_800), &EncodeOptions::default(), None, false, false)
+    }
+
+    #[test]
+    fn public_mix_bounce_refuses_existing_part_then_retries_without_clobbering_it() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-bounce-part-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Mix.wav");
+        let part = stage(&path);
+        let marker = b"unrelated user data inside the staging pathname";
+        std::fs::write(&part, marker).unwrap();
+
+        let mut e = Engine::default();
+        let params = serde_json::json!({"path": path.to_string_lossy(), "start": {"seconds": 0.0}, "end": {"seconds": 0.1}, "dither": false});
+        let err = e.execute("file.bounce_mix", &params).unwrap_err();
+        assert!(err.to_string().contains(".part"), "{err}");
+        assert_eq!(std::fs::read(&part).unwrap(), marker);
+        assert!(!path.exists(), "a refused bounce must not create an output");
+
+        std::fs::remove_file(&part).unwrap();
+        let done = e.execute("file.bounce_mix", &params).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(done["bytes"].as_u64(), Some(bytes.len() as u64));
+        let (_, audio) = soundcraft_audio_io::decode(&bytes, None).unwrap();
+        assert_eq!(audio.frames(), 4_800);
+        assert!(!part.exists(), "successful bounce must rename away its sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stem_bounce_refuses_colliding_part_without_touching_existing_content() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stem-part-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut e = Engine::default();
+        e.execute("track.new", &serde_json::json!({"name": "Solo stem", "format": "mono"})).unwrap();
+        let t = &e.session().tracks[0];
+        let name = stem_output_names(&e.session().name, &[(t.id, t.name.clone())], "wav").unwrap().remove(0);
+        let output = dir.join(name);
+        let part = stage(&output);
+        let marker = b"keep preexisting stem sidecar";
+        std::fs::write(&part, marker).unwrap();
+
+        let err = bounce_stems_with(&e, &dir.to_string_lossy(), Range::new(0, 4_800), &EncodeOptions::default(), false).unwrap_err();
+        assert!(err.to_string().contains(".part"), "{err}");
+        assert_eq!(std::fs::read(&part).unwrap(), marker);
+        assert!(!output.exists());
+        std::fs::remove_file(&part).unwrap();
+        let paths = bounce_stems_with(&e, &dir.to_string_lossy(), Range::new(0, 4_800), &EncodeOptions::default(), false).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(output.is_file());
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_async_bounce_cleans_its_own_part_but_keeps_prior_output() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-bounce-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Prior.wav");
+        let part = stage(&path);
+        let marker = b"previous successful output";
+        std::fs::write(&path, marker).unwrap();
+        let e = Engine::default();
+        let mut job = bounce(&e, &path).unwrap();
+        assert!(part.exists());
+        assert!(job.step(|| false).unwrap().is_none(), "step must yield with work remaining");
+        drop(job);
+        assert!(!part.exists(), "cancellation must remove its own incomplete sidecar");
+        assert_eq!(std::fs::read(&path).unwrap(), marker, "cancellation must not touch prior output");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn completed_async_bounce_does_not_remove_later_file_at_the_old_part_path() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-bounce-finished-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Complete.wav");
+        let part = stage(&path);
+        let e = Engine::default();
+        let mut job = bounce(&e, &path).unwrap();
+        let finished = job.step(|| true).unwrap().unwrap();
+        assert!(finished.bytes > 44);
+        assert!(!part.exists(), "completion must move its staging file to the output");
+
+        let marker = b"new user file created after bounce completion";
+        std::fs::write(&part, marker).unwrap();
+        drop(job);
+        assert_eq!(std::fs::read(&part).unwrap(), marker, "finished bounce must not clean a new unrelated file");
+        assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounce_refuses_existing_part_symlink_without_following_or_removing_it() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-bounce-part-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Mix.wav");
+        let part = stage(&path);
+        let unrelated = dir.join("user-project.txt");
+        let marker = b"never truncate me through a bounce symlink";
+        std::fs::write(&unrelated, marker).unwrap();
+        std::os::unix::fs::symlink(&unrelated, &part).unwrap();
+
+        let err = bounce(&Engine::default(), &path).err().expect("sidecar symlink must reject reservation");
+        assert!(err.to_string().contains(".part"), "{err}");
+        assert!(std::fs::symlink_metadata(&part).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), marker);
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
