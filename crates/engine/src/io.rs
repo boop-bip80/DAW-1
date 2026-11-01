@@ -1551,7 +1551,7 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
     // Finish the already-exclusive stage before backup rotation or project replacement.
     stage.write_and_sync(text.as_bytes(), &p)?;
-    let pending_backup = if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) { back_up(&p) } else { None };
+    let pending_backup = if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) { back_up(&p)? } else { None };
     stage.publish(&p)?;
     // Retention pruning is a consequence of a committed save, never a failed attempt.
     if let Some(backup) = pending_backup {
@@ -1664,9 +1664,47 @@ fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A path-based backup directory snapshot. Refuse a final-component symlink or
+/// non-directory before copying or pruning, and detect most directory replacements.
+/// This is defensive preflight, not an atomic defense against hostile rename races.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BackupDirIdentity {
+    canonical: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn backup_dir_identity(path: &Path) -> Result<BackupDirIdentity> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(EngineError::Io(format!("{}: Backups must be a real directory, not a link or file", path.display())));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(BackupDirIdentity {
+        canonical,
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+    })
+}
+
+fn check_backup_dir_before_create(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => backup_dir_identity(path).map(|_| ()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(EngineError::Io(format!("{}: {err}", path.display()))),
+    }
+}
+
 /// A newly copied backup: old versions are pruned only after the new project commits.
 struct PreparedBackup {
     backups: PathBuf,
+    identity: BackupDirIdentity,
     prefix: String,
     suffix: String,
     numbers: Vec<u32>,
@@ -1675,25 +1713,46 @@ struct PreparedBackup {
 
 impl PreparedBackup {
     fn prune(self) {
-        let Self { backups, prefix, suffix, numbers, next } = self;
+        let Self { backups, identity, prefix, suffix, numbers, next } = self;
         for n in numbers.into_iter().filter(|n| n.saturating_add(10) <= next) {
-            let _ = std::fs::remove_file(backups.join(format!("{prefix}{n}{suffix}")));
+            // A swapped directory must never redirect retention into unrelated paths.
+            if backup_dir_identity(&backups).ok().as_ref() != Some(&identity) {
+                log::warn!("backup directory changed before retention: {}", backups.display());
+                break;
+            }
+            let old = backups.join(format!("{prefix}{n}{suffix}"));
+            // A symlink named like a backup is not an owned regular snapshot.
+            if std::fs::symlink_metadata(&old).is_ok_and(|metadata| metadata.file_type().is_file()) {
+                let _ = std::fs::remove_file(old);
+            }
         }
     }
 }
 
 /// Copy the current session to a new, exclusive numbered backup. Return a deferred retention
 /// plan; never prune old versions until the staged project rename succeeds.
-fn back_up(file: &Path) -> Option<PreparedBackup> {
+/// Unsafe directory types fail the save closed; ordinary backup I/O errors remain best-effort.
+fn back_up(file: &Path) -> Result<Option<PreparedBackup>> {
     let (Some(dir), Some(stem), Some(ext)) = (file.parent(), file.file_stem().and_then(OsStr::to_str), file.extension().and_then(OsStr::to_str))
     else {
-        return None;
+        return Ok(None);
     };
     let backups = dir.join("Backups");
+    // The parent itself must be authorized before inspecting its child with
+    // symlink_metadata; checking Backups first would follow an out-of-root link
+    // and quietly skip the backup instead of refusing an unsafe directory.
+    let checked_dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    crate::file_access::check_write(checked_dir).map_err(EngineError::Io)?;
+    check_backup_dir_before_create(&backups)?;
     if let Err(err) = crate::file_access::check_write(&backups) {
         log::warn!("no backup of {}: {err}", file.display());
-        return None;
+        return Ok(None);
     }
+    if let Err(err) = std::fs::create_dir_all(&backups) {
+        log::warn!("no backup of {}: {err}", file.display());
+        return Ok(None);
+    }
+    let identity = backup_dir_identity(&backups)?;
     let prefix = format!("{stem} backup ");
     let suffix = format!(".{ext}");
     let numbers: Vec<u32> = std::fs::read_dir(&backups)
@@ -1704,18 +1763,21 @@ fn back_up(file: &Path) -> Option<PreparedBackup> {
         .collect();
     let Some(next) = numbers.iter().max().map_or(Some(1), |n| n.checked_add(1)) else {
         log::warn!("no backup of {}: backup numbers are exhausted", file.display());
-        return None;
+        return Ok(None);
     };
     let dest = backups.join(format!("{prefix}{next}{suffix}"));
     if let Err(err) = crate::file_access::check_write(&dest) {
         log::warn!("no backup of {}: {err}", file.display());
-        return None;
+        return Ok(None);
     }
-    if let Err(err) = std::fs::create_dir_all(&backups).and_then(|()| copy_new(file, &dest)) {
+    if backup_dir_identity(&backups)? != identity {
+        return Err(EngineError::Io(format!("{}: backup directory changed before copy", backups.display())));
+    }
+    if let Err(err) = copy_new(file, &dest) {
         log::warn!("no backup of {}: {err}", file.display());
-        return None;
+        return Ok(None);
     }
-    Some(PreparedBackup { backups, prefix, suffix, numbers, next })
+    Ok(Some(PreparedBackup { backups, identity, prefix, suffix, numbers, next }))
 }
 
 /// The file a session saved to `path` goes to: `path`, with `.scraft` added when it has no
@@ -2869,6 +2931,130 @@ mod save_tests {
         std::fs::write(&dest, b"taken").unwrap();
         assert!(copy_new(&path, &dest).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"taken");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unsafe_backup_directory_fails_save_closed_and_safe_retry_reopens() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-unsafe-backup-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = dir.join("Project");
+        let outside = dir.join("Outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let file = project.join("Song.scraft");
+        let path = file.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &json!({"path": path})).unwrap();
+        let committed = std::fs::read(&file).unwrap();
+        e.execute("track.new", &json!({"name": "Uncommitted edit", "format": "mono"})).unwrap();
+        let live = e.session().clone();
+
+        let backups = project.join("Backups");
+        let marker = b"unrelated file named Backups";
+        std::fs::write(&backups, marker).unwrap();
+        let err = e.execute("session.save", &json!({})).unwrap_err();
+        assert!(err.to_string().contains("Backups"), "{err}");
+        assert_eq!(std::fs::read(&backups).unwrap(), marker);
+        assert_eq!(std::fs::read(&file).unwrap(), committed);
+        assert_eq!(*e.session(), live);
+        assert!(e.is_dirty());
+        assert!(!file.with_extension("scraft.tmp").exists());
+        std::fs::remove_file(&backups).unwrap();
+
+        #[cfg(unix)]
+        {
+            let outside_backups: Vec<_> = (1..=10)
+                .map(|n| {
+                    let candidate = outside.join(format!("Song backup {n}.scraft"));
+                    let bytes = format!("unrelated outside sentinel {n}").into_bytes();
+                    std::fs::write(&candidate, &bytes).unwrap();
+                    (candidate, bytes)
+                })
+                .collect();
+            std::os::unix::fs::symlink(&outside, &backups).unwrap();
+            let err = e.execute("session.save", &json!({})).unwrap_err();
+            assert!(err.to_string().contains("Backups"), "{err}");
+            assert!(std::fs::symlink_metadata(&backups).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(&file).unwrap(), committed);
+            assert_eq!(*e.session(), live);
+            assert!(e.is_dirty());
+            assert!(!file.with_extension("scraft.tmp").exists());
+            assert!(!outside.join("Song backup 11.scraft").exists(), "must not copy into a linked directory");
+            for (candidate, bytes) in outside_backups {
+                assert_eq!(std::fs::read(candidate).unwrap(), bytes, "must not prune an unrelated directory");
+            }
+            // A confined command must still report this unsafe child rather than
+            // silently skipping backups after write-root resolution follows the link.
+            let roots = crate::file_access::AutomationRoots::new(&[project.as_path()], &[project.as_path()]).unwrap().unwrap();
+            crate::file_access::confine(Some(&roots), || {
+                let err = e.execute("session.save", &json!({})).unwrap_err();
+                assert!(err.to_string().contains("Backups"), "{err}");
+            });
+            assert_eq!(std::fs::read(&file).unwrap(), committed);
+            assert!(e.is_dirty());
+            assert!(!outside.join("Song backup 11.scraft").exists());
+            std::fs::remove_file(&backups).unwrap();
+        }
+
+        std::fs::create_dir_all(&backups).unwrap();
+        e.execute("session.save", &json!({})).unwrap();
+        assert!(!e.is_dirty());
+        assert_eq!(std::fs::read(backups.join("Song backup 1.scraft")).unwrap(), committed);
+        let reopened = reopen(&path);
+        assert!(reopened.session().track_by_name("Uncommitted edit").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_retention_defers_if_directory_was_swapped_after_copy() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-backup-swap-{}", std::process::id()));
+        let backups = dir.join("Project/Backups");
+        let outside = dir.join("Outside");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let file = dir.join("Project/Song.scraft");
+        std::fs::write(&file, b"committed old project").unwrap();
+        for n in 1..=10 {
+            std::fs::write(backups.join(format!("Song backup {n}.scraft")), format!("real project backup {n}")).unwrap();
+        }
+        let unrelated = outside.join("Song backup 1.scraft");
+        let marker = b"outside file may never be deleted";
+        std::fs::write(&unrelated, marker).unwrap();
+        let prepared = back_up(&file).unwrap().unwrap();
+        assert!(backups.join("Song backup 11.scraft").is_file());
+        let old_backups = dir.join("Project/Retained Backups");
+        std::fs::rename(&backups, &old_backups).unwrap();
+        std::os::unix::fs::symlink(&outside, &backups).unwrap();
+        prepared.prune();
+        assert_eq!(std::fs::read(&unrelated).unwrap(), marker);
+        assert!(old_backups.join("Song backup 1.scraft").is_file(), "retention must not follow a swapped directory");
+        assert!(std::fs::symlink_metadata(&backups).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_skips_existing_symlink_backup_entries() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-backup-entry-link-{}", std::process::id()));
+        let backups = dir.join("Project/Backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let file = dir.join("Project/Song.scraft");
+        std::fs::write(&file, b"committed project").unwrap();
+        let outside = dir.join("outside.txt");
+        let marker = b"unrelated backup-target sentinel";
+        std::fs::write(&outside, marker).unwrap();
+        let link = backups.join("Song backup 1.scraft");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        for n in 2..=10 {
+            std::fs::write(backups.join(format!("Song backup {n}.scraft")), format!("regular backup {n}")).unwrap();
+        }
+        let prepared = back_up(&file).unwrap().unwrap();
+        prepared.prune();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&outside).unwrap(), marker);
+        assert!(backups.join("Song backup 11.scraft").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
