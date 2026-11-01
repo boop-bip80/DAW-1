@@ -165,6 +165,21 @@ pub fn specs() -> Vec<CommandSpec> {
                     "audio_clips": output.clips, "clips_with_nonportable_processing": output.processing_metadata_clips}))
             }
         ),
+        cmd!(noundo "file.export_otioz", "OpenTimelineIO Bundle...", ["File", "Export"], None,
+            "{path, replace?: false} — portable .otioz ZIP with audio-only edit decisions and referenced media (max 512 MiB); nonportable gain, fades, mixer and plug-in processing must be rendered first",
+            always, |e, p| {
+                let id = "file.export_otioz";
+                let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("otioz") {
+                    return Err(bad(id, "output path must end in .otioz"));
+                }
+                refuse_replacing(e, id, std::path::Path::new(&path), p)?;
+                let output = crate::otio_bundle::export_audio(e.session())?;
+                crate::io::write_file(&path, &output.bytes)?;
+                Ok(json!({"path": path, "bytes": output.bytes.len(), "audio_tracks": output.tracks,
+                    "audio_clips": output.clips, "media_sources": output.media_sources}))
+            }
+        ),
         cmd!(noundo "file.export_edl", "CMX3600 Audio EDL...", ["File", "Export"], None,
             "{path, track?: mono/stereo, tracks?: [two mono tracks], fps?: 24|25|30, replace?: false} — frame-aligned A/AA or independent A1/A2 cuts; no lane overlaps, fades or unrendered processing",
             always, |e, p| {
