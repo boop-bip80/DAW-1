@@ -1079,7 +1079,10 @@ mod tests {
         assert_eq!(result["extracted_media_files"], 1);
         let lead = engine.session().tracks.iter().find(|t| t.name == "Fractional lead").unwrap();
         let back = engine.session().tracks.iter().find(|t| t.name == "Fractional back").unwrap();
-        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (1_602, 1_602));
+        // Two 29.97-fps record boundaries round to 1602 and 3203 samples. The clip
+        // after one Gap is 3203-1602 = 1601 samples, even though one isolated
+        // frame rounds to 1602. Its *source* offset remains the separate 1602.
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (1_602, 1_601));
         assert_eq!((back.clips()[0].start, back.clips()[0].length), (0, 1_602));
         assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 1_602, .. }));
         assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 3_203, .. }));
@@ -1147,6 +1150,12 @@ mod tests {
         }
         // Export back into the native 48 kHz OTIO sample timebase, then re-import:
         // no 40-sample drift may appear from new rounding at integer sample boundaries.
+        // Imported bundle audio initially lives in the in-memory source pool. Make
+        // the fixture a saved, relinked project before claiming it can be exported
+        // as a portable .otio reference to on-disk audio.
+        let saved = project.join("project.scraft");
+        crate::io::save_session(&mut engine, saved.to_str().unwrap()).unwrap();
+        assert!(engine.session().sources.iter().all(|source| !source.unsaved));
         let exported = export_audio(engine.session()).unwrap();
         let mut reimported = Engine::default();
         let reimport = import_audio(&mut reimported, &project.join("roundtrip.otio"), &exported.json).unwrap();
