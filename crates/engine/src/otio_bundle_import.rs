@@ -82,7 +82,7 @@ fn audit_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<Arc
     let mut total_all = 0u64;
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(zerr)?;
-        let name = file.name().map_err(zerr)?.to_owned();
+        let name = file.name().map_err(zerr)?.into_owned();
         if !names.insert(name.clone()) {
             return Err(unsupported("duplicate ZIP member name"));
         }
@@ -450,7 +450,7 @@ mod tests {
                 let mut file = archive.by_index(index).unwrap();
                 let mut content = Vec::new();
                 file.read_to_end(&mut content).unwrap();
-                (file.name().unwrap().to_owned(), content, file.compression())
+                (file.name().unwrap().into_owned(), content, file.compression())
             })
             .collect()
     }
