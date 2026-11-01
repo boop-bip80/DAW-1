@@ -30,9 +30,10 @@
 //!   [`instance_specs`] (restoring each insert's stored [`Insert::state`] and calling `prepare`
 //!   there), and hands them over with [`MixEngine::adopt`]; `sync` then moves the matching one
 //!   into its slot. A slot whose instance has not arrived yet passes audio through.
-//! - every instance `sync` replaces or removes (built-in or not) goes to a retired list instead of
-//!   being dropped; the host takes it with [`MixEngine::take_retired`] and drops it on the control
-//!   thread, so plugin destruction never runs on the audio thread either.
+//! - every instance `sync` replaces or removes (built-in or not) is suspended on the audio
+//!   thread when externally hosted, then goes to a retired list instead of being dropped; the
+//!   host takes it with [`MixEngine::take_retired`] and drops it on the control thread, so native
+//!   processing stops before main-thread plugin deactivation and destruction.
 //! - without external instances (the default: offline [`render_range`], bounces, tests) `sync`
 //!   creates third-party plugins itself, synchronously, restores their stored state before the
 //!   first `process`, and drops retired instances at the end of `sync`.
@@ -448,7 +449,12 @@ struct SlotCtx<'a> {
 
 impl SlotCtx<'_> {
     fn retire(&mut self, slot: Option<PluginSlot>) {
-        if let Some(s) = slot {
+        if let Some(mut s) = slot {
+            if self.external {
+                // The audio/render thread must stop native processing before this instance is
+                // handed to the UI to deactivate and destroy.
+                s.plugin.suspend();
+            }
             self.retired.push(s.plugin);
         }
     }
@@ -540,10 +546,19 @@ impl MixEngine {
     /// before replacing the engine.
     pub fn drain_plugins(&mut self) -> Vec<Box<dyn Plugin>> {
         let mut out = std::mem::take(&mut self.retired);
+        let external = self.external;
         for st in self.strips.values_mut() {
-            out.extend(st.plugins.iter_mut().filter_map(Option::take).map(|s| s.plugin));
-            out.extend(st.instrument.take().map(|s| s.plugin));
+            for slot in st.plugins.iter_mut().filter_map(Option::take).chain(st.instrument.take()) {
+                let mut plugin = slot.plugin;
+                if external {
+                    // These slots may still be processing; already-retired slots in `out`
+                    // have been suspended once and must not be suspended again.
+                    plugin.suspend();
+                }
+                out.push(plugin);
+            }
         }
+        // Waiting/adopted instances have never entered native processing.
         out.extend(self.adopt.drain().map(|(_, p)| p.plugin));
         self.synced = (usize::MAX, usize::MAX, usize::MAX);
         out
@@ -2999,6 +3014,97 @@ mod tests {
         let mut out = vec![vec![0.0f32; 512]; 2];
         eng.render(s, pos, 512, &mut out);
         out[0][500]
+    }
+
+    /// A fake native host whose suspend and drop order is observable without loading binaries.
+    struct SuspensionProbe {
+        inner: Box<dyn Plugin>,
+        stopped: Arc<std::sync::atomic::AtomicUsize>,
+        stop_count_at_drop: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for SuspensionProbe {
+        fn drop(&mut self) {
+            use std::sync::atomic::Ordering;
+            self.stop_count_at_drop.store(self.stopped.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
+
+    impl Plugin for SuspensionProbe {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            self.inner.info()
+        }
+        fn prepare(&mut self, sr: f32, mb: usize, ch: usize) {
+            self.inner.prepare(sr, mb, ch);
+        }
+        fn reset(&mut self) {
+            self.inner.reset();
+        }
+        fn suspend(&mut self) {
+            self.stopped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn set_param(&mut self, id: &str, value: f32) -> bool {
+            self.inner.set_param(id, value)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.inner.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.inner.process(io, frames);
+        }
+    }
+
+    #[test]
+    fn external_same_id_replacement_stops_processing_once_before_ui_thread_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const NOT_DROPPED: usize = usize::MAX;
+        let (mut session, track) = session_with_dc(0.5, 48_000);
+        session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.suspension"));
+        let mut engine = MixEngine::new(48_000.0, 512);
+        engine.set_external_instances(true);
+
+        let fake = |stopped: Arc<AtomicUsize>, dropped: Arc<AtomicUsize>| -> Box<dyn Plugin> {
+            let mut inner = soundcraft_dsp::create("gain").unwrap();
+            inner.prepare(48_000.0, 512, 1);
+            Box::new(SuspensionProbe { inner, stopped, stop_count_at_drop: dropped })
+        };
+        let old_stopped = Arc::new(AtomicUsize::new(0));
+        let old_dropped = Arc::new(AtomicUsize::new(NOT_DROPPED));
+        engine.adopt(vec![PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.suspension".into(),
+            ch: 1,
+            plugin: fake(Arc::clone(&old_stopped), Arc::clone(&old_dropped)),
+        }]);
+        let _ = render_block(&mut engine, &session, 0);
+        let _ = render_block(&mut engine, &session, 512);
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 0, "unchanged live slots must not be suspended");
+        assert_eq!(old_dropped.load(Ordering::SeqCst), NOT_DROPPED);
+
+        let new_stopped = Arc::new(AtomicUsize::new(0));
+        let new_dropped = Arc::new(AtomicUsize::new(NOT_DROPPED));
+        engine.adopt(vec![PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.suspension".into(),
+            ch: 1,
+            plugin: fake(Arc::clone(&new_stopped), Arc::clone(&new_dropped)),
+        }]);
+        let _ = render_block(&mut engine, &session, 1024);
+        assert_eq!(old_stopped.load(Ordering::SeqCst), 1, "audio-side retirement stops the old instance exactly once");
+        assert_eq!(old_dropped.load(Ordering::SeqCst), NOT_DROPPED, "native drop remains deferred");
+        assert_eq!(new_stopped.load(Ordering::SeqCst), 0, "newly adopted instance stays in the processing state");
+
+        let retired = engine.take_retired();
+        assert_eq!(retired.len(), 1);
+        drop(retired); // Models the UI/control thread receiving and destroying the old instance.
+        assert_eq!(old_dropped.load(Ordering::SeqCst), 1, "suspend must precede destruction");
+
+        let rest = engine.drain_plugins();
+        assert_eq!(new_stopped.load(Ordering::SeqCst), 1, "old-engine drain also suspends live slots");
+        drop(rest);
+        assert_eq!(new_dropped.load(Ordering::SeqCst), 1, "drained instance must be stopped before destruction");
     }
 
     #[test]

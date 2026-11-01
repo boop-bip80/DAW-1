@@ -258,6 +258,12 @@ impl Plugin for ClapPlugin {
         self.held = [false; 128];
     }
 
+    fn suspend(&mut self) {
+        // Called by the mixer before retirement, on the audio/render thread. Deactivation and
+        // destruction remain deferred to the main thread that drops the retired instance.
+        self.inst.stop_processing();
+    }
+
     fn set_param(&mut self, id: &str, value: f32) -> bool {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&cid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };

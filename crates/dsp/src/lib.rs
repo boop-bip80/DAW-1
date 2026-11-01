@@ -196,6 +196,10 @@ pub trait Plugin: Send {
     fn info(&self) -> &'static PluginInfo;
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize);
     fn reset(&mut self);
+    /// Called on the audio/render thread before a live instance is retired for later destruction
+    /// on the main thread. Must not allocate, wait, deactivate, or destroy; repeated calls are safe.
+    /// Built-ins and hosts without an explicit processing lifecycle need no action.
+    fn suspend(&mut self) {}
     /// Sets a parameter (clamped into range; NaN becomes the default). `false` if `id` is unknown.
     fn set_param(&mut self, id: &str, value: f32) -> bool;
     fn param(&self, id: &str) -> Option<f32>;
