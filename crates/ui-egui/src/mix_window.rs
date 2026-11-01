@@ -146,6 +146,9 @@ pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
 }
 
 pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
+    if track.kind.is_midi() {
+        return "All MIDI inputs".into();
+    }
     if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) }
 }
 
@@ -1354,9 +1357,46 @@ fn input_route_choices(opened_channels: Option<usize>) -> usize {
     opened_channels.unwrap_or(8).clamp(1, 64)
 }
 
+/// MIDI and instrument tracks currently receive all enabled native MIDI inputs together.
+/// Until the recording bridge can filter by track and port, do not offer misleading per-track
+/// routing controls or physical audio input channels in their Input selector.
+fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
+    let (name, armed) = app.engine.session().track(id).map_or(("track".to_string(), false), |track| (track.name.clone(), track.mixer.record_arm));
+    let status = app.midi_input_status();
+    ui.strong(format!("MIDI input for {name}"));
+    ui.label("All enabled MIDI inputs");
+    ui.label(format!("{} enabled MIDI input name(s) in this session", status.enabled_ports.len()));
+    if status.recording {
+        ui.label(format!("Recording MIDI from {} connected input(s)", status.connected_ports.len()));
+    } else {
+        ui.label("MIDI capture idle; connections open on Record");
+    }
+    if let Some(err) = status.error {
+        ui.colored_label(Tokens::current().rec, format!("MIDI input error: {}", err.chars().take(240).collect::<String>()));
+    }
+    ui.label(
+        egui::RichText::new("Each armed MIDI/instrument track currently receives the enabled native inputs. Per-track port and channel filters are not available yet.")
+            .small(),
+    );
+    if ui.button(if armed { "Disarm this MIDI track" } else { "Arm this MIDI track" }).clicked() {
+        if let Err(err) = app.run("mix.record_arm", json!({"track": id.0, "value": !armed})) {
+            app.ui.status = err;
+        }
+        ui.close();
+    }
+    if ui.button("Manage MIDI input devices…").clicked() {
+        let _ = app.run("window.playback_engine", json!({"value": true}));
+        ui.close();
+    }
+}
+
 /// Input or output menu: no route and buses on both, plus the main output (outputs) or
 /// the actual number of input channels when the device is opened.
 fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
+    if input && app.engine.session().track(id).is_some_and(|track| track.kind.is_midi()) {
+        midi_input_route_menu(app, ui, id);
+        return;
+    }
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
     if ui.button(if input { "no input" } else { "no output" }).clicked() {
@@ -1396,9 +1436,35 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
-    use super::{Readout, dragged_send_db, editable_readout, input_route_choices, parse_db, parse_pan};
+    use super::{Readout, dragged_send_db, editable_readout, input_name, input_route_choices, midi_input_route_menu, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+
+    #[test]
+    fn midi_and_instrument_input_selectors_explain_shared_native_inputs() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        for kind in [TrackKind::Midi, TrackKind::Instrument] {
+            let id = app.engine.session_mut().add_track(kind, ChannelFormat::Stereo, Some("Keys"));
+            let track = app.engine.session().track(id).expect("created track");
+            assert_eq!(input_name(&app, track), "All MIDI inputs");
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| midi_input_route_menu(&mut app, ui, id));
+            let visible: Vec<String> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            output.textures_delta.clear();
+            assert!(visible.iter().any(|t| t.contains("Manage MIDI input devices")), "missing route to Setup: {visible:?}");
+            assert!(visible.iter().any(|t| t.contains("Arm this MIDI track")), "track record-arm affordance missing: {visible:?}");
+            assert!(visible.iter().any(|t| t.contains("Per-track port and channel filters")), "routing limitations not visible: {visible:?}");
+        }
+    }
 
     #[test]
     fn hardware_input_menu_matches_opened_device_channel_count() {
