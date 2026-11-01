@@ -1585,10 +1585,14 @@ impl ReservedSessionStage {
     }
 
     fn publish(mut self, file: &Path) -> Result<()> {
+        let tmp = self.tmp.as_deref().expect("session stage has not been published");
+        // Authorization may have changed while large source WAVs were prepared.
+        // Recheck near commit, as stage_file did before this early reservation.
+        crate::file_access::check_write(file).map_err(EngineError::Io)?;
+        crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
         // Windows cannot rename an open file. Closing the handle never reopens the
         // sidecar by path, and a failed rename still leaves cleanup to our guard.
         drop(self.file.take());
-        let tmp = self.tmp.as_deref().expect("session stage has not been published");
         std::fs::rename(tmp, file).map_err(|err| EngineError::Io(format!("{}: {err}", file.display())))?;
         self.tmp = None;
         sync_dir(file.parent().unwrap_or(Path::new("")));
