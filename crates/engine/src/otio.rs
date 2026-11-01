@@ -461,8 +461,16 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                 Some("Clip.1" | "Clip.2") => {
                     reject_nontrivial_metadata(child)?;
                     clip_count = clip_count.checked_add(1).filter(|n| *n <= MAX_CLIPS).ok_or_else(|| invalid_import("more than 100000 clips"))?;
-                    let range = child.get("source_range").ok_or_else(|| invalid_import("clip source trim is required"))?;
                     let is_clip_two = child.get("OTIO_SCHEMA").and_then(Value::as_str) == Some("Clip.2");
+                    let (url, available_range) = clip_media(child)?;
+                    // OTIO uses an ExternalReference's full available_range when a Clip has
+                    // no explicit source_range. The official 0.18.1 writer serializes this
+                    // common untrimmed case as "source_range": null.
+                    let range = child
+                        .get("source_range")
+                        .filter(|range| !range.is_null())
+                        .or_else(|| available_range.filter(|range| !range.is_null()))
+                        .ok_or_else(|| invalid_import("clip needs a source trim or media available range"))?;
                     let (offset, duration) = sample_range(range, rate, is_clip_two)?;
                     if duration <= 0 {
                         return Err(invalid_import("clip must have a positive duration"));
@@ -472,7 +480,6 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         .filter(|v| *v <= MAX_EXACT_SAMPLE)
                         .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
                     let source_end = offset.checked_add(duration).ok_or_else(|| invalid_import("source trim overflows"))?;
-                    let (url, available_range) = clip_media(child)?;
                     // OTIO's Clip.source_range uses the same media-timecode coordinates as
                     // ExternalReference.available_range. A WAV's first decoded frame corresponds
                     // to the available range's start, not necessarily media-timecode zero.
@@ -609,6 +616,11 @@ mod tests {
     // Source/available starts are negative media timecode; the native file offsets are
     // positive. This JSON is embedded so CI never depends on Python or network access.
     const OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"Signed media origins","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Negative lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1200.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Lead","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":12000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-24000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Negative back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Back","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":3000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-46000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
+
+    // Independently generated with OpenTimelineIO 0.18.1's otio_json writer. Full source
+    // deliberately omits its trim (source_range: null); OTIO's Clip.trimmed_range() returns
+    // ExternalReference.available_range [-48000, +48000] for that clip.
+    const OFFICIAL_UNTRIMMED_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"Untrimmed reference","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Untrimmed lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1200.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Full source","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Trimmed back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Back","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":3000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-46000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
 
     fn pack_negative_origin_bundle(timeline: &Value, wav: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
@@ -934,6 +946,94 @@ mod tests {
         assert_eq!(*engine.session(), before);
         assert!(engine.redo());
         assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn official_untrimmed_clip_two_uses_full_available_range_without_shifting_stereo_audio() {
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-untrimmed-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("untrimmed.otioz");
+        let timeline: Value = serde_json::from_str(OFFICIAL_UNTRIMMED_CLIP_TWO).unwrap();
+        let left = (0..96_000).map(|frame| 0.15 + frame as f32 / 300_000.0).collect::<Vec<_>>();
+        let right = (0..96_000).map(|frame| -0.65 + frame as f32 / 250_000.0).collect::<Vec<_>>();
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        std::fs::write(&archive, pack_negative_origin_bundle(&timeline, &wav)).unwrap();
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+
+        let result = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        assert_eq!(result["extracted_media_files"], 1);
+        let lead = engine.session().tracks.iter().find(|t| t.name == "Untrimmed lead").unwrap();
+        let back = engine.session().tracks.iter().find(|t| t.name == "Trimmed back").unwrap();
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (1_200, 96_000));
+        assert_eq!((back.clips()[0].start, back.clips()[0].length), (0, 3_000));
+        assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 0, .. }));
+        assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 2_000, .. }));
+        // The absent clip trim means exactly all 96000 decoded frames, *not* timecode
+        // -48000 interpreted as a negative file seek, and not merely 48000 frames.
+        for (track, position, source_frame) in [(lead.id, 1_200, 0), (lead.id, 49_200, 48_000), (back.id, 0, 2_000)] {
+            let rendered = soundcraft_mix::render_clips(engine.session(), track, soundcraft_time::Range::new(position, position + 1));
+            assert_eq!(rendered.len(), 2);
+            assert!((rendered[0][0] - left[source_frame]).abs() < 0.0001, "incorrect left source frame {source_frame}");
+            assert!((rendered[1][0] - right[source_frame]).abs() < 0.0001, "right source frame {source_frame} was mixed or shifted");
+        }
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn untrimmed_clip_two_rejects_missing_invalid_or_unrendered_ranges_atomically() {
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-no-range-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("no-range.otioz");
+        let timeline: Value = serde_json::from_str(OFFICIAL_UNTRIMMED_CLIP_TWO).unwrap();
+        let wav = soundcraft_audio_io::encode(
+            &AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.25; 96_000], vec![-0.45; 96_000]] },
+            &EncodeOptions::default(),
+        )
+        .unwrap();
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let reference_path = "/tracks/children/0/children/1/media_references/DEFAULT_MEDIA/available_range";
+        let mut no_available = timeline.clone();
+        no_available.pointer_mut(reference_path).unwrap().clone_from(&Value::Null);
+        let mut zero_duration = timeline.clone();
+        zero_duration.pointer_mut(&format!("{reference_path}/duration/value")).unwrap().clone_from(&json!(0.0));
+        let mut negative_duration = timeline.clone();
+        negative_duration.pointer_mut(&format!("{reference_path}/duration/value")).unwrap().clone_from(&json!(-1.0));
+        let mut exceeds_file = timeline.clone();
+        exceeds_file.pointer_mut(&format!("{reference_path}/duration/value")).unwrap().clone_from(&json!(96_001.0));
+        let mut unrendered_gain = timeline.clone();
+        unrendered_gain["tracks"]["children"][0]["children"][1]["metadata"]["soundcraft"]["gain_db"] = json!(6.0);
+
+        for (case, invalid) in [
+            ("missing media duration", no_available),
+            ("zero media duration", zero_duration),
+            ("negative media duration", negative_duration),
+            ("media duration beyond WAV", exceeds_file),
+            ("unrendered gain", unrendered_gain),
+        ] {
+            std::fs::write(&archive, pack_negative_origin_bundle(&invalid, &wav)).unwrap();
+            let error = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap_err();
+            assert_eq!(*engine.session(), before, "{case} modified the session: {error}");
+            assert!(!engine.can_undo(), "{case} added an undo step");
+            assert!(!project.join("Audio Files").exists(), "{case} left extracted media after rejection");
+        }
         std::fs::remove_dir_all(folder).unwrap();
     }
 
