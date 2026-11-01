@@ -357,12 +357,30 @@ fn clip_media(clip: &Value) -> Result<&str> {
 
 fn reject_nontrivial_metadata(value: &Value) -> Result<()> {
     let Some(metadata) = value.pointer("/metadata/soundcraft") else { return Ok(()) };
-    if metadata.get("gain_db").and_then(Value::as_f64).is_some_and(|v| v != 0.0)
-        || metadata.get("gain_env").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
-        || metadata.get("fade_in_samples").and_then(Value::as_i64).is_some_and(|v| v > 0)
-        || metadata.get("fade_out_samples").and_then(Value::as_i64).is_some_and(|v| v > 0)
-    {
-        return Err(invalid_import("render SoundCraft clip processing before import; OTIO edits alone do not preserve it"));
+    let own = metadata.as_object().ok_or_else(|| invalid_import("SoundCraft clip metadata must be an object"))?;
+    // Other OTIO applications are free to attach their own metadata. Only SoundCraft's known
+    // audio-processing fields are interpreted here: a malformed value must never be mistaken for
+    // zero processing and silently dropped when a Clip.1/Clip.2 edit is reconstructed.
+    let processing = || invalid_import("render SoundCraft clip processing before import; OTIO edits alone do not preserve it");
+    if let Some(gain) = own.get("gain_db") {
+        let gain = gain.as_f64().ok_or_else(|| invalid_import("SoundCraft clip `gain_db` must be a number"))?;
+        if gain != 0.0 {
+            return Err(processing());
+        }
+    }
+    for field in ["fade_in_samples", "fade_out_samples"] {
+        if let Some(fade) = own.get(field) {
+            let fade = fade.as_i64().ok_or_else(|| invalid_import(format!("SoundCraft clip `{field}` must be an integer")))?;
+            if fade != 0 {
+                return Err(processing());
+            }
+        }
+    }
+    if let Some(envelope) = own.get("gain_env") {
+        let envelope = envelope.as_array().ok_or_else(|| invalid_import("SoundCraft clip `gain_env` must be an array"))?;
+        if !envelope.is_empty() {
+            return Err(processing());
+        }
     }
     Ok(())
 }
@@ -601,6 +619,15 @@ mod tests {
         document
     }
 
+    fn first_clip_as_official_clip_two(timeline: &mut Value) -> &mut Value {
+        let clip = &mut timeline["tracks"]["children"][0]["children"][1];
+        let reference = clip.as_object_mut().unwrap().remove("media_reference").unwrap();
+        clip["OTIO_SCHEMA"] = json!("Clip.2");
+        clip["media_references"] = json!({"DEFAULT_MEDIA": reference});
+        clip["active_media_reference_key"] = json!("DEFAULT_MEDIA");
+        clip
+    }
+
     #[test]
     fn serializes_multi_track_audio_with_precise_gaps_and_source_trims() {
         let (s, path) = fixture();
@@ -793,6 +820,86 @@ mod tests {
         value["tracks"]["children"][0]["children"][1]["metadata"]["soundcraft"]["gain_db"] = json!(6.0);
         assert!(import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&value).unwrap()).is_err());
         assert_eq!(*engine.session(), before);
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn clip_two_malformed_soundcraft_gain_and_fade_metadata_fails_atomically() {
+        let (session, media) = decodable_fixture();
+        let original_audio = std::fs::read(&media).unwrap();
+        let document = media.with_extension("otio");
+        let exported: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let cases = [
+            ("gain_db", json!("6")),
+            ("gain_db", Value::Null),
+            ("fade_in_samples", json!("500")),
+            ("fade_out_samples", json!(0.0)),
+            ("gain_env", json!({"point": 1})),
+        ];
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (field, malformed) in cases {
+            let mut timeline = exported.clone();
+            let clip = first_clip_as_official_clip_two(&mut timeline);
+            clip["metadata"]["soundcraft"][field] = malformed;
+            std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+            let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains(field), "wrong error for malformed {field}: {error}");
+            assert_eq!(*engine.session(), before, "malformed {field} changed the document");
+            assert!(!engine.can_undo(), "malformed {field} added an undo step");
+            assert_eq!(std::fs::read(&media).unwrap(), original_audio, "malformed {field} changed source media");
+        }
+        let mut timeline = exported;
+        first_clip_as_official_clip_two(&mut timeline)["metadata"]["soundcraft"] = json!("not an object");
+        std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+        assert!(engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).is_err());
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn clip_two_nondefault_soundcraft_processing_must_be_rendered_before_import() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let exported: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let processing =
+            [("gain_db", json!(6.0)), ("fade_in_samples", json!(100)), ("fade_out_samples", json!(100)), ("gain_env", json!([[0, 0.5]]))];
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (field, value) in processing {
+            let mut timeline = exported.clone();
+            first_clip_as_official_clip_two(&mut timeline)["metadata"]["soundcraft"][field] = value;
+            std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+            let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains("render SoundCraft clip processing"), "nondefault {field} was ignored: {error}");
+            assert_eq!(*engine.session(), before);
+            assert!(!engine.can_undo());
+        }
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn clip_two_zero_processing_and_unrelated_vendor_metadata_remain_importable() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let clip = first_clip_as_official_clip_two(&mut timeline);
+        clip["metadata"]["soundcraft"]["gain_db"] = json!(0.0);
+        clip["metadata"]["soundcraft"]["fade_in_samples"] = json!(0);
+        clip["metadata"]["soundcraft"]["fade_out_samples"] = json!(0);
+        clip["metadata"]["soundcraft"]["gain_env"] = json!([]);
+        clip["metadata"]["another_editor"] = json!({"custom_tag": "preserve ordinary third-party edit metadata"});
+        std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+        let mut engine = Engine::default();
+        let imported = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert_eq!(imported["audio_tracks"], 2);
+        assert_eq!(imported["audio_clips"], 2);
+        assert_eq!(imported["media_sources"], 1);
+        assert!(engine.can_undo());
+        std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
 
