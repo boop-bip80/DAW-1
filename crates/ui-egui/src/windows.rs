@@ -903,7 +903,11 @@ mod midi_input_tests {
             data.insert_temp(egui::Id::unique("midi_input_ports"), fake_scan());
             data.insert_temp(egui::Id::unique("audio_systems"), Arc::new(Vec::<AudioSystem>::new()));
         });
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| playback_engine(&mut app, ui.ctx()));
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))), ..Default::default() };
+        // Floating egui windows lay out their layer on the first frame and paint it on the next.
+        let mut first = ctx.run_ui(raw.clone(), |ui| playback_engine(&mut app, ui.ctx()));
+        first.textures_delta.clear();
+        let mut output = ctx.run_ui(raw, |ui| playback_engine(&mut app, ui.ctx()));
         let text = painted_text(&output);
         output.textures_delta.clear();
         assert!(text.iter().any(|s| s.contains("MIDI input devices")), "MIDI selector unreachable: {text:?}");
