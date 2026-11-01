@@ -1,6 +1,6 @@
 # SoundCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (saved per-track MIDI input routes and independent A1/A2 EDL cuts; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (portable OTIOZ export, MIDI filter/output device foundation and release quality dependency; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Forward-looking plan. Status and numbers: [`../ROADMAP.md`](../ROADMAP.md) and
 [`target-app-parity.md`](target-app-parity.md); the ranked work list: [`gaps.md`](gaps.md).
@@ -11,9 +11,9 @@ Hours are Opus 5.5 agent-hours.
 1. **Merge or close the open bug-fix PRs** (#123–#134, #146, #148, #75) and fix the rest of the
    correctness backlog (G-04). ≈ 15–25 h.
 2. **Audio interface completion** (G-01): full physical channel matrix, one-clock duplex monitoring, measured latency/automatic offsets and hardware verification. Manual offset, callback drain and bounded per-track input choice exist; device/rate/buffer choice exists. ≈ 15–25 h estimated.
-3. **MIDI devices** (G-02): validate synthetic desktop Record/Stop and saved per-track input-port/channel routing on a physical controller, then add live instrument monitoring, MIDI output, thru and clock. ≈ 20–35 h estimate not re-calibrated.
+3. **MIDI devices** (G-02): validate synthetic desktop Record/Stop and saved per-track input-port/channel routing on a physical controller, then add live instrument monitoring, track playback through the new output worker, thru and clock. ≈ 20–35 h estimate not re-calibrated.
 4. **macOS plugin hosting** (G-05): obtain explicit owner approval for relaxing signed-app library validation to host third-party native plugins; then address AU editors. ≈ 15–25 h, plus a security decision.
-5. **Verify CI execution** (G-14): local Linux `cargo xtask ci` and CLI import/bounce/save/reopen smoke pass; workflows target the default branch on three OSes, but GitHub reports no Actions runs. Enable/verify runners and add hardware/platform smoke tests.
+5. **Verify CI execution** (G-14): local Linux `cargo xtask ci` and CLI import/bounce/save/reopen smoke pass; workflows target the default branch on three OSes, and release packaging depends on a three-OS quality job, but GitHub reports no Actions runs. Enable/verify runners and add hardware/platform smoke tests.
 
 ## Alpha gate
 
@@ -28,7 +28,7 @@ main platform). Any **no** keeps SoundCraft **pre-alpha**, and those rows are th
 | Edit: select, trim, fade, comp playlists, Slip/Shuffle/Grid | yes (rough) | Every Edit menu command; property-tested with undo; open bugs #3, #5, #140 don't block the workflow | — |
 | Mix with built-in and third-party plugins, sends, busses, automation | partial (passes on CLAP/AU) | 27 built-in processors; CLAP and AU host on the signed macOS build, but its missing entitlement blocks third-party VST3 (#153). No AU plugin windows yet; VST3 windows on macOS only | 1–2 (entitlement) |
 | Bounce mix and stems; save and reopen the session | yes (rough) | WAV/BWF/AIFF/FLAC bounce, stems, `.scraft` save/reopen with plugin state; bugs #59, #103 in bus bounce and aux latency (PRs open) | — |
-| Exchange a session with Pro Tools or a picture editor | **no** | Audio-only OTIO and restricted mono/stereo or two-independent-mono-lane A1/A2 CMX3600 straight-cut EDL import/export work, but no `.ptx`, AAF or OMF interchange (#40, G-03) | 50–90 |
+| Exchange a session with Pro Tools or a picture editor | **no** | Audio-only `.otio` import/export, `.otioz` portable bundle **export only**, and restricted mono/stereo or two-independent-mono-lane A1/A2 CMX3600 straight-cut EDL interchange work, but no `.ptx`, AAF or OMF interchange (#40, G-03) | 50–90 |
 
 **Result: pre-alpha.** Three workflows fail. Passing them is ~110–180 h, about 70 % of it
 parallelizable (interfaces, MIDI and AAF are independent crates).
@@ -48,7 +48,7 @@ Status: ✅ done · 🟡 in progress · ⬜ not started.
 | M10 | Public releases on all platforms | ✅ v0.3.0 (2026-10-08) and v0.4.0 (2026-10-10) released for every platform | — |
 | M11 | Third-party plugin hosting (CLAP, VST3, AU), video, surround | 🟡 mostly done | 40–60 |
 | M12 | **Hardware**: audio interfaces, MIDI devices, sync, control surfaces | ⬜ | 110–180 |
-| M13 | **Interchange**: AAF/OMF import/export and source streaming/recovery (OTIO audio, mono/linked-stereo and independent two-mono-lane CMX3600 EDL cuts, WAV take writing exist) | 🟡 foundation only | 65–115 |
+| M13 | **Interchange**: AAF/OMF import/export and source streaming/recovery (OTIO audio, `.otioz` bundle export-only, mono/linked-stereo and independent two-mono-lane CMX3600 EDL cuts, WAV take writing exist) | 🟡 foundation only | 65–115 |
 | M14 | **Fidelity harness** against Pro Tools (null tests, plugin responses) | ⬜ | 20–30 |
 | M15 | **Localization**: catalog, fonts/RTL, the 8 Pro Tools languages first | ⬜ (PRs #141, #143 open) | 70–110 |
 | M16 | Built-in plugin depth, sidechain, ARA | ⬜ | 110–170 |
@@ -89,6 +89,7 @@ There is no `cargo xtask scorecard` in this repo; the measured number is `cargo 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | OTIOZ portable audio export-only and MIDI Input Filter/output worker foundations recognized; release quality dependency configured, hosted CI and physical MIDI/playback still unverified, alpha gate unchanged |
 | 2026-11-01 | minor | Per-track MIDI named-port/channel selectors and synthetic route filtering landed; independent two-mono-lane A1/A2 CMX3600 EDL cuts landed; physical MIDI/live audition and AAF/OMF/PTX alpha gate unchanged |
 | 2026-11-01 | minor | Desktop native MIDI Record/Stop integrated in synthetic tests; manual record offset, callback-drained audio Stop and restricted CMX3600 mono/stereo audio EDL; physical controller and AAF/OMF/PTX alpha blockers remain |
 | 2026-11-01 | minor | Native MIDI take bridge (not app-wired), audio-only OTIO import, bounded audio channel routes, CLI media round-trip and full Linux gate; alpha/physical/CI runner verification remain open |
