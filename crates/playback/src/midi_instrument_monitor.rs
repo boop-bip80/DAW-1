@@ -6,6 +6,11 @@
 //! block; on overflow, a separate atomic epoch forces an All Notes Off before any new notes.
 //! These events start at the *next rendered block*, not at a sample-accurate device timestamp.
 
+/// Inert, hardware-free bookkeeping for future *verified* instrument cleanup receipts.
+/// Merely using this module never publishes a cleanup ACK or invokes a plugin.
+#[path = "midi_cleanup.rs"]
+pub mod cleanup;
+
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use soundcraft_midi::live::LiveMidiMessage;
 use soundcraft_mix::LiveInstrumentEvent;
