@@ -775,6 +775,18 @@ pub struct Player {
     pub silent: bool,
 }
 
+/// Keep the control-thread retirement receiver alive until an output stream has been
+/// disposed of, then reclaim plugin boxes already sent by its callbacks. Some CPAL backends
+/// join their callback worker in Stream::drop, so relying on Player field drop order (Side
+/// before _stream) can disconnect the mailbox while that worker is still unwinding.
+///
+/// This does NOT recover live plugins: CPAL's callback still owns AudioState, which may be
+/// destroyed on an audio worker. Safe live-instance transfer requires a separate handoff.
+fn stop_output_stream_before_collecting_retired<S>(stream: S, side: &Mutex<Side>) {
+    drop(stream);
+    side.lock().unwrap_or_else(PoisonError::into_inner).collect_garbage();
+}
+
 impl Drop for Player {
     fn drop(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -793,6 +805,11 @@ impl Drop for Player {
                     log::error!("silent audio worker panicked before handing its plugin state back to the control thread");
                 }
             }
+        }
+        if let Some(stream) = self._stream.take() {
+            // Keep Side.garbage connected throughout CPAL Stream::drop, and release
+            // already-retired plugin instances here, not in the callback's destructor.
+            stop_output_stream_before_collecting_retired(stream, &self.side);
         }
     }
 }
@@ -1753,6 +1770,77 @@ mod tests {
         assert_eq!(events[0].0, "suspend");
         assert_ne!(events[0].1, control);
         assert_eq!(events[1], ("drop", control), "retired plugin stays in the mailbox until UI reclamation");
+    }
+
+    /// Synthetic CPAL-style stream teardown: its Drop releases and joins a worker which
+    /// may still return a retired third-party plugin at the very end of output lifetime.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct JoinedRetirementStream {
+        release: Option<Sender<()>>,
+        callback: Option<std::thread::JoinHandle<bool>>,
+        completed: Arc<AtomicBool>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for JoinedRetirementStream {
+        fn drop(&mut self) {
+            if let Some(tx) = self.release.take() {
+                let _ = tx.send(());
+            }
+            let joined = self.callback.take().is_some_and(|worker| worker.join().unwrap_or(false));
+            self.completed.store(joined, Ordering::Release);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn retired_test_plugin(events: &Arc<Mutex<Vec<(&'static str, std::thread::ThreadId)>>>) -> Box<dyn Plugin> {
+        Box::new(SilentLifecycleProbe { events: Arc::clone(events), processed: None, stopped: None })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hardware_stream_drop_keeps_retirement_receiver_connected_through_final_callback() {
+        let control = std::thread::current().id();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (garbage_tx, garbage_rx) = channel();
+        let side = Mutex::new(Side::new(48_000.0, garbage_rx));
+        let (release_tx, release_rx) = channel();
+        let retired = retired_test_plugin(&events);
+        let callback = std::thread::spawn(move || {
+            if release_rx.recv().is_err() {
+                return false;
+            }
+            // This send would disconnect if Side were destroyed before stream Drop.
+            garbage_tx.send(vec![retired]).is_ok()
+        });
+        let completed = Arc::new(AtomicBool::new(false));
+        let stream = JoinedRetirementStream { release: Some(release_tx), callback: Some(callback), completed: Arc::clone(&completed) };
+        stop_output_stream_before_collecting_retired(stream, &side);
+        assert!(completed.load(Ordering::Acquire), "the late callback must deliver retirement before receiver destruction");
+        assert_eq!(*events.lock().unwrap_or_else(PoisonError::into_inner), vec![("drop", control)]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn hardware_stream_drop_collects_already_queued_retirements_after_worker_exit() {
+        let control = std::thread::current().id();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (garbage_tx, garbage_rx) = channel();
+        let side = Mutex::new(Side::new(48_000.0, garbage_rx));
+        let (sent_tx, sent_rx) = channel();
+        let retired = retired_test_plugin(&events);
+        let callback = std::thread::spawn(move || {
+            let delivered = garbage_tx.send(vec![retired]).is_ok();
+            let _ = sent_tx.send(());
+            delivered
+        });
+        assert!(sent_rx.recv_timeout(std::time::Duration::from_secs(3)).is_ok(), "device worker must finish before stream Drop");
+        assert!(events.lock().unwrap_or_else(PoisonError::into_inner).is_empty(), "a queued native plugin must not drop on the worker");
+        let completed = Arc::new(AtomicBool::new(false));
+        let stream = JoinedRetirementStream { release: None, callback: Some(callback), completed: Arc::clone(&completed) };
+        stop_output_stream_before_collecting_retired(stream, &side);
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(*events.lock().unwrap_or_else(PoisonError::into_inner), vec![("drop", control)]);
     }
 
     #[test]
