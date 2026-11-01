@@ -9,7 +9,10 @@
 //! The producer commits whole frames with a Release head store after writing every
 //! channel. The consumer acquires that head before reading, and releases the tail only
 //! after consuming complete frames. Each sample is an `AtomicU32` containing its exact
-//! `f32` bits, requiring no unsafe code, callback heap work, or mutexes. A caller must
+//! `f32` bits, and each physical frame carries an atomic transport-generation tag.
+//! A reader silences frames from earlier Stop/Seek epochs and rechecks the requested
+//! epoch after copying to silence its *entire* buffer if the request changed mid-read.
+//! This requires no unsafe code, callback heap work, or mutexes. A caller must
 //! provide exactly one producer and one consumer; extra concurrent writers/readers
 //! violate the FIFO contract even though individual slot accesses remain memory-safe.
 //! Reinitialization requires `&mut self` **after both endpoints have stopped/joined**.
@@ -19,7 +22,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 /// Maximum interleaved output channels (SoundCraft's widest live mix).
 pub const MAX_OUTPUT_CHANNELS: usize = 16;
 /// Maximum caller-visible capacity in complete frames. Internal power-of-two padding
-/// never exceeds this bound, so 16-channel slots consume at most 2 MiB.
+/// never exceeds this bound: at 16 channels, at most 2 MiB of sample slots plus
+/// 256 KiB of per-frame generation tags.
 pub const MAX_OUTPUT_RING_FRAMES: usize = 32_768;
 
 /// Invalid construction parameters; the ring never silently clamps a requested layout.
@@ -38,6 +42,8 @@ pub struct OutputSampleRing {
     /// Physical storage is a power of two, so mask indexing survives usize wraparound.
     storage_mask: usize,
     slots: Box<[AtomicU32]>,
+    /// Per-physical-frame epoch, published together with its sample channels by head Release.
+    frame_generations: Box<[AtomicU64]>,
     /// Number of complete frames published by the producer (only producer writes).
     head: AtomicUsize,
     /// Number of complete frames consumed (only consumer writes).
@@ -66,6 +72,7 @@ impl OutputSampleRing {
             capacity_frames,
             storage_mask: storage_frames - 1,
             slots: (0..samples).map(|_| AtomicU32::new(0)).collect(),
+            frame_generations: (0..storage_frames).map(|_| AtomicU64::new(generation)).collect(),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             generation: AtomicU64::new(generation),
@@ -91,10 +98,18 @@ impl OutputSampleRing {
         head.wrapping_sub(tail).min(self.capacity_frames)
     }
 
-    /// Producer only. Returns whole frames committed, or `None` for a buffer with
-    /// incomplete interleaved frames. Saturation is reported as `Some(0)`; unread data
-    /// is never overwritten. No heap allocation, mutex, or wait occurs.
+    /// Backwards-compatible producer entry point using this ring's control-thread
+    /// generation. For a live Stop/Seek epoch controlled externally, use
+    /// [`Self::try_write_interleaved_for_generation`] instead.
     pub fn try_write_interleaved(&self, samples: &[f32]) -> Option<usize> {
+        self.try_write_interleaved_for_generation(samples, self.generation())
+    }
+
+    /// Producer only. Tags every complete frame with `generation`, then publishes all
+    /// sample channels and tags through a Release head store. Returns whole frames
+    /// committed, or `None` for incomplete interleaved frames. Saturation is
+    /// `Some(0)`; unread data is never overwritten. No heap work, lock, or wait.
+    pub fn try_write_interleaved_for_generation(&self, samples: &[f32], generation: u64) -> Option<usize> {
         if !samples.len().is_multiple_of(self.channels) {
             return None;
         }
@@ -103,34 +118,66 @@ impl OutputSampleRing {
         let queued = head.wrapping_sub(tail).min(self.capacity_frames);
         let frames = (samples.len() / self.channels).min(self.capacity_frames - queued);
         for (offset, frame) in samples.chunks_exact(self.channels).take(frames).enumerate() {
-            let base = (head.wrapping_add(offset) & self.storage_mask) * self.channels;
+            let slot = head.wrapping_add(offset) & self.storage_mask;
+            let base = slot * self.channels;
             for (channel, sample) in frame.iter().enumerate() {
                 self.slots[base + channel].store(sample.to_bits(), Ordering::Relaxed);
             }
+            self.frame_generations[slot].store(generation, Ordering::Relaxed);
         }
         self.head.store(head.wrapping_add(frames), Ordering::Release);
         Some(frames)
     }
 
-    /// Consumer only. Copies available complete frames and fills the rest with silence;
-    /// returns frames actually read or `None` for a non-frame-aligned output buffer.
-    /// Even malformed output buffers are silenced, never left with stale audio.
+    /// Backwards-compatible consumer entry point for quiescent/reset-only streams.
+    /// It filters against the generation stored in this ring itself. For live
+    /// transport changes, pass the independently updated desired epoch to
+    /// [`Self::read_or_silence_for_generation`].
     pub fn read_or_silence(&self, output: &mut [f32]) -> Option<usize> {
+        self.read_or_silence_for_generation(output, &self.generation)
+    }
+
+    /// Consumer only. A frame with a generation different from `desired` is consumed
+    /// but emitted as silence. Returns frames dequeued, **including discarded stale
+    /// frames**, or `None` for malformed non-frame-aligned output. An underrun or
+    /// malformed buffer always becomes silence. If `desired` changes during copying,
+    /// every output sample is zeroed at the final Acquire recheck.
+    ///
+    /// The caller's epoch must advance monotonically without reuse during a live
+    /// stream. A control thread may change `desired` atomically on Stop/Seek while
+    /// the producer writes old frames; neither endpoint ever waits or allocates.
+    pub fn read_or_silence_for_generation(&self, output: &mut [f32], desired: &AtomicU64) -> Option<usize> {
+        self.read_for_generation_inner(output, desired, || {})
+    }
+
+    /// A zero-cost test hook after the copy and before the final epoch read. The
+    /// production wrapper supplies an empty closure, optimized out by monomorphization.
+    fn read_for_generation_inner(&self, output: &mut [f32], desired: &AtomicU64, after_copy: impl FnOnce()) -> Option<usize> {
         if !output.len().is_multiple_of(self.channels) {
             output.fill(0.0);
             return None;
         }
+        let generation = desired.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Relaxed);
         let head = self.head.load(Ordering::Acquire);
         let frames = (output.len() / self.channels).min(head.wrapping_sub(tail).min(self.capacity_frames));
         for (offset, frame) in output.chunks_exact_mut(self.channels).take(frames).enumerate() {
-            let base = (tail.wrapping_add(offset) & self.storage_mask) * self.channels;
+            let slot = tail.wrapping_add(offset) & self.storage_mask;
+            if self.frame_generations[slot].load(Ordering::Relaxed) != generation {
+                frame.fill(0.0);
+                continue;
+            }
+            let base = slot * self.channels;
             for (channel, sample) in frame.iter_mut().enumerate() {
                 *sample = f32::from_bits(self.slots[base + channel].load(Ordering::Relaxed));
             }
         }
         output[frames * self.channels..].fill(0.0);
         self.tail.store(tail.wrapping_add(frames), Ordering::Release);
+        after_copy();
+        if desired.load(Ordering::Acquire) != generation {
+            output.fill(0.0);
+        }
         Some(frames)
     }
 
@@ -252,6 +299,75 @@ mod tests {
         let mut rest = [0.0; 32];
         assert_eq!(ring.read_or_silence(&mut rest), Some(2));
         assert_eq!(rest.as_slice(), &frames[16..]);
+    }
+
+    #[test]
+    fn pre_seek_frames_are_discarded_after_requested_generation_advances() {
+        let ring = ring(2, 4);
+        let desired = AtomicU64::new(41);
+        assert_eq!(ring.try_write_interleaved_for_generation(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 41), Some(3));
+        desired.store(42, Ordering::Release);
+        let mut old = [99.0; 6];
+        assert_eq!(ring.read_or_silence_for_generation(&mut old, &desired), Some(3));
+        assert_eq!(old, [0.0; 6], "no queued pre-seek frame may reach output after epoch change");
+        assert_eq!(ring.try_write_interleaved_for_generation(&[7.0, 8.0, 9.0, 10.0], 42), Some(2));
+        let mut current = [99.0; 6];
+        assert_eq!(ring.read_or_silence_for_generation(&mut current, &desired), Some(2));
+        assert_eq!(current, [7.0, 8.0, 9.0, 10.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mid_copy_epoch_change_silences_the_complete_output_buffer() {
+        let ring = ring(1, 4);
+        let desired = AtomicU64::new(4);
+        assert_eq!(ring.try_write_interleaved_for_generation(&[10.0, 20.0, 30.0], 4), Some(3));
+        let mut output = [99.0; 4];
+        // A deterministic mutation precisely between sample copy and final epoch check.
+        assert_eq!(ring.read_for_generation_inner(&mut output, &desired, || desired.store(5, Ordering::Release)), Some(3));
+        assert_eq!(output, [0.0; 4], "a Stop/Seek during the callback invalidates the whole copied buffer");
+        assert_eq!(ring.queued_frames(), 0);
+    }
+
+    #[test]
+    fn odd_capacity_counter_wrap_preserves_epoch_tags_and_full_frames() {
+        let ring = ring(2, 7);
+        let desired = AtomicU64::new(90);
+        ring.head.store(usize::MAX - 2, Ordering::Relaxed);
+        ring.tail.store(usize::MAX - 2, Ordering::Relaxed);
+        let before: Vec<f32> = (1..=7).flat_map(|frame| [frame as f32, -(frame as f32)]).collect();
+        let after: Vec<f32> = (8..=11).flat_map(|frame| [frame as f32, -(frame as f32)]).collect();
+        assert_eq!(ring.try_write_interleaved_for_generation(&before, 90), Some(7));
+        let mut initial = [0.0; 6];
+        assert_eq!(ring.read_or_silence_for_generation(&mut initial, &desired), Some(3));
+        assert_eq!(initial.as_slice(), &before[..6]);
+        desired.store(91, Ordering::Release);
+        assert_eq!(ring.try_write_interleaved_for_generation(&after, 91), Some(3), "only three free full frames");
+        let mut output = [99.0; 14];
+        assert_eq!(ring.read_or_silence_for_generation(&mut output, &desired), Some(7));
+        let expected: Vec<f32> = [0.0; 8].into_iter().chain(after[..6].iter().copied()).collect();
+        assert_eq!(output.as_slice(), expected.as_slice(), "old frames are silenced without overwriting new frames");
+        assert_eq!(ring.try_write_interleaved_for_generation(&after[6..], 91), Some(1));
+        let mut last = [0.0; 2];
+        assert_eq!(ring.read_or_silence_for_generation(&mut last, &desired), Some(1));
+        assert_eq!(last.as_slice(), &after[6..]);
+    }
+
+    #[test]
+    fn epoch_filter_handles_underrun_then_recovers_with_current_audio() {
+        let ring = ring(1, 2);
+        let desired = AtomicU64::new(2);
+        let mut empty = [99.0; 3];
+        assert_eq!(ring.read_or_silence_for_generation(&mut empty, &desired), Some(0));
+        assert_eq!(empty, [0.0; 3]);
+        assert_eq!(ring.try_write_interleaved_for_generation(&[11.0], 1), Some(1));
+        assert_eq!(ring.try_write_interleaved_for_generation(&[22.0], 2), Some(1));
+        let mut mixed = [99.0; 3];
+        assert_eq!(ring.read_or_silence_for_generation(&mut mixed, &desired), Some(2));
+        assert_eq!(mixed, [0.0, 22.0, 0.0]);
+        assert_eq!(ring.try_write_interleaved_for_generation(&[33.0], 2), Some(1));
+        let mut recovered = [99.0; 2];
+        assert_eq!(ring.read_or_silence_for_generation(&mut recovered, &desired), Some(1));
+        assert_eq!(recovered, [33.0, 0.0]);
     }
 
     #[test]
