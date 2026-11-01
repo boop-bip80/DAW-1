@@ -16,7 +16,16 @@ const MAX_CHANNELS: usize = 64;
 static NEXT_RESTART_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 fn mint_restart_token(counter: &AtomicU64) -> u64 {
-    counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).unwrap_or(0)
+    // compare_exchange_weak is available at our Rust 1.90 MSRV; try_update is only 1.95+.
+    // Minting occurs on the control thread, never while rendering audio.
+    let mut next = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(after) = next.checked_add(1) else { return 0 };
+        match counter.compare_exchange_weak(next, after, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(actual) => next = actual,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
