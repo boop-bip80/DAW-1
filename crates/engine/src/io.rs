@@ -816,7 +816,7 @@ impl std::io::Seek for Out {
     }
 }
 
-const MAX_BOUNCE_SECS: f64 = 4.0 * 3600.0;
+pub(crate) const MAX_BOUNCE_SECS: f64 = 4.0 * 3600.0;
 
 /// The format, channel count and fold-down source of a bounce of the main mix or `bus`: every
 /// channel (a mono or stereo main mix as stereo), or an ITU stereo fold-down of a surround source
@@ -851,7 +851,7 @@ pub fn bounce_stems(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions) -> Re
 /// Stable stem paths without sanitized-name collisions. Tilde is a reserved
 /// generated suffix marker (sanitize_name replaces user-supplied tildes).
 /// Validate the entire batch before creating any output directory or file.
-fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str) -> Result<Vec<String>> {
+pub(crate) fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str) -> Result<Vec<String>> {
     use std::collections::{HashMap, HashSet};
 
     let names: Vec<_> = stems.iter().map(|(_, name)| sanitize_name(name)).collect();
@@ -894,7 +894,8 @@ fn bounce_sidecar_path(output: &Path) -> PathBuf {
 
 /// Refuse every occupied stem destination and its .part sibling before rendering anything.
 /// symlink_metadata also recognizes dangling links, which Path::exists silently ignores.
-fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
     for output in paths {
         for path in [output.clone(), bounce_sidecar_path(output)] {
             crate::file_access::check_write(&path).map_err(EngineError::Io)?;
@@ -908,17 +909,26 @@ fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn publish_stem_link_no_replace(from: &Path, destination: &Path) -> std::io::Result<()> {
+    // The caller preflights all destinations and owns a private staged source.
+    // hard_link publishes atomically without replacing an occupied output name.
+    std::fs::hard_link(from, destination)
+}
+
 /// An exclusively created, same-filesystem staging directory and the complete files this
 /// batch linked into its destination. Failure/cancellation removes only files this batch
 /// published; the private staging directory is always cleaned.
-struct StemBatch {
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct StemBatch {
     staging: PathBuf,
     published: Vec<PathBuf>,
     committed: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl StemBatch {
-    fn reserve(dir: &Path) -> Result<Self> {
+    pub(crate) fn reserve(dir: &Path) -> Result<Self> {
         // Bounded retries cover concurrent exports, restarted processes and abandoned names
         // without following or deleting anything at an occupied private-directory path.
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
@@ -930,8 +940,30 @@ impl StemBatch {
         }
         Err(EngineError::Io(format!("{}: could not reserve a private stem export directory", dir.display())))
     }
+
+    /// Resolve a checked output name inside the private staging directory.
+    pub(crate) fn staged_path(&self, destination: &Path) -> Result<PathBuf> {
+        let name = destination.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?;
+        Ok(self.staging.join(name))
+    }
+
+    /// Publish one completed stem without replacing a destination. Drop rolls back every link
+    /// successfully published by this job until the whole batch has been committed.
+    pub(crate) fn publish_one(&mut self, destination: &Path, publish: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<()> {
+        let staged = self.staged_path(destination)?;
+        publish(&staged, destination)
+            .map_err(|err| EngineError::Io(format!("{}: cannot publish stem without replacing existing files: {err}", destination.display())))?;
+        self.published.push(destination.to_path_buf());
+        Ok(())
+    }
+
+    pub(crate) fn commit(&mut self, destination_dir: &Path) {
+        sync_dir(destination_dir);
+        self.committed = true;
+    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for StemBatch {
     fn drop(&mut self) {
         if !self.committed {
@@ -946,6 +978,7 @@ impl Drop for StemBatch {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn render_stem(s: &Session, id: TrackId, path: &Path, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<()> {
     let mut solo = s.clone();
     for t in &mut solo.tracks {
@@ -975,59 +1008,52 @@ fn bounce_stems_with_publisher(
     fold_stereo: bool,
     mut publish: impl FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<Vec<String>> {
-    let s = e.session();
-    if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
-        return Err(EngineError::BadParams("file.bounce_stems".into(), "bounces are limited to 4 hours".into()));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // The programmatic command and the future native UI use one incremental implementation.
+        // A synchronous caller simply grants an unbounded slice on each step.
+        let mut job = crate::stem_bounce::StemBounceJob::new(e, dir, r, opts, fold_stereo)?;
+        loop {
+            if let Some(paths) = job.step_with_publisher(|| true, &mut publish)? {
+                return Ok(paths);
+            }
+        }
     }
-    let ext = match opts.format {
-        FileFormat::Aiff => "aif",
-        FileFormat::Flac => "flac",
-        _ => "wav",
-    };
-    let stems: Vec<(TrackId, String)> = s
-        .tracks
-        .iter()
-        .filter(|t| matches!(t.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Midi) && !t.inactive && !t.mixer.mute)
-        .map(|t| (t.id, t.name.clone()))
-        .collect();
-    if stems.len() > 4_096 {
-        return Err(EngineError::BadParams("file.bounce_stems".into(), "stem export is limited to 4096 tracks".into()));
-    }
-    // Keep legacy names for noncolliding tracks, and stable TrackId suffixes for collisions.
-    let names = stem_output_names(&s.name, &stems, ext)?;
-    let files: Vec<PathBuf> = names.iter().map(|name| Path::new(dir).join(name)).collect();
-    let paths: Vec<String> = files.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-    if stems.is_empty() {
-        return Ok(paths);
-    }
-    if cfg!(target_arch = "wasm32") {
+    #[cfg(target_arch = "wasm32")]
+    {
         // Browser exports deliver one file at a time through their host hook; there is no
         // native filesystem or atomic multi-file publication to stage.
+        let _ = &mut publish;
+        let s = e.session();
+        if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
+            return Err(EngineError::BadParams("file.bounce_stems".into(), "bounces are limited to 4 hours".into()));
+        }
+        let ext = match opts.format {
+            FileFormat::Aiff => "aif",
+            FileFormat::Flac => "flac",
+            _ => "wav",
+        };
+        let stems: Vec<(TrackId, String)> = s
+            .tracks
+            .iter()
+            .filter(|t| matches!(t.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Midi) && !t.inactive && !t.mixer.mute)
+            .map(|t| (t.id, t.name.clone()))
+            .collect();
+        if stems.len() > 4_096 {
+            return Err(EngineError::BadParams("file.bounce_stems".into(), "stem export is limited to 4096 tracks".into()));
+        }
+        let names = stem_output_names(&s.name, &stems, ext)?;
+        let files: Vec<PathBuf> = names.iter().map(|name| Path::new(dir).join(name)).collect();
+        let paths: Vec<String> = files.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+        if stems.is_empty() {
+            return Ok(paths);
+        }
         make_dir(dir)?;
         for ((id, _), file) in stems.iter().zip(&files) {
             render_stem(s, *id, file, r, opts, fold_stereo)?;
         }
-        return Ok(paths);
+        Ok(paths)
     }
-
-    preflight_stem_paths(&files)?;
-    make_dir(dir)?;
-    let mut batch = StemBatch::reserve(Path::new(dir))?;
-    for ((id, _), file) in stems.iter().zip(&files) {
-        let staged = batch.staging.join(file.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?);
-        render_stem(s, *id, &staged, r, opts, fold_stereo)?;
-    }
-    // Catch a destination or sidecar that appeared during rendering, before publishing any.
-    preflight_stem_paths(&files)?;
-    for file in &files {
-        let staged = batch.staging.join(file.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?);
-        publish(&staged, file)
-            .map_err(|err| EngineError::Io(format!("{}: cannot publish stem without replacing existing files: {err}", file.display())))?;
-        batch.published.push(file.clone());
-    }
-    sync_dir(Path::new(dir));
-    batch.committed = true;
-    Ok(paths)
 }
 
 /// Limit a range used for rendering to the track's material (plus a second), so a huge

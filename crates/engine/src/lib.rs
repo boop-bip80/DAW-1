@@ -21,6 +21,8 @@ pub mod otio;
 pub mod otio_bundle;
 pub mod otio_bundle_import;
 pub mod score;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stem_bounce;
 
 use serde_json::{Value, json};
 use soundcraft_model::{Clip, Session, TrackId, ZoomState};
