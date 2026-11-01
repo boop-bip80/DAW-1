@@ -17,7 +17,7 @@ pub enum Dialog {
     NewTracks { count: u32, format: String, kind: String, timebase: String, name: String },
     NewSession { name: String, sample_rate: u32, demo: bool },
     Bounce { path: String, format: String, bit_depth: String, normalize: bool, dither: bool },
-    BounceStems { dir: String, format: String, bit_depth: String, dither: bool, fold_stereo: bool, full_session: bool },
+    BounceStems { dir: String, format: String, bit_depth: String, dither: bool, fold_stereo: bool, full_session: bool, last_error: Option<String> },
     RenameTrack { id: TrackId, name: String },
     RenameClip { id: ClipId, name: String },
     RenameMarker { id: soundcraft_model::MarkerId, name: String },
@@ -219,6 +219,7 @@ impl Dialogs {
                     dither: true,
                     fold_stereo: false,
                     full_session: e.session().edit.selection.is_empty(),
+                    last_error: None,
                 }
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
@@ -587,7 +588,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         keep = false;
                     }
                 }
-                Dialog::BounceStems { dir, format, bit_depth, dither, fold_stereo, full_session } => {
+                Dialog::BounceStems { dir, format, bit_depth, dither, fold_stereo, full_session, last_error } => {
                     ui.horizontal(|ui| {
                         ui.label("Export folder");
                         crate::widgets::named_text_field(
@@ -660,6 +661,9 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     if format.as_str() == "flac" && bit_depth.as_str() == "32f" {
                         ui.colored_label(Tokens::current().meter_yellow, "FLAC cannot store floating-point audio; choose 16- or 24-bit stems.");
                     }
+                    if let Some(error) = last_error.as_deref() {
+                        ui.colored_label(Tokens::current().rec, format!("Stem export could not start: {error}"));
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     let options = stem_encode_options(format, bit_depth, *dither);
                     #[cfg(target_arch = "wasm32")]
@@ -677,9 +681,11 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     if buttons_enabled(ui, "Export Stems", enter, ready) {
                         #[cfg(not(target_arch = "wasm32"))]
                         if let Some(options) = options {
-                            crate::bounce::start_stems(app, dir, range, &options, *fold_stereo);
+                            match crate::bounce::start_stems(app, dir, range, &options, *fold_stereo) {
+                                Ok(()) => keep = false,
+                                Err(reason) => *last_error = Some(reason),
+                            }
                         }
-                        keep = false;
                     }
                 }
                 Dialog::RenameTrack { id, name } => {
@@ -1389,6 +1395,11 @@ mod tests {
         };
         let mut app = SoundApp::new(stem_test_engine(), None, services);
         assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        if let Some(Dialog::BounceStems { dir, .. }) = app.dialogs.open.as_mut() {
+            // CI may have neither HOME nor USERPROFILE; the test, not the app, chooses a known
+            // absolute path so the Start button can be enabled on all desktop platforms.
+            *dir = folder.path();
+        }
         let journal = app.engine.journal.clone();
         let document = app.engine.session().to_json();
         let mut harness = Harness::builder()
@@ -1416,6 +1427,85 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     #[allow(clippy::expect_used)]
+    fn stem_preflight_collision_keeps_accessible_options_and_can_retry_in_another_folder() -> Result<(), &'static str> {
+        use std::{cell::Cell, rc::Rc};
+        let occupied = StemTestFolder::new();
+        let available = StemTestFolder::new();
+        let foreign = occupied.0.join("Untitled - Guitar.aif");
+        std::fs::write(&foreign, b"another application's file").expect("create existing foreign stem");
+        let browse_calls = Rc::new(Cell::new(0));
+        let browse_in_service = Rc::clone(&browse_calls);
+        let available_path = available.path();
+        let services = crate::Services {
+            pick_folder: Some(Box::new(move |_| {
+                browse_in_service.set(browse_in_service.get() + 1);
+                Some(available_path.clone())
+            })),
+            ..Default::default()
+        };
+        let mut engine = stem_test_engine();
+        engine.session_mut().edit.selection = soundcraft_time::Range::new(0, 4_800);
+        engine.mark_clean();
+        let mut app = SoundApp::new(engine, None, services);
+        assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        if let Some(Dialog::BounceStems { dir, format, bit_depth, full_session, .. }) = app.dialogs.open.as_mut() {
+            *dir = occupied.path();
+            *format = "aiff".into();
+            *bit_depth = "16".into();
+            *full_session = false;
+        }
+        let session_before = app.engine.session().to_json();
+        let journal_before = app.engine.journal.clone();
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1170.0, 800.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert_eq!(browse_calls.get(), 0, "painting the dialog must not invoke the native folder picker");
+        harness.get_by_label("Export Stems").click();
+        harness.run_steps(2);
+        let Some(Dialog::BounceStems { dir, format, bit_depth, full_session, last_error: Some(error), .. }) = &harness.state().dialogs.open else {
+            return Err("preflight failure must leave options and an inline error visible");
+        };
+        assert_eq!(dir, &occupied.path());
+        assert_eq!(format, "aiff");
+        assert_eq!(bit_depth, "16");
+        assert!(!full_session, "edit-selection range choice must survive a failed export");
+        assert!(error.contains("already exists"), "{error}");
+        let accessible_error = format!("Stem export could not start: {error}");
+        assert!(harness.get_by_label(&accessible_error).rect().width() > 0.0, "failure must be readable within the still-open dialog");
+        assert!(harness.state().dialogs.stem_bounce.is_none(), "failed preflight cannot allocate a job");
+        assert_eq!(harness.state().engine.session().to_json(), session_before);
+        assert_eq!(harness.state().engine.journal, journal_before);
+        assert!(!harness.state().engine.is_dirty());
+        assert!(!harness.state().engine.can_undo());
+        assert_eq!(std::fs::read(&foreign).expect("foreign stem survives"), b"another application's file");
+        assert_eq!(occupied.contents().len(), 1, "no private stage, sidecar or second output may be created on collision");
+
+        // The inline error can reposition this modal; a stale pointer-coordinate click may
+        // miss after reflow. Exercise the real accessible Button action instead.
+        harness.get_by_label("Browse for stem folder…").click_accesskit();
+        harness.run_steps(2);
+        assert_eq!(browse_calls.get(), 1, "folder picker runs only when Browse is clicked");
+        assert!(matches!(&harness.state().dialogs.open, Some(Dialog::BounceStems { dir, format, bit_depth, full_session: false, .. })
+            if dir == &available.path() && format == "aiff" && bit_depth == "16"));
+        harness.get_by_label("Export Stems").click();
+        harness.run_steps(2);
+        assert!(harness.state().dialogs.open.is_none(), "successful preflight closes the form");
+        assert!(harness.state().dialogs.stem_bounce.is_some(), "retry must start a real incremental job");
+        assert_eq!(harness.state().engine.journal, journal_before, "starting is not successful publication");
+        assert_eq!(std::fs::read(&foreign).expect("foreign file still survives"), b"another application's file");
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        assert!(harness.state().dialogs.stem_bounce.is_none(), "Escape cancels the retried job");
+        assert!(available.contents().is_empty(), "cancel cleans the retry's own staging");
+        assert_eq!(harness.state().engine.journal, journal_before);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[allow(clippy::expect_used)]
     fn stem_dialog_disables_export_with_no_signal_tracks_and_rejects_float_flac() {
         let mut app = SoundApp::new(Engine::default(), None, crate::Services::default());
         assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
@@ -1431,6 +1521,29 @@ mod tests {
         assert!(stem_encode_options("flac", "32f", true).is_none());
         assert!(!stem_encode_options("wav", "32f", true).expect("float WAV is valid").dither);
         assert!(stem_encode_options("flac", "24", true).is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stem_export_action_is_disabled_while_recording_even_with_valid_folder_and_tracks() {
+        let folder = StemTestFolder::new();
+        let mut app = SoundApp::new(stem_test_engine(), None, crate::Services::default());
+        app.engine.transport.recording = true;
+        assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));
+        if let Some(Dialog::BounceStems { dir, .. }) = app.dialogs.open.as_mut() {
+            *dir = folder.path();
+        }
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1170.0, 800.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(harness.get_by_label("Export Stems").accesskit_node().is_disabled(), "recording must disable the export action");
+        assert_eq!(harness.state().dialogs.open_name(), Some("bounce_stems"));
+        assert!(harness.state().dialogs.stem_bounce.is_none());
+        assert!(harness.state().engine.journal.is_empty());
+        assert!(!harness.state().engine.is_dirty());
+        assert!(folder.contents().is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
