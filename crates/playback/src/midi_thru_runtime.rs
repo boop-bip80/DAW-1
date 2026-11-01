@@ -402,7 +402,7 @@ mod tests {
     fn start(events: Vec<TimedMidiMessage>) -> ThruPoller<FakeInput> {
         ThruPoller::start(&session(), &["Fake Keys".into()], vec![input(events)], &["Fake Synth".into()], transport(3, false), 4).unwrap()
     }
-    fn sink() -> FakeSink {
+    fn fake_sink() -> FakeSink {
         FakeSink { present: true, ..Default::default() }
     }
 
@@ -424,7 +424,7 @@ mod tests {
             TimedMidiMessage { timestamp_micros: 40, message: LiveMidiMessage::ControlChange { channel: 0, controller: 7, value: 99 } },
             note(60, false),
         ]);
-        let mut sink = sink();
+        let mut sink = fake_sink();
         sink.micros = 9_900;
         assert_eq!(poller.tick(&mut sink, transport(3, false), 4, true).unwrap(), 3);
         assert_eq!(
@@ -438,7 +438,7 @@ mod tests {
     fn stop_seek_loop_or_record_transport_disables_thru_and_requires_release_ack() {
         for observed in [transport(4, false), transport(3, true)] {
             let mut poller = start(vec![note(62, true)]);
-            let mut sink = sink();
+            let mut sink = fake_sink();
             poller.tick(&mut sink, transport(3, false), 4, false).unwrap();
             assert_eq!(poller.status().held_notes, 1);
             poller.tick(&mut sink, observed, 4, false).unwrap();
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn any_session_revision_change_fails_closed_without_implicit_reenable() {
         let mut poller = start(vec![note(60, true)]);
-        let mut sink = sink();
+        let mut sink = fake_sink();
         poller.tick(&mut sink, transport(3, false), 4, false).unwrap();
         poller.tick(&mut sink, transport(3, false), 5, false).unwrap();
         assert_eq!(poller.status().phase, MidiThruPhase::CleaningUp);
@@ -467,14 +467,14 @@ mod tests {
     fn input_queue_loss_or_output_saturation_is_fatal_and_cancels_sender() {
         let mut poller = start(vec![note(60, true)]);
         poller.inputs[0].dropped = 2;
-        let mut sink = sink();
+        let mut sink = fake_sink();
         assert!(poller.tick(&mut sink, transport(3, false), 4, false).unwrap_err().contains("lost 2"));
         assert_eq!(poller.status().phase, MidiThruPhase::Failed);
         assert_eq!(poller.status().dropped_inputs, 2);
         assert_eq!(sink.generation.get("Fake Synth"), Some(&1));
 
         let mut poller = start(vec![note(60, true)]);
-        let mut sink = sink();
+        let mut sink = fake_sink();
         sink.full = true;
         assert!(poller.tick(&mut sink, transport(3, false), 4, false).unwrap_err().contains("queue full"));
         assert_eq!(poller.status().phase, MidiThruPhase::Failed);
@@ -485,13 +485,13 @@ mod tests {
     fn hot_unplug_and_output_loss_never_silently_continue_thru() {
         let mut poller = start(vec![note(60, true)]);
         poller.inputs[0].present = false;
-        let mut sink = sink();
+        let mut sink = fake_sink();
         assert!(poller.tick(&mut sink, transport(3, false), 4, true).is_err());
         assert_eq!(poller.status().phase, MidiThruPhase::Failed);
         assert_eq!(sink.generation.get("Fake Synth"), Some(&1));
 
         let mut poller = start(vec![note(60, true)]);
-        let mut sink = sink();
+        let mut sink = fake_sink();
         sink.present = false;
         assert!(poller.tick(&mut sink, transport(3, false), 4, true).is_err());
         assert_eq!(poller.status().phase, MidiThruPhase::Failed);
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn bounded_poll_cannot_be_monopolized_by_an_input_flood() {
         let mut poller = start((0..MAX_THRU_EVENTS_PER_BATCH).map(|i| note((i % 128) as u8, true)).collect());
-        let mut sink = sink();
+        let mut sink = fake_sink();
         assert_eq!(poller.tick(&mut sink, transport(3, false), 4, false).unwrap(), MAX_EVENTS_PER_POLL);
         assert!(poller.inputs[0].events.len() >= MAX_THRU_EVENTS_PER_BATCH - MAX_EVENTS_PER_POLL);
     }
