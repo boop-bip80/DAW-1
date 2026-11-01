@@ -1,0 +1,19 @@
+TITLE: SoundCraft test
+FCM: NON-DROP FRAME
+
+001  SC000001 A1    C        00:00:00:01 00:00:00:03 00:00:00:00 00:00:00:02
+* FROM CLIP NAME: Voice 1
+* FROM FILE: file:///tmp/golden-a1.wav
+
+002  SC000002 A2    C        00:00:00:03 00:00:00:04 00:00:00:00 00:00:00:01
+* FROM CLIP NAME: Other 1
+* FROM FILE: file:///tmp/golden-a2.wav
+
+003  SC000002 A2    C        00:00:00:05 00:00:00:07 00:00:00:02 00:00:00:04
+* FROM CLIP NAME: Other 2
+* FROM FILE: file:///tmp/golden-a2.wav
+
+004  SC000001 A1    C        00:00:00:04 00:00:00:05 00:00:00:03 00:00:00:04
+* FROM CLIP NAME: Voice 2
+* FROM FILE: file:///tmp/golden-a1.wav
+
