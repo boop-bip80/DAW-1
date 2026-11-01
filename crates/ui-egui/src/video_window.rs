@@ -6,7 +6,7 @@ use crate::theme::{mono, regular};
 use crate::video_track::{MovieKey, movie_secs, online, picture_at};
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use serde_json::json;
-use soundcraft_model::{ClipContent, TrackKind};
+use soundcraft_model::{ClipContent, Session, TrackKind};
 use soundcraft_time::TimeFormat;
 
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
@@ -55,6 +55,15 @@ fn draw_video_surface(app: &SoundApp, painter: &egui::Painter, img: Rect, pic: O
     }
 }
 
+/// The video-offset command targets the first Video track. Match that choice so a
+/// visible button never promises to move a clip on a different track.
+fn first_picture_start(s: &Session) -> Option<i64> {
+    s.tracks
+        .iter()
+        .find(|t| t.kind == TrackKind::Video)
+        .and_then(|t| t.clips().iter().filter(|c| matches!(c.content, ClipContent::Video { .. })).map(|c| c.start).min())
+}
+
 fn video(app: &mut SoundApp, ctx: &egui::Context) {
     app.video.poll(ctx);
     let pos = app.position();
@@ -77,6 +86,23 @@ fn video(app: &mut SoundApp, ctx: &egui::Context) {
             crate::widgets::checkbox(ui, &mut burn, "Timecode burn-in");
             let text = video_status_text(app, pic.as_ref());
             ui.label(egui::RichText::new(text).font(regular(10.5)).color(Color32::from_gray(150)));
+        });
+        ui.horizontal_wrapped(|ui| {
+            let first = first_picture_start(&s);
+            let at = pos.max(0);
+            let stopped = !app.engine.transport.playing && !app.engine.transport.recording;
+            let enabled = stopped && first.is_some_and(|start| start != at);
+            let align = ui.add_enabled(enabled, egui::Button::new("Set Picture Start to Playhead")).on_hover_text(
+                "Move the first Video track's picture to the current timeline position. Undo restores the previous start; stop playback or recording first.",
+            );
+            if align.clicked() {
+                let _ = app.run("video.offset", json!({"at": at}));
+            }
+            if let Some(first) = first {
+                ui.label(format!("Picture starts at {}", s.format_position(first, TimeFormat::Timecode)));
+            } else {
+                ui.label("Import a video clip to set its start");
+            }
         });
         let avail = ui.available_rect_before_wrap();
         let (r, _) = ui.allocate_exact_size(avail.size().max(vec2(64.0, 36.0)), Sense::hover());
@@ -182,7 +208,107 @@ fn universe(app: &mut SoundApp, ctx: &egui::Context) {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_position;
+    use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
+    use soundcraft_model::{ChannelFormat, Clip, SourceId, VideoSource};
+
+    const ALIGN_LABEL: &str = "Set Picture Start to Playhead";
+
+    fn video_harness(app: SoundApp) -> Harness<'static, SoundApp> {
+        Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(760.0, 540.0))
+            .build_ui_state(|ui, app: &mut SoundApp| video(app, ui.ctx()), app)
+    }
+
+    fn app_with_offline_picture() -> (SoundApp, soundcraft_model::TrackId) {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let s = app.engine.session_mut();
+        let track = s.add_track(TrackKind::Video, ChannelFormat::Mono, Some("Picture"));
+        let source = SourceId(s.alloc());
+        s.videos.push(VideoSource {
+            id: source,
+            name: "picture.mov".into(),
+            path: "/not-present/picture.mov".into(),
+            width: 640,
+            height: 360,
+            frame_rate: 24.0,
+            duration: 2.0,
+            codec: "h264".into(),
+            offline: Some("synthetic offline fixture".into()),
+        });
+        let clip = Clip::video(s.new_clip_id(), "Picture", source, 0, 1_000, 96_000);
+        soundcraft_engine::edit::place_clip(s, track, clip);
+        s.edit.selection = soundcraft_time::Range::point(48_000);
+        s.edit.playhead = 48_000;
+        app.engine.mark_clean();
+        (app, track)
+    }
+
+    #[test]
+    fn picture_start_button_is_disabled_without_picture_and_paint_does_not_edit() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.mark_clean();
+        let mut h = video_harness(app);
+        h.run_steps(3);
+        let before = (h.state().engine.undo_history().len(), h.state().engine.journal.len());
+        let button = h.get_by_role_and_label(Role::Button, ALIGN_LABEL);
+        assert!(button.accesskit_node().is_disabled());
+        button.click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty());
+        assert_eq!((h.state().engine.undo_history().len(), h.state().engine.journal.len()), before);
+    }
+
+    #[test]
+    fn picture_start_aligns_from_keyboard_once_and_undo_redo_restore_picture() {
+        let (app, track) = app_with_offline_picture();
+        let mut h = video_harness(app);
+        h.run_steps(3);
+        let before_undo = h.state().engine.undo_history().len();
+        let before_journal = h.state().engine.journal.len();
+        let button = h.get_by_role_and_label(Role::Button, ALIGN_LABEL);
+        assert!(!button.accesskit_node().is_disabled());
+        button.focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().track(track).unwrap().clips()[0].start, 48_000);
+        assert_eq!(h.state().engine.undo_history().len(), before_undo + 1);
+        assert_eq!(h.state().engine.journal.len(), before_journal + 1);
+        assert!(h.get_by_role_and_label(Role::Button, ALIGN_LABEL).accesskit_node().is_disabled(), "aligning twice must be a disabled no-op");
+        h.run_steps(3);
+        assert_eq!(h.state().engine.undo_history().len(), before_undo + 1, "repaint cannot repeat an edit");
+
+        h.state_mut().run("edit.undo", json!({})).expect("undo picture alignment");
+        assert_eq!(h.state().engine.session().track(track).unwrap().clips()[0].start, 1_000);
+        h.state_mut().run("edit.redo", json!({})).expect("redo picture alignment");
+        assert_eq!(h.state().engine.session().track(track).unwrap().clips()[0].start, 48_000);
+    }
+
+    #[test]
+    fn picture_start_alignment_is_disabled_during_record_or_play() {
+        let (mut app, track) = app_with_offline_picture();
+        app.engine.transport.recording = true;
+        let mut h = video_harness(app);
+        h.run_steps(2);
+        assert!(h.get_by_role_and_label(Role::Button, ALIGN_LABEL).accesskit_node().is_disabled());
+        h.get_by_role_and_label(Role::Button, ALIGN_LABEL).click();
+        h.run_steps(1);
+        assert_eq!(h.state().engine.session().track(track).unwrap().clips()[0].start, 1_000);
+        h.state_mut().engine.transport.recording = false;
+        h.state_mut().engine.transport.playing = true;
+        h.run_steps(2);
+        assert!(h.get_by_role_and_label(Role::Button, ALIGN_LABEL).accesskit_node().is_disabled());
+        h.get_by_role_and_label(Role::Button, ALIGN_LABEL).click();
+        h.run_steps(1);
+        assert_eq!(h.state().engine.session().track(track).unwrap().clips()[0].start, 1_000);
+        assert!(!h.state().engine.is_dirty());
+    }
 
     // A 1024 px strip over 1_024_000 samples: 1000 samples per point, exact in f32.
     const LEFT: f32 = 100.0;
