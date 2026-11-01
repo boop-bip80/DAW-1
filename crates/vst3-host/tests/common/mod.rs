@@ -35,7 +35,11 @@ pub fn fixture_dir() -> &'static Path {
         let bin = dir.join("vendor/Fixture.vst3/Contents").join(folder);
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::copy(&built, bin.join(exe)).unwrap();
-        assert_eq!(soundcraft_vst3_host::add_search_dir(&dir), 2);
+        assert_eq!(soundcraft_vst3_host::add_search_dir(&dir), 3);
+        let found = soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]);
+        for name in ["Fixture Gain", "Fixture Synth", "Fixture Headless"] {
+            assert!(found.iter().any(|d| d.name == name), "missing VST3 fixture class {name}: {found:?}");
+        }
         dir
     })
 }
