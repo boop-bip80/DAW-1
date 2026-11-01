@@ -96,6 +96,8 @@ struct Shared {
     dropped: AtomicUsize,
     /// Input callbacks so far, to tell a device that stopped sending.
     beats: AtomicU64,
+    /// Approximate single-input-stream clock rate relative to its configured rate.
+    input_rate: crate::clock::RateTelemetry,
     /// Set from the input stream when it can't go on: `GONE` or `BROKEN`.
     fault: AtomicU8,
     /// The first failure writing a take, until it's reported.
@@ -123,6 +125,7 @@ impl Shared {
             ring,
             dropped: AtomicUsize::new(0),
             beats,
+            input_rate: crate::clock::RateTelemetry::default(),
             fault,
             failed,
             #[cfg(test)]
@@ -194,14 +197,19 @@ where
     use cpal::traits::DeviceTrait;
     let (sh, errors) = (Arc::clone(shared), Arc::clone(shared));
     let mon = Arc::clone(monitor);
+    let channels = usize::from(config.channels).max(1);
+    let mut rate_probe = crate::clock::StreamRateProbe::new(config.sample_rate);
     let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
     let chunk = scratch.len();
     let mut owed = 0;
     device.build_input_stream(
         config,
-        move |data: &[T], _: &cpal::InputCallbackInfo| {
+        move |data: &[T], info: &cpal::InputCallbackInfo| {
             crate::mark_audio_thread();
             sh.guarded(|| {
+                // Capture timestamps belong only to this input stream. The output stream's
+                // timestamp origin may differ; this observation cannot measure duplex latency.
+                sh.input_rate.publish(rate_probe.observe(info.timestamp().capture.as_nanos(), data.len() / channels));
                 for part in data.chunks(chunk) {
                     let Some(s) = scratch.get_mut(..part.len()) else { return };
                     for (o, x) in s.iter_mut().zip(part) {
@@ -269,6 +277,13 @@ impl Recorder {
     /// Open the default input device. Errors when there is none (the caller shows a message).
     pub fn open() -> Result<Recorder, String> {
         Recorder::open_with(&crate::AudioConfig::default())
+    }
+
+    /// Diagnostic-only effective input rate error in parts per million from CPAL capture
+    /// timestamps. `None` means not enough reliable observations yet. This is not a device
+    /// latency measurement and cannot establish that the output uses the same clock.
+    pub fn input_rate_error_ppm(&self) -> Option<i32> {
+        self.shared.input_rate.read()
     }
 
     /// Open the input device `audio` chooses (else the default) at its chosen rate and buffer
