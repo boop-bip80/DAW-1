@@ -26,6 +26,9 @@
 //! still works for them.
 //! Parameter changes made in the plugin's GUI arrive as output events while the plugin processes
 //! and are reported by the editor's `idle`.
+//!
+//! Native `request_restart` is exposed as a read-only `ClapRestartHandle` on concrete
+//! `ClapPlugin` instances; scheduling an automatic mixer-wide restart is not implemented yet.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -40,7 +43,7 @@ mod plugin;
 mod registry;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use plugin::ClapPlugin;
+pub use plugin::{ClapPlugin, ClapRestartHandle};
 
 use soundcraft_dsp::{Category, Plugin, PluginInfo};
 use std::path::{Path, PathBuf};
