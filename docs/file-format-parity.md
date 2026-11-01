@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (mono/stereo straight-cut CMX3600 EDL and OpenTimelineIO audio interchange verified; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (CMX3600 independent mono A1/A2 lane cuts added; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every format Pro Tools reads or writes, and ours. The Pro Tools list comes from the document types
 its bundle declares (`CFBundleDocumentTypes` in Info.plist: names only, nothing else read) and its
@@ -23,7 +23,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | OMF | import/export | ❌ | ❌ | Legacy, still delivered by some editors |
 | Media Composer–compatible session | export | ❌ | ❌ | AAF variant |
 | OpenTimelineIO `.otio` audio timeline | not a native Pro Tools session format | 🟡 | 🟡 | `file.import_otio` reads local audio tracks, gaps, clips and trims, resamples sources and commits atomically with undo; Clip.2 official fixture tested. `file.export_otio` writes eligible audio; unsupported effects, transitions, video, offline/unsaved/stretched media fail explicitly |
-| CMX3600 `.edl` audio cuts | edit decision list interchange, not a full Pro Tools session | 🟡 | 🟡 | `file.import_edl` / `file.export_edl` handle single-lane `A` mono or linked `AA` stereo straight cuts with frame-aligned source trims and strict rejection of unsupported structures. Official OTIO parser fixture and CLI round-trip tests; no AAF/OMF or multitrack EDL promise |
+| CMX3600 `.edl` audio cuts | edit decision list interchange, not a full Pro Tools session | 🟡 | 🟡 | `file.import_edl` / `file.export_edl` handle mono `A`, linked stereo `AA`, or two independently edited mono `A1`/`A2` cut lanes; source/record trims are frame aligned, record cuts may overlap across mono lanes, and unsupported formats/processing fail closed. Engine fixtures include an official OTIO parser check; mono/AA CLI roundtrip tested. Not arbitrary multitrack EDL, AAF, OMF or `.ptx` interchange |
 | ADM BWF (Dolby Atmos master) | import/export | ❌ | ❌ | G-12 |
 | SoundCraft session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
 | Import Session Data (from another session) | Pro Tools sessions | 🟡 | — | From `.scraft` only |
@@ -82,6 +82,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | CMX3600 import/export now accepts two independently edited mono A1/A2 audio lanes with overlapping record cuts, source trims and strict fail-closed checks; not arbitrary multitrack or AAF/OMF/PTX interchange |
 | 2026-11-01 | minor | Added frame-aligned CMX3600 audio EDL import/export for single mono `A` and linked stereo `AA` cuts, with strict rejection and waveform round-trip tests; not a substitute for AAF/OMF/PTX |
 | 2026-11-01 | minor | Added bounded, undoable OTIO audio import with official Clip.2 fixture and source-rate conversion; AAF, OMF and PTX still unsupported |
 | 2026-10-31 | minor | Added OTIO audio-only export; AAF, OMF and Pro Tools sessions remain unsupported |
