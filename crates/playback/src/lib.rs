@@ -34,7 +34,7 @@ use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -125,7 +125,53 @@ struct Shared {
     playing: AtomicBool,
     /// Speed × 1000.
     speed: AtomicU32,
+    /// Invalidate pending out-of-band MIDI playback on transport discontinuities.
+    /// This is a change token, not a clock or a sample-accurate timestamp.
+    transport_generation: AtomicU64,
     meters: Mutex<MeterSnapshot>,
+}
+
+impl Shared {
+    /// Safe from an audio callback: one atomic operation, no lock or allocation.
+    fn invalidate_transport(&self) {
+        self.transport_generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Best-effort, read-only atomic transport observation for a non-audio worker.
+///
+/// Sample position is in the session's absolute sample domain, not the audio
+/// device's wall-clock domain. Position, playback state, speed and generation
+/// are independently updated atomics; the snapshot is not a coherent
+/// sample-accurate clock reading. A changed generation means a Play, Stop,
+/// Seek, Loop wrap, playback end, speed change, or session replacement may
+/// have invalidated previously planned MIDI output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransportSnapshot {
+    pub position: Samples,
+    pub playing: bool,
+    pub speed: f32,
+    pub generation: u64,
+}
+
+/// Clone on a control thread; polling this handle never touches the audio
+/// device, mutexes, session documents, or MIDI output hardware.
+#[derive(Clone)]
+pub struct TransportObserver {
+    shared: Arc<Shared>,
+}
+
+impl TransportObserver {
+    /// A cheap read-only snapshot of atomics; consumers must notice generation
+    /// changes before using any previously scheduled sample-window events.
+    pub fn snapshot(&self) -> TransportSnapshot {
+        TransportSnapshot {
+            position: self.shared.position.load(Ordering::Acquire),
+            playing: self.shared.playing.load(Ordering::Acquire),
+            speed: self.shared.speed.load(Ordering::Acquire) as f32 / 1000.0,
+            generation: self.shared.transport_generation.load(Ordering::Acquire),
+        }
+    }
 }
 
 /// What stopped the audio output.
@@ -347,10 +393,12 @@ impl AudioState {
     /// Render the next block at the session rate into `pending`.
     fn render_next(&mut self, quantum: usize) {
         let mut n = quantum.clamp(1, BLOCK);
+        let mut loop_wrapped = false;
         if let Some(l) = self.looped
             && self.pos >= l.end
         {
             self.pos = l.start;
+            loop_wrapped = true;
         }
         if let Some(l) = self.looped {
             n = n.min(usize::try_from((l.end - self.pos).max(1)).unwrap_or(BLOCK));
@@ -359,6 +407,7 @@ impl AudioState {
                 self.playing = false;
                 self.end = None;
                 self.shared.playing.store(false, Ordering::Relaxed);
+                self.shared.invalidate_transport();
                 n = 0;
             } else {
                 n = n.min(usize::try_from(e - self.pos).unwrap_or(BLOCK));
@@ -387,6 +436,9 @@ impl AudioState {
         if self.playing {
             self.pos += n as i64;
             self.shared.position.store(self.pos, Ordering::Relaxed);
+            if loop_wrapped {
+                self.shared.invalidate_transport();
+            }
         }
     }
 
@@ -645,6 +697,7 @@ impl Player {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let want = session.sample_rate.hz();
@@ -815,6 +868,7 @@ impl Player {
             let mut side = self.side();
             (side.prepare(&s), side.gone_tracks(&s))
         };
+        self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Session(s, instances));
         if !gone.is_empty() {
             let _ = self.tx.send(Cmd::Forget(gone));
@@ -900,6 +954,7 @@ impl Player {
     pub fn play(&self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
         self.shared.position.store(from, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
+        self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Play { from, end, looped });
     }
 
@@ -914,17 +969,21 @@ impl Player {
 
     pub fn stop(&self) {
         self.shared.playing.store(false, Ordering::Relaxed);
+        self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Stop);
     }
 
     pub fn locate(&self, at: Samples) {
         self.shared.position.store(at, Ordering::Relaxed);
+        self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Locate(at));
     }
 
     pub fn set_speed(&self, speed: f32) {
         let v = if speed.is_finite() { (speed.clamp(0.1, 4.0) * 1000.0) as u32 } else { 1000 };
-        self.shared.speed.store(v, Ordering::Relaxed);
+        if self.shared.speed.swap(v, Ordering::Relaxed) != v {
+            self.shared.invalidate_transport();
+        }
     }
 
     /// Playback rate last requested, 1.0 at full speed.
@@ -938,6 +997,12 @@ impl Player {
 
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Relaxed)
+    }
+
+    /// Obtain a read-only atomic transport handle for a non-audio scheduling
+    /// thread. This does not start MIDI playback or open a device.
+    pub fn transport_observer(&self) -> TransportObserver {
+        TransportObserver { shared: Arc::clone(&self.shared) }
     }
 
     /// A copy of the meters accumulated since the last [`Player::take_meters`], leaving them in
@@ -1233,6 +1298,89 @@ fn pick_output_config(
 mod tests {
     use super::*;
 
+    /// Exercise the real Player control API without opening an audio device or
+    /// starting a silent-clock thread. The queued commands can be delivered to
+    /// a synthetic AudioState when the callback side matters.
+    fn observer_test_player() -> (Player, Receiver<Cmd>) {
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (_, garbage) = channel();
+        (
+            Player {
+                shared,
+                fault: Arc::new(Fault::default()),
+                #[cfg(not(target_arch = "wasm32"))]
+                watch: Mutex::new(None),
+                tx,
+                side: Mutex::new(Side::new(48_000.0, garbage)),
+                _stream: None,
+                device_name: "Synthetic observer-only player".into(),
+                device_rate: 48_000,
+                device_channels: 0,
+                device_buffer: None,
+                silent: true,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn transport_observer_tracks_control_requests_without_hardware_or_session_mutation() {
+        let (player, commands) = observer_test_player();
+        let observer = player.transport_observer();
+        let second = observer.clone();
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 0, playing: false, speed: 1.0, generation: 0 });
+
+        player.play(4_800, None, None);
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 4_800, playing: true, speed: 1.0, generation: 1 });
+        player.locate(9_600);
+        assert_eq!(second.snapshot(), TransportSnapshot { position: 9_600, playing: true, speed: 1.0, generation: 2 });
+        player.set_speed(1.25);
+        assert_eq!(second.snapshot(), TransportSnapshot { position: 9_600, playing: true, speed: 1.25, generation: 3 });
+        player.set_speed(1.25);
+        assert_eq!(observer.snapshot().generation, 3, "no new generation for an unchanged speed");
+
+        player.stop();
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 9_600, playing: false, speed: 1.25, generation: 4 });
+        player.update_session(Arc::new(Session::default()));
+        assert_eq!(second.snapshot().generation, 5, "session replacement invalidates precollected MIDI windows");
+        let queued: Vec<_> = commands.try_iter().collect();
+        assert_eq!(queued.len(), 4);
+        assert!(matches!(queued.last(), Some(Cmd::Session(..))));
+    }
+
+    #[test]
+    fn callback_loop_wrap_and_natural_end_advance_observer_generation_once() {
+        let (player, commands) = observer_test_player();
+        let observer = player.transport_observer();
+        let (garbage, _) = channel();
+        let mut audio = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, garbage);
+
+        player.play(100, None, Some(Range { start: 10, end: 100 }));
+        assert_eq!(observer.snapshot().generation, 1);
+        audio.drain();
+        audio.render_next(16);
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 26, playing: true, speed: 1.0, generation: 2 });
+        audio.render_next(16);
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 42, playing: true, speed: 1.0, generation: 2 });
+
+        player.play(200, Some(220), None);
+        audio.drain();
+        assert_eq!(observer.snapshot().generation, 3);
+        audio.render_next(32);
+        assert_eq!(observer.snapshot().position, 220);
+        audio.render_next(32);
+        assert_eq!(observer.snapshot(), TransportSnapshot { position: 220, playing: false, speed: 1.0, generation: 4 });
+        audio.render_next(32);
+        assert_eq!(observer.snapshot().generation, 4, "natural end must not repeatedly invalidate");
+    }
+
     /// A stream that builds; `starts` says whether the device lets it play (it can refuse after a
     /// reconnect).
     struct Fake {
@@ -1372,6 +1520,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1479,6 +1628,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(true),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         };
         let fault = Fault::default();
@@ -1520,6 +1670,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1538,6 +1689,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1562,6 +1714,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1669,6 +1822,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1702,6 +1856,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1843,6 +1998,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1872,6 +2028,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1907,6 +2064,7 @@ mod tests {
                 position: AtomicI64::new(0),
                 playing: AtomicBool::new(false),
                 speed: AtomicU32::new(1000),
+                transport_generation: AtomicU64::new(0),
                 meters: Mutex::new(MeterSnapshot::default()),
             });
             let (tx, rx) = channel();
@@ -1937,6 +2095,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1962,6 +2121,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -1989,6 +2149,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
@@ -2027,6 +2188,7 @@ mod tests {
             position: AtomicI64::new(0),
             playing: AtomicBool::new(false),
             speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
             meters: Mutex::new(MeterSnapshot::default()),
         });
         let (tx, rx) = channel();
