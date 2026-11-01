@@ -158,6 +158,39 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<bool> {
     }
 }
 
+/// A portable import may create private media only alongside its saved session file. Session
+/// metadata is editable, so do not trust its `folder` field without checking the document path.
+/// In particular, never follow an existing `Audio Files` symlink when allocating imported media.
+pub(crate) fn private_session_audio_dir(e: &Engine) -> Result<(PathBuf, bool)> {
+    let file = e.path.as_deref().ok_or_else(|| EngineError::Unsupported("save the session before importing bundled audio media".into()))?;
+    let folder = e.session().folder.as_deref().ok_or_else(|| EngineError::Unsupported("session has no media folder; save it first".into()))?;
+    if !same_path(folder, Path::new(file).parent().unwrap_or(Path::new(""))) {
+        return Err(EngineError::Unsupported("session media folder differs from the saved session location".into()));
+    }
+    let audio_dir = folder.join("Audio Files");
+    crate::file_access::check_write(&audio_dir).map_err(EngineError::Io)?;
+    let ensure_plain_directory = || -> Result<()> {
+        match std::fs::symlink_metadata(&audio_dir) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                Err(EngineError::Unsupported("Audio Files must be a regular directory, not a symlink".into()))
+            }
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(EngineError::Io(format!("{}: {err}", audio_dir.display()))),
+        }
+    };
+    ensure_plain_directory()?;
+    // `create_dir` (not recursive create_dir_all) tells us whether this operation truly created
+    // the parent, so failed imports never remove a directory owned by somebody else.
+    let newly_created = match std::fs::create_dir(&audio_dir) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(err) => return Err(EngineError::Io(format!("{}: {err}", audio_dir.display()))),
+    };
+    ensure_plain_directory()?;
+    Ok((audio_dir, newly_created))
+}
+
 /// Copy one bounded ZIP member to a brand-new session-owned file in fixed-size IO buffers.
 /// A truncated, oversized or CRC-failing member leaves no partial file behind. `create_new`
 /// prevents a racing symlink or another process's media file from being overwritten.
@@ -169,7 +202,8 @@ pub(crate) fn copy_new_file_limited(path: &Path, reader: &mut impl std::io::Read
     let err = |why: std::io::Error| EngineError::Io(format!("{}: {why}", path.display()));
     let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
     let mut file = file;
-    let write_result = std::io::copy(&mut (&mut *reader).take(limit.saturating_add(1)), &mut file).map_err(err).and_then(|written| {
+    let mut bounded = std::io::Read::take(reader, limit.saturating_add(1));
+    let write_result = std::io::copy(&mut bounded, &mut file).map_err(err).and_then(|written| {
         if written != expected {
             Err(EngineError::Io(format!("{}: archive member length mismatch or exceeded extraction limit", path.display())))
         } else {
