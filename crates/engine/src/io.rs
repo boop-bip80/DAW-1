@@ -909,10 +909,10 @@ pub(crate) fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// Publish one private, completed stem on the same filesystem. The batch preflight checks every
-/// final name and sidecar; hard_link itself fails rather than replacing an occupied name.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn publish_stem_link_no_replace(from: &Path, destination: &Path) -> std::io::Result<()> {
+    // The caller preflights all destinations and owns a private staged source.
+    // hard_link publishes atomically without replacing an occupied output name.
     std::fs::hard_link(from, destination)
 }
 
