@@ -17,14 +17,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "soundcraft-a1-a2-cli-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("soundcraft-a1-a2-cli-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         Self(dir)
     }
@@ -65,10 +59,8 @@ fn checked(label: &str, output: &Output) {
 fn result_json(output: &Output, command: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let prefix = format!("{command}: ");
-    let line = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("{command} result missing from CLI stdout:\n{stdout}"));
+    let line =
+        stdout.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap_or_else(|| panic!("{command} result missing from CLI stdout:\n{stdout}"));
     serde_json::from_str(line).unwrap()
 }
 
@@ -78,12 +70,7 @@ fn write_tone(path: &Path, frequency: f64, level: f32) {
         let radians = std::f64::consts::TAU * frequency * i as f64 / f64::from(RATE);
         *sample = level * radians.sin() as f32;
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     std::fs::write(path, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
 }
 
@@ -93,10 +80,7 @@ fn read_mix(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, RATE, "bounce rate changed");
     assert_eq!(audio.frames(), FRAMES, "bounce duration changed");
     assert_eq!(audio.num_channels(), 2, "main output must remain stereo");
-    assert!(
-        audio.channels.iter().flatten().all(|sample| sample.is_finite()),
-        "A1/A2 bounce contains non-finite samples"
-    );
+    assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()), "A1/A2 bounce contains non-finite samples");
     audio
 }
 
@@ -129,15 +113,8 @@ fn verify_independent_lanes(audio: &AudioBuffer) {
 
 fn equal_mixes(label: &str, original: &AudioBuffer, other: &AudioBuffer) {
     for (channel, (before, after)) in original.channels.iter().zip(&other.channels).enumerate() {
-        let max_difference = before
-            .iter()
-            .zip(after)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            max_difference < 0.001,
-            "{label} changed channel {channel}: maximum sample difference {max_difference}"
-        );
+        let max_difference = before.iter().zip(after).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+        assert!(max_difference < 0.001, "{label} changed channel {channel}: maximum sample difference {max_difference}");
     }
 }
 
@@ -166,18 +143,9 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
     // frames and A2 at four makes events overlap across (but not within)
     // lanes, so a mono/stereo flattening bug cannot pass this check.
     assert_eq!(RATE as usize / 24, 2_000);
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"paths":[left_source.to_string_lossy(), right_source.to_string_lossy()]})
-    );
-    let save_original = format!(
-        "session.save={}",
-        serde_json::json!({"path":original_project.to_string_lossy()})
-    );
-    let export = format!(
-        "file.export_edl={}",
-        serde_json::json!({"path":edl.to_string_lossy(), "tracks":["Left400","Right800"], "fps":24})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"paths":[left_source.to_string_lossy(), right_source.to_string_lossy()]}));
+    let save_original = format!("session.save={}", serde_json::json!({"path":original_project.to_string_lossy()}));
+    let export = format!("file.export_edl={}", serde_json::json!({"path":edl.to_string_lossy(), "tracks":["Left400","Right800"], "fps":24}));
     let exported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .args(["--cmd", r#"edit.select={"tracks":["Left400"]}"#])
@@ -205,11 +173,7 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
     assert!(text.contains("FCM: NON-DROP FRAME"), "expected 24 fps non-drop EDL");
     let events: Vec<Vec<&str>> = text
         .lines()
-        .filter(|line| {
-            line.split_whitespace()
-                .next()
-                .is_some_and(|first| first.len() == 3 && first.bytes().all(|byte| byte.is_ascii_digit()))
-        })
+        .filter(|line| line.split_whitespace().next().is_some_and(|first| first.len() == 3 && first.bytes().all(|byte| byte.is_ascii_digit())))
         .map(|line| line.split_whitespace().collect())
         .collect();
     assert_eq!(events.len(), 4, "expected four cut events");
@@ -221,10 +185,7 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
     assert_eq!(events[2][6], "00:00:00:04", "A2 second cut should start at frame 4");
     assert_eq!(events[3][6], "00:00:00:06", "A1 second cut should start at frame 6");
 
-    let import_edl = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path":edl.to_string_lossy(), "fps":24})
-    );
+    let import_edl = format!("file.import_edl={}", serde_json::json!({"path":edl.to_string_lossy(), "fps":24}));
     let imported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_edl])
         .args(["--cmd", r#"mix.pan={"track":"A1","pan":-1}"#])
@@ -254,10 +215,7 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
     let broken = text.replacen(" A2    C ", " AA    C ", 1);
     assert_ne!(broken, text, "malformed fixture did not alter an A2 event");
     std::fs::write(&invalid_edl, broken).unwrap();
-    let import_invalid = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path":invalid_edl.to_string_lossy(), "fps":24})
-    );
+    let import_invalid = format!("file.import_edl={}", serde_json::json!({"path":invalid_edl.to_string_lossy(), "fps":24}));
     let rejected = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_invalid])
         .arg("--bounce")
@@ -272,10 +230,7 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
         "mixed-lane rejection reported an unexpected error:\n{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
-    assert!(
-        !invalid_project.exists() && !invalid_mix.exists(),
-        "rejected EDL produced a saved session or bounced audio"
-    );
+    assert!(!invalid_project.exists() && !invalid_mix.exists(), "rejected EDL produced a saved session or bounced audio");
 
     // The imported project must carry its own media. Remove both original
     // source WAVs and the project whose media URLs the EDL used, then reopen.
@@ -291,10 +246,7 @@ fn independent_a1_a2_interleaved_edl_survives_import_bounce_and_media_handoff() 
         .output()
         .unwrap();
     checked("reopen independent A1/A2 session without original media", &reopened);
-    assert!(
-        !String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"),
-        "reopened session lost its imported mono media"
-    );
+    assert!(!String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"), "reopened session lost its imported mono media");
     let reopened = read_mix(&reopened_mix);
     verify_independent_lanes(&reopened);
     equal_mixes("save/reopen without source project", &after, &reopened);
