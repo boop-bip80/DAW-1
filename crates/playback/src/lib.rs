@@ -951,9 +951,7 @@ impl Player {
         let failed = Arc::clone(&fault);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || {
-            silent_clock_loop(state, &worker_stop, &failed)
-        });
+        let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || silent_clock_loop(state, &worker_stop, &failed));
         let silent_clock = match spawn {
             Ok(join) => Some(SilentClock { stop, join }),
             Err(e) => {
@@ -1690,10 +1688,7 @@ mod tests {
         let player = silent_lifecycle_player(Arc::clone(&session));
         let events = Arc::new(Mutex::new(Vec::new()));
         let (processed, rendered) = sync_channel(1);
-        player
-            .tx
-            .send(Cmd::Session(Arc::clone(&session), vec![silent_lifecycle_instance(&events, track, Some(processed), None)]))
-            .unwrap();
+        player.tx.send(Cmd::Session(Arc::clone(&session), vec![silent_lifecycle_instance(&events, track, Some(processed), None)])).unwrap();
         player.play(0, None, None);
         assert!(rendered.recv_timeout(std::time::Duration::from_secs(3)).is_ok(), "fake plugin should process on silent clock");
         drop(player);
@@ -1741,10 +1736,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let (processed, rendered) = sync_channel(1);
         let (stopped, suspended) = sync_channel(1);
-        player
-            .tx
-            .send(Cmd::Session(session, vec![silent_lifecycle_instance(&events, track, Some(processed), Some(stopped))]))
-            .unwrap();
+        player.tx.send(Cmd::Session(session, vec![silent_lifecycle_instance(&events, track, Some(processed), Some(stopped))])).unwrap();
         player.play(0, None, None);
         assert!(rendered.recv_timeout(std::time::Duration::from_secs(3)).is_ok());
         // The next document change retires the plugin while keeping the Side receiver
