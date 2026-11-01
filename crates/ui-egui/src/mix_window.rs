@@ -511,6 +511,21 @@ fn strip(app: &mut SoundApp, ui: &mut Ui, id: TrackId, snap: Option<&MeterSnapsh
             let _ = app.run("mix.mute", json!({"track": id.0}));
         }
     }
+    y += 22.0;
+    // Solo Safe remains visible on both regular and 64-point narrow strips. A separate
+    // full-width row retains the existing Solo and Mute hit targets and makes the state
+    // discoverable without a modifier-key gesture or hidden context menu.
+    if track.kind != TrackKind::Master {
+        let mut safe = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(pos2(x0, y), vec2(inner_w, 20.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+        );
+        let label = format!("Solo safe for {}", track.name);
+        if text_toggle(&mut safe, vec2(inner_w, 18.0), if narrow { "SAFE" } else { "SOLO SAFE" }, track.mixer.solo_safe, t.solo, &label).clicked() {
+            let _ = app.run("mix.solo_safe", json!({"track": id.0}));
+        }
+    }
     y += 26.0;
     // Fader + meter.
     let bottom_h = 64.0;
@@ -1768,6 +1783,65 @@ mod tests {
         assert!(input.width() >= 30.0, "input selector must retain a clickable narrow-strip width: {input:?}");
         assert!(polarity.width() >= 17.0 && polarity.min.x >= input.max.x, "polarity must not overlap input selector: {input:?} {polarity:?}");
         assert!(!h.state().engine.is_dirty());
+    }
+
+    #[test]
+    fn solo_safe_is_visible_in_default_mix_and_click_is_undoable() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Backing Vox"));
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(620.0, 820.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::strip(app, ui, id, None, false), app);
+
+        h.run_steps(3);
+        let safe = h.get_by_label("Solo safe for Backing Vox");
+        assert!(safe.rect().width() >= 80.0, "Solo Safe must be visible in the default regular-width Mix strip");
+        assert!(!safe.accesskit_node().is_selected(), "Solo Safe must announce its initially off state");
+        assert!(!h.state().engine.session().track(id).expect("track").mixer.solo_safe);
+        assert!(!h.state().engine.is_dirty(), "painting Solo Safe must not edit the document");
+        let undo_before = h.state().engine.undo_history().len();
+
+        h.get_by_label("Solo safe for Backing Vox").click();
+        h.run_steps(2);
+        assert!(h.state().engine.session().track(id).expect("track").mixer.solo_safe);
+        assert!(h.get_by_label("Solo safe for Backing Vox").accesskit_node().is_selected());
+        assert!(h.state().engine.is_dirty());
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "one click must create one undoable command");
+
+        h.state_mut().run("edit.undo", serde_json::json!({})).expect("undo Solo Safe");
+        h.run_steps(2);
+        assert!(!h.state().engine.session().track(id).expect("track").mixer.solo_safe);
+        h.state_mut().run("edit.redo", serde_json::json!({})).expect("redo Solo Safe");
+        h.run_steps(2);
+        assert!(h.state().engine.session().track(id).expect("track").mixer.solo_safe);
+        h.state_mut().engine.mark_clean();
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "rerendering an active Solo Safe toggle must not execute the command");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "rerendering must not append undo history");
+    }
+
+    #[test]
+    fn solo_safe_narrow_mix_keeps_solo_mute_hit_targets() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Drum Machine"));
+        app.ui.narrow_mix = true;
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(500.0, 820.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::strip(app, ui, id, None, false), app);
+
+        h.run_steps(3);
+        let solo = h.get_by_label("Solo for Drum Machine").rect();
+        let mute = h.get_by_label("Mute for Drum Machine").rect();
+        let safe = h.get_by_label("Solo safe for Drum Machine").rect();
+        assert!(solo.width() >= 24.0 && mute.width() >= 24.0, "narrow Solo/Mute hit targets must not shrink: {solo:?} {mute:?}");
+        assert!(safe.width() >= 50.0 && safe.min.y >= solo.max.y, "narrow Safe button must be full-width and below Solo/Mute: {safe:?}");
+        assert!(!h.state().engine.is_dirty(), "narrow default Mix paint must not edit the session");
     }
 
     fn synthetic_outputs(names: &[&str]) -> MidiOutputScan {
