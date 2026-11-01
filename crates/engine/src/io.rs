@@ -2792,7 +2792,7 @@ mod stem_tests {
             assert_eq!(audio.frames(), FRAMES);
             assert_eq!(audio.num_channels(), 2);
             assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()));
-            let measure = |hz| {
+            let measure = |hz: f64| {
                 let (mut real, mut imag) = (0.0, 0.0);
                 for (sample_index, sample) in audio.channels[0].iter().enumerate() {
                     let radians = std::f64::consts::TAU * hz * sample_index as f64 / f64::from(RATE);
