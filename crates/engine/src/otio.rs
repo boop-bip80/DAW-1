@@ -829,8 +829,9 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
     }
     for marker in imported_markers {
         let id = session.add_marker(&marker.name, marker.kind, marker.start, marker.end);
-        let native = session.markers.last_mut().ok_or_else(|| invalid_import("new marker missing"))?;
-        debug_assert_eq!(native.id, id);
+        // Session::add_marker sorts by position. A pre-existing later marker may remain
+        // last, so always resolve the newly allocated id before applying its metadata.
+        let native = session.markers.iter_mut().find(|native| native.id == id).ok_or_else(|| invalid_import("new marker missing"))?;
         native.color = marker.color;
         native.comments = marker.comment;
     }
@@ -1368,6 +1369,33 @@ mod tests {
         session.markers.last_mut().unwrap().track = None;
         session.add_marker("Verse", MarkerKind::Marker, 100, 100);
         assert!(matches!(export_audio(&session), Err(EngineError::Unsupported(message)) if message.contains("duplicate timeline marker")));
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn incoming_marker_metadata_is_attached_by_id_after_native_time_sort() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        timeline["tracks"]["markers"] = serde_json::from_str(OFFICIAL_STACK_MARKERS).unwrap();
+        std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+
+        let mut engine = Engine::default();
+        let id = engine.session_mut().add_marker("Later", MarkerKind::Marker, 10_000, 10_000);
+        let later = engine.session_mut().markers.iter_mut().find(|marker| marker.id == id).unwrap();
+        later.comments = "keep existing comment".into();
+        later.color = Some([90, 80, 70]);
+        let before = engine.session().clone();
+        engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+
+        let imported = &engine.session().markers;
+        assert_eq!(imported.len(), 3);
+        assert_eq!((&*imported[0].name, imported[0].comments.as_str(), imported[0].color), ("Beat", "point", Some([0, 255, 255])));
+        assert_eq!((&*imported[1].name, imported[1].comments.as_str(), imported[1].color), ("Passage", "one frame", Some([12, 34, 56])));
+        assert_eq!((&*imported[2].name, imported[2].comments.as_str(), imported[2].color), ("Later", "keep existing comment", Some([90, 80, 70])));
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
 
