@@ -15,6 +15,7 @@ use soundcraft_playback::midi_live_thru::MidiThruPhase;
 use soundcraft_playback::midi_out_runtime::{MidiOutputRuntimePhase, MidiOutputRuntimeStatus};
 #[cfg(not(target_arch = "wasm32"))]
 use soundcraft_playback::midi_thru_runtime::MidiThruRuntimeStatus;
+use soundcraft_playback::record::InputRing;
 use std::sync::Arc;
 
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
@@ -38,7 +39,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
 
 fn audio_health(app: &mut SoundApp, ctx: &egui::Context) {
     let mut open = app.ui.show_audio_health;
-    win(ctx, &mut open, "Session Audio Health", vec2(620.0, 360.0), |ui| {
+    win(ctx, &mut open, "Session Audio Health", vec2(620.0, 500.0), |ui| {
         let refresh = ui.button("Refresh Report").clicked();
         if app.audio_health_report.is_none() || refresh {
             app.audio_health_report = Some(app.engine.execute("session.audio_health", &json!({})).map_err(|error| error.to_string()));
@@ -56,7 +57,7 @@ fn audio_health(app: &mut SoundApp, ctx: &egui::Context) {
                 if report["healthy"] == true {
                     ui.label("All audio clips have loaded media within source bounds.");
                 }
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
                     if let Some(issues) = report["issues"].as_array() {
                         for issue in issues {
                             ui.group(|ui| {
@@ -83,11 +84,46 @@ fn audio_health(app: &mut SoundApp, ctx: &egui::Context) {
                 ui.label(error.to_string());
             }
         }
+        let reset = live_monitor_health(ui, app.recorder.as_ref().map(|r| r.monitor.as_ref()), app.live_audio_monitor_enabled());
+        if reset {
+            app.monitor_health_counters_reset();
+        }
     });
     app.ui.show_audio_health = open;
     if !open {
         app.audio_health_report = None;
     }
+}
+
+/// Read the monitor FIFO's atomics on the UI thread. The engine's Session Audio Health command
+/// intentionally checks loaded media only; these live figures are an unrelated, volatile device
+/// diagnostic and must never change the session's healthy/issue-count result.
+fn live_monitor_health(ui: &mut egui::Ui, ring: Option<&InputRing>, active: bool) -> bool {
+    ui.separator();
+    ui.label(egui::RichText::new("Live Input Monitoring — separate from recording-to-disk health").strong());
+    let Some(ring) = ring else {
+        ui.label("No live audio input device is connected; monitor FIFO counters are unavailable.");
+        return false;
+    };
+    let reset = ui.button("Reset Monitor Counters").clicked();
+    if reset {
+        ring.reset_health();
+    }
+    let health = ring.health();
+    ui.label(if active { "Audio input monitoring is enabled." } else { "No audio track currently requests live input monitoring." });
+    ui.label(format!("Buffered input: {} of {} input-device frame(s)", health.queued_frames, health.capacity_frames));
+    ui.label(format!(
+        "Monitor queue busy: {} input sample(s) skipped across {} affected input frame(s)",
+        health.skipped_input_samples, health.skipped_input_frames
+    ));
+    ui.label(format!(
+        "Monitor queue full: {} oldest input sample(s) evicted across {} affected input frame(s)",
+        health.evicted_oldest_samples, health.evicted_oldest_frames
+    ));
+    ui.label(format!("Monitor underflow/contention: {} session-rate output frame(s) rendered as silence", health.silent_output_frames));
+    ui.small("Output silence counts can increase during playback with monitoring off; use these figures during active monitoring.");
+    ui.small("These do not measure hardware clock drift or latency. WAV recording dropouts are reported separately.");
+    reset
 }
 
 fn win(ctx: &egui::Context, open: &mut bool, title: &str, size: egui::Vec2, body: impl FnOnce(&mut egui::Ui)) {
@@ -1115,6 +1151,8 @@ pub fn clip_effects(app: &mut SoundApp, ctx: &egui::Context) {
 #[allow(clippy::unwrap_used)]
 mod audio_health_tests {
     use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::{Harness, kittest::Queryable};
 
     #[test]
     fn window_command_renders_report_and_close_clears_snapshot() {
@@ -1134,6 +1172,52 @@ mod audio_health_tests {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| audio_health(&mut app, ui.ctx()));
         output.textures_delta.clear();
         assert!(app.audio_health_report.is_some());
+    }
+
+    #[test]
+    fn session_audio_health_shows_no_device_without_changing_media_integrity() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.ui.show_audio_health = true;
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(900.0, 680.0))
+            .build_ui_state(|ui, app: &mut SoundApp| audio_health(app, ui.ctx()), app);
+        h.run_steps(4);
+        assert!(h.query_by_label_contains("No live audio input device is connected").is_some());
+        assert!(h.query_by_label_contains("All audio clips have loaded media").is_some());
+        assert_eq!(h.state().audio_health_report.as_ref().unwrap().as_ref().unwrap()["healthy"], true);
+        assert!(!h.state().engine.is_dirty() && !h.state().engine.can_undo(), "read-only monitoring data must not edit session media");
+    }
+
+    /// Synthetic InputRing only: user-visible counters reset while queued monitoring audio and
+    /// Session state survive untouched, with no physical interface or CPAL callback needed.
+    #[test]
+    fn live_monitor_health_displays_independent_frame_units_and_reset_preserves_queue() {
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let ring = InputRing::new(3, 8); // four input frames fit, six produced
+        ring.push(&[0.375; 18]);
+        let mut output = vec![vec![0.0; 6]; 3];
+        ring.pop_into(&mut output, 6, 8); // three valid interpolated frames; three session-rate silences
+        let before = ring.health();
+        assert_eq!(before.evicted_oldest_frames, 2);
+        assert_eq!(before.silent_output_frames, 3);
+        let mut h = Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(880.0, 420.0)).build_ui_state(
+            |ui, state: &mut (SoundApp, Arc<InputRing>)| {
+                let _ = live_monitor_health(ui, Some(state.1.as_ref()), true);
+            },
+            (app, ring),
+        );
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("Live Input Monitoring").is_some());
+        assert!(h.query_by_label_contains("2 affected input frame(s)").is_some());
+        assert!(h.query_by_label_contains("3 session-rate output frame(s)").is_some());
+        assert!(h.query_by_label_contains("WAV recording dropouts are reported separately").is_some());
+        h.get_by_role_and_label(Role::Button, "Reset Monitor Counters").click();
+        h.run_steps(2);
+        let after = h.state().1.health();
+        assert_eq!(after.queued_frames, before.queued_frames, "reset cannot drop buffered monitoring samples");
+        assert_eq!((after.evicted_oldest_frames, after.skipped_input_frames, after.silent_output_frames), (0, 0, 0));
+        assert!(!h.state().0.engine.is_dirty() && !h.state().0.engine.can_undo(), "a monitor counter reset is not a session edit");
     }
 }
 
