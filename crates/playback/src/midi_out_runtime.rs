@@ -29,7 +29,12 @@ use soundcraft_model::Session;
 use soundcraft_time::{MAX_POSITION, Range, Samples};
 use thiserror::Error;
 
-use crate::{TransportObserver, TransportSnapshot, midi_out::collect_midi_output_window};
+use crate::{
+    TransportObserver, TransportSnapshot,
+    midi_live_thru::{MidiThruPhase, MidiThruSink},
+    midi_out::collect_midi_output_window,
+    midi_thru_runtime::{MidiThruRuntimeStatus, NativeThru},
+};
 
 const MAX_ACTIVE_PORTS: usize = 8;
 const PORT_EVENT_CAPACITY: usize = 4_096;
@@ -141,6 +146,39 @@ trait MidiPort {
 struct NativePort {
     sender: MidiOutputSender,
     _stream: MidiOutputStream,
+}
+
+/// Borrow the existing *user-approved* output streams. MIDI thru never
+/// discovers or opens a duplicate port; playback and monitoring share a
+/// single bounded MIDI output worker per named destination.
+struct ThruOutput<'a>(&'a mut BTreeMap<String, NativePort>);
+
+impl MidiThruSink for ThruOutput<'_> {
+    fn try_send_now(&mut self, name: &str, packet: &[u8]) -> Result<(), String> {
+        self.0
+            .get_mut(name)
+            .ok_or_else(|| format!("MIDI output {name:?} disconnected"))?
+            .sender
+            .try_send_now(packet)
+            .map_err(|error| error.to_string())
+    }
+
+    fn cancel_and_release(&mut self, name: &str) -> Result<u64, String> {
+        self.0
+            .get_mut(name)
+            .ok_or_else(|| format!("MIDI output {name:?} disconnected"))?
+            .sender
+            .cancel_and_release()
+            .map_err(|error| error.to_string())
+    }
+
+    fn cleanup_acknowledged(&self, name: &str, generation: u64) -> bool {
+        self.0.get(name).is_some_and(|port| port.sender.status().acknowledged_generation >= generation)
+    }
+
+    fn port_connected(&self, name: &str) -> bool {
+        self.0.get(name).is_some_and(|port| port.sender.status().worker == MidiOutputWorkerState::Running)
+    }
 }
 
 impl MidiPort for NativePort {
@@ -355,6 +393,11 @@ struct RuntimeControl {
     request_revision: AtomicU64,
     shutdown: AtomicBool,
     status: Mutex<MidiOutputRuntimeStatus>,
+    /// Second, independent per-launch permission; output playback consent
+    /// never implies input monitoring permission.
+    thru_desired: AtomicBool,
+    thru_revision: AtomicU64,
+    thru_status: Mutex<MidiThruRuntimeStatus>,
 }
 
 impl RuntimeControl {
@@ -396,6 +439,9 @@ impl MidiOutputRuntime {
                 phase: MidiOutputRuntimePhase::Connecting,
                 ..MidiOutputRuntimeStatus::default()
             }),
+            thru_desired: AtomicBool::new(false),
+            thru_revision: AtomicU64::new(0),
+            thru_status: Mutex::new(MidiThruRuntimeStatus::default()),
         });
         let thread_control = Arc::clone(&control);
         let worker = thread::Builder::new()
@@ -409,6 +455,11 @@ impl MidiOutputRuntime {
     /// `false` always requests panic/cleanup, even during playback or a
     /// slow OS connection attempt. It never waits for the device.
     pub fn set_enabled(&self, enabled: bool) -> Result<(), MidiOutputRuntimeError> {
+        if !enabled {
+            // Output disable revokes the narrower live-thru permission first;
+            // the worker must ACK both cleanup generations before dropping ports.
+            let _ = self.set_thru_enabled(false);
+        }
         let status = self.status();
         if enabled && status.phase == MidiOutputRuntimePhase::Disabling {
             return Err(MidiOutputRuntimeError::CleaningUp);
@@ -438,6 +489,9 @@ impl MidiOutputRuntime {
     /// new session and revision are one mutex-protected handoff: the worker
     /// never reads a new document under an old handoff revision.
     pub fn update_session(&self, session: Arc<Session>) -> Result<(), MidiOutputRuntimeError> {
+        // A session edit/replacement cannot silently reroute live keyboard
+        // input to newly persisted devices. Fresh consent is required.
+        let _ = self.set_thru_enabled(false);
         let mut slot = self.control.session.lock().map_err(|_| MidiOutputRuntimeError::Runtime("session handoff lock was poisoned".into()))?;
         slot.0 = session;
         slot.1 = slot.1.wrapping_add(1);
@@ -454,10 +508,54 @@ impl MidiOutputRuntime {
         status.enabled = self.control.desired_enabled.load(Ordering::Acquire);
         status
     }
+
+    /// Distinct, **never persisted** permission for idle-only keyboard→MIDI
+    /// output thru. Enabling signals the existing off-audio scheduler thread;
+    /// OS input enumeration/open happens there only after this explicit call.
+    /// A route stored in `.scraft` never invokes this method automatically.
+    pub fn set_thru_enabled(&self, enabled: bool) -> Result<(), MidiOutputRuntimeError> {
+        if enabled {
+            let output = self.status();
+            if !output.enabled || output.phase != MidiOutputRuntimePhase::Ready || output.cleanup_pending {
+                return Err(MidiOutputRuntimeError::Runtime(
+                    "enable external MIDI playback and wait for its idle, connected state before enabling MIDI thru".into(),
+                ));
+            }
+            let status = self.thru_status();
+            if status.cleanup_pending || status.phase == MidiThruPhase::Failed {
+                return Err(MidiOutputRuntimeError::CleaningUp);
+            }
+        }
+        if self.control.thru_desired.swap(enabled, Ordering::AcqRel) != enabled {
+            self.control.thru_revision.fetch_add(1, Ordering::AcqRel);
+            if let Ok(mut status) = self.control.thru_status.lock() {
+                status.enabled = enabled;
+                status.phase = if enabled { MidiThruPhase::Disabled } else { MidiThruPhase::CleaningUp };
+                status.cleanup_pending = !enabled;
+                if enabled {
+                    status.last_error = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cheap read-only UI/control snapshot. Never polls OS MIDI devices.
+    pub fn thru_status(&self) -> MidiThruRuntimeStatus {
+        let mut status = self.control.thru_status.lock().map(|guard| guard.clone()).unwrap_or_else(|_| MidiThruRuntimeStatus {
+            phase: MidiThruPhase::Failed,
+            last_error: Some("MIDI thru status lock was poisoned".into()),
+            ..MidiThruRuntimeStatus::default()
+        });
+        status.enabled = self.control.thru_desired.load(Ordering::Acquire);
+        status
+    }
 }
 
 impl Drop for MidiOutputRuntime {
     fn drop(&mut self) {
+        self.control.thru_desired.store(false, Ordering::Release);
+        self.control.thru_revision.fetch_add(1, Ordering::AcqRel);
         self.control.desired_enabled.store(false, Ordering::Release);
         self.control.request_revision.fetch_add(1, Ordering::AcqRel);
         self.control.shutdown.store(true, Ordering::Release);
@@ -476,8 +574,137 @@ fn publish_scheduler_status(control: &RuntimeControl, scheduler: &WindowSchedule
     });
 }
 
+fn publish_thru_status(control: &RuntimeControl, status: MidiThruRuntimeStatus) {
+    if let Ok(mut slot) = control.thru_status.lock() {
+        *slot = status;
+        slot.enabled = control.thru_desired.load(Ordering::Acquire);
+    }
+}
+
+/// The only live MIDI-thru device/packet/cleanup owner. All work is on this
+/// already-established scheduler thread, and all sends share `plan.ports`.
+fn service_midi_thru(
+    control: &RuntimeControl,
+    observer: &TransportObserver,
+    plan: &mut WindowScheduler<NativePort>,
+    thru: &mut Option<NativeThru>,
+    active_thru_request: &mut u64,
+    frozen_thru_request: &mut Option<u64>,
+    output_ready: bool,
+) {
+    let observed = observer.snapshot();
+    let requested = control.thru_revision.load(Ordering::Acquire);
+    let requested_enabled = control.thru_desired.load(Ordering::Acquire);
+    if requested_enabled && observed.playing {
+        // A consent clicked during Play/Record is rejected, not held until
+        // Stop where it might otherwise silently start transmitting.
+        control.thru_desired.store(false, Ordering::Release);
+        control.thru_revision.fetch_add(1, Ordering::AcqRel);
+        if thru.is_none() {
+            publish_thru_status(
+                control,
+                MidiThruRuntimeStatus {
+                    phase: MidiThruPhase::Failed,
+                    last_error: Some("MIDI thru requires an idle transport; Stop playback/recording and explicitly enable again".into()),
+                    ..MidiThruRuntimeStatus::default()
+                },
+            );
+            return;
+        }
+    }
+    let allowed = output_ready && requested_enabled && !observed.playing && !plan.blocked;
+    if let Some(active) = thru.as_mut() {
+        let mut sink = ThruOutput(&mut plan.ports);
+        if !allowed || requested != *active_thru_request {
+            active.stop(&mut sink);
+        } else {
+            match control.session_snapshot() {
+                Ok((_, revision)) => {
+                    if let Err(error) = active.tick(&mut sink, observed, revision) {
+                        control.publish(|status| status.last_error = Some(format!("External MIDI thru stopped: {error}")));
+                    }
+                }
+                Err(_) => active.stop(&mut sink),
+            }
+        }
+        let status = active.status();
+        if status.phase != MidiThruPhase::Enabled && requested_enabled {
+            // Unexpected Play/Seek/Loop, device loss or document change must
+            // never silently reopen inputs when the transport stops again.
+            control.thru_desired.store(false, Ordering::Release);
+            control.thru_revision.fetch_add(1, Ordering::AcqRel);
+        }
+        let cleanup_done = active.cleanup_complete(&sink);
+        let status = active.status();
+        publish_thru_status(control, status);
+        if cleanup_done {
+            *thru = None;
+        }
+        return;
+    }
+    if !requested_enabled {
+        let mut status = control.thru_status.lock().map(|slot| slot.clone()).unwrap_or_default();
+        status.phase = MidiThruPhase::Disabled;
+        status.cleanup_pending = false;
+        status.connected_inputs.clear();
+        publish_thru_status(control, status);
+        return;
+    }
+    if !allowed || *frozen_thru_request == Some(requested) {
+        return;
+    }
+    let Ok((session, revision)) = control.session_snapshot() else {
+        *frozen_thru_request = Some(requested);
+        publish_thru_status(
+            control,
+            MidiThruRuntimeStatus {
+                enabled: true,
+                phase: MidiThruPhase::Failed,
+                last_error: Some("could not read MIDI thru session snapshot".into()),
+                ..MidiThruRuntimeStatus::default()
+            },
+        );
+        return;
+    };
+    if plan.generation != Some(observed.generation) || plan.session_revision != Some(revision) || !plan.pending.is_empty() {
+        return; // Playback note release/transport handoff must ACK first.
+    }
+    *active_thru_request = requested;
+    // This is the *only* call that can open native input hardware, and it is
+    // unreachable until BOTH external output and distinct thru consents exist.
+    let outputs: Vec<_> = plan.ports.keys().cloned().collect();
+    let output_request = control.request_revision.load(Ordering::Acquire);
+    match NativeThru::start_native(&session, observed, revision, &outputs) {
+        Ok(mut active) => {
+            let still_consented = control.thru_desired.load(Ordering::Acquire)
+                && control.thru_revision.load(Ordering::Acquire) == requested
+                && !observer.snapshot().playing
+                && observer.snapshot().generation == observed.generation
+                && control.request_revision.load(Ordering::Acquire) == output_request
+                && control.desired_enabled.load(Ordering::Acquire);
+            if !still_consented {
+                // A slow driver returned after opt-out/Stop; no input is
+                // consumed and absolutely no NoteOn can be dispatched.
+                active.stop(&mut ThruOutput(&mut plan.ports));
+            }
+            publish_thru_status(control, active.status());
+            *thru = Some(active);
+        }
+        Err(error) => {
+            *frozen_thru_request = Some(requested);
+            publish_thru_status(
+                control,
+                MidiThruRuntimeStatus { enabled: true, phase: MidiThruPhase::Failed, last_error: Some(error), ..MidiThruRuntimeStatus::default() },
+            );
+        }
+    }
+}
+
 fn run_scheduler_thread(control: Arc<RuntimeControl>, observer: TransportObserver) {
     let mut scheduler: Option<WindowScheduler<NativePort>> = None;
+    let mut thru: Option<NativeThru> = None;
+    let mut active_thru_request: u64 = 0;
+    let mut frozen_thru_request: Option<u64> = None;
     let mut active_request: u64 = 0;
     let mut frozen_request: Option<u64> = None;
     let mut stopping = false;
@@ -486,6 +713,17 @@ fn run_scheduler_thread(control: Arc<RuntimeControl>, observer: TransportObserve
         let shutting_down = control.shutdown.load(Ordering::Acquire);
         let enabled = control.desired_enabled.load(Ordering::Acquire) && !shutting_down;
         let requested = control.request_revision.load(Ordering::Acquire);
+        if let Some(plan) = &mut scheduler {
+            service_midi_thru(
+                &control,
+                &observer,
+                plan,
+                &mut thru,
+                &mut active_thru_request,
+                &mut frozen_thru_request,
+                enabled && requested == active_request && !stopping,
+            );
+        }
         if let Some(plan) = &mut scheduler
             && (!enabled || requested != active_request || stopping)
         {
@@ -501,7 +739,7 @@ fn run_scheduler_thread(control: Arc<RuntimeControl>, observer: TransportObserve
                 });
             }
             match plan.cleanup_complete() {
-                Ok(true) => {
+                Ok(true) if thru.is_none() => {
                     scheduler = None;
                     stopping = false;
                     control.publish(|status| {
@@ -510,7 +748,10 @@ fn run_scheduler_thread(control: Arc<RuntimeControl>, observer: TransportObserve
                         status.cleanup_pending = false;
                     });
                 }
-                Ok(false) => {}
+                Ok(true) | Ok(false) => {
+                    // A separate thru generation may still be awaiting ACK;
+                    // never drop its shared output sender prematurely.
+                }
                 Err(error) => {
                     // Do not silently reopen another connection after a failed
                     // hardware panic. The stream is dropped without joining.
