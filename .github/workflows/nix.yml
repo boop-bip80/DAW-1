@@ -4,7 +4,7 @@ name: Nix
 
 on:
   push:
-    branches: [main]
+    branches: [build/craft-update-495e597]
     paths: ["flake.nix", "flake.lock", "nix/**", "Cargo.lock", ".github/workflows/nix.yml"]
   pull_request:
     paths: ["flake.nix", "flake.lock", "nix/**", "Cargo.lock", ".github/workflows/nix.yml"]
