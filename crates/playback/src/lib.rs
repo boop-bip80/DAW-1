@@ -25,6 +25,8 @@
 mod clock;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod midi_instrument_input_runtime;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod midi_instrument_monitor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod midi_live_thru;
@@ -603,6 +605,9 @@ impl AudioState {
             // Check even when the transport is stopped and this callback will emit silence.
             if self.midi_monitor_reader.epoch_changed() {
                 self.mix.panic_live_notes();
+                // ACK follows the actual plugin call. A producer-side epoch bump alone
+                // cannot authorize Play/Record while notes might still be held.
+                self.midi_monitor_reader.acknowledge_cleanup();
                 self.pending_len = 0;
                 self.read = 0.0;
             }

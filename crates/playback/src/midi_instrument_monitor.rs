@@ -51,6 +51,9 @@ struct QueuedEvent {
 struct MonitorState {
     enabled: AtomicBool,
     epoch: AtomicU64,
+    /// Published by the audio callback *after* it actually releases sounding voices.
+    /// A queued note-off or an off-thread invalidation is never itself an acknowledgment.
+    cleanup_ack_epoch: AtomicU64,
     dropped: AtomicU64,
 }
 
@@ -112,9 +115,15 @@ fn audible(session: &Session, track: &soundcraft_model::Track, any_solo: bool) -
 impl MonitorPort {
     /// Stop all routing immediately and request callback-side note cleanup via the atomic epoch.
     /// No queue slot is required, so even a full queue cannot prevent the panic signal.
-    pub fn invalidate(&self) {
+    pub fn invalidate(&self) -> u64 {
         self.state.enabled.store(false, Ordering::Release);
-        self.state.epoch.fetch_add(1, Ordering::AcqRel);
+        self.state.epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+    }
+
+    /// Only a completed audio callback can acknowledge the requested panic generation.
+    /// If the audio device is gone and callbacks never run, this must stay false.
+    pub fn cleanup_acknowledged(&self, requested_epoch: u64) -> bool {
+        self.state.cleanup_ack_epoch.load(Ordering::Acquire) >= requested_epoch
     }
 
     pub fn dropped(&self) -> u64 {
@@ -165,6 +174,32 @@ impl MonitorPort {
 }
 
 impl MonitorRouter {
+    /// The exact (normalized and enabled) input identities used for route preflight.
+    /// Native workers must independently verify each identity against freshly opened ports.
+    pub fn enabled_sources(&self) -> &[String] {
+        &self.sources
+    }
+
+    /// Callback-safe control handle, cloned before moving the router into its native worker.
+    /// Status and stop operations use atomics; the worker alone owns OS input connections.
+    pub fn control_port(&self) -> MonitorPort {
+        self.port.clone()
+    }
+
+    /// Request immediate producer shutdown and priority callback-side held-note cleanup.
+    /// Idempotent for a stale router: dropping/releasing an old route cannot disable a new one.
+    pub fn stop(&self) -> u64 {
+        if self.port.state.epoch.load(Ordering::Acquire) == self.epoch && self.port.enabled() {
+            self.port.invalidate()
+        } else {
+            self.port.state.epoch.load(Ordering::Acquire)
+        }
+    }
+
+    pub fn cleanup_acknowledged(&self, epoch: u64) -> bool {
+        self.port.cleanup_acknowledged(epoch)
+    }
+
     /// Call from a native device/control worker, never the audio callback. The route scan and
     /// fixed-size `try_send` require no allocation. Any dropped event disables the entire
     /// monitor and schedules priority note cleanup, including a dropped NoteOff or sustain CC.
@@ -196,6 +231,12 @@ impl MonitorRouter {
     }
 }
 
+impl Drop for MonitorRouter {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
 fn valid_channel(message: LiveMidiMessage) -> Result<Option<u8>, MonitorError> {
     use LiveMidiMessage::*;
     let (channel, data_ok) = match message {
@@ -220,6 +261,12 @@ impl MonitorReader {
         }
         self.seen_epoch = now;
         true
+    }
+
+    /// Audio-callback only, strictly after `MixEngine::panic_live_notes`. The release store
+    /// lets a control worker wait for *actual callback execution* before restarting transport.
+    pub(crate) fn acknowledge_cleanup(&self) {
+        self.state.cleanup_ack_epoch.store(self.seen_epoch, Ordering::Release);
     }
 
     pub fn enabled(&self) -> bool {
@@ -292,6 +339,17 @@ mod tests {
         assert_eq!(drained[0].track, a);
         assert_eq!(drained[1].track, b);
         assert!(!receiver.epoch_changed());
+    }
+
+    #[test]
+    fn dropping_an_obsolete_router_does_not_disable_a_new_route() {
+        let (port, _receiver) = monitor_pair();
+        let (s, _, _) = session();
+        let old = port.arm(&s, &["Keys A".into(), "Keys B".into()]).unwrap();
+        let new = port.arm(&s, &["Keys A".into(), "Keys B".into()]).unwrap();
+        drop(old);
+        assert!(port.enabled());
+        assert_eq!(new.try_send("Keys A", note(1)).unwrap(), 1);
     }
 
     #[test]
@@ -480,7 +538,10 @@ mod tests {
             router.try_send("Keys A", note(1)).unwrap();
         }
         assert_eq!(router.try_send("Keys A", note(1)), Err(MonitorError::Overflow));
+        let overflow_epoch = router.port.state.epoch.load(Ordering::Acquire);
+        assert!(!router.cleanup_acknowledged(overflow_epoch), "overflow flag is not a callback cleanup ACK");
         assert_eq!(output(&mut audio), 0.0, "priority epoch panic bypasses a full queue");
+        assert!(router.cleanup_acknowledged(overflow_epoch));
         assert!(counts.panics.load(Ordering::SeqCst) >= 1);
         let router = audio.midi_monitor_port.arm(&session, sources).unwrap();
         router.try_send("Keys A", note(1)).unwrap();
@@ -498,5 +559,18 @@ mod tests {
         assert!(output(&mut audio) > 0.0);
         tx.send(crate::Cmd::Session(Arc::new(session), Vec::new())).unwrap();
         assert_eq!(output(&mut audio), 0.0);
+    }
+
+    #[test]
+    fn explicit_stop_ack_is_deferred_until_real_audio_panic() {
+        let (mut audio, _tx, session, counts) = audio_fixture();
+        let router = audio.midi_monitor_port.arm(&session, &["Keys A".into()]).unwrap();
+        router.try_send("Keys A", note(1)).unwrap();
+        assert!(output(&mut audio) > 0.0);
+        let requested_epoch = router.stop();
+        assert!(!router.cleanup_acknowledged(requested_epoch));
+        assert_eq!(output(&mut audio), 0.0);
+        assert!(router.cleanup_acknowledged(requested_epoch));
+        assert!(counts.panics.load(Ordering::SeqCst) >= 1);
     }
 }
