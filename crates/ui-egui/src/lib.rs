@@ -1739,8 +1739,21 @@ impl SoundApp {
         }
     }
 
+    /// Never relocate/restart playback under a running take: its audio and MIDI input
+    /// timestamps are still tied to the original transport start.
+    fn refuse_recording_relocation(&mut self, action: &str) -> bool {
+        if !self.engine.transport.recording {
+            return false;
+        }
+        self.ui.status = format!("Cannot {action} during recording. Stop Record first; the take continues unchanged.");
+        true
+    }
+
     /// Play from the selection, honouring loop playback and selection end.
     pub fn play_from_selection(&mut self) {
+        if self.refuse_recording_relocation("restart playback") {
+            return;
+        }
         let s = self.engine.session();
         let sel = s.edit.selection;
         let preroll = if s.edit.pre_post_roll { s.edit.pre_roll } else { 0 };
@@ -1780,13 +1793,13 @@ impl SoundApp {
                     self.main_meter = MeterDisplay::default();
                 }
                 TransportRequest::Play => {
-                    if !self.is_playing() {
+                    if !self.refuse_recording_relocation("start playback") && !self.is_playing() {
                         self.play_from_selection();
                     }
                 }
                 TransportRequest::Stop | TransportRequest::Pause => self.stop_play(),
                 TransportRequest::TogglePlay => {
-                    if self.is_playing() {
+                    if self.engine.transport.recording || self.is_playing() {
                         self.stop_play();
                     } else {
                         self.play_from_selection();
@@ -1800,6 +1813,9 @@ impl SoundApp {
                     }
                 }
                 TransportRequest::Locate(at) => {
+                    if self.refuse_recording_relocation("locate the playhead") {
+                        continue;
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(output) = &self.midi_output {
                         let _ = output.set_thru_enabled(false);
@@ -1816,6 +1832,9 @@ impl SoundApp {
                     self.engine.transport.position = at;
                 }
                 TransportRequest::PlaySelection => {
+                    if self.refuse_recording_relocation("play the selection") {
+                        continue;
+                    }
                     let sel = self.engine.session().edit.selection;
                     self.start_play(sel.start, Some(sel.end.max(sel.start + 1)), None);
                 }
@@ -1830,6 +1849,9 @@ impl SoundApp {
                     }
                 }
                 TransportRequest::Scrub(at) => {
+                    if self.refuse_recording_relocation("scrub the playhead") {
+                        continue;
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(output) = &self.midi_output {
                         let _ = output.set_thru_enabled(false);
@@ -3204,6 +3226,85 @@ mod tests {
         assert!(app.ui.status.contains("cannot start during recording"), "{}", app.ui.status);
         assert!(app.recorder.is_none() && app.take_plan.is_none());
         assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+    }
+
+    /// The engine command layer blocks normal user requests, while a host may still hand
+    /// the UI a stale/direct transport request. Neither path may relocate an active take.
+    #[test]
+    fn direct_relocation_requests_cannot_move_an_armed_recording_take() {
+        use soundcraft_engine::{TransportRequest, io::Recording};
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        use soundcraft_time::Range;
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        engine.session_mut().track_mut(track).unwrap().mixer.record_arm = true;
+        engine.session_mut().edit.selection = Range::point(48_000);
+        engine.mark_clean();
+        let mut app = SoundApp::new(engine, None, Services::default());
+        app.engine.transport.playing = true;
+        app.engine.transport.recording = true;
+        app.engine.transport.position = 72_000;
+        app.sim = Some((72_000, None, None));
+        app.record_start = 60_000;
+        app.punch = Some(Range::new(60_000, 96_000));
+        app.take_plan = Some(Recording { start: 60_000, pass: None, punch: app.punch, rate: 48_000, offset_samples: Some(0), takes: Vec::new() });
+        let before_plan = app.take_plan.clone();
+        let before_sim = app.sim;
+        let before_edit = app.engine.session().edit.clone();
+        app.engine.transport_requests.extend([
+            TransportRequest::Locate(120_000),
+            TransportRequest::PlaySelection,
+            TransportRequest::Scrub(180_000),
+            TransportRequest::Play,
+        ]);
+
+        app.handle_transport(0.0);
+        app.play_from_selection(); // public host entry point must refuse as well
+
+        assert!(app.engine.transport.recording && app.is_playing());
+        assert_eq!(app.engine.transport.position, 72_000);
+        assert_eq!(app.sim, before_sim, "no simulated seek or playback restart");
+        assert_eq!(app.record_start, 60_000);
+        assert_eq!(app.punch, Some(Range::new(60_000, 96_000)));
+        assert_eq!(app.take_plan, before_plan, "capture placement stays anchored to its original start");
+        assert_eq!(app.engine.session().edit.selection, before_edit.selection);
+        assert_eq!(app.engine.session().edit.playhead, before_edit.playhead);
+        assert!(app.engine.session().track(track).unwrap().mixer.record_arm);
+        assert!(app.ui.status.contains("during recording"), "{}", app.ui.status);
+        assert!(app.engine.transport_requests.is_empty());
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+    }
+
+    #[test]
+    fn stalled_recording_refuses_play_but_toggle_play_and_record_button_can_stop_it() {
+        use soundcraft_engine::TransportRequest;
+        use soundcraft_model::{ChannelFormat, TrackKind};
+
+        for request in [TransportRequest::Play, TransportRequest::TogglePlay, TransportRequest::Record, TransportRequest::Stop] {
+            let mut engine = soundcraft_engine::Engine::default();
+            let track = engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+            engine.session_mut().track_mut(track).unwrap().mixer.record_arm = true;
+            engine.mark_clean();
+            let mut app = SoundApp::new(engine, None, Services::default());
+            app.engine.transport.position = 48_000;
+            app.engine.transport.recording = true;
+            app.engine.transport.playing = false; // e.g. output stopped asking for samples
+            app.engine.transport_requests.push(request.clone());
+
+            app.handle_transport(0.0);
+
+            assert!(app.sim.is_none() && !app.is_playing(), "{request:?} must not restart a stalled take");
+            assert_eq!(app.engine.transport.position, 48_000);
+            assert!(app.engine.session().track(track).unwrap().mixer.record_arm);
+            if matches!(request, TransportRequest::Play) {
+                assert!(app.engine.transport.recording, "Play refusal must not silently discard the take");
+                assert!(app.ui.status.contains("during recording"));
+            } else {
+                assert!(!app.engine.transport.recording, "{request:?} must remain an explicit Record stop");
+            }
+            assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+        }
     }
 
     #[test]
