@@ -103,6 +103,11 @@ fn internal_error(message: &str) -> EngineError {
     EngineError::Io(format!("OpenTimelineIO bundle staging failed: {message}"))
 }
 
+struct MediaFile {
+    path: PathBuf,
+    source: SourceId,
+}
+
 /// Create a native OTIOZ bundle, with bounded media reads and safe, relative archive links.
 /// The command writes its output only if every source has passed validation and archival.
 pub fn export_audio(session: &Session) -> Result<Export> {
@@ -124,7 +129,7 @@ fn export_audio_with_limits(session: &Session, limits: Limits) -> Result<Export>
 
     // Canonical source path is the dedupe key; source IDs give deterministic, safe archive names.
     let mut by_path = BTreeMap::<PathBuf, String>::new();
-    let mut files = BTreeMap::<String, PathBuf>::new();
+    let mut files = BTreeMap::<String, MediaFile>::new();
     for track in tracks {
         let children = track.get_mut("children").and_then(Value::as_array_mut).ok_or_else(|| internal_error("track has no children"))?;
         for child in children {
@@ -140,13 +145,18 @@ fn export_audio_with_limits(session: &Session, limits: Limits) -> Result<Export>
             let src = session.source(SourceId(id)).ok_or_else(|| internal_error("generated clip refers to a missing media source"))?;
             let path = source_path(session, src)?;
             let name = if let Some(existing) = by_path.get(&path) {
+                let primary = files.get(existing).ok_or_else(|| internal_error("deduplicated media entry disappeared"))?;
+                let reference = session.source(primary.source).ok_or_else(|| internal_error("deduplicated media source disappeared"))?;
+                if src.channels != reference.channels || src.sample_rate != reference.sample_rate || src.frames != reference.frames {
+                    return Err(unsupported(format!("sources referring to `{}` disagree about its channels, rate or duration", src.name)));
+                }
                 existing.clone()
             } else {
                 if files.len() >= MAX_SOURCES {
                     return Err(unsupported("more than 1024 distinct source audio files"));
                 }
                 let name = media_name(src)?;
-                if files.insert(name.clone(), path.clone()).is_some() {
+                if files.insert(name.clone(), MediaFile { path: path.clone(), source: src.id }).is_some() {
                     return Err(internal_error("archive media names collided"));
                 }
                 by_path.insert(path, name.clone());
@@ -174,12 +184,22 @@ fn export_audio_with_limits(session: &Session, limits: Limits) -> Result<Export>
     zip.write_all(b"1.0.0\n").map_err(ioerr)?;
 
     let mut total_media = 0usize;
-    for (name, path) in &files {
+    for (name, media) in &files {
         let available = limits.total_media.saturating_sub(total_media);
         let read_limit = limits.single_media.min(available);
-        let bytes = crate::io::read_file_limited(path, read_limit)?;
+        let bytes = crate::io::read_file_limited(&media.path, read_limit)?;
         total_media =
             total_media.checked_add(bytes.len()).filter(|n| *n <= limits.total_media).ok_or_else(|| unsupported("media exceeds 512 MiB"))?;
+        let source = session.source(media.source).ok_or_else(|| internal_error("bundled media source disappeared"))?;
+        let extension = media.path.extension().and_then(std::ffi::OsStr::to_str);
+        let actual = soundcraft_audio_io::probe(&bytes, extension)
+            .map_err(|err| EngineError::Io(format!("OTIO bundle media `{}` is unreadable: {err}", media.path.display())))?;
+        if actual.channels != source.channels || actual.sample_rate != source.sample_rate || actual.frames < source.frames {
+            return Err(unsupported(format!(
+                "source `{}` has changed on disk (expected {} channel(s), {} Hz, at least {} frames; found {} channel(s), {} Hz, {} frames)",
+                source.name, source.channels, source.sample_rate, source.frames, actual.channels, actual.sample_rate, actual.frames
+            )));
+        }
         zip.start_file(name.as_str(), options).map_err(zerr)?;
         zip.write_all(&bytes).map_err(ioerr)?;
     }
@@ -386,6 +406,13 @@ mod tests {
         fixture.session.sources[0].unsaved = true;
         assert!(matches!(export_audio(&fixture.session), Err(EngineError::Unsupported(message)) if message.contains("unsaved")));
         fixture.session.sources[0].unsaved = false;
+        // A source file can be replaced by an external editor after being loaded into the
+        // session. Never hand off bytes whose true channels/duration disagree with the edit.
+        let wrong_channels = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.3; 12_000]] };
+        std::fs::write(&fixture.sources[0], soundcraft_audio_io::encode(&wrong_channels, &EncodeOptions::default()).unwrap()).unwrap();
+        assert!(matches!(export_audio(&fixture.session), Err(EngineError::Unsupported(message)) if message.contains("changed on disk")));
+        let restored = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.31; 12_000], vec![-0.47; 12_000]] };
+        std::fs::write(&fixture.sources[0], soundcraft_audio_io::encode(&restored, &EncodeOptions::default()).unwrap()).unwrap();
         let destination = fixture.directory.join("missing.otioz");
         std::fs::remove_file(&fixture.sources[1]).unwrap();
         let mut engine = Engine::new(fixture.session.clone());
