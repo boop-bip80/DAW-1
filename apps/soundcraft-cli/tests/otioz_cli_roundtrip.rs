@@ -295,7 +295,8 @@ fn portable_otioz_cli_import_survives_archive_and_exporter_removal() {
     std::fs::remove_dir_all(&original_dir).unwrap();
     std::fs::remove_file(&archive).unwrap();
     assert!(!source.exists() && !project.exists() && !archive.exists());
-    let reopened = cli().arg("run").arg("--in").arg(&recipient).arg("--bounce").arg(&reopened_bounce).args(["--start", "0", "--end", "0.5"]).output().unwrap();
+    let reopened =
+        cli().arg("run").arg("--in").arg(&recipient).arg("--bounce").arg(&reopened_bounce).args(["--start", "0", "--end", "0.5"]).output().unwrap();
     checked("reopen and rebounce without archive or original media", &reopened);
     assert!(
         !String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"),
