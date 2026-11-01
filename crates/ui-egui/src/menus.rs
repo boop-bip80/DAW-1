@@ -800,7 +800,7 @@ mod tests {
         invoke_menu(&mut app, "edit.paste_clip_gain", PASTE_CLIP_GAIN_MENU);
         assert_eq!(app.engine.undo_label(), Some("Paste Clip Gain"));
         let pasted = app.engine.session().find_clip(soundcraft_model::ClipId(clip)).unwrap().1;
-        assert!(!pasted.gain_env.is_empty(), "menu must dispatch paste, not just expose a label");
+        assert!((pasted.gain_db + 9.0).abs() < 1e-3, "a flat pasted gain is stored as static gain, not a redundant envelope");
 
         let key = format!("clip_fx.{clip}.unit-test-param");
         app.engine.session_mut().edit.values.insert(key.clone(), 0.75);
