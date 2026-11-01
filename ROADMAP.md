@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (native MIDI capture foundation, recording safeguards, plugin note releases, audio OTIO export, UI fixes and CI config; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (audio OTIO import/export, MIDI take bridge, physical input-route safeguards and full Linux CI gate; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -35,11 +35,12 @@ Detail: [target-app-parity.md](docs/target-app-parity.md#readiness-by-audience).
 
 **Why pre-alpha:** the core-workflow gate in [docs/roadmap.md](docs/roadmap.md#alpha-gate) fails.
 Editing, mixing, bouncing, and saving and reopening work end to end. Audio device, rate and
-buffer selection exist, and the recorder streams WAV takes to disk, but multichannel physical
-routing, a single-clock duplex path and reliable latency compensation are incomplete. There is
-now a tested live-MIDI byte-stream decoder, take assembler and native input-port capture adapter,
-but no route from MIDI hardware to armed tracks or hosted instruments, so keyboards still cannot record. There is audio-only OTIO timeline export, but no AAF, OMF
-or `.ptx` session interchange with Pro Tools.
+buffer selection exist, WAV takes stream to disk, and per-track input selections are bounded
+rather than silently wrapping to the wrong mic. A single-clock duplex path, complete I/O matrix
+and latency compensation remain incomplete. MIDI hardware capture and an undoable armed-track
+take bridge exist, but the desktop record/stop cycle is not yet wired to that bridge or live
+instruments, so keyboard recording remains unverified. Audio-only OpenTimelineIO import and
+export now work, but AAF, OMF and `.ptx` interchange with Pro Tools remain absent.
 Readiness (~40 %) sits right at the alpha bar, but a gate failure keeps the app pre-alpha. The
 2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence. This one
 measures readiness and adds hardware, localization and field bug reports.
@@ -104,12 +105,12 @@ Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-p
 
 Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadmap.md](docs/roadmap.md).
 
-1. **Alpha blocker:** audio interfaces: physical channel routing, one-clock duplex monitoring, record latency compensation and hardware testing (G-01); source streaming/recovery remain separate (G-06). Estimated gate 35–55 h, not re-calibrated.
-2. **Alpha blocker:** wire native MIDI input capture to armed tracks and live instruments; implement MIDI output, thru, clock and hardware tests (G-02). 20–35 h.
+1. **Alpha blocker:** audio interfaces: full physical-channel I/O matrix, one-clock duplex monitoring, record latency compensation and hardware testing (G-01); per-track input bounds and take-to-disk now work, source streaming/recovery remain separate (G-06). Estimated gate 35–55 h, not re-calibrated.
+2. **Alpha blocker:** wire the new native MIDI capture and undoable recording bridge into desktop record/stop and live instrument playback; add MIDI output, thru, clock and physical keyboard tests (G-02). 20–35 h.
 3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
 4. Obtain explicit owner approval for macOS third-party native-plugin library-validation entitlement (#153), then AU editors (G-05). 15–25 h plus the security decision.
 5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
-6. Verify the newly configured three-OS PR CI actually runs in this fork; GitHub currently reports no Actions runs. Then add runtime smoke tests (G-14).
+6. Enable and verify the three-OS PR CI in this fork; GitHub still reports no Actions runs. A headless audio import/bounce/save/reopen CLI smoke test now passes on Linux; macOS/Windows startup and hardware checks remain (G-14).
 7. Fidelity harness against Pro Tools (G-07). 20–30 h.
 
 ## Robustness
@@ -124,6 +125,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-11-01:** A second integration slice adds an audio-only OpenTimelineIO importer (official Clip.2 fixture, media/source bounds, atomic undo, File menu path), native MIDI device selection in Setup, and a transport-aware capture-to-armed-track take bridge with synthetic tests. Desktop record/stop and instrument audition are not yet wired to the MIDI bridge. Multichannel audio recording now refuses invalid physical input routes before WAV creation and silences unavailable monitor channels. CLAP/VST3 scans fail closed on ambiguous bundle executables. A hardware-free CLI import→bounce→save→reopen→bounce test passes. The complete Linux `cargo xtask ci` gate, including WebAssembly, passed on the exact GitHub tree; there are still no GitHub Actions runs and no new hardware/macOS/Windows validation. Readiness and alpha gate unchanged.
 - **2026-10-31:** First stabilization/integration slice: direct-to-disk recording reports writer-thread failures and retries input stream startup with the device-default buffer when needed. CLAP/VST3 note releases survive saturated queues and transport stops. MIDI 1.0 decoding/take assembly and a native bounded MIDI input-port capture adapter are available, but not wired to instruments/armed tracks. `file.export_otio` exports eligible multitrack audio timelines through the desktop File menu, compatible with the official OTIO reader. Exact keyboard shortcuts and command-palette selection handling prevent unintended commands. Three-OS CI configuration now targets this fork's default branch; GitHub runner and macOS/Windows/hardware checks remain outstanding. No readiness percentage change.
 - **2026-10-25:** Auto Pan moves the balance of a stereo track: the left channel's level falls as the position moves right and the right channel's as it moves left, at constant power, and each channel stays on its own side. At the center the track passes unchanged, so a wide or out-of-phase stereo image keeps its width, and the envelope follower follows the louder channel. No readiness percentage change.
 - **2026-10-24:** Clip List › Auto Rename (`clip.auto_rename`) sets the names that editing gives the clips it separates from the selected clips: a name, a starting number, a number of places (zeros before the number) and a suffix. The piece after each cut takes the next name, the piece before it keeps its name, and all the pieces count up one number sequence. Pieces that Strip Silence names with its own Rename fields, or removes, take no Auto Rename name. Copied clips keep their scheme when they are pasted, saved sessions hold the schemes, and Import Session Data brings them along. No readiness percentage change.
@@ -178,6 +180,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Audio-only OTIO import/export, MIDI recording bridge and Setup selector, bounded input routing, plugin scan safety and Linux full-gate/smoke evidence; pre-alpha gate still fails |
 | 2026-10-31 | minor | Stabilization and interchange work logged; corrected stale assertions about device selection and recording-to-disk; alpha gate still fails |
 | 2026-10-25 | trivial | Progress log: Auto Pan stereo balance; readiness estimates unchanged |
 | 2026-10-24 | trivial | Progress log: Clip List Auto Rename; readiness estimates unchanged |
