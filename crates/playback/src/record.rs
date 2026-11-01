@@ -533,12 +533,18 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
     let (mut done, mut problem) = (Vec::new(), None);
     for mut t in takes {
         t.write_header();
-        if t.frames == 0 {
-            let _ = std::fs::remove_file(&t.path);
-        } else {
-            done.push((t.id, t.path));
+        let TakeWriter { id, path, file, frames, error, .. } = t;
+        // A failed first write_all may leave recoverable complete samples on disk even though no
+        // full 64-KiB chunk was committed to `frames`. Never delete that evidence or import it as
+        // a successful take. Only a genuinely empty *successful* take is disposable.
+        // Close the file before unlinking an empty take (required on Windows).
+        drop(file);
+        if frames > 0 {
+            done.push((id, path));
+        } else if error.is_none() {
+            let _ = std::fs::remove_file(&path);
         }
-        problem = problem.or(t.error);
+        problem = problem.or(error);
     }
     (done, problem)
 }
@@ -1145,6 +1151,35 @@ mod tests {
         assert_eq!(fail.bytes[..TAKE_WRITE_CHUNK_BYTES], short.bytes[..TAKE_WRITE_CHUNK_BYTES]);
         assert!(fail.largest_request <= TAKE_WRITE_CHUNK_BYTES);
         assert!(scratch.len() <= TAKE_WRITE_CHUNK_BYTES);
+    }
+
+    /// `write_all` can commit one or more complete samples before failing its *first* 64-KiB
+    /// chunk. Since no whole chunk was committed, `frames` remains zero, but the WAV decoder can
+    /// recover the bytes after the unfinished zero-sized header. Keep this file for recovery,
+    /// without advertising a failed take as a usable clip; still remove a truly empty take.
+    #[test]
+    fn zero_counted_frames_after_io_error_preserve_recoverable_wav_but_not_empty_takes() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-recover-first-failed-chunk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (failed_path, empty_path, existing_path) = (dir.join("Failed.wav"), dir.join("Empty.wav"), dir.join("Existing.wav"));
+        let mut failed = TakeWriter::create(TrackId(1), vec![0], failed_path.clone(), 48_000).unwrap();
+        // Simulate the on-disk aftermath of a short write before the first complete chunk.
+        failed.file.write_all(&0.375f32.to_le_bytes()).unwrap();
+        failed.error = Some("synthetic disk failure after a recoverable sample".into());
+        assert_eq!(failed.frames, 0);
+        let empty = TakeWriter::create(TrackId(2), vec![0], empty_path.clone(), 48_000).unwrap();
+        let sentinel = b"pre-existing recording must remain untouched";
+        std::fs::write(&existing_path, sentinel).unwrap();
+
+        let shared = Shared::new(CaptureRing::new(32)); // disarmed: flush and finalize at once
+        let (done, problem) = write_takes(&shared, vec![failed, empty], 1);
+        assert!(done.is_empty(), "a failed zero-count WAV is not imported as a completed take");
+        assert!(problem.is_some_and(|p| p.contains("synthetic disk failure")));
+        assert!(failed_path.exists(), "a short failed write can contain recoverable audio");
+        assert_eq!(decode(&failed_path), vec![vec![0.375]]);
+        assert!(!empty_path.exists(), "a successfully opened but empty take is disposable");
+        assert_eq!(std::fs::read(existing_path).unwrap(), sentinel);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
