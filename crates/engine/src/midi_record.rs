@@ -163,6 +163,13 @@ impl MidiRecordBridge {
         (self.dropped_events, self.truncated_packets)
     }
 
+    /// Account for lost events from multiple independent input ports after merging their
+    /// timestamp domains on the control thread. Never call this from a driver callback.
+    pub fn add_input_loss(&mut self, dropped_events: u64, truncated_packets: u64) {
+        self.dropped_events = self.dropped_events.saturating_add(dropped_events);
+        self.truncated_packets = self.truncated_packets.saturating_add(truncated_packets);
+    }
+
     /// Finish note-offs at the actual transport stop (or the last observed event, whichever
     /// is later) and commit all completed takes in one undoable engine command.
     ///
