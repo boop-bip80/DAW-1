@@ -3075,7 +3075,8 @@ mod tests {
         for id in [midi, instrument, audio] {
             let track = h.state().engine.session().track(id).expect("output track");
             let expected = crate::mix_window::output_name(h.state(), track);
-            let node = h.query_by_role_and_label(Role::ComboBox, &format!("Output for {}", track.name)).expect("accessible Edit output selector");
+            let label = format!("Output for {}", track.name);
+            let node = h.query_by_role_and_label(Role::ComboBox, &label).expect("accessible Edit output selector");
             assert_eq!(node.value().as_deref(), Some(expected.as_str()), "Edit output differs from Mix's shared label for {}", track.name);
         }
         assert_eq!(crate::mix_window::output_name(h.state(), h.state().engine.session().track(midi).expect("MIDI track")), "Offline DIN · ch 7");
@@ -4565,4 +4566,3 @@ mod tests {
             assert_eq!(h.state().engine.session().track(track).unwrap().clips(), clips.as_slice(), "{tool}");
         }
     }
-}
