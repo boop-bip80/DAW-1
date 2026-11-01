@@ -41,7 +41,7 @@ proptest = "1"
 symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "vorbis", "ogg", "wav", "pcm", "aiff", "isomp4", "aac", "alac", "adpcm", "caf", "mkv"] }
 rustfft = "6"
 # Session bundles (one file holding a session and its audio, for the browser): stored entries only.
-zip = { version = "9", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 cpal = "0.18"
 
 # Which file paths stored in a session may be opened.
