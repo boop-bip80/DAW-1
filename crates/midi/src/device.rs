@@ -144,6 +144,12 @@ impl MidiInputStream {
         self.capture.pending()
     }
 
+    /// Borrow the bounded queue for transport-aware consumers. The OS callback owns the
+    /// producer; receiving and musical-time conversion must remain off that callback.
+    pub fn capture_queue(&self) -> &MidiCaptureQueue {
+        &self.capture
+    }
+
     pub fn take_dropped_events(&self) -> u64 {
         self.capture.take_dropped_events()
     }

@@ -17,6 +17,8 @@ pub mod icons;
 pub mod import;
 pub mod menus;
 pub mod midi_editor;
+#[cfg(not(target_arch = "wasm32"))]
+mod midi_input_runtime;
 pub mod mix_window;
 pub mod ops_windows;
 pub mod palette;
@@ -38,7 +40,7 @@ pub mod windows;
 
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
-use soundcraft_model::TrackId;
+use soundcraft_model::{TrackId, TrackKind};
 use soundcraft_playback::record::Trouble;
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
@@ -46,6 +48,20 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
 
 pub use control::ControlRequest;
+#[cfg(not(target_arch = "wasm32"))]
+pub use midi_input_runtime::MidiInputStatus;
+
+/// Native MIDI ports cannot be opened in the browser; preserve the same read-only status API.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MidiInputStatus {
+    pub enabled_ports: Vec<String>,
+    pub connected_ports: Vec<String>,
+    pub recording: bool,
+    pub dropped_events: u64,
+    pub truncated_packets: u64,
+    pub error: Option<String>,
+}
 
 /// Which main window is in front (Window › Mix / Edit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -259,6 +275,13 @@ pub struct SoundApp {
     pub player: Option<Player>,
     /// Input capture, opened on first record.
     pub recorder: Option<soundcraft_playback::record::Recorder>,
+    /// Native MIDI input queues and the transport-aware MIDI recording bridge, on the UI thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_capture: Option<midi_input_runtime::MidiInputRuntime>,
+    midi_status: MidiInputStatus,
+    /// Synthetic MIDI backend for deterministic Record/Stop lifecycle tests, never hardware.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    midi_test_sources: Option<midi_input_runtime::MidiInputSources>,
     record_start: Samples,
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
@@ -477,6 +500,11 @@ impl SoundApp {
             engine,
             player,
             recorder: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_capture: None,
+            midi_status: MidiInputStatus::default(),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            midi_test_sources: None,
             record_start: 0,
             punch: None,
             recorder_failed: false,
@@ -631,6 +659,27 @@ impl SoundApp {
         (fresh && !self.engine.session().tracks.iter().any(|t| t.mixer.record_arm)).then_some(why)
     }
 
+    /// Native MIDI recording state for Setup and track input readouts. Device names and selected
+    /// preferences are independent of audio I/O; streams open only while recording and are
+    /// closed on Stop. This is a snapshot, never a driver-thread or audio-thread API.
+    pub fn midi_input_status(&self) -> MidiInputStatus {
+        let mut status = self.midi_status.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            status.enabled_ports = midi_input_runtime::selected_names(&self.engine);
+            status.recording = self.engine.transport.recording && self.midi_capture.as_ref().is_some_and(|midi| !midi.connected_ports().is_empty());
+            if let Some(midi) = &self.midi_capture {
+                status.connected_ports = midi.connected_ports();
+                (status.dropped_events, status.truncated_packets) = midi.input_loss();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            status.error = Some("Hardware MIDI input is unavailable in the browser".into());
+        }
+        status
+    }
+
     /// Current transport position (playhead while playing, else the edit insertion).
     pub fn position(&self) -> Samples {
         if self.engine.transport.playing { self.engine.transport.position } else { self.engine.session().edit.selection.start }
@@ -707,15 +756,65 @@ impl SoundApp {
             self.record_hint = Some((self.last_frame.unwrap_or_default(), why));
             return;
         }
-        self.ensure_input();
-        let takes = match self.arm_recorder() {
-            Ok(takes) => takes,
-            Err(err) => {
-                self.ui.status = format!("Cannot record: {err}");
+        let audio_armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive);
+        let midi_armed = self.engine.session().tracks.iter().filter(|t| t.mixer.record_arm && t.kind.is_midi() && !t.inactive).count();
+        if !audio_armed && midi_armed == 0 {
+            self.ui.status = "Record-enable an active audio, MIDI or instrument track first.".into();
+            return;
+        }
+        if midi_armed > 64 {
+            self.ui.status = "Cannot record more than 64 MIDI/instrument tracks in one pass.".into();
+            return;
+        }
+        // Audio punch/loop capture remains unchanged. MIDI punch, loop comping and MIDI
+        // pre/post-roll trimming require a separate verified musical-time implementation.
+        let edit = self.engine.session().edit.clone();
+        if midi_armed > 0 && !self.is_playing() && !edit.selection.is_empty() {
+            self.ui.status = "MIDI time-range punch/loop recording is not supported yet; clear the timeline range before recording.".into();
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if midi_armed > 0 {
+            self.ui.status = "Native MIDI input is unavailable in the browser.".into();
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let midi_sources = if midi_armed > 0 {
+            if self.midi_capture.is_some() {
+                self.ui.status = "An unfinished MIDI take is awaiting recovery; retry its commit before starting another recording.".into();
                 return;
             }
+            #[cfg(test)]
+            let opened: Result<_, String> =
+                self.midi_test_sources.take().map(Ok).unwrap_or_else(|| midi_input_runtime::MidiInputSources::open_selected(&self.engine));
+            #[cfg(not(test))]
+            let opened = midi_input_runtime::MidiInputSources::open_selected(&self.engine);
+            match opened {
+                Ok(sources) => Some(sources),
+                Err(err) => {
+                    self.midi_status.error = Some(err.clone());
+                    self.ui.status = format!("Cannot record MIDI: {err}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let takes = if audio_armed {
+            self.ensure_input();
+            match self.arm_recorder() {
+                Ok(takes) => takes,
+                Err(err) => {
+                    self.ui.status = format!("Cannot record: {err}");
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
         };
         self.lost_shown = 0;
+        self.take_plan = None;
+        self.midi_status = MidiInputStatus::default();
         if let Some(p) = &self.player {
             p.set_recording(true);
         }
@@ -725,26 +824,41 @@ impl SoundApp {
             // Punch in on the fly at the current playhead.
             self.record_start = self.position();
             self.punch = None;
-            self.plan_recording(takes, None);
-            return;
-        }
-        let e = self.engine.session().edit.clone();
-        let sel = e.selection;
-        if e.loop_record && !sel.is_empty() {
-            self.record_start = sel.start;
-            self.punch = None;
-            self.start_play(sel.start, None, Some(sel));
-            self.plan_recording(takes, Some(sel.len()));
+            if audio_armed {
+                self.plan_recording(takes, None);
+            }
         } else {
-            // Record into the selection when there is one (punch), with pre/post-roll if enabled;
-            // the take is trimmed back to the punch range afterwards.
-            let (pre, post) = if e.pre_post_roll { (e.pre_roll, e.post_roll) } else { (0, 0) };
-            let from = (sel.start - pre).max(0);
-            self.record_start = from;
-            self.punch = (!sel.is_empty()).then_some(sel);
-            let end = (!sel.is_empty()).then_some(sel.end + post);
-            self.start_play(from, end, None);
-            self.plan_recording(takes, None);
+            let sel = edit.selection;
+            if edit.loop_record && !sel.is_empty() {
+                self.record_start = sel.start;
+                self.punch = None;
+                self.start_play(sel.start, None, Some(sel));
+                if audio_armed {
+                    self.plan_recording(takes, Some(sel.len()));
+                }
+            } else {
+                // Audio selection punch and pre/post-roll retain their existing behavior.
+                let (pre, post) = if edit.pre_post_roll { (edit.pre_roll, edit.post_roll) } else { (0, 0) };
+                let from = (sel.start - pre).max(0);
+                self.record_start = from;
+                self.punch = (!sel.is_empty()).then_some(sel);
+                let end = (!sel.is_empty()).then_some(sel.end + post);
+                self.start_play(from, end, None);
+                if audio_armed {
+                    self.plan_recording(takes, None);
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sources) = midi_sources {
+            match midi_input_runtime::MidiInputRuntime::begin(&self.engine, sources) {
+                Ok(runtime) => self.midi_capture = Some(runtime),
+                Err(err) => {
+                    self.stop_play();
+                    self.midi_status.error = Some(err.clone());
+                    self.ui.status = format!("Cannot begin MIDI recording: {err}");
+                }
+            }
         }
     }
 
@@ -1117,6 +1231,35 @@ impl SoundApp {
         };
     }
 
+    /// The only MIDI queue consumer: never run on the audio or MIDI callback thread. A lost
+    /// connection stops the whole transport and finalizes the audio and MIDI partial takes;
+    /// continuing silently would yield a false impression that the keyboard was recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_midi_input(&mut self) {
+        if !self.engine.transport.recording {
+            return;
+        }
+        let Some(runtime) = &mut self.midi_capture else { return };
+        match runtime.poll(self.engine.transport.position) {
+            Ok(_) => {
+                let loss = runtime.input_loss();
+                let previous = (self.midi_status.dropped_events, self.midi_status.truncated_packets);
+                if loss != previous && (loss.0 > 0 || loss.1 > 0) {
+                    self.midi_status.dropped_events = loss.0;
+                    self.midi_status.truncated_packets = loss.1;
+                    self.ui.status =
+                        format!("MIDI input lost {} event(s) and truncated {} packet(s); the partial take will be kept.", loss.0, loss.1);
+                }
+            }
+            Err(err) => {
+                log::warn!("MIDI recording stopped: {err}");
+                self.stop_play();
+                self.midi_status.error = Some(err.clone());
+                self.ui.status = format!("MIDI input stopped: {err}. Recorded material has been preserved where possible.");
+            }
+        }
+    }
+
     /// Reopen the audio devices, keeping a take in progress.
     pub fn reconnect_audio(&mut self) {
         if self.is_playing() || self.engine.transport.recording {
@@ -1136,25 +1279,74 @@ impl SoundApp {
         if let Some(p) = &self.player {
             p.set_recording(false);
         }
-        let plan = self.take_plan.take();
-        let Some(r) = &mut self.recorder else { return };
-        let (takes, problem) = r.finish();
-        let tracks = takes.len().max(1);
-        let plan = plan.unwrap_or_else(|| soundcraft_engine::io::Recording {
-            start: self.record_start,
-            pass: None,
-            punch: self.punch,
-            rate: 0,
-            takes: Vec::new(),
-        });
+        let mut summaries = Vec::new();
+        if let Some(plan) = self.take_plan.take() {
+            if let Some(r) = &mut self.recorder {
+                let (takes, problem) = r.finish();
+                let tracks = takes.len().max(1);
+                let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
+                summaries.push(if plan.pass.is_some() {
+                    format!("Loop-recorded {} take(s)", ids.len() / tracks)
+                } else {
+                    format!("Recorded {} clip(s)", ids.len())
+                });
+                if let Some(problem) = problem {
+                    log::warn!("recording: {problem}");
+                    summaries.push(format!("audio input: {problem}"));
+                }
+            } else {
+                summaries.push("Audio input disappeared before the take could be finalized".into());
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut midi) = self.midi_capture.take() {
+            let end = self.engine.transport.position;
+            let result = midi.finish(&mut self.engine, end);
+            (self.midi_status.dropped_events, self.midi_status.truncated_packets) = midi.input_loss();
+            match result {
+                Ok(result) => {
+                    let clips = result.get("clips").and_then(Value::as_array).map_or(0, Vec::len);
+                    summaries.push(if clips == 0 {
+                        "MIDI recording ended without note/controller events".into()
+                    } else {
+                        format!("Recorded {clips} MIDI clip(s)")
+                    });
+                }
+                Err(err) => {
+                    log::warn!("MIDI take commit: {err}");
+                    self.midi_status.error = Some(format!("MIDI take not committed: {err}"));
+                    summaries.push(format!("MIDI take not committed: {err}; kept in memory for retry"));
+                    self.midi_capture = Some(midi);
+                }
+            }
+        }
         self.punch = None;
         self.autosaved_rev = 0;
-        let ids = soundcraft_engine::io::place_recording(&mut self.engine, &plan, takes);
-        self.ui.status =
-            if plan.pass.is_some() { format!("Loop-recorded {} take(s)", ids.len() / tracks) } else { format!("Recorded {} clip(s)", ids.len()) };
-        if let Some(p) = problem {
-            log::warn!("recording: {p}");
-            self.ui.status = format!("{} ({p})", self.ui.status);
+        if !summaries.is_empty() {
+            self.ui.status = summaries.join("; ");
+        }
+    }
+
+    /// Retry committing an in-memory MIDI take after correcting a failed target or tempo edit.
+    /// The native streams have already closed; this does not resume recording or reopen ports.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn retry_midi_commit(&mut self) -> Result<Value, String> {
+        if self.engine.transport.recording {
+            return Err("stop the current recording before retrying MIDI take placement".into());
+        }
+        let mut midi = self.midi_capture.take().ok_or_else(|| "no unfinished MIDI take to retry".to_owned())?;
+        let at_sample = self.engine.transport.position;
+        match midi.finish(&mut self.engine, at_sample) {
+            Ok(result) => {
+                self.midi_status.error = None;
+                self.ui.status = "Recovered the pending MIDI recording take.".into();
+                Ok(result)
+            }
+            Err(err) => {
+                self.midi_status.error = Some(err.clone());
+                self.midi_capture = Some(midi);
+                Err(err)
+            }
         }
     }
 
@@ -1420,6 +1612,8 @@ impl SoundApp {
         self.watch_input();
         // Stop the old playback before sending a replacement session to the audio thread.
         self.handle_transport(dt);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.poll_midi_input();
         if self.engine.revision != self.last_rev {
             self.last_rev = self.engine.revision;
             if let Some(p) = &self.player {
@@ -1432,7 +1626,7 @@ impl SoundApp {
         self.autosave();
         if self.recorder.is_none()
             && !self.recorder_failed
-            && self.engine.session().tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm)
+            && self.engine.session().tracks.iter().any(|t| t.kind == TrackKind::Audio && (t.mixer.input_monitor || t.mixer.record_arm))
         {
             self.ensure_input();
         }
@@ -1440,7 +1634,17 @@ impl SoundApp {
         // egui 0.37 schedules the delay as given (it no longer subtracts the predicted frame time),
         // so ask for the real interval instead of adding that time back.
         let editors = self.player.as_ref().is_some_and(Player::any_editor_open);
-        ctx.request_repaint_after_secs(if editors { 0.03 } else { 1.0 });
+        #[cfg(not(target_arch = "wasm32"))]
+        let midi_recording = self.engine.transport.recording && self.midi_capture.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let midi_recording = false;
+        ctx.request_repaint_after_secs(if midi_recording {
+            0.02
+        } else if editors {
+            0.03
+        } else {
+            1.0
+        });
         control::drain_screenshots(self, ctx);
         if control::screenshots_need_paint(self) {
             // An admitted capture that has not reached a UI pass needs an explicit hidden paint;
