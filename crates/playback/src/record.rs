@@ -1116,6 +1116,10 @@ struct RingState {
     phase: f64,
 }
 
+/// No pending monitor trim. A pending request survives a contended `try_lock` until the next
+/// successful output read, so stale samples can never slip through after an idle period.
+const NO_MONITOR_TRIM: usize = usize::MAX;
+
 /// A small interleaved FIFO from the input callback to the output callback, for input
 /// monitoring. Both sides only `try_lock`; it holds at most ~0.5 s and drops the oldest frames.
 /// The input device may run at a different rate than the session, so the reader converts
@@ -1127,6 +1131,8 @@ pub struct InputRing {
     rate: u32,
     /// Most samples kept: half a second of input, or 24 000 frames when the rate is unknown.
     cap: usize,
+    /// Keep this many newest frames before the next read (0 clears all), or no pending request.
+    pending_keep: AtomicUsize,
 }
 
 impl InputRing {
@@ -1138,7 +1144,44 @@ impl InputRing {
             channels: std::sync::atomic::AtomicUsize::new(ch),
             rate,
             cap: frames * ch,
+            pending_keep: AtomicUsize::new(NO_MONITOR_TRIM),
         })
+    }
+
+    /// Drop old monitoring samples while the output is silent. Input capture into WAV files uses
+    /// a different ring and is unaffected. Never block an audio callback on the input producer.
+    pub(crate) fn discard_idle(&self) {
+        self.request_trim(0);
+    }
+
+    /// On enabling monitoring, retain at most the newest 10 ms so the first audible block is
+    /// current input, rather than the half-second backlog an idle output may have accumulated.
+    pub(crate) fn resume_monitoring(&self) {
+        let rate = if self.rate == 0 { 48_000 } else { self.rate };
+        self.request_trim((rate as usize / 100).max(2));
+    }
+
+    fn request_trim(&self, keep: usize) {
+        self.pending_keep.store(keep, Ordering::Release);
+        if let Ok(mut s) = self.state.try_lock() {
+            self.trim_pending(&mut s);
+        }
+    }
+
+    fn trim_pending(&self, s: &mut RingState) {
+        let keep = self.pending_keep.swap(NO_MONITOR_TRIM, Ordering::AcqRel);
+        if keep == NO_MONITOR_TRIM {
+            return;
+        }
+        let ch = self.channels.load(Ordering::Relaxed).max(1);
+        // Remove complete interleaved frames only; a new read starts at a frame boundary.
+        let remove = (s.data.len() / ch).saturating_sub(keep) * ch;
+        if remove == s.data.len() {
+            s.data.clear();
+        } else if remove > 0 {
+            s.data.drain(..remove);
+        }
+        s.phase = 0.0;
     }
 
     pub fn push(&self, samples: &[f32]) {
@@ -1158,6 +1201,7 @@ impl InputRing {
             c.iter_mut().take(frames).for_each(|x| *x = 0.0);
         }
         let Ok(mut s) = self.state.try_lock() else { return };
+        self.trim_pending(&mut s);
         // Input frames consumed per output frame.
         let step = if self.rate == 0 || session_rate == 0 { 1.0 } else { f64::from(self.rate) / f64::from(session_rate) };
         for f in 0..frames {
@@ -1184,7 +1228,7 @@ impl InputRing {
 
 #[cfg(test)]
 mod ring_tests {
-    use super::InputRing;
+    use super::{InputRing, NO_MONITOR_TRIM, Ordering};
 
     /// A 1 kHz sine recorded at 16 kHz must come out as a 1 kHz sine at 48 kHz, across calls.
     #[test]
@@ -1237,6 +1281,52 @@ mod ring_tests {
         let mut out = vec![vec![1.0f32; 16]];
         ring.pop_into(&mut out, 16, 48_000);
         assert!(out[0].iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn idle_monitor_discards_stale_stereo_frames_and_resets_interpolation_phase() {
+        let ring = InputRing::new(2, 48_000);
+        ring.push(&[0.125, -0.125].repeat(24_000));
+        let mut out = vec![vec![0.0f32; 32], vec![0.0f32; 32]];
+        ring.pop_into(&mut out, 1, 48_000); // leaves a nonzero read phase
+        ring.discard_idle();
+        let fresh: Vec<f32> = (0..512).flat_map(|i| [i as f32, -(i as f32)]).collect();
+        ring.push(&fresh);
+        ring.pop_into(&mut out, 32, 48_000);
+        assert_eq!(out[0][..32], (0..32).map(|i| i as f32).collect::<Vec<_>>());
+        assert_eq!(out[1][..32], (0..32).map(|i| -(i as f32)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn contended_idle_trim_is_applied_before_any_later_monitor_read() {
+        let ring = InputRing::new(1, 48_000);
+        ring.push(&[0.125; 24_000]);
+        let guard = ring.state.lock().unwrap();
+        ring.discard_idle(); // a realtime callback must never wait for the input producer
+        assert_eq!(ring.pending_keep.load(Ordering::Acquire), 0);
+        drop(guard);
+        let mut out = vec![vec![1.0f32; 32]];
+        ring.pop_into(&mut out, 32, 48_000);
+        assert!(out[0].iter().all(|v| *v == 0.0), "the queued trim must suppress old input");
+        ring.push(&[0.875; 128]);
+        ring.pop_into(&mut out, 32, 48_000);
+        assert_eq!(out[0], [0.875; 32]);
+    }
+
+    #[test]
+    fn contended_monitor_resume_keeps_only_fresh_interleaved_frames() {
+        let ring = InputRing::new(2, 48_000);
+        ring.push(&[0.125, -0.125].repeat(24_000));
+        let guard = ring.state.lock().unwrap();
+        ring.resume_monitoring();
+        assert_eq!(ring.pending_keep.load(Ordering::Acquire), 480, "the 10 ms trim remains pending on try_lock contention");
+        drop(guard);
+        ring.push(&[0.875, -0.5].repeat(512));
+        let mut out = vec![vec![0.0f32; 128], vec![0.0f32; 128]];
+        ring.pop_into(&mut out, 128, 48_000);
+        assert_eq!(out[0], [0.875; 128]);
+        assert_eq!(out[1], [-0.5; 128]);
+        assert_eq!(ring.pending_keep.load(Ordering::Acquire), NO_MONITOR_TRIM);
     }
 
     /// NaN and infinities from the device monitor as silence.
