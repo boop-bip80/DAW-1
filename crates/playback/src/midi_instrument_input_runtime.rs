@@ -110,14 +110,37 @@ fn input_key(name: &str) -> String {
     name.chars().filter(|ch| !ch.is_control() && *ch != '=').take(64).collect::<String>().trim().to_owned()
 }
 
+fn start_cancelled(stop: bool, observed: TransportSnapshot, starting_generation: u64, revision: u64, starting_revision: u64) -> bool {
+    stop || observed.playing || observed.generation != starting_generation || revision != starting_revision
+}
+
+/// The OS operation is not evaluated if transport/revision changed, even if a previous user
+/// click granted consent. Tests inject a fake opener to prove preflight happens *before* calls.
+fn guarded_native_open<T>(cancelled: bool, operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    if cancelled { Err("live MIDI monitor start cancelled before OS device access".into()) } else { operation() }
+}
+
 /// Check both the saved normalized port names and their *currently opened* identities. A
 /// transient index is used only to open a port; it is never saved in a project or route.
-fn open_native_sources(router: &MonitorRouter) -> Result<Vec<NativeInput>, String> {
+fn open_native_sources(
+    router: &MonitorRouter,
+    stop: &AtomicBool,
+    observer: &TransportObserver,
+    starting_generation: u64,
+    revision: &AtomicU64,
+    starting_revision: u64,
+) -> Result<Vec<NativeInput>, String> {
+    let cancelled = || {
+        start_cancelled(stop.load(Ordering::Acquire), observer.snapshot(), starting_generation, revision.load(Ordering::Acquire), starting_revision)
+    };
     let selected = router.enabled_sources();
     if selected.is_empty() || selected.len() > MAX_INPUT_PORTS {
         return Err(format!("software-instrument monitoring requires 1..={MAX_INPUT_PORTS} enabled MIDI inputs"));
     }
-    let scanned = device::input_ports().map_err(|error| format!("scan MIDI input devices: {error}"))?;
+    let scanned = guarded_native_open(cancelled(), || device::input_ports().map_err(|error| format!("scan MIDI input devices: {error}")))?;
+    if cancelled() {
+        return Err("live MIDI monitor start cancelled during device scan".into());
+    }
     let mut matching = Vec::with_capacity(selected.len());
     for wanted in selected {
         let ports: Vec<_> = scanned.iter().filter(|port| input_key(&port.name).eq_ignore_ascii_case(wanted)).collect();
@@ -128,7 +151,15 @@ fn open_native_sources(router: &MonitorRouter) -> Result<Vec<NativeInput>, Strin
     }
     let mut inputs = Vec::with_capacity(matching.len());
     for port in matching {
-        let stream = device::open_input(port.index, INPUT_QUEUE_CAPACITY).map_err(|error| format!("open MIDI input {:?}: {error}", port.name))?;
+        if cancelled() {
+            return Err("live MIDI monitor start cancelled before connecting every input".into());
+        }
+        let stream = guarded_native_open(cancelled(), || {
+            device::open_input(port.index, INPUT_QUEUE_CAPACITY).map_err(|error| format!("open MIDI input {:?}: {error}", port.name))
+        })?;
+        if cancelled() {
+            return Err("live MIDI monitor start cancelled during input connection".into());
+        }
         // Hot-plug may reorder ports between scanning and opening. Reject changed identity.
         if stream.port().index != port.index || input_key(&stream.port().name) != input_key(&port.name) {
             return Err(format!("MIDI input {:?} changed identity while opening; rescan and retry", port.name));
@@ -265,6 +296,7 @@ impl<I: MonitorInput> MonitorPoller<I> {
 pub struct NativeMonitorWorker {
     stop: Arc<AtomicBool>,
     port: MonitorPort,
+    owning_epoch: u64,
     cleanup_epoch: Arc<AtomicU64>,
     status: Arc<Mutex<MonitorInputStatus>>,
     thread: Option<thread::JoinHandle<()>>,
@@ -281,6 +313,7 @@ impl NativeMonitorWorker {
         session_revision: Arc<AtomicU64>,
     ) -> Result<Self, String> {
         let port = router.control_port();
+        let owning_epoch = router.armed_epoch();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let cleanup_epoch = Arc::new(AtomicU64::new(0));
@@ -298,11 +331,23 @@ impl NativeMonitorWorker {
                 }
                 let starting = observer.snapshot();
                 let initial_revision = session_revision.load(Ordering::Acquire);
-                let mut poller = match open_native_sources(&router).and_then(|inputs| MonitorPoller::new(router, inputs, starting, initial_revision))
+                let opened = open_native_sources(&router, &worker_stop, &observer, starting.generation, &session_revision, initial_revision);
+                // A driver scan may take time: revalidate *after* every port is opened and
+                // before publishing Ready or forwarding any event.
+                let current = observer.snapshot();
+                let opened = if worker_stop.load(Ordering::Acquire)
+                    || current.playing
+                    || current.generation != starting.generation
+                    || session_revision.load(Ordering::Acquire) != initial_revision
                 {
+                    Err("live MIDI monitor cancelled before becoming Ready".into())
+                } else {
+                    opened
+                };
+                let mut poller = match opened.and_then(|inputs| MonitorPoller::new(router, inputs, current, initial_revision)) {
                     Ok(poller) => poller,
                     Err(error) => {
-                        let epoch = worker_port.invalidate();
+                        let epoch = worker_port.invalidate_if(owning_epoch).unwrap_or(owning_epoch);
                         let _ = worker_cleanup.compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire);
                         let mut latest = worker_status.lock().unwrap_or_else(PoisonError::into_inner);
                         *latest = MonitorInputStatus {
@@ -331,7 +376,7 @@ impl NativeMonitorWorker {
                 *worker_status.lock().unwrap_or_else(PoisonError::into_inner) = poller.status();
             })
             .map_err(|error| format!("start live MIDI instrument worker: {error}"))?;
-        Ok(Self { stop, port, cleanup_epoch, status, thread: Some(thread) })
+        Ok(Self { stop, port, owning_epoch, cleanup_epoch, status, thread: Some(thread) })
     }
 
     /// Priority disable, even if a device callback queue is full. A missing output callback
@@ -339,7 +384,7 @@ impl NativeMonitorWorker {
     pub fn request_stop(&self) -> u64 {
         let mut epoch = self.cleanup_epoch.load(Ordering::Acquire);
         if epoch == 0 {
-            let requested = self.port.invalidate();
+            let requested = self.port.invalidate_if(self.owning_epoch).unwrap_or(self.owning_epoch);
             epoch = match self.cleanup_epoch.compare_exchange(0, requested, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => requested,
                 Err(existing) => existing,
@@ -347,6 +392,18 @@ impl NativeMonitorWorker {
         }
         self.stop.store(true, Ordering::Release);
         epoch
+    }
+
+    /// Control thread only. Deterministically close all native MIDI input streams before this
+    /// handle is released; the returned epoch is a request, not a callback-side note-off ACK.
+    /// Never call from an audio callback or during egui paint. A driver blocked inside one
+    /// `open_input` OS call may delay joining; cancellation is checked between every port.
+    pub fn stop_and_join(&mut self) -> Result<u64, String> {
+        let epoch = self.request_stop();
+        if let Some(worker) = self.thread.take() {
+            worker.join().map_err(|_| "native MIDI monitor worker panicked while shutting down".to_owned())?;
+        }
+        Ok(epoch)
     }
 
     pub fn status(&self) -> MonitorInputStatus {
@@ -364,11 +421,11 @@ impl NativeMonitorWorker {
 
 impl Drop for NativeMonitorWorker {
     fn drop(&mut self) {
-        self.request_stop();
-        // Never synchronously wait for a driver scan or disconnect from an egui paint. The
-        // dedicated worker observes the stop flag and drops its own device streams. A future
-        // control-thread shutdown may explicitly join when the driver is known responsive.
-        let _ = self.thread.take();
+        // Do not silently detach a thread that still owns live native MIDI input handles.
+        // Callers must keep this owner off realtime/paint and use `stop_and_join` explicitly.
+        if let Err(error) = self.stop_and_join() {
+            log::error!("{error}");
+        }
     }
 }
 
@@ -436,6 +493,54 @@ mod tests {
         assert!(ExclusiveInputConsent::from_user_action(false, false, true).is_err());
         assert!(ExclusiveInputConsent::from_user_action(false, false, false).is_ok());
         assert_eq!(MonitorInputStatus::default().phase, MonitorInputPhase::Disabled);
+    }
+
+    #[test]
+    fn transport_started_before_worker_spawn_never_reaches_fake_os_open() {
+        let mut opened = 0usize;
+        for observed in [snapshot(9, true), snapshot(10, false)] {
+            let invalid = start_cancelled(false, observed, 9, 42, 42);
+            let result: Result<(), String> = guarded_native_open(invalid, || {
+                opened += 1;
+                Ok(())
+            });
+            assert!(result.is_err());
+        }
+        let revised = start_cancelled(false, snapshot(9, false), 9, 43, 42);
+        assert!(
+            guarded_native_open(revised, || {
+                opened += 1;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(opened, 0, "neither a Play edge, Seek, nor changed session may open an input");
+    }
+
+    #[test]
+    fn stale_native_worker_stop_and_drop_never_disables_newly_armed_router() {
+        let mut session = Session::default();
+        let id = session.add_track(TrackKind::Instrument, ChannelFormat::Stereo, None);
+        let track = session.track_mut(id).unwrap();
+        track.instrument = Some(Insert::new("fake:synth"));
+        track.mixer.input_monitor = true;
+        let (port, _receiver) = monitor_pair();
+        let old_router = port.arm(&session, &["Keys".into()]).unwrap();
+        let old_worker = NativeMonitorWorker {
+            stop: Arc::new(AtomicBool::new(false)),
+            port: port.clone(),
+            owning_epoch: old_router.armed_epoch(),
+            cleanup_epoch: Arc::new(AtomicU64::new(0)),
+            status: Arc::new(Mutex::new(MonitorInputStatus::default())),
+            thread: None,
+        };
+        let new_router = port.arm(&session, &["Keys".into()]).unwrap();
+        assert_eq!(old_worker.request_stop(), old_router.armed_epoch());
+        assert!(port.enabled());
+        assert_eq!(new_router.try_send("Keys", LiveMidiMessage::NoteOn { channel: 0, pitch: 60, velocity: 100 }).unwrap(), 1);
+        drop(old_worker);
+        drop(old_router);
+        assert!(port.enabled(), "old worker Stop+Drop must not cancel a newer listener");
     }
 
     #[test]

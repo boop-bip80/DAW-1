@@ -12,7 +12,7 @@ use soundcraft_mix::LiveInstrumentEvent;
 use soundcraft_model::{Session, TrackId, TrackKind};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
 
@@ -49,7 +49,9 @@ struct QueuedEvent {
 
 #[derive(Default)]
 struct MonitorState {
-    enabled: AtomicBool,
+    /// A single atomically updated word: bit 0 is enabled; upper bits are a monotonic
+    /// generation. Comparing only the generation then writing a separate enabled flag would
+    /// let a stale worker A disable a freshly re-armed worker B between those operations.
     epoch: AtomicU64,
     /// Published by the audio callback *after* it actually releases sounding voices.
     /// A queued note-off or an off-thread invalidation is never itself an acknowledgment.
@@ -116,8 +118,33 @@ impl MonitorPort {
     /// Stop all routing immediately and request callback-side note cleanup via the atomic epoch.
     /// No queue slot is required, so even a full queue cannot prevent the panic signal.
     pub fn invalidate(&self) -> u64 {
-        self.state.enabled.store(false, Ordering::Release);
-        self.state.epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+        loop {
+            let old = self.state.epoch.load(Ordering::Acquire);
+            let next = old.wrapping_add(2) & !1;
+            if self.state.epoch.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return next;
+            }
+        }
+    }
+
+    /// Atomically invalidate *only* this exact armed route. A late Stop/Drop from an old
+    /// native worker is harmless after the user has armed a replacement route.
+    pub fn invalidate_if(&self, armed_epoch: u64) -> Option<u64> {
+        if armed_epoch & 1 == 0 {
+            return None;
+        }
+        let next = armed_epoch.wrapping_add(2) & !1;
+        self.state.epoch.compare_exchange(armed_epoch, next, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| next)
+    }
+
+    fn arm_new(&self) -> u64 {
+        loop {
+            let old = self.state.epoch.load(Ordering::Acquire);
+            let next = old.wrapping_add(2) | 1;
+            if self.state.epoch.compare_exchange_weak(old, next, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                return next;
+            }
+        }
     }
 
     /// Only a completed audio callback can acknowledge the requested panic generation.
@@ -131,7 +158,7 @@ impl MonitorPort {
     }
 
     pub fn enabled(&self) -> bool {
-        self.state.enabled.load(Ordering::Acquire)
+        self.state.epoch.load(Ordering::Acquire) & 1 != 0
     }
 
     /// A pure preflight with provided, **already verified** enabled source identities. This
@@ -166,9 +193,7 @@ impl MonitorPort {
         if routes.is_empty() {
             return Err(MonitorError::NoRoutes);
         }
-        self.invalidate();
-        let epoch = self.state.epoch.load(Ordering::Acquire);
-        self.state.enabled.store(true, Ordering::Release);
+        let epoch = self.arm_new();
         Ok(MonitorRouter { port: self.clone(), epoch, sources: enabled_sources.to_vec(), routes })
     }
 }
@@ -186,14 +211,15 @@ impl MonitorRouter {
         self.port.clone()
     }
 
+    /// Exact active epoch owned by this router, for generation-checked native-worker Stop.
+    pub fn armed_epoch(&self) -> u64 {
+        self.epoch
+    }
+
     /// Request immediate producer shutdown and priority callback-side held-note cleanup.
     /// Idempotent for a stale router: dropping/releasing an old route cannot disable a new one.
     pub fn stop(&self) -> u64 {
-        if self.port.state.epoch.load(Ordering::Acquire) == self.epoch && self.port.enabled() {
-            self.port.invalidate()
-        } else {
-            self.port.state.epoch.load(Ordering::Acquire)
-        }
+        self.port.invalidate_if(self.epoch).unwrap_or(self.epoch)
     }
 
     pub fn cleanup_acknowledged(&self, epoch: u64) -> bool {
@@ -208,7 +234,7 @@ impl MonitorRouter {
             return Err(MonitorError::Invalidated);
         }
         let Some(source_index) = self.sources.iter().position(|name| name == source) else {
-            self.port.invalidate();
+            let _ = self.port.invalidate_if(self.epoch);
             return Err(MonitorError::UnknownSource(source.to_owned()));
         };
         let Some(channel) = valid_channel(message)? else { return Ok(0) };
@@ -222,7 +248,7 @@ impl MonitorRouter {
                 Ok(()) => sent += 1,
                 Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                     self.port.state.dropped.fetch_add(1, Ordering::Relaxed);
-                    self.port.invalidate();
+                    let _ = self.port.invalidate_if(self.epoch);
                     return Err(MonitorError::Overflow);
                 }
             }
@@ -270,7 +296,7 @@ impl MonitorReader {
     }
 
     pub fn enabled(&self) -> bool {
-        self.state.enabled.load(Ordering::Acquire)
+        self.state.epoch.load(Ordering::Acquire) & 1 != 0
     }
 
     /// At most one queue capacity per block. Discard stale events even if a new route was
@@ -393,6 +419,7 @@ mod tests {
         offs: AtomicU64,
         controls: AtomicU64,
         panics: AtomicU64,
+        processed_panics: AtomicU64,
     }
 
     static TEST_SYNTH_INFO: soundcraft_dsp::PluginInfo = soundcraft_dsp::PluginInfo {
@@ -410,6 +437,7 @@ mod tests {
         pressed: bool,
         sustained: bool,
         pedal: bool,
+        pending_panic: bool,
     }
 
     impl soundcraft_dsp::Plugin for FakeSynth {
@@ -421,6 +449,7 @@ mod tests {
             self.pressed = false;
             self.sustained = false;
             self.pedal = false;
+            self.pending_panic = false;
         }
         fn set_param(&mut self, _id: &str, _value: f32) -> bool {
             false
@@ -429,6 +458,15 @@ mod tests {
             None
         }
         fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            // Deliberately CLAP-like: all_notes_off *queues* a release. Only the next plugin
+            // processing block consumes it. An early atomic ACK would lie about held notes.
+            if self.pending_panic {
+                self.pressed = false;
+                self.sustained = false;
+                self.pedal = false;
+                self.pending_panic = false;
+                self.counts.processed_panics.fetch_add(1, Ordering::SeqCst);
+            }
             if self.pressed || self.sustained {
                 for channel in io {
                     for sample in channel.iter_mut().take(frames) {
@@ -459,9 +497,7 @@ mod tests {
         }
         fn all_notes_off(&mut self) {
             self.counts.panics.fetch_add(1, Ordering::SeqCst);
-            self.pressed = false;
-            self.sustained = false;
-            self.pedal = false;
+            self.pending_panic = true;
         }
     }
 
@@ -497,7 +533,7 @@ mod tests {
             slot: soundcraft_mix::INSTRUMENT_SLOT,
             id: TEST_SYNTH_INFO.id.into(),
             ch: 2,
-            plugin: Box::new(FakeSynth { counts: Arc::clone(&counts), pressed: false, sustained: false, pedal: false }),
+            plugin: Box::new(FakeSynth { counts: Arc::clone(&counts), pressed: false, sustained: false, pedal: false, pending_panic: false }),
         }]);
         (audio, tx, session, counts)
     }
@@ -572,5 +608,6 @@ mod tests {
         assert_eq!(output(&mut audio), 0.0);
         assert!(router.cleanup_acknowledged(requested_epoch));
         assert!(counts.panics.load(Ordering::SeqCst) >= 1);
+        assert!(counts.processed_panics.load(Ordering::SeqCst) >= 1, "ACK requires a real post-panic plugin.process block");
     }
 }
