@@ -328,6 +328,18 @@ impl Recorder {
     /// Create each take's file and start recording into them: a track's take records the given
     /// input channels into a new file.
     pub fn arm(&mut self, takes: Vec<(TrackId, Vec<usize>, PathBuf)>) -> Result<(), String> {
+        self.arm_with_spawn(takes, |shared, takes, channels| {
+            std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels))
+        })
+    }
+
+    /// Separate thread creation so tests can inject a deterministic spawn failure after all
+    /// take files have been created. A failed arm must leave no new WAVs behind.
+    fn arm_with_spawn(
+        &mut self,
+        takes: Vec<(TrackId, Vec<usize>, PathBuf)>,
+        spawn: impl FnOnce(Arc<Shared>, Vec<TakeWriter>, usize) -> std::io::Result<std::thread::JoinHandle<Takes>>,
+    ) -> Result<(), String> {
         if self.writer.is_some() {
             return Err("already recording".into());
         }
@@ -347,19 +359,31 @@ impl Recorder {
                 ));
             }
         }
-        let takes =
-            takes.into_iter().map(|(id, inputs, path)| TakeWriter::create(id, inputs, path, self.sample_rate)).collect::<Result<Vec<_>, _>>()?;
+        let mut created = Vec::new();
+        for (id, inputs, path) in takes {
+            match TakeWriter::create(id, inputs, path, self.sample_rate) {
+                Ok(take) => created.push(take),
+                Err(error) => {
+                    // Only these handles came from successful create_new calls in THIS arm.
+                    // Close them before unlinking, including on Windows.
+                    let paths = created.iter().map(|t: &TakeWriter| t.path.clone()).collect::<Vec<_>>();
+                    drop(created);
+                    return Err(cleanup_new_takes(error, paths));
+                }
+            }
+        }
+        let paths = created.iter().map(|t| t.path.clone()).collect::<Vec<_>>();
+        let takes = created;
         let live = takes.iter().map(|t| (t.id, Arc::clone(&t.live))).collect();
         let ring = &self.shared.ring;
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.shared.armed.store(true, Ordering::SeqCst);
-        let (shared, channels) = (Arc::clone(&self.shared), self.channels);
-        match std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels)) {
+        match spawn(Arc::clone(&self.shared), takes, self.channels) {
             Ok(w) => self.writer = Some((w, live)),
             Err(e) => {
                 self.shared.armed.store(false, Ordering::SeqCst);
-                return Err(e.to_string());
+                return Err(cleanup_new_takes(e.to_string(), paths));
             }
         }
         Ok(())
@@ -416,6 +440,18 @@ impl Recorder {
             (lost > 0).then(|| format!("{} ms of input lost: the disk was too slow", lost.saturating_mul(1000) / self.sample_rate.max(1) as usize));
         (takes, problem.or(slow))
     }
+}
+
+/// Only paths returned by successful `File::create_new` calls are eligible for rollback. An
+/// existing take or arbitrary user file that made creation fail is never included. Report any
+/// cleanup failure instead of silently leaving an orphan WAV to be mistaken for a real take.
+fn cleanup_new_takes(mut error: String, paths: Vec<PathBuf>) -> String {
+    for path in paths {
+        if let Err(why) = std::fs::remove_file(&path) {
+            error.push_str(&format!("; could not remove newly-created {}: {why}", path.display()));
+        }
+    }
+    error
 }
 
 impl Drop for Recorder {
@@ -486,7 +522,12 @@ impl TakeWriter {
         let live = Arc::new(Mutex::new(vec![Vec::new(); inputs.len()]));
         let mut take = TakeWriter { id, inputs, path, file, rate, frames: 0, error: None, live };
         take.write_header();
-        take.error.take().map_or(Ok(take), Err)
+        if let Some(error) = take.error.take() {
+            let path = take.path.clone();
+            drop(take);
+            return Err(cleanup_new_takes(error, vec![path]));
+        }
+        Ok(take)
     }
 
     /// Append this take's channels of `block` (interleaved, `channels` wide).
@@ -818,6 +859,75 @@ mod tests {
         assert!(r.writer.is_none());
         assert!(r.arm(vec![(TrackId(3), Vec::new(), first.clone())]).is_err());
         assert!(!first.exists());
+    }
+
+    #[test]
+    fn failed_second_take_creation_removes_only_the_first_new_file() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-failed-second-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = dir.join("Audio Files/Guitar.wav");
+        let existing = dir.join("Audio Files/Vocal.wav");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        let sentinel = b"an existing take must never be overwritten or deleted";
+        std::fs::write(&existing, sentinel).unwrap();
+
+        let shared = Arc::new(Shared::new(CaptureRing::new(512)));
+        let mut r = recorder(&shared);
+        let error = r.arm(vec![(TrackId(1), vec![0], first.clone()), (TrackId(2), vec![0], existing.clone())]).unwrap_err();
+        assert!(error.contains("Vocal.wav"), "{error}");
+        assert!(!first.exists(), "the earlier new WAV must be rolled back when a later file cannot be opened");
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+        assert!(!shared.armed.load(Ordering::SeqCst));
+        assert!(r.writer.is_none());
+
+        // A corrected second attempt can immediately reuse the same filename.
+        r.arm(vec![(TrackId(1), vec![0], first.clone())]).unwrap();
+        shared.capture(&[0.25; 8], &mut 0);
+        let (finished, problem) = r.finish();
+        assert_eq!((finished, problem), (vec![(TrackId(1), first.clone())], None));
+        assert_eq!(decode(&first), vec![vec![0.25; 8]]);
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn simulated_writer_spawn_failure_rolls_back_all_new_takes_not_preexisting_files() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-failed-writer-start-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = dir.join("Audio Files/Guitar.wav");
+        let second = dir.join("Audio Files/Vocal.wav");
+        let existing = dir.join("Audio Files/Earlier.wav");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        let sentinel = b"keep a real recording safe";
+        std::fs::write(&existing, sentinel).unwrap();
+
+        let shared = Arc::new(Shared::new(CaptureRing::new(512)));
+        let mut r = recorder(&shared);
+        let error = r
+            .arm_with_spawn(vec![(TrackId(1), vec![0], first.clone()), (TrackId(2), vec![0], second.clone())], |_shared, takes, _channels| {
+                assert_eq!(takes.len(), 2);
+                assert!(first.exists() && second.exists(), "failure is injected after both WAV headers were created");
+                drop(takes);
+                Err(std::io::Error::other("synthetic thread spawn failure"))
+            })
+            .unwrap_err();
+        assert!(error.contains("synthetic thread spawn failure"), "{error}");
+        assert!(!first.exists() && !second.exists(), "neither brand-new file should remain after failed arm");
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+        assert!(!shared.armed.load(Ordering::SeqCst));
+        assert!(r.writer.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_new_wav_header_does_not_leave_an_empty_take() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-failed-take-header-{}", std::process::id()));
+        let path = dir.join("Audio Files/Invalid.wav");
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = TakeWriter::create(TrackId(1), vec![0], path.clone(), 0).err().unwrap();
+        assert!(error.contains("sample rate"), "{error}");
+        assert!(!path.exists(), "the new zero-length WAV is removed if header initialization fails");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
