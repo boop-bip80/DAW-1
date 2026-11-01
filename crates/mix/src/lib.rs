@@ -53,7 +53,7 @@
 
 use soundcraft_dsp::pan::{PanLaw, SpeakerPos, SurroundParams, gains};
 use soundcraft_dsp::{Plugin, SampleSource, Transport, db_to_gain};
-use soundcraft_midi::CtrlKind;
+use soundcraft_midi::{CtrlKind, live::LiveMidiMessage};
 use soundcraft_model::{
     AutoParam, BusId, ChannelFormat, Clip, ClipContent, Route, Session, SourceAudio, Speaker, SurroundPan, Track, TrackId, TrackKind,
 };
@@ -76,6 +76,19 @@ pub fn main_channels(s: &Session) -> usize {
 /// Slot index used for a track's instrument plugin in [`InstanceSpec`] and [`PreparedInstance`]
 /// (insert slots use their index).
 pub const INSTRUMENT_SLOT: usize = usize::MAX;
+
+/// One preflighted live software-instrument message. The native MIDI input worker resolves
+/// source port and channel before enqueueing; a realtime render sees only a track id and a
+/// fixed-size message, never a driver handle, String, or allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveInstrumentEvent {
+    pub track: TrackId,
+    pub message: LiveMidiMessage,
+}
+
+impl LiveInstrumentEvent {
+    pub const EMPTY: Self = Self { track: TrackId(0), message: LiveMidiMessage::Realtime(0xf8) };
+}
 
 /// Hosted third-party plugin ids (CLAP or VST3): created off the audio thread in realtime use.
 pub fn is_third_party(id: &str) -> bool {
@@ -270,6 +283,9 @@ struct Strip {
     sample: Option<Arc<SourceAudio>>,
     /// MIDI notes currently sounding on the instrument (pitch), for note-offs at stops/seek.
     held: Vec<u8>,
+    /// A live event has reached this plugin since its last priority cleanup. This is separate
+    /// from timeline-held notes, which are intentionally suppressed while transport is stopped.
+    live_active: bool,
     /// The instrument's next block starts somewhere new: send it the controllers in effect there.
     chase: bool,
     muted: bool,
@@ -379,6 +395,7 @@ impl Strip {
             instrument: None,
             sample: None,
             held: Vec::new(),
+            live_active: false,
             chase: true,
             muted: false,
             gr: 0.0,
@@ -558,6 +575,7 @@ impl MixEngine {
             // Native stop_processing may kill voices; when resumed, chase controllers anew.
             strip.held.clear();
             strip.chase = true;
+            strip.live_active = false;
         }
         true
     }
@@ -662,6 +680,7 @@ impl MixEngine {
                 i.failed = false;
             }
             s.held.clear();
+            s.live_active = false;
             s.chase = true;
             s.align.clear();
             s.align_pre.clear();
@@ -674,6 +693,21 @@ impl MixEngine {
         // play, stop and locate.
         self.meters.values_mut().for_each(StripMeter::reset_levels);
         self.main_meter.reset_levels();
+    }
+
+    /// Emergency live-note cleanup on a lost NoteOff/sustain message or monitor invalidation.
+    /// This bypasses the event queue and allocates nothing. Do not invoke from UI/device
+    /// threads: the audio callback owns all plugin instances.
+    pub fn panic_live_notes(&mut self) {
+        for strip in self.strips.values_mut().filter(|strip| strip.live_active) {
+            if let Some(inst) = strip.instrument.as_mut().filter(|inst| !inst.parked && !inst.failed) {
+                for channel in 0..16 {
+                    inst.plugin.midi(0, [0xb0 | channel, 64, 0]);
+                }
+                inst.plugin.all_notes_off();
+            }
+            strip.live_active = false;
+        }
     }
 
     /// Bring plugin instances in line with the session (creates/destroys as needed). Allocates;
@@ -768,8 +802,23 @@ impl MixEngine {
 
     /// Render `frames` (≤ max_block) samples starting at `pos` into `out` (≥ 2 channels).
     pub fn render(&mut self, s: &Session, pos: Samples, frames: usize, out: &mut [Vec<f32>]) {
+        self.render_with_live(s, pos, frames, out, &[], false);
+    }
+
+    /// Render a block with already-routed live instrument events. `monitor_instruments` keeps
+    /// instrument plugins processing their release tails while stopped, but neither schedules
+    /// nor chases timeline clips in that state. The ordinary [`Self::render`] path is unchanged.
+    pub fn render_with_live(
+        &mut self,
+        s: &Session,
+        pos: Samples,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        live_midi: &[LiveInstrumentEvent],
+        monitor_instruments: bool,
+    ) {
         let frames = frames.min(self.max_block);
-        if pos != self.last_end {
+        if !self.monitor_only && pos != self.last_end {
             // Seek: silence held notes and ringing plugins.
             for st in self.strips.values_mut() {
                 if let Some(i) = &mut st.instrument
@@ -810,7 +859,13 @@ impl MixEngine {
             }
         }
         let busses = std::mem::take(&mut self.busses);
-        let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+        let live_in = LiveInput {
+            input: &self.input,
+            midi: live_midi,
+            instrument_monitor: monitor_instruments,
+            monitor_only: self.monitor_only,
+            recording: self.recording,
+        };
         run_strips(&mut work, |(i, st)| {
             if let Some(t) = s.tracks.get(*i) {
                 process_strip(s, t, st, &busses, &live_in, pos, frames, any_solo);
@@ -891,7 +946,13 @@ impl MixEngine {
             if st.scratch.len() < self.max_block {
                 st.scratch.resize(self.max_block, 0.0);
             }
-            let live_in = LiveInput { input: &self.input, monitor_only: self.monitor_only, recording: self.recording };
+            let live_in = LiveInput {
+                input: &self.input,
+                midi: live_midi,
+                instrument_monitor: monitor_instruments,
+                monitor_only: self.monitor_only,
+                recording: self.recording,
+            };
             process_strip(s, t, &mut st, &self.busses, &live_in, pos, frames, any_solo);
             let ch = st.buf.len();
             st.align.set(if pdc { lmax_a.saturating_sub(st.latency) } else { 0 }, ch);
@@ -1052,8 +1113,29 @@ impl MixEngine {
 /// Live input routed to monitored tracks.
 struct LiveInput<'a> {
     input: &'a [Vec<f32>],
+    midi: &'a [LiveInstrumentEvent],
+    instrument_monitor: bool,
     monitor_only: bool,
     recording: bool,
+}
+
+/// The sender has already verified the source identity, channel and MIDI data ranges. Using
+/// the plugin's note methods preserves native CLAP/VST3 note-event semantics; expressive
+/// controls retain the original zero-based MIDI channel in the wire status byte.
+fn dispatch_instrument_midi(plugin: &mut dyn Plugin, message: LiveMidiMessage) {
+    match message {
+        LiveMidiMessage::NoteOn { pitch, velocity: 0, .. } | LiveMidiMessage::NoteOff { pitch, .. } => plugin.note_off(0, pitch),
+        LiveMidiMessage::NoteOn { pitch, velocity, .. } => plugin.note_on(0, pitch, velocity),
+        LiveMidiMessage::ControlChange { channel, controller, value } => plugin.midi(0, [0xb0 | channel, controller, value]),
+        LiveMidiMessage::PolyPressure { channel, pitch, pressure } => plugin.midi(0, [0xa0 | channel, pitch, pressure]),
+        LiveMidiMessage::ProgramChange { channel, program } => plugin.midi(0, [0xc0 | channel, program, 0]),
+        LiveMidiMessage::ChannelPressure { channel, pressure } => plugin.midi(0, [0xd0 | channel, pressure, 0]),
+        LiveMidiMessage::PitchBend { channel, value } => {
+            let bend = i32::from(value) + 8192;
+            plugin.midi(0, [0xe0 | channel, (bend & 0x7f) as u8, ((bend >> 7) & 0x7f) as u8]);
+        }
+        LiveMidiMessage::Realtime(_) => {}
+    }
 }
 
 fn process_strip(
@@ -1085,7 +1167,7 @@ fn process_strip(
             }
         }
         TrackKind::Audio if live.monitor_only => {}
-        TrackKind::Instrument | TrackKind::Midi if live.monitor_only => {}
+        TrackKind::Instrument | TrackKind::Midi if live.monitor_only && !live.instrument_monitor => {}
         TrackKind::Audio => {
             let block = Range { start: pos, end: pos.saturating_add(frames as i64) };
             for clip in t.clips() {
@@ -1147,10 +1229,18 @@ fn process_strip(
                     apply_params(inst, ins, t, INSTRUMENT_SLOT, pos);
                 }
                 inst.plugin.set_transport(&transport);
-                if std::mem::take(&mut strip.chase) {
-                    chase_controllers(s, t, pos, inst);
+                if !live.monitor_only {
+                    if std::mem::take(&mut strip.chase) {
+                        chase_controllers(s, t, pos, inst);
+                    }
+                    schedule_notes(s, t, pos, frames, inst, &mut strip.held);
                 }
-                schedule_notes(s, t, pos, frames, inst, &mut strip.held);
+                if live.instrument_monitor && !t.inactive && (t.mixer.record_arm || t.mixer.input_monitor) {
+                    for event in live.midi.iter().filter(|event| event.track == t.id) {
+                        dispatch_instrument_midi(inst.plugin.as_mut(), event.message);
+                        strip.live_active = true;
+                    }
+                }
                 if strip.buf.len() >= 2 {
                     inst.plugin.process(&mut strip.buf, frames);
                 } else if let Some(c0) = strip.buf.first_mut() {
