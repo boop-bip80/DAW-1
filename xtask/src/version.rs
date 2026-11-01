@@ -3,7 +3,7 @@
 //! The version lives in `[workspace.package] version` in the root `Cargo.toml`; every crate
 //! inherits it with `version.workspace = true`, and the packaging scripts read it from here.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// The `version = "…"` value inside `[workspace.package]`.
@@ -85,11 +85,6 @@ fn find_line(manifest: &str) -> Result<(usize, &str), String> {
     Err("no `version = \"…\"` in [workspace.package] of the root Cargo.toml".into())
 }
 
-/// The workspace root (the parent of `xtask/`).
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
-}
-
 fn cargo_update(root: &Path, offline: bool) -> Result<(), String> {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args(["update", "--workspace"]).current_dir(root);
@@ -127,7 +122,7 @@ fn set(root: &Path, path: &Path, text: &str, new: &str, update: impl FnOnce() ->
 
 /// `cargo xtask version [set X.Y.Z[-pre]]`; `args` are the words after `version`.
 pub fn run(args: &[String]) -> Result<(), String> {
-    let root = root();
+    let root = crate::root()?;
     let path = root.join("Cargo.toml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -211,7 +206,7 @@ mod tests {
 
     #[test]
     fn the_real_manifest_has_a_valid_version() {
-        let text = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+        let text = std::fs::read_to_string(crate::root().unwrap().join("Cargo.toml")).unwrap();
         validate(&read(&text).unwrap()).unwrap();
     }
 }
