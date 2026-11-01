@@ -1,6 +1,7 @@
 //! `ClapPlugin`: a loaded CLAP instance behind the safe `soundcraft_dsp::Plugin` trait.
 
-use crate::ffi::{EVENT_CAP, Event, GuiLink, Instance, NotePort, PortBuffers};
+use crate::ClapError;
+use crate::ffi::{EVENT_CAP, Event, GuiLink, HostState, Instance, NotePort, PortBuffers};
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport};
 use std::sync::Arc;
@@ -16,6 +17,24 @@ enum NoteMode {
     None,
     Clap,
     Midi,
+}
+
+/// A read-only restart request from one CLAP instance. It owns only host-side atomic state,
+/// no plugin pointer; observation remains safe after the native instance is destroyed.
+///
+/// This stage exposes pending `clap_host.request_restart` notifications. SoundCraft does not
+/// yet automatically stop, reactivate or replace the plugin in response.
+#[derive(Clone)]
+pub struct ClapRestartHandle {
+    state: Arc<HostState>,
+}
+
+impl ClapRestartHandle {
+    /// Returns the coalesced request without consuming it or invoking native code. Activation
+    /// temporarily takes the bit, restores it on failure, and preserves newer callbacks.
+    pub fn requested(&self) -> bool {
+        self.state.restart.load(Ordering::Acquire)
+    }
 }
 
 /// A hosted CLAP plugin. Parameter ids are the CLAP param ids as decimal strings ("0", "17", …);
@@ -66,6 +85,12 @@ impl ClapPlugin {
             steady: 0,
             transport: None,
         }
+    }
+
+    /// Observe native restart requests independently of optional state or GUI extensions.
+    /// Automatic reactivation is not wired into the mixer yet.
+    pub fn restart_handle(&self) -> ClapRestartHandle {
+        ClapRestartHandle { state: self.inst.restart_state() }
     }
 
     /// Re-reads every parameter value from the plugin (after a state load).
@@ -168,6 +193,21 @@ fn note_mode(p: Option<NotePort>) -> NoteMode {
     }
 }
 
+/// An old restart request is consumed only when reactivation works. Clear it before the native
+/// activate call so a *new* request raised during activation remains observable afterwards.
+fn activate_preserving_restart(
+    state: &HostState,
+    activate: impl FnOnce() -> Result<(), ClapError>,
+) -> Result<(), ClapError> {
+    let previous = state.restart.swap(false, Ordering::AcqRel);
+    let result = activate();
+    if result.is_err() && previous {
+        // Restoring true never overwrites a newer native request.
+        state.restart.store(true, Ordering::Release);
+    }
+    result
+}
+
 impl Plugin for ClapPlugin {
     fn info(&self) -> &'static PluginInfo {
         self.info
@@ -202,8 +242,8 @@ impl Plugin for ClapPlugin {
         self.notes = note_mode(port);
         self.midi_in = port.is_some_and(|p| p.supported & CLAP_NOTE_DIALECT_MIDI != 0);
         self.max_block = mb;
-        self.inst.state().restart.store(false, Ordering::Relaxed);
-        match self.inst.activate(sr, 1, u32::try_from(mb).unwrap_or(u32::MAX)) {
+        let restart_state = self.inst.restart_state();
+        match activate_preserving_restart(&restart_state, || self.inst.activate(sr, 1, u32::try_from(mb).unwrap_or(u32::MAX))) {
             Ok(()) => {
                 self.latency = self.inst.latency() as usize;
                 self.inst.state().latency_changed.store(false, Ordering::Relaxed);
@@ -434,6 +474,39 @@ impl PluginEditor for ClapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_handle_survives_its_sender_and_activation_preserves_new_or_failed_requests() {
+        let state = Arc::new(HostState::default());
+        let handle = ClapRestartHandle { state: Arc::clone(&state) };
+        let observer = handle.clone();
+        assert!(!handle.requested());
+        state.restart.store(true, Ordering::Release);
+        assert!(handle.requested());
+
+        // Success acknowledges only requests that predate activation; a callback issued
+        // by the fake native activate function remains pending.
+        let activated = activate_preserving_restart(&state, || {
+            assert!(!handle.requested());
+            state.restart.store(true, Ordering::Release);
+            Ok(())
+        });
+        assert!(activated.is_ok());
+        assert!(handle.requested());
+
+        // A failed activate cannot make an earlier request disappear.
+        let failed = activate_preserving_restart(&state, || Err(ClapError::Process("synthetic activation failed".into())));
+        assert!(failed.is_err());
+        assert!(observer.requested());
+
+        // A later successful activation with no new request acknowledges the pending one.
+        let activated = activate_preserving_restart(&state, || Ok(()));
+        assert!(activated.is_ok());
+        assert!(!observer.requested());
+        drop(state);
+        drop(handle);
+        assert!(!observer.requested(), "the Arc-backed signal remains readable after the native owner is gone");
+    }
 
     #[test]
     fn saturated_queue_rejects_new_param_without_diverging_and_coalesces_pending_param() {
