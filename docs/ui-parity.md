@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (native MIDI input selector and OTIO import/export File workflows) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (Setup MIDI Input Filter window, Mix/Edit MIDI capture routing and OTIOZ export picker; no live hardware evidence) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 How SoundCraft feels in the hands of a Pro Tools user: tools, modes, modifiers, shortcuts,
 windows, meters. Measured from `crates/model/src/session.rs` (tools, modes), the command
@@ -48,7 +48,9 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 | Transport, Big Counter, Memory Locations, Automation, Video, Universe, Renderer, UI Customization | ✅ present | |
 | Workspace / sound browser with previews | ❌ | G-16 |
 | I/O Setup | 🟡 | Busses and paths; no hardware channel matrix (G-01) |
-| Preferences | 🟡 | Setup › Playback Engine now discovers/selects native MIDI input ports with manual rescan; selections persist, but desktop MIDI capture/recording is not wired yet. Many other settings remain unimplemented |
+| Preferences | 🟡 | Setup › Playback Engine rescans/selects enabled MIDI inputs; Mix/Edit per-track named port/channel selectors route synthetically tested desktop Record/Stop captures. No physical keyboard or live instrument audition verified; many settings remain incomplete |
+| Setup › MIDI › MIDI Input Filter | 🟡 | Dedicated window shows eight persisted event-kind checkboxes; edits disabled during recording, opening is read-only. Native capture snapshots flags at Record start; SysEx still not decoded and no physical-device test |
+| File › Export › OpenTimelineIO Bundle | 🟡 | `.otioz` export-only save prompt/native picker and replace confirmation, synthetic UI test; no direct bundle import or live picker test |
 | Window configurations, Tile/Cascade | 🟡 | Configurations ✅; Tile/Cascade in PR #151 |
 | Plugin windows | 🟡 | Generic parameter sliders; Pro Tools plugins have bespoke GUIs (#138 asks for skeuomorphic design); multi-page plugin views (#6) |
 | A plugin opens when it's inserted | ✅ | #486; a hosted plugin's own editor, else its plugin window |
@@ -69,6 +71,7 @@ Legend: ✅ matches · 🟡 partial · ❌ missing.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Dedicated MIDI Input Filter UI and portable audio OTIOZ export save picker reached from menus; MIDI Record/Stop routing synthetic only, no import or hardware proof |
 | 2026-11-01 | minor | Setup MIDI input selector and native File › Import/Export OpenTimelineIO audio paths; workflow limitations remain explicit |
 | 2026-10-31 | trivial | Exact shortcut modifier routing and command-palette selection/search safety regressions; no readiness estimate change |
 | 2026-10-16 | minor | Track name menu: Scroll Into View brings the track to the top of the Edit window and the left of the Mix. Readiness estimate unchanged |
