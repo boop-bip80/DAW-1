@@ -1021,7 +1021,8 @@ fn bounce_stems_with_publisher(
     preflight_stem_paths(&files)?;
     for file in &files {
         let staged = batch.staging.join(file.file_name().ok_or_else(|| EngineError::Io("stem has no output filename".into()))?);
-        publish(&staged, file).map_err(|err| EngineError::Io(format!("{}: cannot publish stem without replacing existing files: {err}", file.display())))?;
+        publish(&staged, file)
+            .map_err(|err| EngineError::Io(format!("{}: cannot publish stem without replacing existing files: {err}", file.display())))?;
         batch.published.push(file.clone());
     }
     sync_dir(Path::new(dir));
@@ -3126,20 +3127,13 @@ mod stem_batch_tests {
         let files = outputs(&e, &dir);
         let mut published = 0;
         let sentinel = b"second output appeared after full-batch preflight";
-        let err = bounce_stems_with_publisher(
-            &e,
-            &dir.to_string_lossy(),
-            Range::new(0, 4_800),
-            &EncodeOptions::default(),
-            false,
-            |from, to| {
-                published += 1;
-                if published == 2 {
-                    std::fs::write(to, sentinel).unwrap();
-                }
-                std::fs::hard_link(from, to)
-            },
-        )
+        let err = bounce_stems_with_publisher(&e, &dir.to_string_lossy(), Range::new(0, 4_800), &EncodeOptions::default(), false, |from, to| {
+            published += 1;
+            if published == 2 {
+                std::fs::write(to, sentinel).unwrap();
+            }
+            std::fs::hard_link(from, to)
+        })
         .unwrap_err();
         assert!(err.to_string().contains("cannot publish stem"), "{err}");
         assert_eq!(published, 2);
@@ -3157,20 +3151,13 @@ mod stem_batch_tests {
         let e = two_tracks();
         let files = outputs(&e, &dir);
         let mut published = 0;
-        let err = bounce_stems_with_publisher(
-            &e,
-            &dir.to_string_lossy(),
-            Range::new(0, 4_800),
-            &EncodeOptions::default(),
-            false,
-            |from, to| {
-                published += 1;
-                if published == 2 {
-                    return Err(std::io::ErrorKind::Interrupted.into());
-                }
-                std::fs::hard_link(from, to)
-            },
-        )
+        let err = bounce_stems_with_publisher(&e, &dir.to_string_lossy(), Range::new(0, 4_800), &EncodeOptions::default(), false, |from, to| {
+            published += 1;
+            if published == 2 {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            std::fs::hard_link(from, to)
+        })
         .unwrap_err();
         assert!(err.to_string().contains("cannot publish stem"), "{err}");
         assert_eq!(published, 2);
