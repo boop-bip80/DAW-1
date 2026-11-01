@@ -1378,6 +1378,11 @@ impl Instance {
     /// controller restore may leave the component partially restored.
     pub fn load_state(&self, data: &[u8]) -> bool {
         let Some((comp, ctrl)) = split_state(data) else { return false };
+        // No controller exists to consume this half. Reject before changing the component:
+        // otherwise a mismatched project state would be silently, partially restored.
+        if !ctrl.is_empty() && self.controller.is_none() {
+            return false;
+        }
         let stream = MemoryStream::new(comp.to_vec());
         let Some(s) = stream.as_com_ref::<sb::IBStream>() else { return false };
         // SAFETY: valid component; the stream lives on this frame for the call.
