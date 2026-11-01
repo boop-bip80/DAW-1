@@ -1580,12 +1580,12 @@ impl ReservedSessionStage {
     fn write_and_sync(&mut self, bytes: &[u8], file: &Path) -> Result<()> {
         use std::io::Write as _;
 
-        let staged = self.file.as_mut().expect("session stage has not been published");
+        let staged = self.file.as_mut().ok_or_else(|| EngineError::Io("session stage file is closed".into()))?;
         staged.write_all(bytes).and_then(|()| staged.sync_all()).map_err(|err| EngineError::Io(format!("{}: {err}", file.display())))
     }
 
     fn publish(mut self, file: &Path) -> Result<()> {
-        let tmp = self.tmp.as_deref().expect("session stage has not been published");
+        let tmp = self.tmp.as_deref().ok_or_else(|| EngineError::Io("session stage path missing".into()))?;
         // Authorization may have changed while large source WAVs were prepared.
         // Recheck near commit, as stage_file did before this early reservation.
         crate::file_access::check_write(file).map_err(EngineError::Io)?;
