@@ -265,7 +265,7 @@ fn rejected_controller_state_reports_failure_and_allows_a_later_restore() {
     blob.extend_from_slice(&0.25f64.to_le_bytes()); // Valid component half.
     let controller_offset = blob.len();
     blob.extend_from_slice(&2u32.to_le_bytes());
-    blob.extend_from_slice(b"\\xDE\\xAD"); // Truncated controller half: fixture returns kResultFalse.
+    blob.extend_from_slice(b"\xDE\xAD"); // Truncated controller half: fixture returns kResultFalse.
     assert!(!p.load_state(&blob), "a rejected controller-only state must not be reported as restored");
 
     // The same plugin remains able to accept a subsequently corrected state.
