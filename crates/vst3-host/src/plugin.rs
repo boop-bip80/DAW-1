@@ -1,5 +1,6 @@
 //! `Vst3Plugin`: a loaded VST3 instance behind the safe `soundcraft_dsp::Plugin` trait.
 
+use crate::Vst3Error;
 use crate::ffi::{AFTERTOUCH, BusBuffers, EVENT_CAP, EditorLink, HostContext, Instance, NoteEvent, PARAM_QUEUE_CAP, PITCH_BEND};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport, Unit};
 use std::collections::HashMap;
@@ -256,6 +257,25 @@ fn queue_param_update(
     true
 }
 
+/// Run one native block, then consume only events the plugin accepted. A failed process may
+/// have applied some writes, so retry only idempotent parameter values and note releases;
+/// re-sending note-ons or pressure would risk duplicate or stuck voices. All queues stay bounded.
+fn process_pending_chunk(
+    pending: &mut Vec<(u32, f64)>,
+    notes: &mut Vec<NoteEvent>,
+    count: usize,
+    native_process: impl FnOnce(&[(u32, f64)], &[NoteEvent]) -> Result<(), Vst3Error>,
+) -> Result<(), Vst3Error> {
+    let result = native_process(pending, notes.get(..count).unwrap_or(&[]));
+    if result.is_ok() {
+        pending.clear();
+        notes.drain(..count.min(notes.len()));
+    } else {
+        keep_releases(notes);
+    }
+    result
+}
+
 impl Plugin for Vst3Plugin {
     fn info(&self) -> &'static PluginInfo {
         self.info
@@ -350,20 +370,20 @@ impl Plugin for Vst3Plugin {
             }
             let k = self.notes.iter().position(|e| e.time() >= end).unwrap_or(self.notes.len());
             let offset = u32::try_from(start).unwrap_or(u32::MAX);
-            let notes = self.notes.get(..k).unwrap_or(&[]);
-            let r = self.inst.process(
-                n,
-                &mut self.inputs,
-                &mut self.outputs,
-                &self.pending,
-                &self.controls,
-                notes,
-                offset,
-                self.position,
-                self.transport.as_ref(),
-            );
-            self.pending.clear();
-            self.notes.drain(..k);
+            let r = process_pending_chunk(&mut self.pending, &mut self.notes, k, |pending, notes| {
+                self.inst.process(
+                    n,
+                    &mut self.inputs,
+                    &mut self.outputs,
+                    pending,
+                    &self.controls,
+                    notes,
+                    offset,
+                    self.position,
+                    self.transport.as_ref(),
+                )
+            });
+            let failed = r.is_err();
             self.position = self.position.saturating_add(i64::try_from(n).unwrap_or(0));
             match r {
                 Ok(()) if self.has_output => {
@@ -385,6 +405,11 @@ impl Plugin for Vst3Plugin {
                 _ => {}
             }
             start += n;
+            if failed {
+                // Do not try another sub-block after native failure. The next call retries only
+                // coalesced parameter writes and distinct release events at frame zero.
+                break;
+            }
         }
         self.controls.clear();
     }
@@ -606,6 +631,61 @@ impl PluginEditor for Vst3Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_native_chunk_retains_bounded_idempotent_events_for_retry() {
+        let mut pending = Vec::with_capacity(2);
+        pending.extend([(7, 0.75), (9, 0.25)]);
+        let mut notes = Vec::with_capacity(6);
+        notes.extend([
+            NoteEvent::On { time: 1, key: 60, velocity: 1.0 },
+            NoteEvent::Off { time: 2, key: 60 },
+            NoteEvent::Pressure { time: 3, key: 61, pressure: 0.5 },
+            NoteEvent::Off { time: 4, key: 60 },
+            NoteEvent::Off { time: 5, key: 61 },
+        ]);
+        let (param_capacity, note_capacity) = (pending.capacity(), notes.capacity());
+        let mut native_calls = 0;
+        let failed = process_pending_chunk(&mut pending, &mut notes, 3, |params, events| {
+            native_calls += 1;
+            assert_eq!(params, &[(7, 0.75), (9, 0.25)]);
+            assert_eq!(events.len(), 3);
+            Err(Vst3Error::EventBufferBusy)
+        });
+        assert_eq!(failed, Err(Vst3Error::EventBufferBusy));
+        assert_eq!(native_calls, 1);
+        assert_eq!(pending.as_slice(), &[(7, 0.75), (9, 0.25)]);
+        assert_eq!(notes.as_slice(), &[NoteEvent::Off { time: 0, key: 60 }, NoteEvent::Off { time: 0, key: 61 }]);
+        assert_eq!((pending.capacity(), notes.capacity()), (param_capacity, note_capacity));
+
+        let retried = process_pending_chunk(&mut pending, &mut notes, 2, |params, events| {
+            native_calls += 1;
+            assert_eq!(params, &[(7, 0.75), (9, 0.25)]);
+            assert_eq!(events, &[NoteEvent::Off { time: 0, key: 60 }, NoteEvent::Off { time: 0, key: 61 }]);
+            Ok(())
+        });
+        assert_eq!(retried, Ok(()));
+        assert_eq!(native_calls, 2);
+        assert!(pending.is_empty());
+        assert!(notes.is_empty());
+        assert_eq!((pending.capacity(), notes.capacity()), (param_capacity, note_capacity));
+    }
+
+    #[test]
+    fn successful_native_chunk_consumes_only_the_dispatched_notes() {
+        let mut pending = vec![(7, 0.75)];
+        let mut notes = vec![NoteEvent::On { time: 1, key: 60, velocity: 1.0 }, NoteEvent::Off { time: 10, key: 60 }];
+        assert_eq!(
+            process_pending_chunk(&mut pending, &mut notes, 1, |params, events| {
+                assert_eq!(params, &[(7, 0.75)]);
+                assert_eq!(events, &[NoteEvent::On { time: 1, key: 60, velocity: 1.0 }]);
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert!(pending.is_empty());
+        assert_eq!(notes, vec![NoteEvent::Off { time: 10, key: 60 }]);
+    }
 
     #[test]
     fn saturated_param_queue_preserves_display_and_unsynced_state_until_retry() {
