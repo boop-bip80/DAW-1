@@ -152,10 +152,7 @@ fn public_cli_stem_bounce_remains_isolated_after_save_reopen_and_source_removal(
 
     // Saving first makes the project own both imported audio files. The original
     // recording directory can then disappear without breaking stem export.
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"paths": [voice_source.to_string_lossy(), pad_source.to_string_lossy()]})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"paths": [voice_source.to_string_lossy(), pad_source.to_string_lossy()]}));
     let saved = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .args(["--cmd", r#"mix.pan={"track":"Voice400","pan":-1}"#])
@@ -181,12 +178,8 @@ fn public_cli_stem_bounce_remains_isolated_after_save_reopen_and_source_removal(
     // This is a deliberate user error: an unsupported fold-down target must
     // reject before creating output files or modifying the saved session.
     let session_before_failure = std::fs::read(&project).unwrap();
-    let invalid = format!(
-        "file.bounce_stems={}",
-        serde_json::json!({"dir": rejected_stems.to_string_lossy(), "fold_down": "quad"})
-    );
-    let rejected =
-        cli().arg("run").arg("--in").arg(&project).arg("--cmd").arg(&invalid).arg("--save").arg(&project).output().unwrap();
+    let invalid = format!("file.bounce_stems={}", serde_json::json!({"dir": rejected_stems.to_string_lossy(), "fold_down": "quad"}));
+    let rejected = cli().arg("run").arg("--in").arg(&project).arg("--cmd").arg(&invalid).arg("--save").arg(&project).output().unwrap();
     assert!(!rejected.status.success(), "unsupported stem fold_down was accepted");
     assert!(!rejected_stems.exists(), "failed stem export created an output directory");
     assert_eq!(std::fs::read(&project).unwrap(), session_before_failure, "failed stem export changed saved project");
