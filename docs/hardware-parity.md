@@ -1,10 +1,11 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (synthetic desktop MIDI Record/Stop, manual recording offset and safe callback/WAV draining; no physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (per-track MIDI input port/channel selectors and synthetic filtering/preflight tests; no physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 A DAW is judged by how it drives audio interfaces, MIDI gear, control surfaces and sync. This is
-SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal) and the new MIDI input-capture adapter and the absence of
-wired MIDI routing or control-surface code; Pro Tools' from its documentation and Setup menus.
+SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal), the MIDI input-capture adapter and
+per-track MIDI input route code, and the absence of external MIDI output/sync/control-surface
+support; Pro Tools' from its documentation and Setup menus.
 
 **Hardware: ~12 % ready** (estimated). **Performance: ~35 %** (estimated; nothing benchmarked
 against Pro Tools). Remaining ≈ 110–180 h for hardware, 40–70 h for performance.
@@ -29,11 +30,11 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 
 ## MIDI
 
-A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. The desktop Record/Stop lifecycle opens selected native inputs, drains callbacks and commits tempo-mapped, undoable MIDI takes to armed MIDI/instrument tracks; synthetic tests cover MIDI-only recording, timestamp normalization and Stop draining. It does **not** provide live instrument audition or external MIDI output, and track-specific port/channel input assignment is incomplete. No physical keyboard was tested; Web has no native adapter. Hardware readiness percentages remain unchanged.
+A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. The desktop Record/Stop lifecycle opens selected native inputs, drains callbacks and commits tempo-mapped, undoable MIDI takes to armed MIDI/instrument tracks; synthetic tests cover MIDI-only recording, timestamp normalization and Stop draining. Per-track named input ports and all/1–16 channel filters are persisted and selectable in the Mix/Edit track popups; route changes are undoable, and disconnected or ambiguous named ports fail recording preflight. These checks are synthetic, **not physical controller validation**. Live instrument audition, MIDI thru/output, and sync remain missing; Web has no native adapter. Hardware readiness percentages remain unchanged.
 
 | Feature | Pro Tools | SoundCraft (all platforms) |
 |---|---|---|
-| MIDI input devices (keyboards, pads) | ✅ | 🟡 desktop native input Record/Stop to armed tracks tested synthetically; no hardware test, live audition or per-track port/channel assignment yet |
+| MIDI input devices (keyboards, pads) | ✅ | 🟡 desktop Record/Stop plus per-track named input-port/channel selectors and filtering tested synthetically; no physical keyboard or live audition verified |
 | MIDI output to external gear | ✅ | ❌ |
 | MIDI Thru, input filter | ✅ | ❌ (stored flags only) |
 | MIDI Beat Clock out, MTC generate/chase | ✅ | ❌ |
@@ -74,6 +75,7 @@ A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Persistent per-track MIDI named-port/channel input routing and Mix/Edit selectors passed synthetic tests; disconnected/ambiguous-port preflight fails closed, but physical devices/live audition remain unverified |
 | 2026-11-01 | minor | Desktop Record/Stop now drives native MIDI input and undoable armed-track takes in synthetic tests; manual ±500 ms recording offset and callback-drain safeguards, no measured duplex latency or physical keyboard evidence |
 | 2026-11-01 | minor | Bounded recording routes avoid wrong-channel capture; native MIDI selector and synthetic recording bridge added, still not wired to app transport; no physical or duplex validation |
 | 2026-10-31 | minor | Native MIDI port discovery and capture API added but not wired to playback or armed tracks; corrected WAV take-to-disk evidence; hardware and duplex tests remain open |
