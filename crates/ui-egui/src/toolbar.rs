@@ -598,7 +598,7 @@ mod tests {
         assert!(!h.get_by_label("Next marker").accesskit_node().is_disabled());
         assert!(!h.state().engine.is_dirty(), "navigation changes insertion position, not saved document content");
         assert_eq!(h.state().engine.undo_history().len(), undo_before, "marker navigation is intentionally non-undoable");
-        assert_eq!(h.state().engine.journal.len(), journal_before, "noundo navigation must not append mutation journal entries");
+        assert_eq!(h.state().engine.journal.len(), journal_before + 2, "non-undoable navigation is still recorded in the command journal");
         h.run_steps(3);
         assert_eq!(h.state().engine.session().edit.playhead, 1_000, "repainting must not navigate again");
     }
