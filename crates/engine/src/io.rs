@@ -1381,7 +1381,11 @@ pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
         "session.save" | "session.save_as" | "session.save_copy" => {
             file.exists() && !e.path.as_deref().is_some_and(|own| same_path(Path::new(own), file))
         }
-        "session.save_template" | "file.export_selected_tracks_as_session" | "file.export_session_text" | "file.export_otio" => file.exists(),
+        "session.save_template"
+        | "file.export_selected_tracks_as_session"
+        | "file.export_session_text"
+        | "file.export_otio"
+        | "file.export_otioz" => file.exists(),
         _ => false,
     }
 }
