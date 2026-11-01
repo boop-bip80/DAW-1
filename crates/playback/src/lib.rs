@@ -31,6 +31,7 @@ pub mod midi_out;
 pub mod midi_out_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod midi_thru_runtime;
+pub mod output_sample_ring;
 pub mod record;
 
 pub use devices::AudioConfig;
