@@ -33,7 +33,9 @@ use clap_sys::fixedpoint::{CLAP_BEATTIME_FACTOR, CLAP_SECTIME_FACTOR};
 use clap_sys::host::clap_host;
 use clap_sys::id::clap_id;
 use clap_sys::plugin::clap_plugin;
-use clap_sys::process::{CLAP_PROCESS_ERROR, clap_process};
+use clap_sys::process::{
+    CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_ERROR, CLAP_PROCESS_SLEEP, CLAP_PROCESS_TAIL, clap_process,
+};
 use clap_sys::stream::{clap_istream, clap_ostream};
 use clap_sys::version::{CLAP_VERSION, clap_version_is_compatible};
 use soundcraft_dsp::Transport;
@@ -654,6 +656,23 @@ fn queue_output_param(out: &mut Vec<(u32, f64)>, id: u32, value: f64) -> bool {
     }
     out.push((id, value));
     true
+}
+
+/// Only committed native blocks may publish plugin-generated parameter edits to the session.
+/// CLAP_PROCESS_ERROR means the plugin's outputs are invalid; unknown statuses are invalid too.
+/// This never blocks or grows the audio-thread queues when the UI is busy.
+fn publish_output_param_edits(status: i32, out: &mut Vec<(u32, f64)>, edits: &Mutex<Vec<(u32, f64)>>) -> bool {
+    let success = matches!(status, CLAP_PROCESS_CONTINUE | CLAP_PROCESS_CONTINUE_IF_NOT_QUIET | CLAP_PROCESS_TAIL | CLAP_PROCESS_SLEEP);
+    if success
+        && !out.is_empty()
+        && let Ok(mut pending) = edits.try_lock()
+    {
+        for &event in out.iter().take(pending.capacity().saturating_sub(pending.len())) {
+            pending.push(event);
+        }
+    }
+    out.clear();
+    success
 }
 
 unsafe extern "C" fn out_events_try_push(list: *const clap_output_events, event: *const clap_event_header) -> bool {
@@ -1425,18 +1444,12 @@ impl Instance {
         // lists and their contexts and the transport live on this stack frame / in `self.raw`,
         // untouched until the call returns.
         let status = unsafe { process(self.plugin, &p) };
-        if !self.out_params.is_empty()
-            && let Ok(mut edits) = self.state.edits.try_lock()
-        {
-            // Never blocks or grows: a busy UI or a full queue drops the edits.
-            for &e in &self.out_params {
-                if edits.len() < edits.capacity() {
-                    edits.push(e);
-                }
-            }
+        if !publish_output_param_edits(status, &mut self.out_params, &self.state.edits) {
+            let reason =
+                if status == CLAP_PROCESS_ERROR { "plugin reported a processing error" } else { "plugin returned an invalid processing status" };
+            return Err(ClapError::Process(reason.into()));
         }
-        self.out_params.clear();
-        if status == CLAP_PROCESS_ERROR { Err(ClapError::Process("plugin reported a processing error".into())) } else { Ok(status) }
+        Ok(status)
     }
 }
 
@@ -1662,6 +1675,39 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_or_invalid_process_cannot_publish_partial_parameter_edits() {
+        let mut out = Vec::with_capacity(2);
+        let edits = Mutex::new(Vec::with_capacity(1));
+        let invalid = [CLAP_PROCESS_ERROR, -1, CLAP_PROCESS_SLEEP + 1, i32::MAX];
+
+        for status in invalid {
+            out.extend([(7, 0.25), (9, 0.5)]);
+            assert!(!publish_output_param_edits(status, &mut out, &edits), "invalid status {status} must not publish");
+            assert!(out.is_empty(), "failed native output must not survive into the next block");
+            assert!(edits.lock().unwrap_or_else(PoisonError::into_inner).is_empty(), "failed output may not change session parameters");
+        }
+
+        // All four CLAP-defined success statuses can publish, but the UI queue is bounded.
+        for status in [CLAP_PROCESS_CONTINUE, CLAP_PROCESS_CONTINUE_IF_NOT_QUIET, CLAP_PROCESS_TAIL, CLAP_PROCESS_SLEEP] {
+            out.extend([(7, 0.25), (9, 0.5)]);
+            assert!(publish_output_param_edits(status, &mut out, &edits));
+            assert!(out.is_empty());
+            let mut published = edits.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(published.as_slice(), &[(7, 0.25)]);
+            assert_eq!(published.capacity(), 1);
+            published.clear();
+        }
+
+        // An occupied UI queue must never block the audio callback or retain stale edits.
+        let held = edits.lock().unwrap_or_else(PoisonError::into_inner);
+        out.push((11, 0.75));
+        assert!(publish_output_param_edits(CLAP_PROCESS_CONTINUE, &mut out, &edits));
+        assert!(out.is_empty());
+        assert!(held.is_empty());
+        assert_eq!(out.capacity(), 2);
+    }
 
     #[test]
     fn output_param_events_report_backpressure_and_accept_retries() {
