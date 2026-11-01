@@ -84,6 +84,7 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     v.push((EDL_EXPORT_MENU, "file.export_edl"));
     v.push((OTIO_IMPORT_MENU, "file.import_otio"));
     v.push((OTIO_EXPORT_MENU, "file.export_otio"));
+    v.push((OTIOZ_EXPORT_MENU, "file.export_otioz"));
     v.extend(mix_view_aliases().iter().copied());
     v.extend(AUDIOSUITE.iter().map(|(p, _)| (*p, "audiosuite.process")));
     v.extend(MENU_WINDOWS.iter().copied());
@@ -95,6 +96,7 @@ const EDL_IMPORT_MENU: &str = "File > Import > CMX3600 Audio EDL...";
 const EDL_EXPORT_MENU: &str = "File > Export > CMX3600 Audio EDL...";
 const OTIO_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Audio...";
 const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
+const OTIOZ_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Bundle…";
 
 /// Mix-view menu paths, allocated once. Rebuilding them on every menu draw leaked a copy per frame.
 fn mix_view_aliases() -> &'static [(&'static str, &'static str)] {
@@ -219,6 +221,7 @@ pub fn tree() -> Vec<MenuNode> {
     insert_path(&mut roots, EDL_EXPORT_MENU);
     insert_path(&mut roots, OTIO_IMPORT_MENU);
     insert_path(&mut roots, OTIO_EXPORT_MENU);
+    insert_path(&mut roots, OTIOZ_EXPORT_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
     // Not in the observed catalog either; Pro Tools lists it right under Identify Sync Point.
     if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
@@ -763,6 +766,26 @@ mod tests {
         invoke_menu(&mut app, "file.export_otio", OTIO_EXPORT_MENU);
         assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, path, .. })
             if cmd == "file.export_otio" && path.ends_with(".otio")));
+    }
+
+    #[test]
+    fn portable_otio_bundle_export_is_reachable_and_opens_a_save_prompt() {
+        let file = tree().into_iter().find(|node| node.label == "File").unwrap();
+        let export = file.children.iter().find(|node| node.label == "Export").unwrap();
+        let bundle = export.children.iter().find(|node| node.path == OTIOZ_EXPORT_MENU).unwrap();
+        assert_eq!(bundle.label, "OpenTimelineIO Bundle…");
+        let command = command_for_path(&bundle.path, &ui_aliases()).unwrap();
+        assert_eq!(command, "file.export_otioz");
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, &command, &bundle.path);
+        assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, title, path, key })
+            if cmd == "file.export_otioz"
+                && title.contains("OpenTimelineIO Bundle")
+                && path.ends_with(".otioz")
+                && key == "path"));
+        assert!(!app.engine.is_dirty(), "opening an export dialog is not a session edit");
+        assert!(!app.engine.can_undo());
     }
 
     #[test]
