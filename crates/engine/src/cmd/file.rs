@@ -166,7 +166,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(noundo "file.export_edl", "CMX3600 Audio EDL...", ["File", "Export"], None,
-            "{path, track?: selected mono or stereo audio track, fps?: 24|25|30, replace?: false} — frame-aligned A/AA cuts; no overlaps, fades or unrendered processing",
+            "{path, track?: mono/stereo, tracks?: [two mono tracks], fps?: 24|25|30, replace?: false} — frame-aligned A/AA or independent A1/A2 cuts; no lane overlaps, fades or unrendered processing",
             always, |e, p| {
                 let id = "file.export_edl";
                 let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
@@ -176,17 +176,34 @@ pub fn specs() -> Vec<CommandSpec> {
                 refuse_replacing(e, id, std::path::Path::new(&path), p)?;
                 let fps = p.get("fps").map(|v| v.as_u64().ok_or_else(|| bad(id, "`fps` must be 24, 25 or 30"))).transpose()?;
                 let rate = crate::edl::frame_rate(e.session(), fps)?;
-                let track = track_param(e, id, p, "track")?.or_else(|| {
+                if p.get("track").is_some() && p.get("tracks").is_some() {
+                    return Err(bad(id, "choose either `track` or `tracks`, not both"));
+                }
+                let tracks = if p.get("tracks").is_some() {
+                    if !p["tracks"].is_array() {
+                        return Err(bad(id, "`tracks` must be an array of one or two audio track ids/names"));
+                    }
+                    tracks_param(e, id, p)?
+                } else if p.get("track").is_some() {
+                    tracks_param(e, id, p)?
+                } else {
                     let selected = e.session().edit.selected_tracks.to_vec();
-                    (selected.len() == 1).then(|| selected[0])
-                }).or_else(|| {
-                    let audio = e.session().tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect::<Vec<_>>();
-                    (audio.len() == 1).then(|| audio[0].id)
-                }).ok_or_else(|| bad(id, "select exactly one mono audio track or provide `track`"))?;
-                let output = crate::edl::export_audio(e.session(), track, rate)?;
+                    if (1..=2).contains(&selected.len()) {
+                        selected
+                    } else if selected.is_empty() {
+                        let audio = e.session().tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect::<Vec<_>>();
+                        if audio.len() == 1 { vec![audio[0].id] } else { Vec::new() }
+                    } else {
+                        Vec::new()
+                    }
+                };
+                if tracks.is_empty() || tracks.len() > 2 {
+                    return Err(bad(id, "select one mono/stereo or two mono audio tracks, or provide `track`/`tracks`"));
+                }
+                let output = crate::edl::export_audio_tracks(e.session(), &tracks, rate)?;
                 crate::io::write_file(&path, &output.bytes)?;
                 Ok(json!({"path": path, "bytes": output.bytes.len(), "edits": output.summary.edits,
-                    "unique_sources": output.summary.unique_sources, "track": track, "fps": rate}))
+                    "unique_sources": output.summary.unique_sources, "track": if tracks.len() == 1 { Some(tracks[0]) } else { None }, "tracks": tracks, "fps": rate}))
             }
         ),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?, replace?: false}", always, |e, p| {
