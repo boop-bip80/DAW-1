@@ -13,7 +13,6 @@ use std::path::Path;
 const KNOWN_UNREACHED: &[&str] = &[
     "event.midi_note",
     "file.bounce_stems",
-    "mix.insert_move",
     "mix.send_surround_pan",
     "setup.hardware",        // menu opens the Playback Engine window, which doesn't run it
     "setup.playback_engine", // same
