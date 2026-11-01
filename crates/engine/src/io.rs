@@ -49,6 +49,31 @@ pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(err)
 }
 
+/// Checked, size-bounded read for interchange files and the media they reference. Check both
+/// metadata and the bytes actually read: the file can grow between `metadata` and `read`.
+/// A bounded stream also refuses a special file even when it advertises a misleading size.
+pub(crate) fn read_file_limited(path: impl AsRef<Path>, limit: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    let err = |err: std::io::Error| EngineError::Io(format!("{}: {err}", path.display()));
+    let file = std::fs::File::open(path).map_err(err)?;
+    let metadata = file.metadata().map_err(err)?;
+    if !metadata.is_file() {
+        return Err(EngineError::Io(format!("{}: not a regular file", path.display())));
+    }
+    if metadata.len() > limit as u64 {
+        return Err(EngineError::Io(format!("{}: file exceeds the {}-byte import limit", path.display(), limit)));
+    }
+    let mut bytes = Vec::new();
+    file.take((limit as u64).saturating_add(1)).read_to_end(&mut bytes).map_err(err)?;
+    if bytes.len() > limit {
+        return Err(EngineError::Io(format!("{}: file exceeds the {}-byte import limit", path.display(), limit)));
+    }
+    Ok(bytes)
+}
+
 /// [`read_file`] as UTF-8 text.
 pub fn read_text(path: impl AsRef<Path>) -> Result<String> {
     let path = path.as_ref();
