@@ -15,6 +15,8 @@ pub mod device;
 pub mod live;
 mod names;
 pub mod ops;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod output;
 mod rng;
 mod sequence;
 mod smf;
