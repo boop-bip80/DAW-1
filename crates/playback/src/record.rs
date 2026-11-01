@@ -1511,6 +1511,29 @@ struct RingState {
 /// successful output read, so stale samples can never slip through after an idle period.
 const NO_MONITOR_TRIM: usize = usize::MAX;
 
+/// These counters describe the *monitoring* path only; the separate WAV capture FIFO is not
+/// affected by a failed monitor lock. An output read can happen during playback even when no
+/// track is monitoring, so consumers must only interpret output-silence counts for active
+/// monitoring periods. Occupancy is not a clock-drift or hardware-latency measurement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MonitorFifoHealth {
+    /// Complete interleaved input frames currently queued, sampled without acquiring the FIFO.
+    pub queued_frames: usize,
+    pub capacity_frames: usize,
+    /// Samples discarded because the input callback could not acquire the FIFO's `try_lock`.
+    pub skipped_input_samples: u64,
+    /// Input frames with at least one skipped sample, including a partial interleaved frame.
+    pub skipped_input_frames: u64,
+    /// Samples pushed out of the *oldest* end by the half-second FIFO capacity limit.
+    pub evicted_oldest_samples: u64,
+    /// Input frames touched by that eviction, even if only one channel sample was evicted.
+    pub evicted_oldest_frames: u64,
+    /// Session-rate frames returned as silence by `pop_into` because monitor input was missing
+    /// or its `try_lock` failed. These are *not* physical output-device frames, and intentional
+    /// zero-valued samples in the input signal are not counted.
+    pub silent_output_frames: u64,
+}
+
 /// A small interleaved FIFO from the input callback to the output callback, for input
 /// monitoring. Both sides only `try_lock`; it holds at most ~0.5 s and drops the oldest frames.
 /// The input device may run at a different rate than the session, so the reader converts
@@ -1524,6 +1547,13 @@ pub struct InputRing {
     cap: usize,
     /// Keep this many newest frames before the next read (0 clears all), or no pending request.
     pending_keep: AtomicUsize,
+    /// Best-effort occupancy snapshot; the two callbacks update it while holding `state`.
+    queued_samples: AtomicUsize,
+    skipped_input_samples: AtomicU64,
+    skipped_input_frames: AtomicU64,
+    evicted_oldest_samples: AtomicU64,
+    evicted_oldest_frames: AtomicU64,
+    silent_output_frames: AtomicU64,
 }
 
 impl InputRing {
@@ -1536,7 +1566,40 @@ impl InputRing {
             rate,
             cap: frames * ch,
             pending_keep: AtomicUsize::new(NO_MONITOR_TRIM),
+            queued_samples: AtomicUsize::new(0),
+            skipped_input_samples: AtomicU64::new(0),
+            skipped_input_frames: AtomicU64::new(0),
+            evicted_oldest_samples: AtomicU64::new(0),
+            evicted_oldest_frames: AtomicU64::new(0),
+            silent_output_frames: AtomicU64::new(0),
         })
+    }
+
+    /// An allocation-free, lock-free diagnostic snapshot of this stream's monitor FIFO. Each
+    /// counter is individually atomic; the fields need not describe the exact same instant when
+    /// input and output callbacks race. No counter measures input/output clock alignment.
+    pub fn health(&self) -> MonitorFifoHealth {
+        let ch = self.channels.load(Ordering::Relaxed).max(1);
+        MonitorFifoHealth {
+            queued_frames: self.queued_samples.load(Ordering::Relaxed) / ch,
+            capacity_frames: self.cap / ch,
+            skipped_input_samples: self.skipped_input_samples.load(Ordering::Relaxed),
+            skipped_input_frames: self.skipped_input_frames.load(Ordering::Relaxed),
+            evicted_oldest_samples: self.evicted_oldest_samples.load(Ordering::Relaxed),
+            evicted_oldest_frames: self.evicted_oldest_frames.load(Ordering::Relaxed),
+            silent_output_frames: self.silent_output_frames.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Clear accumulated losses for a new monitoring interval without discarding queued input
+    /// or altering interpolation. Atomic callback increments before/after a reset are assigned
+    /// to the old/new interval respectively; `health` itself is not a transactionally atomic read.
+    pub fn reset_health(&self) {
+        self.skipped_input_samples.store(0, Ordering::Relaxed);
+        self.skipped_input_frames.store(0, Ordering::Relaxed);
+        self.evicted_oldest_samples.store(0, Ordering::Relaxed);
+        self.evicted_oldest_frames.store(0, Ordering::Relaxed);
+        self.silent_output_frames.store(0, Ordering::Relaxed);
     }
 
     /// Drop old monitoring samples while the output is silent. Input capture into WAV files uses
@@ -1573,13 +1636,27 @@ impl InputRing {
             s.data.drain(..remove);
         }
         s.phase = 0.0;
+        self.queued_samples.store(s.data.len(), Ordering::Relaxed);
     }
 
     pub fn push(&self, samples: &[f32]) {
         if let Ok(mut s) = self.state.try_lock() {
             s.data.extend(samples.iter().copied().map(finite));
+            let ch = self.channels.load(Ordering::Relaxed).max(1);
+            let evicted = s.data.len().saturating_sub(self.cap);
             while s.data.len() > self.cap {
                 s.data.pop_front();
+            }
+            self.queued_samples.store(s.data.len(), Ordering::Relaxed);
+            if evicted > 0 {
+                self.evicted_oldest_samples.fetch_add(u64::try_from(evicted).unwrap_or(u64::MAX), Ordering::Relaxed);
+                self.evicted_oldest_frames.fetch_add(u64::try_from(evicted.div_ceil(ch)).unwrap_or(u64::MAX), Ordering::Relaxed);
+            }
+        } else {
+            let ch = self.channels.load(Ordering::Relaxed).max(1);
+            if !samples.is_empty() {
+                self.skipped_input_samples.fetch_add(u64::try_from(samples.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
+                self.skipped_input_frames.fetch_add(u64::try_from(samples.len().div_ceil(ch)).unwrap_or(u64::MAX), Ordering::Relaxed);
             }
         }
     }
@@ -1591,10 +1668,14 @@ impl InputRing {
         for c in out.iter_mut() {
             c.iter_mut().take(frames).for_each(|x| *x = 0.0);
         }
-        let Ok(mut s) = self.state.try_lock() else { return };
+        let Ok(mut s) = self.state.try_lock() else {
+            self.silent_output_frames.fetch_add(u64::try_from(frames).unwrap_or(u64::MAX), Ordering::Relaxed);
+            return;
+        };
         self.trim_pending(&mut s);
         // Input frames consumed per output frame.
         let step = if self.rate == 0 || session_rate == 0 { 1.0 } else { f64::from(self.rate) / f64::from(session_rate) };
+        let mut rendered = 0;
         for f in 0..frames {
             // Drop input frames we have moved past; keep the one at `phase` and the next one.
             while s.phase >= 1.0 && s.data.len() >= 2 * ch {
@@ -1613,13 +1694,129 @@ impl InputRing {
                 }
             }
             s.phase += step;
+            rendered += 1;
+        }
+        self.queued_samples.store(s.data.len(), Ordering::Relaxed);
+        if rendered < frames {
+            self.silent_output_frames.fetch_add(u64::try_from(frames - rendered).unwrap_or(u64::MAX), Ordering::Relaxed);
         }
     }
 }
 
 #[cfg(test)]
 mod ring_tests {
-    use super::{InputRing, NO_MONITOR_TRIM, Ordering};
+    use super::{InputRing, MonitorFifoHealth, NO_MONITOR_TRIM, Ordering};
+
+    /// Both callbacks have an intentional `try_lock`: when another thread owns the FIFO, input
+    /// samples are dropped and output frames are silent, but neither callback may wait for it.
+    /// A partial backend block still counts the *affected* input frame, not just whole pairs.
+    #[test]
+    fn monitor_fifo_health_counts_lock_contention_for_one_two_and_three_channels() {
+        for channels in [1, 2, 3] {
+            let ring = InputRing::new(channels, 8);
+            let blocked = channels * 3 + 1;
+            let guard = ring.state.lock().unwrap();
+            ring.push(&vec![0.25; blocked]);
+            let mut output = vec![vec![1.0; 5]; channels];
+            ring.pop_into(&mut output, 5, 8);
+            assert!(output.iter().all(|channel| channel.iter().all(|&v| v == 0.0)));
+            assert_eq!(
+                ring.health(),
+                MonitorFifoHealth {
+                    queued_frames: 0,
+                    capacity_frames: 4,
+                    skipped_input_samples: blocked as u64,
+                    skipped_input_frames: 4,
+                    evicted_oldest_samples: 0,
+                    evicted_oldest_frames: 0,
+                    silent_output_frames: 5,
+                },
+                "{channels}-channel monitor lock contention must not be invisible"
+            );
+            drop(guard);
+            ring.push(&vec![0.875; channels * 2]);
+            assert_eq!(ring.health().queued_frames, 2, "subsequent successful input must still be queued");
+            ring.reset_health();
+            let reset = ring.health();
+            assert_eq!(reset.queued_frames, 2);
+            assert_eq!((reset.skipped_input_samples, reset.skipped_input_frames, reset.silent_output_frames), (0, 0, 0));
+        }
+    }
+
+    /// The finite queue keeps the newest complete interleaved frames and reports each *oldest*
+    /// discarded frame; intentional idle trims should not be called input overruns.
+    #[test]
+    fn monitor_fifo_health_counts_oldest_frame_evictions_without_reallocating() {
+        for channels in [1, 2, 3] {
+            let ring = InputRing::new(channels, 8); // 4 input frames fit
+            let reserved = ring.state.lock().unwrap().data.capacity();
+            let input: Vec<f32> = (0..6).flat_map(|frame| std::iter::repeat_n(frame as f32, channels)).collect();
+            ring.push(&input);
+            let pressure = ring.health();
+            assert_eq!((pressure.queued_frames, pressure.capacity_frames), (4, 4));
+            assert_eq!(pressure.evicted_oldest_samples, (2 * channels) as u64);
+            assert_eq!(pressure.evicted_oldest_frames, 2);
+            assert_eq!((pressure.skipped_input_samples, pressure.silent_output_frames), (0, 0));
+            assert_eq!(ring.state.lock().unwrap().data.capacity(), reserved, "monitoring may not grow backing storage for a bounded callback");
+
+            let mut output = vec![vec![0.0; 3]; channels];
+            ring.pop_into(&mut output, 3, 8);
+            assert!(output.iter().all(|c| c.as_slice() == [2.0, 3.0, 4.0]), "latest frames must retain correct channel alignment");
+            let currently_queued = ring.health().queued_frames;
+            ring.reset_health();
+            let reset = ring.health();
+            assert_eq!(reset.queued_frames, currently_queued, "resetting diagnostics must not change live input data");
+            assert_eq!((reset.evicted_oldest_samples, reset.evicted_oldest_frames, reset.silent_output_frames), (0, 0, 0));
+        }
+    }
+
+    /// A malformed fragment is not expected from CPAL, but it can force the oldest side to
+    /// evict just one sample. Report the touched frame rather than rounding 1/3 down to zero.
+    #[test]
+    fn monitor_fifo_health_reports_partial_three_channel_eviction() {
+        let ring = InputRing::new(3, 8);
+        ring.push(&[0.125; 12]);
+        ring.push(&[0.5]);
+        let health = ring.health();
+        assert_eq!(health.queued_frames, 4);
+        assert_eq!(health.evicted_oldest_samples, 1);
+        assert_eq!(health.evicted_oldest_frames, 1);
+    }
+
+    /// Interpolation needs two input frames. Once only one remains, output is zeroed even if the
+    /// signal is nonzero; count exactly the requested frames that could not be rendered.
+    #[test]
+    fn monitor_fifo_health_counts_interpolation_underrun_not_silent_input_samples() {
+        let ring = InputRing::new(2, 48_000);
+        ring.push(&[0.5, -0.5, 0.75, -0.75]);
+        let mut output = vec![vec![1.0; 4]; 2];
+        ring.pop_into(&mut output, 4, 48_000);
+        assert_eq!(output[0], [0.5, 0.0, 0.0, 0.0]);
+        assert_eq!(output[1], [-0.5, 0.0, 0.0, 0.0]);
+        assert_eq!(ring.health().silent_output_frames, 3);
+        assert_eq!(ring.health().queued_frames, 1);
+
+        ring.reset_health();
+        ring.discard_idle();
+        ring.push(&[0.0, 0.0, 0.0, 0.0]);
+        ring.pop_into(&mut output, 1, 48_000);
+        assert_eq!((output[0][0], output[1][0]), (0.0, 0.0));
+        assert_eq!(ring.health().silent_output_frames, 0, "valid zero-valued input is not an underrun");
+    }
+
+    #[test]
+    fn monitor_fifo_health_idle_and_resume_trims_reset_occupancy_without_evictions() {
+        let ring = InputRing::new(3, 1000);
+        ring.push(&[0.25; 900]); // 300 frames buffered, no overflow
+        assert_eq!(ring.health().queued_frames, 300);
+        ring.resume_monitoring(); // retain newest 10ms at 1000Hz
+        assert_eq!(ring.health().queued_frames, 10);
+        ring.discard_idle();
+        let health = ring.health();
+        assert_eq!(health.queued_frames, 0);
+        assert_eq!(health.evicted_oldest_samples, 0, "intentional stale-input trim isn't a FIFO overrun");
+        assert_eq!(health.silent_output_frames, 0);
+    }
 
     /// A 1 kHz sine recorded at 16 kHz must come out as a 1 kHz sine at 48 kHz, across calls.
     #[test]
