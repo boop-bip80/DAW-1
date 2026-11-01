@@ -25,6 +25,8 @@
 mod clock;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod midi_instrument_input_poller;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod midi_instrument_monitor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod midi_live_thru;
