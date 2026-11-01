@@ -86,6 +86,9 @@ fn finite(x: f32) -> f32 {
 
 struct Shared {
     armed: AtomicBool,
+    /// Callbacks that have committed to capturing a block. Stop must wait for them before the
+    /// writer's final ring drain, or their last samples could arrive after the WAV is finalized.
+    capturing: AtomicUsize,
     ring: CaptureRing,
     /// Samples lost while the ring was full.
     dropped: AtomicUsize,
@@ -95,12 +98,34 @@ struct Shared {
     fault: AtomicU8,
     /// The first failure writing a take, until it's reported.
     failed: Mutex<Option<String>>,
+    /// Tests can observe the writer reaching the stop path without timing sleeps.
+    #[cfg(test)]
+    writer_saw_stop: AtomicBool,
+}
+
+/// Drop is run during a callback unwind too, so a guarded panic cannot strand the writer.
+struct CaptureInFlight<'a>(&'a AtomicUsize);
+
+impl Drop for CaptureInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Shared {
     fn new(ring: CaptureRing) -> Shared {
         let (beats, fault, failed) = (AtomicU64::new(0), AtomicU8::new(0), Mutex::new(None));
-        Shared { armed: AtomicBool::new(false), ring, dropped: AtomicUsize::new(0), beats, fault, failed }
+        Shared {
+            armed: AtomicBool::new(false),
+            capturing: AtomicUsize::new(0),
+            ring,
+            dropped: AtomicUsize::new(0),
+            beats,
+            fault,
+            failed,
+            #[cfg(test)]
+            writer_saw_stop: AtomicBool::new(false),
+        }
     }
 
     /// Run the input callback's `work`. After a panic in it, the input is broken and does
@@ -119,6 +144,19 @@ impl Shared {
         let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().map_or(0.0, finite)) } else { 0 };
         *owed = owed.saturating_add(data.len() - kept);
         self.dropped.fetch_add(data.len() - kept, Ordering::Relaxed);
+    }
+
+    /// Register before the final armed check: a callback accepted before stop remains visible to
+    /// the writer until its ring push completes. SeqCst orders disarm, registration and the
+    /// writer's quiescence check even if the two threads race at the stop boundary.
+    fn capture_if_armed(&self, work: impl FnOnce()) -> bool {
+        self.capturing.fetch_add(1, Ordering::SeqCst);
+        let _in_flight = CaptureInFlight(&self.capturing);
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        work();
+        true
     }
 }
 
@@ -168,8 +206,10 @@ where
                         *o = f32::from_sample(*x);
                     }
                     mon.push(s);
-                    if sh.armed.load(Ordering::Acquire) {
-                        sh.capture(s, &mut owed);
+                    if sh.armed.load(Ordering::SeqCst) {
+                        if !sh.capture_if_armed(|| sh.capture(s, &mut owed)) {
+                            owed = 0;
+                        }
                     } else {
                         owed = 0;
                     }
@@ -313,12 +353,12 @@ impl Recorder {
         let ring = &self.shared.ring;
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.shared.armed.store(true, Ordering::Release);
+        self.shared.armed.store(true, Ordering::SeqCst);
         let (shared, channels) = (Arc::clone(&self.shared), self.channels);
         match std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels)) {
             Ok(w) => self.writer = Some((w, live)),
             Err(e) => {
-                self.shared.armed.store(false, Ordering::Release);
+                self.shared.armed.store(false, Ordering::SeqCst);
                 return Err(e.to_string());
             }
         }
@@ -363,7 +403,7 @@ impl Recorder {
     }
 
     pub fn finish(&mut self) -> Takes {
-        self.shared.armed.store(false, Ordering::Release);
+        self.shared.armed.store(false, Ordering::SeqCst);
         let (takes, problem) = match self.writer.take() {
             Some((writer, _)) => match writer.join() {
                 Ok(result) => result,
@@ -387,7 +427,14 @@ impl Drop for Recorder {
 fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> Takes {
     let (mut block, mut header_written, mut reported) = (Vec::new(), Instant::now(), false);
     loop {
-        let stopping = !shared.armed.load(Ordering::Acquire);
+        let stopping = !shared.armed.load(Ordering::SeqCst);
+        // Snapshot this BEFORE popping: even if an active callback finishes during the pop,
+        // perform one more drain to include every sample it published.
+        let captures_finished = shared.capturing.load(Ordering::SeqCst) == 0;
+        #[cfg(test)]
+        if stopping {
+            shared.writer_saw_stop.store(true, Ordering::Release);
+        }
         // The ring holds interleaved samples and a pop can end mid-frame: write whole frames and
         // keep the remainder for the next pop, so channels never shift.
         shared.ring.pop_all(&mut block);
@@ -398,7 +445,7 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
             *shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(e);
             reported = true;
         }
-        if stopping {
+        if stopping && captures_finished {
             break;
         }
         if header_written.elapsed() >= Duration::from_secs(1) {
@@ -669,6 +716,67 @@ mod tests {
         assert!(problem.is_some_and(|e| e.contains("writer panicked") && e.contains("recoverable audio")));
         assert!(!shared.armed.load(Ordering::Acquire));
         assert!(r.writer.is_none());
+    }
+
+    /// Stop can race a callback that already accepted input but has not finished copying it.
+    /// Wait for the writer to actually observe stop while the callback is blocked, then publish
+    /// the samples: the final WAV must contain them, with no timing-sensitive sleeps in the test.
+    #[test]
+    fn stop_drains_an_inflight_callback_before_finalizing_its_wav() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stop-inflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Audio Files/Vox.wav");
+        let shared = Arc::new(Shared::new(CaptureRing::new(1 << 12)));
+        let mut r = recorder(&shared);
+        r.arm(vec![(TrackId(1), vec![0], path.clone())]).unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let callback_shared = Arc::clone(&shared);
+        let callback = std::thread::spawn(move || {
+            let mut owed = 0;
+            callback_shared.guarded(|| {
+                assert!(callback_shared.capture_if_armed(|| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    callback_shared.capture(&[0.375; 480], &mut owed);
+                }));
+            });
+        });
+
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(shared.capturing.load(Ordering::SeqCst), 1);
+        shared.armed.store(false, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !shared.writer_saw_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(shared.writer_saw_stop.load(Ordering::Acquire), "writer did not reach the stop path");
+        assert!(!r.writer.as_ref().unwrap().0.is_finished(), "the writer must wait for the accepted callback");
+
+        release_tx.send(()).unwrap();
+        callback.join().unwrap();
+        let (takes, problem) = r.finish();
+        assert_eq!(problem, None);
+        assert_eq!(takes, vec![(TrackId(1), path.clone())]);
+        assert_eq!(decode(&path), vec![vec![0.375; 480]]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panicking_and_disarmed_callbacks_cannot_strand_capture_inflight() {
+        let shared = Shared::new(CaptureRing::new(64));
+        let mut ran = false;
+        assert!(!shared.capture_if_armed(|| ran = true));
+        assert!(!ran);
+        assert_eq!(shared.capturing.load(Ordering::SeqCst), 0);
+
+        shared.armed.store(true, Ordering::SeqCst);
+        shared.guarded(|| {
+            shared.capture_if_armed(|| std::panic::panic_any("synthetic recording callback failure"));
+        });
+        assert_eq!(shared.capturing.load(Ordering::SeqCst), 0, "the guard drops when a callback unwinds");
+        assert_eq!(shared.fault.load(Ordering::Relaxed), BROKEN);
     }
 
     #[test]
