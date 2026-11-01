@@ -213,6 +213,8 @@ struct AudioState {
     read: f64,
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
+    /// Silent output has not needed input since the last monitor/transport activation.
+    input_was_idle: bool,
     recording: bool,
     /// Retired plugin instances go back to the UI thread to be dropped there.
     garbage: Sender<Vec<Box<dyn Plugin>>>,
@@ -252,6 +254,7 @@ impl AudioState {
             read: 0.0,
             device_rate,
             input: None,
+            input_was_idle: true,
             recording: false,
             unsent: MeterSnapshot::default(),
             forget_shared: Vec::new(),
@@ -315,6 +318,11 @@ impl AudioState {
                     self.read = 0.0;
                     self.mix.reset();
                 }
+            }
+            // Two rapid session commands can turn monitoring off and back on before any output
+            // callback runs. Remember that idle transition so the resumed read drops old input.
+            if !self.playing && !self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm) {
+                self.input_was_idle = true;
             }
         }
         if changed {
@@ -406,6 +414,12 @@ impl AudioState {
         let channels = channels.max(1);
         let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
         if !self.playing && !monitoring {
+            // The input device keeps running while monitoring is off. Without this discard,
+            // rearming later plays up to half a second of old audio from its monitor ring.
+            if let Some(input) = &self.input {
+                input.discard_idle();
+            }
+            self.input_was_idle = true;
             out.iter_mut().for_each(|x| *x = 0.0);
             self.unsent.silence();
             self.forget_meters();
@@ -413,6 +427,15 @@ impl AudioState {
                 m.silence();
             }
             return;
+        }
+        if self.input_was_idle {
+            // Also catch up if no silent output callback ran between disarming and rearming.
+            // Keep a tiny recent tail for immediate monitoring; a contended try_lock is retried
+            // inside pop_into before any input is read, so stale data cannot become audible.
+            if let Some(input) = &self.input {
+                input.resume_monitoring();
+            }
+            self.input_was_idle = false;
         }
         let speed = f64::from(self.shared.speed.load(Ordering::Relaxed)) / 1000.0;
         let step = self.session.sample_rate.as_f64() / self.device_rate.max(1.0) * speed.clamp(0.1, 4.0);
@@ -1914,5 +1937,103 @@ mod tests {
         st.fill(&mut out, 2);
         assert!(out.iter().any(|x| x.abs() > 0.1), "the input is heard");
         assert!(shared.meters.lock().unwrap().tracks.get(&t).is_some_and(|m| m.peak[0] > 0.1), "and metered");
+    }
+
+    #[test]
+    fn input_monitor_resumes_with_fresh_samples_after_idle_output() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut session = soundcraft_model::Session::default();
+        let track = session.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, shared, Arc::new(session.clone()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
+        ring.push(&[0.125; 24_000]); // half a second accumulated while monitoring is off
+        let mut out = vec![0.0f32; 2 * 128];
+        st.fill(&mut out, 2); // silent output drains the stale input without rendering it
+        session.track_mut(track).unwrap().mixer.record_arm = true;
+        tx.send(Cmd::Session(Arc::new(session), Vec::new())).unwrap();
+        ring.push(&[0.875; 512]);
+        st.fill(&mut out, 2);
+        assert!(st.mix.input[0][..128].iter().all(|&x| x == 0.875), "fresh input must be heard on the first monitored block");
+        assert!(out.iter().any(|x| x.abs() > 0.1));
+    }
+
+    #[test]
+    fn rapid_disarm_and_rearm_without_idle_callback_cannot_replay_stale_input() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut armed = soundcraft_model::Session::default();
+        let track = armed.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        armed.track_mut(track).unwrap().mixer.record_arm = true;
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, shared, Arc::new(armed.clone()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
+        ring.push(&[0.5; 512]);
+        let mut out = vec![0.0f32; 2 * BLOCK];
+        st.fill(&mut out, 2); // input monitoring was already running
+        assert!(!st.input_was_idle);
+
+        let mut disarmed = armed.clone();
+        disarmed.track_mut(track).unwrap().mixer.record_arm = false;
+        tx.send(Cmd::Session(Arc::new(disarmed), Vec::new())).unwrap();
+        tx.send(Cmd::Session(Arc::new(armed), Vec::new())).unwrap();
+        ring.push(&[0.125; 24_000]); // input ran while the output received no callbacks
+        ring.push(&[0.875; 512]);
+        st.fill(&mut out, 2); // both commands drained before any silent output callback
+        assert!(st.mix.input[0][..128].iter().all(|&x| x == 0.875), "even a rapid toggle must trim the old half-second backlog");
+        assert!(out.iter().any(|x| x.abs() > 0.1));
+    }
+
+    #[test]
+    fn playback_drains_input_even_before_monitoring_is_enabled() {
+        use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let backing = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let monitor = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.pool.insert(
+            SourceId(7),
+            Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 48_000]] })),
+        );
+        let clip = s.new_clip_id();
+        s.track_mut(backing).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(clip, "Backing", SourceId(7), 0, 0, 48_000));
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, shared, Arc::new(s.clone()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let mut out = vec![0.0f32; 2 * BLOCK];
+        for _ in 0..10 {
+            ring.push(&[0.125; BLOCK]);
+            st.fill(&mut out, 2); // render_next drains input, even though no track is monitoring
+            assert!(out.iter().any(|x| x.abs() > 0.1), "backing playback must remain audible");
+        }
+
+        s.track_mut(monitor).unwrap().mixer.input_monitor = true;
+        tx.send(Cmd::Session(Arc::new(s), Vec::new())).unwrap();
+        ring.push(&[0.875; BLOCK]);
+        st.fill(&mut out, 2);
+        // The resampler deliberately retains one input frame for interpolation across blocks;
+        // playback has drained everything earlier, not accumulated a stale half-second.
+        assert!(st.mix.input[0][1..128].iter().all(|&x| x == 0.875), "monitoring must hear current input after the interpolation boundary");
+        assert!(out.iter().any(|x| x.abs() > 0.1), "enabling monitoring must not silence the backing track");
     }
 }
