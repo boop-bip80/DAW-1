@@ -490,7 +490,7 @@ fn encode(message: LiveMidiMessage) -> Option<(Option<u8>, Encoded)> {
             let unsigned = i32::from(value) + 8_192;
             (channel, Encoded::Voice([0xe0 | channel, (unsigned & 0x7f) as u8, ((unsigned >> 7) & 0x7f) as u8], 3))
         }
-        LiveMidiMessage::Realtime(status) if matches!(status, 0xf8 | 0xfa | 0xfb | 0xfc | 0xfe | 0xff) => {
+        LiveMidiMessage::Realtime(0xf8 | 0xfa | 0xfb | 0xfc | 0xfe | 0xff) => {
             return Some((None, Encoded::Realtime));
         }
         _ => return None,
