@@ -177,7 +177,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let fps = p.get("fps").map(|v| v.as_u64().ok_or_else(|| bad(id, "`fps` must be 24, 25 or 30"))).transpose()?;
                 let rate = crate::edl::frame_rate(e.session(), fps)?;
                 let track = track_param(e, id, p, "track")?.or_else(|| {
-                    let selected = e.session().edit.selected_tracks.iter().copied().collect::<Vec<_>>();
+                    let selected = e.session().edit.selected_tracks.to_vec();
                     (selected.len() == 1).then(|| selected[0])
                 }).or_else(|| {
                     let audio = e.session().tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect::<Vec<_>>();
