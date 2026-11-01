@@ -291,6 +291,38 @@ fn sample_range(value: &Value, rate: u32, allow_negative_start: bool) -> Result<
     Ok((start, length))
 }
 
+/// Sequential OTIO items share one continuous record timeline. Rounding each fractional
+/// duration separately accumulates drift (100 frames at 30000/1001 fps become 160200 samples
+/// instead of 160160 at 48 kHz). Round each *absolute* record boundary, then subtract adjacent
+/// integer boundaries. Compensated summation limits floating-point drift over long edit lists.
+#[derive(Default)]
+struct RecordCursor {
+    exact_samples: f64,
+    correction: f64,
+    samples: i64,
+}
+
+impl RecordCursor {
+    fn advance(&mut self, duration: &Value, rate: u32) -> Result<i64> {
+        let amount = time_samples_unrounded(duration, rate, false)?;
+        if amount <= 0.0 {
+            return Err(invalid_import("record segment must have a positive duration"));
+        }
+        let adjusted = amount - self.correction;
+        let end_exact = self.exact_samples + adjusted;
+        if !end_exact.is_finite() || !(0.0..=(MAX_EXACT_SAMPLE as f64)).contains(&end_exact) {
+            return Err(invalid_import("timeline exceeds the sample limit"));
+        }
+        let end = end_exact.round() as i64;
+        let length =
+            end.checked_sub(self.samples).filter(|length| *length > 0).ok_or_else(|| invalid_import("record segment rounds to zero samples"))?;
+        self.correction = (end_exact - self.exact_samples) - adjusted;
+        self.exact_samples = end_exact;
+        self.samples = end;
+        Ok(length)
+    }
+}
+
 fn hex_digit(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -448,19 +480,17 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
             clips: Vec::new(),
             channels: 1,
         };
-        let mut cursor = 0i64;
+        let mut cursor = RecordCursor::default();
         for child in children(value)? {
             plain_composable(child)?;
             match child.get("OTIO_SCHEMA").and_then(Value::as_str) {
                 Some("Gap.1") => {
-                    let (_, duration) = sample_range(child.get("source_range").ok_or_else(|| invalid_import("gap has no duration"))?, rate, false)?;
+                    let range = child.get("source_range").ok_or_else(|| invalid_import("gap has no duration"))?;
+                    let (_, duration) = sample_range(range, rate, false)?;
                     if duration <= 0 {
                         return Err(invalid_import("gap must have a positive duration"));
                     }
-                    cursor = cursor
-                        .checked_add(duration)
-                        .filter(|v| *v <= MAX_EXACT_SAMPLE)
-                        .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
+                    cursor.advance(range.get("duration").ok_or_else(|| invalid_import("gap has no duration"))?, rate)?;
                 }
                 Some("Clip.1" | "Clip.2") => {
                     reject_nontrivial_metadata(child)?;
@@ -475,14 +505,12 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         .filter(|range| !range.is_null())
                         .or_else(|| available_range.filter(|range| !range.is_null()))
                         .ok_or_else(|| invalid_import("clip needs a source trim or media available range"))?;
-                    let (offset, duration) = sample_range(range, rate, is_clip_two)?;
-                    if duration <= 0 {
+                    let (offset, source_duration) = sample_range(range, rate, is_clip_two)?;
+                    if source_duration <= 0 {
                         return Err(invalid_import("clip must have a positive duration"));
                     }
-                    let end = cursor
-                        .checked_add(duration)
-                        .filter(|v| *v <= MAX_EXACT_SAMPLE)
-                        .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
+                    let start = cursor.samples;
+                    let duration = cursor.advance(range.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate)?;
                     // OTIO's Clip.source_range uses the same media-timecode coordinates as
                     // ExternalReference.available_range. A WAV's first decoded frame corresponds
                     // to the available range's start, not necessarily media-timecode zero.
@@ -586,11 +614,10 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         name: child.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("Audio").to_owned(),
                         source,
                         offset: media_offset,
-                        start: cursor,
+                        start,
                         length: duration,
                         muted: child.get("enabled").and_then(Value::as_bool) == Some(false),
                     });
-                    cursor = end;
                 }
                 _ => return Err(invalid_import("only sequential audio clips and gaps are supported (no transitions or nested compositions)")),
             }
@@ -1067,6 +1094,136 @@ mod tests {
         assert!(engine.redo());
         assert_eq!(engine.session().sources.len(), 1);
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn official_100_frame_gap_timeline_places_audio_at_absolute_sample_160160() {
+        // The official OpenTimelineIO 0.18.1 range_of_child oracle puts this clip at
+        // frame 100 of a 30000/1001-fps track, or sample 160160 at 48 kHz. We duplicate
+        // an official-adapter serialized Gap.1 component, preserving its exact schema.
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-100-gaps-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("hundred-gaps.otioz");
+        let mut timeline: Value = serde_json::from_str(OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO).unwrap();
+        let items = timeline["tracks"]["children"][0]["children"].as_array_mut().unwrap();
+        let clip = items.pop().unwrap();
+        let gap = items.pop().unwrap();
+        items.extend((0..100).map(|_| gap.clone()));
+        items.push(clip);
+
+        let mut left = vec![0.04; 10_000];
+        let mut right = vec![-0.08; 10_000];
+        left[1_602] = 0.67;
+        right[1_602] = -0.59;
+        left[3_203] = -0.48;
+        right[3_203] = 0.73;
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        std::fs::write(&archive, pack_negative_origin_bundle(&timeline, &wav)).unwrap();
+
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let imported = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!(imported["audio_tracks"], 2);
+        assert_eq!(imported["audio_clips"], 2);
+        assert_eq!(imported["media_sources"], 1);
+        let lead = engine.session().tracks.iter().find(|t| t.name == "Fractional lead").unwrap();
+        let back = engine.session().tracks.iter().find(|t| t.name == "Fractional back").unwrap();
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (160_160, 1_602));
+        assert_eq!((back.clips()[0].start, back.clips()[0].length), (0, 1_602));
+        assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 1_602, .. }));
+        assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 3_203, .. }));
+        let prior = soundcraft_mix::render_clips(engine.session(), lead.id, soundcraft_time::Range::new(160_159, 160_160));
+        assert_eq!(prior[0][0], 0.0, "audio must not start before the official record boundary");
+        for (track, position, frame) in [(lead.id, 160_160, 1_602), (back.id, 0, 3_203)] {
+            let rendered = soundcraft_mix::render_clips(engine.session(), track, soundcraft_time::Range::new(position, position + 1));
+            assert_eq!(rendered.len(), 2);
+            assert!((rendered[0][0] - left[frame]).abs() < 0.0001, "left source/timeline offset changed");
+            assert!((rendered[1][0] - right[frame]).abs() < 0.0001, "right source/timeline offset changed");
+        }
+        // Export back into the native 48 kHz OTIO sample timebase, then re-import:
+        // no 40-sample drift may appear from new rounding at integer sample boundaries.
+        let exported = export_audio(engine.session()).unwrap();
+        let mut reimported = Engine::default();
+        let reimport = import_audio(&mut reimported, &project.join("roundtrip.otio"), &exported.json).unwrap();
+        assert_eq!(reimport, Import { tracks: 2, clips: 2, sources: 1 });
+        let again = reimported.session().tracks.iter().find(|t| t.name == "Fractional lead").unwrap();
+        assert_eq!(again.clips()[0].start, 160_160);
+        assert!(matches!(&again.clips()[0].content, ClipContent::Audio { offset: 1_602, .. }));
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn fractional_one_frame_audio_cuts_round_cumulative_boundaries_without_drift() {
+        let (_, media) = decodable_fixture();
+        let mut timeline: Value = serde_json::from_str(OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO).unwrap();
+        let local_url = file_url(&crate::io::checked_media_path(&media).unwrap()).unwrap();
+        for track in timeline["tracks"]["children"].as_array_mut().unwrap() {
+            for item in track["children"].as_array_mut().unwrap() {
+                if item["OTIO_SCHEMA"] == "Clip.2" {
+                    item["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(local_url);
+                }
+            }
+        }
+        let items = timeline["tracks"]["children"][0]["children"].as_array_mut().unwrap();
+        let clip = items.pop().unwrap();
+        items.clear();
+        items.extend((0..100).map(|_| clip.clone()));
+        let mut engine = Engine::default();
+        let result = import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&timeline).unwrap()).unwrap();
+        assert_eq!(result, Import { tracks: 2, clips: 101, sources: 1 });
+        let lead = engine.session().tracks.iter().find(|track| track.name == "Fractional lead").unwrap();
+        assert_eq!(lead.clips().len(), 100);
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (0, 1_602));
+        assert_eq!((lead.clips()[1].start, lead.clips()[1].length), (1_602, 1_601));
+        assert_eq!((lead.clips()[2].start, lead.clips()[2].length), (3_203, 1_602));
+        assert_eq!(lead.clips()[99].start, 158_558);
+        assert_eq!(lead.clips()[99].start + lead.clips()[99].length, 160_160);
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn cumulative_record_cursor_rejects_tiny_negative_and_overflowing_edits_atomically() {
+        let (_, media) = decodable_fixture();
+        let mut timeline: Value = serde_json::from_str(OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO).unwrap();
+        let local_url = file_url(&crate::io::checked_media_path(&media).unwrap()).unwrap();
+        for track in timeline["tracks"]["children"].as_array_mut().unwrap() {
+            for item in track["children"].as_array_mut().unwrap() {
+                if item["OTIO_SCHEMA"] == "Clip.2" {
+                    item["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(local_url);
+                }
+            }
+        }
+        let original_media = std::fs::read(&media).unwrap();
+        let mut tiny = timeline.clone();
+        tiny["tracks"]["children"][0]["children"][0]["source_range"]["duration"]["value"] = json!(0.000001);
+        let mut negative = timeline.clone();
+        negative["tracks"]["children"][0]["children"][0]["source_range"]["duration"]["value"] = json!(-1.0);
+        let mut overflowing = timeline.clone();
+        let items = overflowing["tracks"]["children"][0]["children"].as_array_mut().unwrap();
+        let first = items[0].clone();
+        items.insert(0, first);
+        // The first duration is individually valid, but the *next* one-frame gap
+        // pushes the cumulative record boundary beyond OTIO's exact sample bound.
+        items[0]["source_range"]["duration"]["rate"] = json!(48_000.0);
+        items[0]["source_range"]["duration"]["value"] = json!((MAX_EXACT_SAMPLE - 100) as f64);
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (case, value) in [("subsample gap", tiny), ("negative gap", negative), ("overflowing cumulative gap", overflowing)] {
+            let error = import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert_eq!(*engine.session(), before, "{case} partially imported: {error}");
+            assert!(!engine.can_undo(), "{case} added an undo step");
+            assert_eq!(std::fs::read(&media).unwrap(), original_media, "{case} modified WAV");
+        }
+        std::fs::remove_file(media).unwrap();
     }
 
     #[test]
