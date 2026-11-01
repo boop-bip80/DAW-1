@@ -435,8 +435,39 @@ fn insert_move(e: &mut Engine, p: &Value) -> Result<Value> {
     let t = tracks_required(e, "mix.insert_move", p)?.first().copied().ok_or_else(|| bad("mix.insert_move", "no track"))?;
     let from = slot_of(p, "from", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_move", "`from` slot"))?;
     let to = slot_of(p, "to", INSERT_SLOTS).ok_or_else(|| bad("mix.insert_move", "`to` slot"))?;
-    if let Some(tr) = e.session_mut().track_mut(t) {
-        tr.mixer.inserts.swap(from, to);
+    if from == to {
+        return Err(bad("mix.insert_move", "source and destination are the same insert"));
+    }
+    let tr = e.session().track(t).ok_or_else(|| bad("mix.insert_move", "no such track"))?;
+    let source = tr.mixer.inserts.get(from).ok_or_else(|| bad("mix.insert_move", "source slot is missing"))?.as_ref();
+    let dest = tr.mixer.inserts.get(to).ok_or_else(|| bad("mix.insert_move", "destination slot is missing"))?.as_ref();
+    if source.is_none() && dest.is_none() {
+        return Err(bad("mix.insert_move", "both insert slots are empty"));
+    }
+    // The native rack caches live plugin instances by (track, slot, plugin id). Moving a
+    // third-party insert, or swapping two instances of the *same* plugin id, can otherwise
+    // leave the old instance's opaque state bound to the wrong saved insert. Fail closed
+    // until an explicit state-capture and instance-rekey protocol exists.
+    if [source, dest].into_iter().flatten().any(|insert| soundcraft_mix::is_third_party(&insert.plugin)) {
+        return Err(bad("mix.insert_move", "moving third-party inserts requires state-safe plugin relocation"));
+    }
+    if let (Some(source), Some(dest)) = (source, dest)
+        && source.plugin == dest.plugin
+    {
+        return Err(bad("mix.insert_move", "swapping two instances of the same plugin requires state-safe relocation"));
+    }
+    let tr = e.session_mut().track_mut(t).ok_or_else(|| bad("mix.insert_move", "no such track"))?;
+    tr.mixer.inserts.swap(from, to);
+    // Automation is attached to the processor, not the physical A–J position. Move each
+    // lane's slot key alongside its insert so existing rides keep controlling the same effect.
+    for lane in &mut tr.automation {
+        if let AutoParam::Plugin { slot, .. } = &mut lane.param {
+            if usize::from(*slot) == from {
+                *slot = to as u8;
+            } else if usize::from(*slot) == to {
+                *slot = from as u8;
+            }
+        }
     }
     Ok(json!({}))
 }
@@ -795,6 +826,49 @@ mod tests {
     fn convert(e: &mut Engine, t: TrackId, start: i64, end: i64) {
         e.session_mut().edit.selection = Range::new(start, end);
         e.execute("automation.volume_to_clip_gain", &json!({"track": t.0, "start": start, "end": end})).unwrap();
+    }
+
+    #[test]
+    fn insert_move_swaps_effects_and_their_automation_in_one_undo_step() {
+        let (mut e, track) = tone_session(&[]);
+        let tr = e.session_mut().track_mut(track).unwrap();
+        tr.mixer.inserts[0] = Some(Insert::new("eq_7band"));
+        tr.mixer.inserts[1] = Some(Insert::new("eq_1band"));
+        let a = AutoParam::Plugin { slot: 0, param: "freq".into() };
+        let b = AutoParam::Plugin { slot: 1, param: "gain".into() };
+        tr.lane_mut(&a).set_point(1024, 400.0);
+        tr.lane_mut(&b).set_point(2048, -6.0);
+        e.mark_clean();
+        let undo_before = e.undo_history().len();
+        e.execute("mix.insert_move", &json!({"track": track.0, "from": 0, "to": 1})).unwrap();
+        let tr = e.session().track(track).unwrap();
+        assert_eq!(tr.mixer.inserts[0].as_ref().unwrap().plugin, "eq_1band");
+        assert_eq!(tr.mixer.inserts[1].as_ref().unwrap().plugin, "eq_7band");
+        assert_eq!(tr.lane(&AutoParam::Plugin { slot: 1, param: "freq".into() }).unwrap().points[0].value, 400.0);
+        assert_eq!(tr.lane(&AutoParam::Plugin { slot: 0, param: "gain".into() }).unwrap().points[0].value, -6.0);
+        assert_eq!(e.undo_history().len(), undo_before + 1);
+        e.execute("edit.undo", &json!({})).unwrap();
+        let tr = e.session().track(track).unwrap();
+        assert_eq!(tr.mixer.inserts[0].as_ref().unwrap().plugin, "eq_7band");
+        assert!(tr.lane(&a).is_some() && tr.lane(&b).is_some());
+        e.execute("edit.redo", &json!({})).unwrap();
+        assert_eq!(e.session().track(track).unwrap().mixer.inserts[0].as_ref().unwrap().plugin, "eq_1band");
+    }
+
+    #[test]
+    fn insert_move_refuses_same_plugin_or_third_party_without_mutating_the_session() {
+        let (mut e, track) = tone_session(&[]);
+        e.session_mut().track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("eq_7band"));
+        e.session_mut().track_mut(track).unwrap().mixer.inserts[1] = Some(Insert::new("eq_7band"));
+        e.mark_clean();
+        assert!(e.execute("mix.insert_move", &json!({"track": track.0, "from": 0, "to": 1})).is_err());
+        assert!(!e.is_dirty() && !e.can_undo());
+
+        e.session_mut().track_mut(track).unwrap().mixer.inserts[1] = Some(Insert::new("clap:opaque-native"));
+        e.mark_clean();
+        assert!(e.execute("mix.insert_move", &json!({"track": track.0, "from": 0, "to": 1})).is_err());
+        assert_eq!(e.session().track(track).unwrap().mixer.inserts[1].as_ref().unwrap().plugin, "clap:opaque-native");
+        assert!(!e.is_dirty() && !e.can_undo());
     }
 
     #[test]

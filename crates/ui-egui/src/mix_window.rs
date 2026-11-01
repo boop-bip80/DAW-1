@@ -769,7 +769,12 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     let cmd = if ui.ctx().os().is_mac() { "⌘" } else { "Ctrl+" };
     let tip = format!("{name}: click to open · {cmd}click to bypass · right-click to change");
     let menu_resp = if ins.is_none() { resp.clone() } else { resp.clone().on_hover_text(tip) };
-    let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp) };
+    // Context menus must also be reachable without a mouse. With the insert focused, the
+    // keyboard Menu key or Shift+F10 opens the same popup anchored to the insert widget.
+    let keyboard_menu =
+        resp.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Menu) || (input.modifiers.shift && input.key_pressed(egui::Key::F10)));
+    let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp).anchor_widget(menu_resp.id) };
+    let popup = if keyboard_menu { popup.open_memory(egui::SetOpenCommand::Bool(true)) } else { popup };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
 }
@@ -793,11 +798,25 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         }
         // The command swaps complete plugin slots, not just their labels. Explicitly name the
         // destination so an occupied neighbour is not mistaken for a drag-and-shift operation.
-        if slot > 0 && ui.button(format!("Swap with Insert {}", char::from(b'A' + (slot - 1) as u8))).clicked() {
-            swap_insert(app, ui, id, slot, slot - 1);
+        if slot > 0 {
+            let allowed = app.engine.session().track(id).is_some_and(|track| safe_insert_swap(track, slot, slot - 1));
+            if ui
+                .add_enabled(allowed, egui::Button::new(format!("Swap with Insert {}", char::from(b'A' + (slot - 1) as u8))))
+                .on_disabled_hover_text("Native and same-plugin swaps require safe state relocation")
+                .clicked()
+            {
+                swap_insert(app, ui, id, slot, slot - 1);
+            }
         }
-        if slot + 1 < soundcraft_model::INSERT_SLOTS && ui.button(format!("Swap with Insert {}", char::from(b'A' + (slot + 1) as u8))).clicked() {
-            swap_insert(app, ui, id, slot, slot + 1);
+        if slot + 1 < soundcraft_model::INSERT_SLOTS {
+            let allowed = app.engine.session().track(id).is_some_and(|track| safe_insert_swap(track, slot, slot + 1));
+            if ui
+                .add_enabled(allowed, egui::Button::new(format!("Swap with Insert {}", char::from(b'A' + (slot + 1) as u8))))
+                .on_disabled_hover_text("Native and same-plugin swaps require safe state relocation")
+                .clicked()
+            {
+                swap_insert(app, ui, id, slot, slot + 1);
+            }
         }
         ui.separator();
     }
@@ -891,6 +910,19 @@ fn run_pick(app: &mut SoundApp, ui: &Ui, cmd: &str, params: serde_json::Value) {
         app.ui.status = e;
     }
     ui.close();
+}
+
+/// The playback rack reuses instances keyed by (slot, plugin id). For now only move built-in
+/// inserts whose identities actually change across the destination; other moves require an
+/// explicit host instance/state relocation protocol before they are safe to expose.
+fn safe_insert_swap(track: &Track, from: usize, to: usize) -> bool {
+    if from == to {
+        return false;
+    }
+    let Some(source) = track.mixer.inserts.get(from).and_then(Option::as_ref) else { return false };
+    let Some(dest) = track.mixer.inserts.get(to) else { return false };
+    !soundcraft_mix::is_third_party(&source.plugin)
+        && dest.as_ref().is_none_or(|other| !soundcraft_mix::is_third_party(&other.plugin) && other.plugin != source.plugin)
 }
 
 /// A slot swap changes both the audio graph and the identities found at the two editor keys.
@@ -1785,6 +1817,46 @@ mod tests {
         Harness,
         kittest::{NodeT, Queryable},
     };
+
+    #[test]
+    fn focused_real_insert_opens_context_menu_with_the_keyboard_menu_key() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let track = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Vox"));
+        app.run("mix.insert", serde_json::json!({"track": track.0, "slot": 0, "plugin": "eq_7band"})).expect("insert");
+        app.engine.mark_clean();
+        let mut h = Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(550.0, 360.0)).build_ui_state(
+            move |ui, app: &mut crate::SoundApp| {
+                let track_ref = app.engine.session().track(track).expect("track").clone();
+                let (rect, _) = ui.allocate_exact_size(vec2(130.0, 24.0), egui::Sense::hover());
+                super::insert_slot(app, ui, &track_ref, 0, rect);
+            },
+            app,
+        );
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty());
+        h.get_by_label("Insert A for Vox").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Menu);
+        h.run_steps(2);
+        assert!(!h.get_by_label("Swap with Insert B").accesskit_node().is_disabled());
+    }
+
+    #[test]
+    fn insert_menu_disables_unsafe_same_plugin_or_native_moves() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let track = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Guitar"));
+        app.engine.session_mut().track_mut(track).unwrap().mixer.inserts[0] = Some(soundcraft_model::Insert::new("eq_7band"));
+        app.engine.session_mut().track_mut(track).unwrap().mixer.inserts[1] = Some(soundcraft_model::Insert::new("eq_7band"));
+        assert!(!super::safe_insert_swap(app.engine.session().track(track).unwrap(), 0, 1));
+        app.engine.session_mut().track_mut(track).unwrap().mixer.inserts[1] = Some(soundcraft_model::Insert::new("vst3:opaque-native"));
+        assert!(!super::safe_insert_swap(app.engine.session().track(track).unwrap(), 0, 1));
+        app.engine.session_mut().track_mut(track).unwrap().mixer.inserts[1] = None;
+        assert!(super::safe_insert_swap(app.engine.session().track(track).unwrap(), 0, 1));
+        app.engine.session_mut().track_mut(track).unwrap().mixer.inserts[0] = None;
+        assert!(!super::safe_insert_swap(app.engine.session().track(track).unwrap(), 0, 1));
+    }
 
     #[test]
     fn insert_context_menu_swaps_effects_with_keyboard_and_undo_without_stale_editors() {
