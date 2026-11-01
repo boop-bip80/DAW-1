@@ -18,14 +18,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soundcraft-stereo-aa-cli-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("soundcraft-stereo-aa-cli-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -60,10 +54,7 @@ fn checked(label: &str, output: &Output) {
 fn command_result(output: &Output, command: &str) -> serde_json::Value {
     let text = String::from_utf8_lossy(&output.stdout);
     let prefix = format!("{command}: ");
-    let result = text
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("{command} had no result in stdout: {text}"));
+    let result = text.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap_or_else(|| panic!("{command} had no result in stdout: {text}"));
     serde_json::from_str(result).unwrap()
 }
 
@@ -75,12 +66,7 @@ fn write_distinct_stereo(path: &Path) {
             *sample = level * radians.sin() as f32;
         }
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     std::fs::write(path, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
 }
 
@@ -90,10 +76,7 @@ fn read_mix(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, RATE, "unexpected bounce sample rate");
     assert_eq!(audio.frames(), FRAMES, "unexpected bounced duration");
     assert_eq!(audio.num_channels(), 2, "linked AA cut should bounce to stereo");
-    assert!(
-        audio.channels.iter().flatten().all(|sample| sample.is_finite()),
-        "stereo EDL roundtrip produced a non-finite audio sample"
-    );
+    assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()), "stereo EDL roundtrip produced a non-finite audio sample");
     audio
 }
 
@@ -116,14 +99,8 @@ fn check_channel_isolation_and_gain(audio: &AudioBuffer) {
 
     // Broad bounds allow PCM16 rounding and any ordinary stereo pan law but
     // reject missing channels, severe attenuation and duplicated full-scale audio.
-    assert!(
-        left_400 > 0.18 && left_400 < 0.34,
-        "left 400-Hz level was altered: {left_400}"
-    );
-    assert!(
-        right_800 > 0.09 && right_800 < 0.17,
-        "right 800-Hz level was altered: {right_800}"
-    );
+    assert!(left_400 > 0.18 && left_400 < 0.34, "left 400-Hz level was altered: {left_400}");
+    assert!(right_800 > 0.09 && right_800 < 0.17, "right 800-Hz level was altered: {right_800}");
     assert!(
         left_800 < left_400 * 0.01 && right_400 < right_800 * 0.01,
         "AA import crossed or mixed channels: L400={left_400}, L800={left_800}, R400={right_400}, R800={right_800}"
@@ -152,18 +129,9 @@ fn stereo_aa_edl_roundtrip_preserves_channels_and_rejects_mixed_a_aa() {
     // 48,000 / 24 = 2,000 samples per EDL frame. The middle cut is six frames
     // from time zero and yields exactly two consecutive six-frame AA events.
     assert_eq!(RATE as usize / 24 * 6, FRAME_BOUNDARY);
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"path": source.to_string_lossy()})
-    );
-    let save = format!(
-        "session.save={}",
-        serde_json::json!({"path": project.to_string_lossy()})
-    );
-    let export = format!(
-        "file.export_edl={}",
-        serde_json::json!({"path": edl.to_string_lossy(), "track": "Stereo", "fps": 24})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"path": source.to_string_lossy()}));
+    let save = format!("session.save={}", serde_json::json!({"path": project.to_string_lossy()}));
+    let export = format!("file.export_edl={}", serde_json::json!({"path": edl.to_string_lossy(), "track": "Stereo", "fps": 24}));
     let exported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .args(["--cmd", r#"edit.select={"tracks":["Stereo"]}"#])
@@ -183,17 +151,12 @@ fn stereo_aa_edl_roundtrip_preserves_channels_and_rejects_mixed_a_aa() {
     let text = std::fs::read_to_string(&edl).unwrap();
     assert!(text.contains("FCM: NON-DROP FRAME"), "expected non-drop EDL");
     assert_eq!(
-        text.lines()
-            .filter(|line| line.starts_with("00") && line.contains(" AA    C "))
-            .count(),
+        text.lines().filter(|line| line.starts_with("00") && line.contains(" AA    C ")).count(),
         2,
         "EDL must have two linked stereo AA cuts (not separate mono events)"
     );
 
-    let import_edl = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path": edl.to_string_lossy(), "fps": 24})
-    );
+    let import_edl = format!("file.import_edl={}", serde_json::json!({"path": edl.to_string_lossy(), "fps": 24}));
     let imported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_edl])
         .arg("--bounce")
@@ -211,21 +174,9 @@ fn stereo_aa_edl_roundtrip_preserves_channels_and_rejects_mixed_a_aa() {
     let reimported_mix = read_mix(&after);
     check_channel_isolation_and_gain(&original_mix);
     check_channel_isolation_and_gain(&reimported_mix);
-    for (channel, (original, reimported)) in original_mix
-        .channels
-        .iter()
-        .zip(&reimported_mix.channels)
-        .enumerate()
-    {
-        let max_delta = original
-            .iter()
-            .zip(reimported)
-            .map(|(left, right)| (left - right).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            max_delta < 0.001,
-            "AA roundtrip changed output channel {channel}: max sample delta {max_delta}"
-        );
+    for (channel, (original, reimported)) in original_mix.channels.iter().zip(&reimported_mix.channels).enumerate() {
+        let max_delta = original.iter().zip(reimported).map(|(left, right)| (left - right).abs()).fold(0.0_f32, f32::max);
+        assert!(max_delta < 0.001, "AA roundtrip changed output channel {channel}: max sample delta {max_delta}");
     }
 
     // One mono event followed by a stereo AA event is not a linked-stereo EDL.
@@ -235,10 +186,7 @@ fn stereo_aa_edl_roundtrip_preserves_channels_and_rejects_mixed_a_aa() {
     assert_eq!(mixed.matches(" AA    C ").count(), 1);
     assert_eq!(mixed.matches(" A     C ").count(), 1);
     std::fs::write(&mixed_edl, mixed).unwrap();
-    let import_mixed = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path": mixed_edl.to_string_lossy(), "fps": 24})
-    );
+    let import_mixed = format!("file.import_edl={}", serde_json::json!({"path": mixed_edl.to_string_lossy(), "fps": 24}));
     let rejected = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_mixed])
         .arg("--bounce")
@@ -253,8 +201,5 @@ fn stereo_aa_edl_roundtrip_preserves_channels_and_rejects_mixed_a_aa() {
         "failure did not report mixed channel events:\n{}",
         String::from_utf8_lossy(&rejected.stderr)
     );
-    assert!(
-        !bad_bounce.exists() && !bad_project.exists(),
-        "a rejected EDL left a bounce or session on disk"
-    );
+    assert!(!bad_bounce.exists() && !bad_project.exists(), "a rejected EDL left a bounce or session on disk");
 }
