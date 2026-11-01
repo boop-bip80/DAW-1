@@ -1370,7 +1370,9 @@ impl Instance {
         }
     }
 
-    fn stop_processing(&mut self) {
+    /// Stop the native processing state while still on the audio/render thread. A later
+    /// main-thread `deactivate`/`destroy` then sees `processing == false`.
+    pub(crate) fn stop_processing(&mut self) {
         if self.processing {
             if let Some(f) = self.vt().stop_processing {
                 // SAFETY: valid instance in the processing state.
