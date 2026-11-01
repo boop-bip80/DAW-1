@@ -22,6 +22,7 @@
 //! through handles taken from each instance before it leaves ([`Player::open_editor`]).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod clock;
 pub mod devices;
 pub mod midi_out;
 pub mod record;
@@ -149,6 +150,8 @@ struct Fault {
     beats: std::sync::atomic::AtomicU64,
     /// The UI has been told.
     reported: AtomicBool,
+    /// Approximate single-output-stream clock rate relative to its configured rate.
+    output_rate: clock::RateTelemetry,
 }
 
 impl Fault {
@@ -621,6 +624,13 @@ impl Player {
         #[cfg(target_arch = "wasm32")]
         let stalled = false;
         self.fault.trouble(stalled)
+    }
+
+    /// Diagnostic-only output stream rate error in parts per million; `None` until a stable
+    /// timestamp window has been observed. This is not an input/output clock alignment or a
+    /// round-trip latency measurement. CPAL's output timestamps predict DAC playback times.
+    pub fn output_rate_error_ppm(&self) -> Option<i32> {
+        self.fault.output_rate.read()
     }
 
     fn side(&self) -> std::sync::MutexGuard<'_, Side> {
@@ -1110,13 +1120,17 @@ where
 {
     use cpal::traits::DeviceTrait;
     let frame = channels.max(1);
+    let mut rate_probe = clock::StreamRateProbe::new(config.sample_rate);
     let mut scratch = vec![0.0f32; 8192 * frame];
     let chunk = scratch.len();
     let (failed, guard, gone) = (Arc::clone(fault), Arc::clone(shared), Arc::clone(fault));
     device.build_output_stream(
         config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             mark_audio_thread();
+            // One observation per original CPAL callback, not per scratch-buffer chunk. Compare
+            // only timestamps *within this output stream*; input origins may be unrelated.
+            failed.output_rate.publish(rate_probe.observe(info.timestamp().playback.as_nanos(), data.len() / frame));
             for out in data.chunks_mut(chunk) {
                 let Some(s) = scratch.get_mut(..out.len()) else { return };
                 guarded_block(&failed, &guard, s, |d| state.fill(d, channels));
