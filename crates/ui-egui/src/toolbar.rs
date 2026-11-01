@@ -235,10 +235,11 @@ fn fmt_pos(app: &SoundApp, at: i64, f: TimeFormat) -> String {
 /// Main and sub position counters, a main-counter format menu, selection readouts and dirty/device status.
 fn counters(app: &mut SoundApp, ui: &mut Ui) {
     let t = Tokens::current();
-    let (main_fmt, sub_fmt, sel) = {
+    let (main_fmt, sub_choice, sel) = {
         let s = app.engine.session();
-        (s.edit.main_counter, s.edit.sub_counter.unwrap_or(TimeFormat::Samples), s.edit.selection)
+        (s.edit.main_counter, s.edit.sub_counter, s.edit.selection)
     };
+    let sub_fmt = sub_choice.unwrap_or(TimeFormat::Samples);
     let pos = app.position();
     let (r, _) = ui.allocate_exact_size(vec2(318.0, 64.0), Sense::hover());
     ui.painter().rect(r, CornerRadius::same(4), t.counter_bg, Stroke::new(1.0, t.counter_border), StrokeKind::Inside);
@@ -246,10 +247,15 @@ fn counters(app: &mut SoundApp, ui: &mut Ui) {
     let txt = fmt_pos(app, pos, main_fmt);
     ui.painter().text(pos2(main_r.max.x - 18.0, main_r.center().y), Align2::RIGHT_CENTER, txt, mono(26.0), t.counter_text);
     let resp = ui.interact(main_r, ui.scope_id().with("main_counter"), Sense::click());
+    resp.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), "Main counter format");
+        info.current_text_value = Some(main_fmt.label().into());
+        info
+    });
     icons::draw(ui.painter(), Rect::from_center_size(pos2(main_r.max.x - 9.0, main_r.center().y), vec2(10.0, 10.0)), "triangle_down", t.text_dim);
     egui::Popup::menu(&resp).show(|ui| {
         for f in TimeFormat::ALL {
-            if ui.selectable_label(main_fmt == f, f.label()).clicked() {
+            if ui.selectable_label(main_fmt == f, f.label()).clicked() && main_fmt != f {
                 let _ = app.run("view.main_counter", json!({"format": f.id()}));
             }
         }
@@ -271,6 +277,33 @@ fn counters(app: &mut SoundApp, ui: &mut Ui) {
     ui.painter().line_segment([pos2(r.min.x + 6.0, r.max.y - 21.0), pos2(r.max.x - 6.0, r.max.y - 21.0)], Stroke::new(1.0, t.counter_rule));
     ui.painter().text(pos2(r.min.x + 10.0, y), Align2::LEFT_CENTER, "Sub", regular(11.0), t.counter_label);
     ui.painter().text(pos2(r.min.x + 150.0, y), Align2::RIGHT_CENTER, fmt_pos(app, pos, sub_fmt), mono(11.0), t.counter_text);
+    let sub_r = Rect::from_min_max(pos2(r.min.x + 7.0, r.max.y - 20.0), pos2(r.min.x + 175.0, r.max.y - 1.0));
+    let sub_resp = ui.interact(sub_r, ui.scope_id().with("sub_counter_format"), Sense::click());
+    sub_resp.widget_info(|| {
+        let mut info = egui::WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), "Sub counter format");
+        info.current_text_value = Some(sub_choice.map_or("Default (Samples)", |fmt| fmt.label()).into());
+        info
+    });
+    icons::draw(ui.painter(), Rect::from_center_size(pos2(sub_r.max.x - 8.0, sub_r.center().y), vec2(10.0, 10.0)), "triangle_down", t.text_dim);
+    egui::Popup::menu(&sub_resp).show(|ui| {
+        let default = sub_choice.is_none();
+        if ui.selectable_label(default, "Default (Samples)").clicked()
+            && !default
+            && let Err(error) = app.run("view.sub_counter", json!({"format": null}))
+        {
+            app.ui.status = format!("Could not reset Sub counter format: {error}");
+        }
+        ui.separator();
+        for format in TimeFormat::ALL {
+            let chosen = sub_choice == Some(format);
+            if ui.selectable_label(chosen, format.label()).clicked()
+                && !chosen
+                && let Err(error) = app.run("view.sub_counter", json!({"format": format.id()}))
+            {
+                app.ui.status = format!("Could not change Sub counter format: {error}");
+            }
+        }
+    });
     let st = if app.engine.is_dirty() { "modified" } else { "saved" };
     let dev = app.player.as_ref().map_or("no audio engine", |p| if p.silent { "silent clock" } else { "audio on" });
     ui.painter().text(pos2(r.max.x - 8.0, y), Align2::RIGHT_CENTER, format!("{st} · {dev}"), regular(10.0), t.text_dim);
@@ -455,5 +488,79 @@ fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
     for c in 0..2 {
         let rr = Rect::from_min_size(pos2(r.min.x + 2.0 + c as f32 * (w + 2.0), r.min.y), vec2(w, r.height()));
         crate::widgets::meter(ui, rr, m.level[c], m.hold[c], m.clip);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn counter_harness(app: SoundApp) -> Harness<'static, SoundApp> {
+        Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(750.0, 480.0))
+            .build_ui_state(|ui, app: &mut SoundApp| counters(app, ui), app)
+    }
+
+    #[test]
+    fn sub_counter_default_fallback_and_main_counter_are_accessible_without_dirtying() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.session_mut().edit.sub_counter = None;
+        app.engine.mark_clean();
+        let mut h = counter_harness(app);
+        h.run_steps(3);
+        let sub = h.get_by_role_and_label(Role::ComboBox, "Sub counter format");
+        assert!(sub.rect().width() > 100.0, "Sub counter is a genuine clickable picker");
+        assert_eq!(sub.value().as_deref(), Some("Default (Samples)"), "None must keep the explicit Samples fallback");
+        let main = h.get_by_role_and_label(Role::ComboBox, "Main counter format");
+        assert_eq!(main.value().as_deref(), Some("Min:Secs"));
+        assert_eq!(h.state().engine.session().edit.sub_counter, None);
+        assert!(!h.state().engine.is_dirty(), "merely painting both counters must not mutate the document");
+    }
+
+    #[test]
+    fn sub_counter_popup_changes_only_sub_timebase_and_reselecting_it_is_clean() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.session_mut().edit.sub_counter = None;
+        app.engine.mark_clean();
+        let mut h = counter_harness(app);
+        h.run_steps(3);
+        let undo_before = h.state().engine.undo_history().len();
+        let main_before = h.state().engine.session().edit.main_counter;
+
+        h.get_by_role_and_label(Role::ComboBox, "Sub counter format").click();
+        h.run_steps(2);
+        h.get_by_label("Timecode").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.sub_counter, Some(TimeFormat::Timecode));
+        assert_eq!(h.get_by_role_and_label(Role::ComboBox, "Sub counter format").value().as_deref(), Some("Timecode"));
+        assert_eq!(h.state().engine.session().edit.main_counter, main_before, "Sub format must not overwrite the main counter");
+        assert!(h.state().engine.is_dirty(), "a new timebase persists as an edit preference");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before, "the existing view preference command is intentionally non-undoable");
+
+        h.state_mut().engine.mark_clean();
+        h.get_by_role_and_label(Role::ComboBox, "Sub counter format").click();
+        h.run_steps(2);
+        h.get_by_label("Timecode").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty(), "selecting the active timebase must not re-run the mutating command");
+
+        h.get_by_role_and_label(Role::ComboBox, "Sub counter format").click();
+        h.run_steps(2);
+        h.get_by_label("Default (Samples)").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.sub_counter, None);
+        assert!(h.state().engine.is_dirty(), "restoring the fallback preference is a genuine change");
+
+        h.state_mut().engine.mark_clean();
+        h.get_by_role_and_label(Role::ComboBox, "Sub counter format").click();
+        h.run_steps(2);
+        h.get_by_label("Samples").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.sub_counter, Some(TimeFormat::Samples), "explicit Samples differs from default None");
+        assert_eq!(h.get_by_role_and_label(Role::ComboBox, "Sub counter format").value().as_deref(), Some("Samples"));
     }
 }
