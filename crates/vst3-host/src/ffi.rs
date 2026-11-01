@@ -1344,11 +1344,7 @@ unsafe impl Send for Instance {}
 /// Native VST3 bus metadata must fit the buffers we provide. Truncating a plugin's declared
 /// layout would let its processor index buses/channels that the host never allocated.
 fn checked_layout_count(value: i32, max: i32, kind: &str) -> Result<i32, Vst3Error> {
-    if (0..=max).contains(&value) {
-        Ok(value)
-    } else {
-        Err(Vst3Error::Process(format!("{kind} {value} outside supported range 0..={max}")))
-    }
+    if (0..=max).contains(&value) { Ok(value) } else { Err(Vst3Error::Process(format!("{kind} {value} outside supported range 0..={max}"))) }
 }
 
 impl Instance {
