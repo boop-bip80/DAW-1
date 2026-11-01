@@ -19,6 +19,7 @@ pub mod io;
 pub mod midi_record;
 pub mod otio;
 pub mod otio_bundle;
+pub mod otio_bundle_import;
 pub mod score;
 
 use serde_json::{Value, json};
