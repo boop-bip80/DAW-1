@@ -15,7 +15,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  quality:
+    # A failing gate prevents any packaging, signing, tag or draft-release job from starting.
+    permissions:
+      contents: read
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      os: '["ubuntu-24.04","macos-latest","windows-latest"]'
+      timeout-minutes: 90
+      packages: >-
+        pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
+        libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
+        libgl1-mesa-dev libasound2-dev
+
   release:
+    needs: quality
     # The shared workflow creates the draft release, which needs write access to contents.
     permissions:
       contents: write
