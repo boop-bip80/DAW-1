@@ -1551,6 +1551,8 @@ impl Instance {
         let (din, dout) = (sv::BusDirections_::kInput, sv::BusDirections_::kOutput);
         let nin = self.bus_count(audio, din, "audio input bus count")?;
         let nout = self.bus_count(audio, dout, "audio output bus count")?;
+        // Event output is currently ignored, but its advertised bus count must be valid too.
+        let _ = self.bus_count(event, dout, "event output bus count")?;
         let current = |s: &Self, dir: sv::BusDirections, n: i32| -> Vec<sv::SpeakerArrangement> {
             (0..n).map(|i| s.arrangement(dir, i).unwrap_or(sv::SpeakerArr::kStereo)).collect()
         };
