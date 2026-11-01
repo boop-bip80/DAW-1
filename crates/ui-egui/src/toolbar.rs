@@ -33,6 +33,7 @@ pub fn show(app: &mut SoundApp, ui: &mut Ui) {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 edit_modes(app, ui);
                 zoom_group(app, ui);
+                marker_navigation(app, ui);
                 tools(app, ui);
                 counters(app, ui);
                 grid_nudge(app, ui);
@@ -102,6 +103,34 @@ fn edit_modes(app: &mut SoundApp, ui: &mut Ui) {
             }
             resp.on_hover_text(edit_mode_tooltip(m, state.locked, &cmd, fkey));
         }
+    });
+}
+
+/// Edit-marker navigation uses the edit insertion point, exactly like the engine's `markers.next`
+/// and `markers.previous` commands. Enabled state is read-only; navigation itself is non-undoable
+/// and is only requested by an actual button activation.
+fn marker_navigation(app: &mut SoundApp, ui: &mut Ui) {
+    let s = app.engine.session();
+    let at = s.edit.selection.start;
+    let has_previous = s.markers.iter().any(|marker| marker.start < at);
+    let has_next = s.markers.iter().any(|marker| marker.start > at);
+    group(ui, 116.0, 52.0, |ui, _| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
+            ui.label(egui::RichText::new("MARKERS").size(10.0).color(Tokens::current().text_dim));
+            ui.horizontal(|ui| {
+                let previous = ui.add_enabled(has_previous, egui::Button::new("Prev").min_size(vec2(48.0, 22.0)));
+                previous.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, has_previous, "Previous marker"));
+                if previous.on_hover_text("Go to previous marker from the edit insertion point").clicked() {
+                    let _ = app.run("markers.previous", json!({}));
+                }
+                let next = ui.add_enabled(has_next, egui::Button::new("Next").min_size(vec2(48.0, 22.0)));
+                next.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, has_next, "Next marker"));
+                if next.on_hover_text("Go to next marker from the edit insertion point").clicked() {
+                    let _ = app.run("markers.next", json!({}));
+                }
+            });
+        });
     });
 }
 
@@ -496,13 +525,82 @@ fn output_meter(app: &mut SoundApp, ui: &mut Ui) {
 mod tests {
     use super::*;
     use egui::accesskit::Role;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
 
     fn counter_harness(app: SoundApp) -> Harness<'static, SoundApp> {
         Harness::builder()
             .with_context_setup(crate::fonts::install)
             .with_size(vec2(750.0, 480.0))
             .build_ui_state(|ui, app: &mut SoundApp| counters(app, ui), app)
+    }
+
+    fn marker_harness(app: SoundApp) -> Harness<'static, SoundApp> {
+        Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(560.0, 320.0))
+            .build_ui_state(|ui, app: &mut SoundApp| marker_navigation(app, ui), app)
+    }
+
+    #[test]
+    fn marker_navigation_shows_disabled_accessible_buttons_without_mutating_an_empty_session() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.mark_clean();
+        let mut h = marker_harness(app);
+        h.run_steps(3);
+        let undo_before = h.state().engine.undo_history().len();
+        let journal_before = h.state().engine.journal.len();
+        for label in ["Previous marker", "Next marker"] {
+            let button = h.get_by_role_and_label(Role::Button, label);
+            assert!(button.accesskit_node().is_disabled(), "{label} must be disabled with no markers");
+            assert!(button.rect().width() >= 48.0, "{label} must keep a usable click target");
+            button.click();
+            h.run_steps(2);
+        }
+        assert!(!h.state().engine.is_dirty(), "painting or clicking disabled marker navigation cannot edit the session");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before);
+        assert_eq!(h.state().engine.journal.len(), journal_before);
+    }
+
+    #[test]
+    fn marker_navigation_keyboard_moves_edit_cursor_and_locates_without_undo() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.run("markers.add", json!({"name": "Verse", "at": 1_000})).expect("first marker");
+        app.run("markers.add", json!({"name": "Chorus", "at": 2_000})).expect("second marker");
+        app.engine.session_mut().edit.selection = soundcraft_time::Range::point(1_500);
+        app.engine.session_mut().edit.playhead = 1_500;
+        app.engine.mark_clean();
+        let mut h = marker_harness(app);
+        h.run_steps(3);
+        assert!(!h.get_by_label("Previous marker").accesskit_node().is_disabled());
+        assert!(!h.get_by_label("Next marker").accesskit_node().is_disabled());
+        let undo_before = h.state().engine.undo_history().len();
+        let journal_before = h.state().engine.journal.len();
+
+        h.get_by_label("Next marker").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.selection.start, 2_000);
+        assert_eq!(h.state().engine.session().edit.playhead, 2_000);
+        assert_eq!(h.state().engine.transport_requests.last(), Some(&soundcraft_engine::TransportRequest::Locate(2_000)));
+        assert!(h.get_by_label("Next marker").accesskit_node().is_disabled(), "last marker has no next marker");
+        assert!(!h.get_by_label("Previous marker").accesskit_node().is_disabled());
+
+        h.get_by_label("Previous marker").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.selection.start, 1_000);
+        assert_eq!(h.state().engine.session().edit.playhead, 1_000);
+        assert_eq!(h.state().engine.transport_requests.last(), Some(&soundcraft_engine::TransportRequest::Locate(1_000)));
+        assert!(h.get_by_label("Previous marker").accesskit_node().is_disabled(), "first marker has no previous marker");
+        assert!(!h.get_by_label("Next marker").accesskit_node().is_disabled());
+        assert!(!h.state().engine.is_dirty(), "navigation changes insertion position, not saved document content");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before, "marker navigation is intentionally non-undoable");
+        assert_eq!(h.state().engine.journal.len(), journal_before, "noundo navigation must not append mutation journal entries");
+        h.run_steps(3);
+        assert_eq!(h.state().engine.session().edit.playhead, 1_000, "repainting must not navigate again");
     }
 
     #[test]
