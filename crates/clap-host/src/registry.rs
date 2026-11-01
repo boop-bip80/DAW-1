@@ -145,16 +145,7 @@ fn param_info(inst: &Instance, p: &RawParam) -> Option<ParamInfo> {
         (true, false) => p.name.clone(),
         (false, false) => format!("{}/{}", p.module, p.name),
     };
-    Some(ParamInfo {
-        id: leak(p.id.to_string()),
-        name: leak(name),
-        min,
-        max,
-        default,
-        unit,
-        taper: Taper::Linear,
-        choices,
-    })
+    Some(ParamInfo { id: leak(p.id.to_string()), name: leak(name), min, max, default, unit, taper: Taper::Linear, choices })
 }
 
 /// Builds and leaks the `PluginInfo` for one plugin type. Called at most once per id (cached).
