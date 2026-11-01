@@ -14,10 +14,11 @@ use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
 use soundcraft_midi::{
     Sequence,
-    live::{LiveMidiMessage, LiveMidiTake, TimedMidiMessage},
+    live::{LiveMidiMessage, LiveMidiTake, MAX_LIVE_TAKE_EVENTS, TimedMidiMessage},
 };
-use soundcraft_model::TrackId;
+use soundcraft_model::{MidiInputRoute, TrackId};
 use soundcraft_time::{MAX_POSITION, SampleRate, Samples, TempoMap};
+use std::collections::BTreeMap;
 
 /// Maximum number of MIDI input events handled in one UI/control-thread poll.
 pub const MAX_MIDI_DRAIN_PER_POLL: usize = 4096;
@@ -26,18 +27,25 @@ const MAX_RECORD_MICROS: u64 = 24 * 60 * 60 * 1_000_000;
 
 struct TrackCapture {
     id: TrackId,
-    recorder: Option<LiveMidiTake>,
+    route: MidiInputRoute,
+    /// Events with no source identity (legacy/control callers) are isolated from tagged ports.
+    legacy_recorder: Option<LiveMidiTake>,
+    /// Separate note-state machines per port prevent one keyboard's Note Off from closing a
+    /// different keyboard's held note on an All Enabled track.
+    per_port: BTreeMap<String, LiveMidiTake>,
     completed: Option<Sequence>,
 }
 
-/// One MIDI recording pass, broadcast to the MIDI/instrument tracks armed at its start.
-/// Input port/channel filtering and external MIDI output remain separate future work.
+/// One MIDI recording pass, routed to the MIDI/instrument tracks armed at its start.
+/// Port/channel settings are frozen for the pass; external MIDI output remains future work.
 pub struct MidiRecordBridge {
     start_sample: Samples,
     start_tick: i64,
     sample_rate: SampleRate,
     tempo: TempoMap,
     tracks: Vec<TrackCapture>,
+    /// Total delivered voice messages, across every target, bounded before the mutation.
+    recorded_messages: usize,
     /// Device timestamp paired with a transport position at the same observed moment.
     anchor: Option<(u64, Samples)>,
     last_timestamp: Option<u64>,
@@ -64,7 +72,7 @@ impl MidiRecordBridge {
             .tracks
             .iter()
             .filter(|t| t.mixer.record_arm && t.kind.is_midi() && !t.inactive)
-            .map(|t| TrackCapture { id: t.id, recorder: Some(LiveMidiTake::default()), completed: None })
+            .map(|t| TrackCapture { id: t.id, route: t.midi_input.clone(), legacy_recorder: None, per_port: BTreeMap::new(), completed: None })
             .collect();
         if tracks.is_empty() {
             return Err(problem("record-enable at least one MIDI or instrument track"));
@@ -72,12 +80,21 @@ impl MidiRecordBridge {
         if tracks.len() > 64 {
             return Err(problem("no more than 64 MIDI or instrument tracks can be recorded in one pass"));
         }
+        for track in &tracks {
+            if track.route.channel.is_some_and(|channel| !(1..=16).contains(&channel)) {
+                return Err(problem("record target has an invalid one-based MIDI input channel"));
+            }
+            if track.route.port.as_deref().is_some_and(|port| port.is_empty() || port.chars().count() > 64 || port.contains('=')) {
+                return Err(problem("record target has an invalid MIDI input port name"));
+            }
+        }
         let start_sample = engine.transport.position.clamp(0, MAX_POSITION - 1);
         Ok(Self {
             start_tick: session.tempo.samples_to_ticks(start_sample, session.sample_rate),
             sample_rate: session.sample_rate,
             tempo: session.tempo.clone(),
             tracks,
+            recorded_messages: 0,
             start_sample,
             anchor: None,
             last_timestamp: None,
@@ -124,21 +141,46 @@ impl MidiRecordBridge {
         Ok(at_sample.saturating_add(delta_samples).min(MAX_POSITION))
     }
 
-    /// Consume one decoded device message off the realtime thread. The same message reaches
-    /// every armed MIDI/instrument track, as when multiple tracks listen to one input port.
+    /// Legacy source-less input for direct/control callers. This reaches All Enabled routes,
+    /// subject to their channel filter, but deliberately cannot satisfy a named-port route.
     pub fn record_event(&mut self, event: TimedMidiMessage) -> Result<()> {
+        self.record_event_from(None, event)
+    }
+
+    /// The desktop MIDI consumer supplies an unambiguous, stable port name for each decoded
+    /// packet. Track routes and channel filters are evaluated before mutating any note state.
+    /// Two ports with the same channel/pitch have *separate* held-note tables on shared tracks.
+    pub fn record_sourced_event(&mut self, port_name: &str, event: TimedMidiMessage) -> Result<()> {
+        if port_name.is_empty() {
+            return Err(problem("recorded MIDI events require a non-empty input port name"));
+        }
+        self.record_event_from(Some(port_name), event)
+    }
+
+    fn record_event_from(&mut self, port: Option<&str>, event: TimedMidiMessage) -> Result<()> {
         if self.commit_end.is_some() {
             return Err(problem("cannot append MIDI events after finishing a take"));
         }
         let at_sample = self.sample_for(event.timestamp_micros)?;
         if !matches!(event.message, LiveMidiMessage::Realtime(_)) {
+            let recipients = self.tracks.iter().filter(|track| route_matches(&track.route, port, event.message)).count();
+            if self.recorded_messages.saturating_add(recipients) > MAX_LIVE_TAKE_EVENTS {
+                return Err(problem("MIDI take exceeds its bounded total recorded event limit"));
+            }
             let tick = self.tempo.samples_to_ticks(at_sample, self.sample_rate).saturating_sub(self.start_tick).max(0);
             for track in &mut self.tracks {
-                if let Some(recorder) = &mut track.recorder {
+                if route_matches(&track.route, port, event.message) {
+                    let recorder = match port {
+                        Some(name) => track.per_port.entry(name.to_owned()).or_default(),
+                        None => track.legacy_recorder.get_or_insert_with(LiveMidiTake::default),
+                    };
                     recorder.record(tick, event.message).map_err(|err| problem(format!("record MIDI event: {err}")))?;
                 }
             }
-            self.last_event_sample = self.last_event_sample.max(at_sample);
+            self.recorded_messages = self.recorded_messages.saturating_add(recipients);
+            if recipients > 0 {
+                self.last_event_sample = self.last_event_sample.max(at_sample);
+            }
         }
         self.last_timestamp = Some(event.timestamp_micros);
         Ok(())
@@ -192,8 +234,20 @@ impl MidiRecordBridge {
         };
         let end_tick = self.tempo.samples_to_ticks(end, self.sample_rate).saturating_sub(self.start_tick).max(1);
         for track in &mut self.tracks {
-            if let Some(recorder) = track.recorder.take() {
-                track.completed = Some(recorder.finish(end_tick).map_err(|err| problem(format!("finish MIDI take: {err}")))?);
+            if track.completed.is_none() {
+                let mut merged = Sequence::default();
+                if let Some(recorder) = track.legacy_recorder.take() {
+                    let seq = recorder.finish(end_tick).map_err(|err| problem(format!("finish MIDI take: {err}")))?;
+                    merged.notes.extend(seq.notes);
+                    merged.ctrls.extend(seq.ctrls);
+                }
+                for recorder in std::mem::take(&mut track.per_port).into_values() {
+                    let seq = recorder.finish(end_tick).map_err(|err| problem(format!("finish MIDI take: {err}")))?;
+                    merged.notes.extend(seq.notes);
+                    merged.ctrls.extend(seq.ctrls);
+                }
+                merged.sort();
+                track.completed = Some(merged);
             }
         }
         let takes: Vec<Value> = self
@@ -228,6 +282,31 @@ impl MidiRecordBridge {
                 self.dropped_events, self.truncated_packets
             ));
         }
+    }
+}
+
+/// Explicit one-based route channels match the zero-based live MIDI decoder. Realtime messages
+/// have no channel and are discarded before this function is called.
+fn route_matches(route: &MidiInputRoute, source: Option<&str>, message: LiveMidiMessage) -> bool {
+    if route.port.as_deref().is_some_and(|selected| Some(selected) != source) {
+        return false;
+    }
+    match route.channel {
+        None => true,
+        Some(one_based) => message_channel(message).is_some_and(|decoded| u16::from(decoded) + 1 == u16::from(one_based)),
+    }
+}
+
+fn message_channel(message: LiveMidiMessage) -> Option<u8> {
+    match message {
+        LiveMidiMessage::NoteOn { channel, .. }
+        | LiveMidiMessage::NoteOff { channel, .. }
+        | LiveMidiMessage::PolyPressure { channel, .. }
+        | LiveMidiMessage::ControlChange { channel, .. }
+        | LiveMidiMessage::ProgramChange { channel, .. }
+        | LiveMidiMessage::ChannelPressure { channel, .. }
+        | LiveMidiMessage::PitchBend { channel, .. } => Some(channel),
+        LiveMidiMessage::Realtime(_) => None,
     }
 }
 
@@ -347,5 +426,80 @@ mod tests {
         e.execute("mix.record_arm", &json!({"tracks": [t.0], "value": true})).unwrap();
         e.transport.recording = false;
         assert!(MidiRecordBridge::begin(&e).is_err());
+    }
+
+    #[test]
+    fn source_and_one_based_channel_routes_isolate_notes_and_controllers() {
+        let (mut e, all) = engine_with_armed_instrument();
+        e.transport.recording = false;
+        let a = e.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Port A only"));
+        let b = e.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Port B only"));
+        let ch3 = e.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, Some("Channel 3"));
+        e.execute("mix.record_arm", &json!({"tracks": [a.0, b.0, ch3.0], "value": true})).unwrap();
+        e.execute("setup.midi_input_devices", &json!({"enable": ["Port A", "Port B"]})).unwrap();
+        e.execute("track.midi_input", &json!({"track": a.0, "port": "Port A", "channel": 1})).unwrap();
+        e.execute("track.midi_input", &json!({"track": b.0, "port": "Port B", "channel": 1})).unwrap();
+        e.execute("track.midi_input", &json!({"track": ch3.0, "channel": 3})).unwrap();
+        e.transport.recording = true;
+        let mut bridge = MidiRecordBridge::begin(&e).unwrap();
+        bridge.set_anchor(0, 48_000).unwrap();
+        let events = [
+            (0, "Port A", LiveMidiMessage::NoteOn { channel: 0, pitch: 60, velocity: 90 }),
+            (100_000, "Port B", LiveMidiMessage::NoteOn { channel: 0, pitch: 60, velocity: 80 }),
+            (200_000, "Port A", LiveMidiMessage::ControlChange { channel: 2, controller: 7, value: 100 }),
+            (250_000, "Port B", LiveMidiMessage::ControlChange { channel: 0, controller: 1, value: 55 }),
+            (300_000, "Port B", LiveMidiMessage::NoteOff { channel: 0, pitch: 60, velocity: 64 }),
+            (400_000, "Port B", LiveMidiMessage::ControlChange { channel: 2, controller: 7, value: 85 }),
+            (500_000, "Port A", LiveMidiMessage::NoteOff { channel: 0, pitch: 60, velocity: 64 }),
+        ];
+        for (timestamp_micros, source, message) in events {
+            bridge.record_sourced_event(source, TimedMidiMessage { timestamp_micros, message }).unwrap();
+        }
+        bridge.finish(&mut e, 96_000).unwrap();
+        let sequence = |id| {
+            let clips = e.session().track(id).unwrap().clips();
+            let ClipContent::Midi { sequence } = &clips[0].content else { panic!("MIDI content expected") };
+            sequence.clone()
+        };
+        let all_seq = sequence(all);
+        assert_eq!(all_seq.notes.len(), 2, "All Enabled receives both keyboards' overlapping C4 notes");
+        assert_eq!(all_seq.notes[0].length, 960, "Port B Note Off must not shorten Port A's held C4");
+        assert_eq!(all_seq.notes[1].start, 192);
+        assert_eq!(all_seq.notes[1].length, 384);
+        assert_eq!(all_seq.ctrls.len(), 3);
+        let a_seq = sequence(a);
+        assert_eq!(a_seq.notes.len(), 1);
+        assert_eq!((a_seq.notes[0].start, a_seq.notes[0].length), (0, 960));
+        assert!(a_seq.ctrls.is_empty(), "channel 3 controller must not leak into channel 1 route");
+        let b_seq = sequence(b);
+        assert_eq!(b_seq.notes.len(), 1);
+        assert_eq!((b_seq.notes[0].start, b_seq.notes[0].length), (192, 384));
+        assert_eq!(b_seq.ctrls.len(), 1);
+        let ch3_seq = sequence(ch3);
+        assert!(ch3_seq.notes.is_empty());
+        assert_eq!(ch3_seq.ctrls.len(), 2, "All Enabled channel 3 should receive CC from both ports");
+    }
+
+    #[test]
+    fn legacy_unsourced_events_cannot_bypass_explicit_port_route() {
+        let (mut e, all) = engine_with_armed_instrument();
+        e.transport.recording = false;
+        let routed = e.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, None);
+        e.execute("mix.record_arm", &json!({"tracks": [routed.0], "value": true})).unwrap();
+        e.execute("setup.midi_input_devices", &json!({"enable": ["Named Port"]})).unwrap();
+        e.execute("track.midi_input", &json!({"track": routed.0, "port": "Named Port"})).unwrap();
+        e.transport.recording = true;
+        let mut bridge = MidiRecordBridge::begin(&e).unwrap();
+        bridge.set_anchor(0, 48_000).unwrap();
+        for (timestamp_micros, message) in [
+            (0, LiveMidiMessage::NoteOn { channel: 0, pitch: 60, velocity: 90 }),
+            (500_000, LiveMidiMessage::NoteOff { channel: 0, pitch: 60, velocity: 64 }),
+        ] {
+            bridge.record_event(TimedMidiMessage { timestamp_micros, message }).unwrap();
+        }
+        let r = bridge.finish(&mut e, 96_000).unwrap();
+        assert_eq!(r["clips"].as_array().map(Vec::len), Some(1));
+        assert_eq!(e.session().track(all).unwrap().clips().len(), 1);
+        assert!(e.session().track(routed).unwrap().clips().is_empty());
     }
 }

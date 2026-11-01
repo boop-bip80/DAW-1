@@ -250,6 +250,25 @@ impl Playlist {
     }
 }
 
+/// Persistent MIDI input routing. `None` port listens to every globally enabled MIDI input;
+/// `None` channel listens to all 16 MIDI channels. Channel numbers in saved sessions and in
+/// commands are **one-based** (1..=16); device messages use zero-based channel bytes.
+///
+/// Hardware port *indexes* are deliberately not persisted: they change when devices hot-plug.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MidiInputRoute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+}
+
+impl MidiInputRoute {
+    pub fn is_all_enabled(&self) -> bool {
+        self.port.is_none() && self.channel.is_none()
+    }
+}
+
 /// A track.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
@@ -262,6 +281,10 @@ pub struct Track {
     pub playlists: Vec<Playlist>,
     pub active_playlist: usize,
     pub mixer: Mixer,
+    /// MIDI/instrument track's source port and channel filter. Old sessions default to all
+    /// enabled ports and channels; this field does not affect audio routing.
+    #[serde(default, skip_serializing_if = "MidiInputRoute::is_all_enabled")]
+    pub midi_input: MidiInputRoute,
     pub automation: Vec<AutomationLane>,
     /// Which lane the track shows: `waveform`/`blocks`/`notes`/`regions` or an automation param id.
     pub view: String,
@@ -317,6 +340,7 @@ impl Track {
             height: TrackHeight::Medium,
             active_playlist: 0,
             mixer: Mixer::new(format),
+            midi_input: MidiInputRoute::default(),
             automation: Vec::new(),
             view: view.into(),
             hidden: false,
@@ -392,6 +416,21 @@ mod tests {
         let m = Track::new(TrackId(2), "Keys", TrackKind::Midi, ChannelFormat::Stereo, TRACK_COLORS[0]);
         assert_eq!(m.format, ChannelFormat::Mono);
         assert_eq!(m.view, "notes");
+        assert!(m.midi_input.is_all_enabled());
+    }
+
+    #[test]
+    fn legacy_tracks_default_to_all_midi_inputs_and_new_routes_roundtrip() {
+        let mut t = Track::new(TrackId(2), "Keys", TrackKind::Instrument, ChannelFormat::Stereo, TRACK_COLORS[0]);
+        let old = serde_json::to_value(&t).unwrap();
+        assert!(old.get("midi_input").is_none(), "default should not alter legacy session output");
+        let from_old: Track = serde_json::from_value(old).unwrap();
+        assert_eq!(from_old.midi_input, MidiInputRoute::default());
+        t.midi_input = MidiInputRoute { port: Some("Keyboard 1".into()), channel: Some(12) };
+        let saved = serde_json::to_string(&t).unwrap();
+        let restored: Track = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.midi_input, t.midi_input);
+        assert!(!saved.contains("port_index"), "transient OS indexes must never be serialized");
     }
 
     #[test]
