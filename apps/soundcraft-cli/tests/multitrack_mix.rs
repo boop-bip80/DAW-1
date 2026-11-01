@@ -14,14 +14,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soundcraft-multitrack-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("soundcraft-multitrack-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -60,12 +54,7 @@ fn write_tone(path: &Path, frequency: f64) {
         let phase = std::f64::consts::TAU * frequency * i as f64 / f64::from(RATE);
         *sample = INPUT_AMPLITUDE * phase.sin() as f32;
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     let bytes = soundcraft_audio_io::encode(&audio, &options).unwrap();
     std::fs::write(path, bytes).unwrap();
 }
@@ -76,10 +65,7 @@ fn read_bounce(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, RATE, "unexpected bounce sample rate");
     assert_eq!(audio.frames(), FRAMES, "unexpected bounce length");
     assert_eq!(audio.num_channels(), 2, "main mix must be stereo");
-    assert!(
-        audio.channels.iter().flatten().all(|s| s.is_finite()),
-        "the bounce contains non-finite audio"
-    );
+    assert!(audio.channels.iter().flatten().all(|s| s.is_finite()), "the bounce contains non-finite audio");
     audio
 }
 
@@ -158,28 +144,14 @@ fn multitrack_pan_fader_and_media_survive_roundtrip() {
     // A saved project must carry its own copied media, not depend on import paths.
     std::fs::remove_file(left).unwrap();
     std::fs::remove_file(right).unwrap();
-    let reopened = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&session)
-        .arg("--bounce")
-        .arg(&after)
-        .args(["--start", "0", "--end", "0.25"])
-        .output()
-        .unwrap();
+    let reopened = cli().arg("run").arg("--in").arg(&session).arg("--bounce").arg(&after).args(["--start", "0", "--end", "0.25"]).output().unwrap();
     let reopened = checked("reopen and bounce", reopened);
-    assert!(
-        !String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"),
-        "reopened session reports missing saved media"
-    );
+    assert!(!String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"), "reopened session reports missing saved media");
 
     let mix_after = read_bounce(&after);
     for (a, b) in mix_before.channels.iter().zip(&mix_after.channels) {
         for (first, second) in a.iter().zip(b) {
-            assert!(
-                (first - second).abs() < 0.001,
-                "mix samples changed after session save/reopen"
-            );
+            assert!((first - second).abs() < 0.001, "mix samples changed after session save/reopen");
         }
     }
 }
