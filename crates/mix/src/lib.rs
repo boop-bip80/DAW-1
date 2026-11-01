@@ -588,6 +588,26 @@ impl MixEngine {
         std::mem::take(&mut self.retired)
     }
 
+    /// Stops live externally hosted instances on the rendering thread before their entire
+    /// engine is returned to the control thread for destruction. Retired and not-yet-adopted
+    /// instances are already stopped or have never started. No ownership moves or allocations.
+    ///
+    /// This is terminal shutdown, not an ordinary transport stop or a CLAP restart: callers
+    /// must never render this engine again after invoking it.
+    pub fn suspend_external_for_shutdown(&mut self) {
+        if !self.external {
+            return;
+        }
+        for strip in self.strips.values_mut() {
+            for slot in strip.plugins.iter_mut().filter_map(Option::as_mut).chain(strip.instrument.iter_mut()) {
+                if !slot.parked {
+                    slot.parked = true;
+                    slot.plugin.suspend();
+                }
+            }
+        }
+    }
+
     /// Every instance this engine holds (strips, instruments, clip effects excluded) plus the
     /// retired and waiting ones, leaving the engine empty: hand them to another thread to drop
     /// before replacing the engine.
