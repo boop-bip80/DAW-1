@@ -41,6 +41,8 @@ pub mod windows;
 use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
 use soundcraft_model::{TrackId, TrackKind};
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_playback::midi_out_runtime::{MidiOutputRuntime, MidiOutputRuntimePhase, MidiOutputRuntimeStatus};
 use soundcraft_playback::record::Trouble;
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
@@ -281,6 +283,10 @@ pub struct SoundApp {
     /// Native MIDI input queues and the transport-aware MIDI recording bridge, on the UI thread.
     #[cfg(not(target_arch = "wasm32"))]
     midi_capture: Option<midi_input_runtime::MidiInputRuntime>,
+    /// Native external MIDI transmission is *never* inferred from saved track
+    /// routes. Only an explicit per-launch user action starts this runtime.
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_output: Option<MidiOutputRuntime>,
     midi_status: MidiInputStatus,
     /// Synthetic MIDI backend for deterministic Record/Stop lifecycle tests, never hardware.
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -505,6 +511,8 @@ impl SoundApp {
             recorder: None,
             #[cfg(not(target_arch = "wasm32"))]
             midi_capture: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_output: None,
             midi_status: MidiInputStatus::default(),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             midi_test_sources: None,
@@ -627,6 +635,10 @@ impl SoundApp {
                     self.release_autosave(false);
                 }
                 if id == "app.quit" {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(output) = &self.midi_output {
+                        let _ = output.set_enabled(false);
+                    }
                     self.quit_requested = true;
                 }
                 if id == "options.scrolling" {
@@ -650,6 +662,13 @@ impl SoundApp {
     /// as bytes). Screenshot requests admitted for the old document must never receive the new
     /// one's pixels, so every replacement path bumps the epoch.
     pub(crate) fn document_replaced(&mut self) {
+        // Another document's persisted route is never fresh user consent.
+        // Keep the runtime alive until its off-thread cleanup acknowledges,
+        // so a rapid re-enable cannot overlap an old port connection.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(output) = &self.midi_output {
+            let _ = output.set_enabled(false);
+        }
         self.doc_epoch = self.doc_epoch.wrapping_add(1);
         // Note indices and gestures belong to the old session's clips (#443); every document
         // replacement (run, Recover, a session the browser read) goes through here.
@@ -688,12 +707,53 @@ impl SoundApp {
         status
     }
 
+    /// Native external MIDI is off at startup, even when the loaded session
+    /// remembers named output routes. This is a cheap read-only UI snapshot:
+    /// it never scans ports, creates a stream, or dispatches a MIDI message.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn midi_output_status(&self) -> MidiOutputRuntimeStatus {
+        self.midi_output.as_ref().map_or_else(MidiOutputRuntimeStatus::default, MidiOutputRuntime::status)
+    }
+
+    /// Explicit per-launch consent for external MIDI hardware transmission.
+    /// Enable is available only with a stopped transport and a live native
+    /// playback observer. Disable remains available during playback to request
+    /// asynchronous held-note cleanup without blocking the UI/audio callback.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_midi_output_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if !enabled {
+            return self.midi_output.as_ref().map_or(Ok(()), |runtime| runtime.set_enabled(false).map_err(|error| error.to_string()));
+        }
+        if self.engine.transport.playing || self.engine.transport.recording {
+            return Err("Stop playback and recording before enabling external MIDI transmission.".into());
+        }
+        let Some(player) = &self.player else {
+            return Err("External MIDI output requires a native playback device or silent clock.".into());
+        };
+        if let Some(runtime) = &self.midi_output {
+            runtime.update_session(self.engine.session_arc()).map_err(|error| error.to_string())?;
+            runtime.set_enabled(true).map_err(|error| error.to_string())
+        } else {
+            let runtime =
+                MidiOutputRuntime::start_enabled(self.engine.session_arc(), player.transport_observer()).map_err(|error| error.to_string())?;
+            self.midi_output = Some(runtime);
+            Ok(())
+        }
+    }
+
     /// Current transport position (playhead while playing, else the edit insertion).
     pub fn position(&self) -> Samples {
         if self.engine.transport.playing { self.engine.transport.position } else { self.engine.session().edit.selection.start }
     }
 
     fn start_play(&mut self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(output) = &self.midi_output
+            && let Err(error) = output.update_session(self.engine.session_arc())
+        {
+            let _ = output.set_enabled(false);
+            self.ui.status = format!("External MIDI output disabled after a session handoff error: {error}");
+        }
         if let Some(p) = &self.player {
             p.update_session(self.engine.session_arc());
             p.play(from, end, looped);
@@ -1152,6 +1212,16 @@ impl SoundApp {
     pub fn apply_audio_config(&mut self, cfg: soundcraft_playback::AudioConfig) -> Result<(), String> {
         if self.engine.transport.recording {
             return Err("stop recording before changing the audio device".into());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.midi_output.as_ref().is_some_and(|output| output.status().phase != MidiOutputRuntimePhase::Disabled) {
+            return Err("Disable external MIDI transmission and wait for note cleanup before changing audio devices.".into());
+        }
+        // A disabled runtime still observes the old Player; drop it before
+        // replacing the Player so the next opt-in uses the new audio clock.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.midi_output = None;
         }
         self.ui.audio = cfg;
         let at = self.position();
@@ -1637,6 +1707,13 @@ impl SoundApp {
         self.poll_midi_input();
         if self.engine.revision != self.last_rev {
             self.last_rev = self.engine.revision;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(output) = &self.midi_output
+                && let Err(error) = output.update_session(self.engine.session_arc())
+            {
+                let _ = output.set_enabled(false);
+                self.ui.status = format!("External MIDI output disabled after a session handoff error: {error}");
+            }
             if let Some(p) = &self.player {
                 p.update_session(self.engine.session_arc());
             }
@@ -2186,6 +2263,48 @@ mod tests {
     use super::{Services, SoundApp, automation_step_due};
     use serde_json::json;
     use soundcraft_model::TrackId;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn external_midi_hardware_never_opens_from_a_saved_track_route_or_new_app() {
+        use soundcraft_model::{ChannelFormat, MidiOutputRoute, TrackKind};
+        use soundcraft_playback::midi_out_runtime::MidiOutputRuntimePhase;
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, Some("External"));
+        let Some(midi) = engine.session_mut().track_mut(track) else { panic!("synthetic track") };
+        midi.midi_output = Some(MidiOutputRoute { port: "Offline Fake Synth".into(), channel: None });
+        let mut app = SoundApp::new(engine, None, Services::default());
+        let status = app.midi_output_status();
+        assert_eq!(status.phase, MidiOutputRuntimePhase::Disabled);
+        assert!(!status.enabled);
+        assert!(status.connected_ports.is_empty());
+        assert_eq!(status.scheduled_events, 0);
+        assert!(status.last_error.is_none());
+
+        // No Player is available in this synthetic test: even an explicit
+        // enable request fails before any OS MIDI device can be enumerated.
+        assert!(app.set_midi_output_enabled(true).is_err());
+        assert_eq!(app.midi_output_status().phase, MidiOutputRuntimePhase::Disabled);
+        assert_eq!(app.set_midi_output_enabled(false), Ok(()));
+        assert!(!app.midi_output_status().enabled);
+        app.document_replaced();
+        assert!(!app.midi_output_status().enabled);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn external_midi_requires_stopped_transport_and_disable_is_always_allowed() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.transport.playing = true;
+        assert!(app.set_midi_output_enabled(true).is_err());
+        assert_eq!(app.set_midi_output_enabled(false), Ok(()));
+        app.engine.transport.playing = false;
+        app.engine.transport.recording = true;
+        assert!(app.set_midi_output_enabled(true).is_err());
+        assert_eq!(app.set_midi_output_enabled(false), Ok(()));
+        assert!(!app.midi_output_status().enabled);
+    }
 
     #[test]
     fn new_session_stops_playback_and_the_old_clock() {
