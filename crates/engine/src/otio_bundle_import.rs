@@ -131,7 +131,9 @@ fn audit_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<Arc
         if file.is_symlink() {
             return Err(unsupported("symbolic links are never allowed in portable audio bundles"));
         }
-        if file.is_dir() {
+        // ZIP 9 defines a directory entry by a trailing slash or backslash in its member name.
+        // This examines archive metadata, not the host filesystem; keep all host IO in `io`.
+        if name.ends_with('/') || name.ends_with('\\') {
             if name != "media/" || file.size() != 0 {
                 return Err(unsupported("only an optional empty `media/` directory entry is permitted"));
             }
