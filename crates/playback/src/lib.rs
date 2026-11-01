@@ -712,6 +712,42 @@ impl Side {
     }
 }
 
+/// Owns the silent render thread until an explicit UI/control-thread join. The worker
+/// returns its entire audio state (including pending native plugin commands) rather than
+/// destroying any native plugin in a worker thread's destructor.
+#[cfg(not(target_arch = "wasm32"))]
+struct SilentClock {
+    stop: Arc<AtomicBool>,
+    join: std::thread::JoinHandle<AudioState>,
+}
+
+/// Run the native silent-output clock until its control-thread owner requests shutdown.
+/// Return the *entire* AudioState: live plugins, retired plugins, and queued Cmd::Session
+/// payloads must remain alive until the owner's join returns on the control thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn silent_clock_loop(mut state: AudioState, stop: &AtomicBool, fault: &Fault) -> AudioState {
+    let mut buf = vec![0.0f32; 4096];
+    let mut last = std::time::Instant::now();
+    while !stop.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        let now = std::time::Instant::now();
+        let frames = ((now - last).as_secs_f64() * state.device_rate) as usize;
+        last = now;
+        let n = frames.saturating_mul(2).min(buf.len());
+        if let Some(b) = buf.get_mut(..n) {
+            let shared = Arc::clone(&state.shared);
+            guarded_block(fault, &shared, b, |b| state.fill(b, 2));
+        }
+    }
+    // Exactly once, still on this render thread. No native destroy and no heap work here.
+    // The owner joins and drops the returned state on its control/UI thread.
+    state.mix.suspend_external_for_shutdown();
+    state
+}
+
 /// The transport and audio device.
 pub struct Player {
     shared: Arc<Shared>,
@@ -721,6 +757,8 @@ pub struct Player {
     watch: Mutex<Option<(u64, std::time::Instant)>>,
     tx: Sender<Cmd>,
     side: Mutex<Side>,
+    #[cfg(not(target_arch = "wasm32"))]
+    silent_clock: Option<SilentClock>,
     #[cfg(not(target_arch = "wasm32"))]
     _stream: Option<cpal::Stream>,
     #[cfg(target_arch = "wasm32")]
@@ -733,6 +771,28 @@ pub struct Player {
     pub device_buffer: Option<u32>,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(clock) = self.silent_clock.take() {
+            // Join before Side's garbage receiver is dropped. The worker suspends native
+            // processing, then transfers live, retired and queued instances as AudioState.
+            clock.stop.store(true, Ordering::Release);
+            match clock.join.join() {
+                Ok(audio) => {
+                    // Both the audio state (including pending Cmd::Session payloads) and
+                    // retired instances must be destroyed on this control thread.
+                    drop(audio);
+                    self.side().collect_garbage();
+                }
+                Err(_) => {
+                    log::error!("silent audio worker panicked before handing its plugin state back to the control thread");
+                }
+            }
+        }
+    }
 }
 
 impl Player {
@@ -838,6 +898,7 @@ impl Player {
                             watch: Mutex::new(None),
                             tx,
                             side: new_side(grx),
+                            silent_clock: None,
                             _stream: Some(stream),
                             device_name: name,
                             device_rate: rate,
@@ -885,36 +946,29 @@ impl Player {
         gtx: Sender<Vec<Box<dyn Plugin>>>,
     ) -> Player {
         let rate = session.sample_rate.hz();
-        let mut state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
+        let state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
         let fault = Arc::new(Fault::default());
         let failed = Arc::clone(&fault);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
         let spawn = std::thread::Builder::new().name("soundcraft-clock".into()).spawn(move || {
-            let mut buf = vec![0.0f32; 4096];
-            let mut last = std::time::Instant::now();
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                let now = std::time::Instant::now();
-                let frames = ((now - last).as_secs_f64() * state.device_rate) as usize;
-                last = now;
-                let n = (frames * 2).min(buf.len());
-                if let Some(b) = buf.get_mut(..n) {
-                    let shared = Arc::clone(&state.shared);
-                    guarded_block(&failed, &shared, b, |b| state.fill(b, 2));
-                }
-                if Arc::strong_count(&state.shared) <= 1 {
-                    break;
-                }
-            }
+            silent_clock_loop(state, &worker_stop, &failed)
         });
-        if let Err(e) = spawn {
-            log::warn!("clock thread failed: {e}");
-        }
+        let silent_clock = match spawn {
+            Ok(join) => Some(SilentClock { stop, join }),
+            Err(e) => {
+                // Builder::spawn drops its unstarted closure here, on this control thread.
+                log::warn!("clock thread failed: {e}");
+                None
+            }
+        };
         Player {
             shared,
             fault,
             watch: Mutex::new(None),
             tx,
             side,
+            silent_clock,
             _stream: None,
             device_name: "No audio device (silent)".into(),
             device_rate: rate,
@@ -1453,6 +1507,8 @@ mod tests {
                 watch: Mutex::new(None),
                 tx,
                 side: Mutex::new(Side::new(48_000.0, garbage)),
+                #[cfg(not(target_arch = "wasm32"))]
+                silent_clock: None,
                 _stream: None,
                 device_name: "Synthetic observer-only player".into(),
                 device_rate: 48_000,
@@ -1535,6 +1591,173 @@ mod tests {
         fn restart_reader(&mut self) -> Option<Box<dyn PluginRestartReader>> {
             Some(Box::new(RestartFlag { pending: Arc::clone(&self.pending), token: self.token }))
         }
+    }
+
+    /// Native plugin shutdown must stop processing on the silent render thread but
+    /// destroy the instance only after Player has joined it on the control thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct SilentLifecycleProbe {
+        events: Arc<Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+        processed: Option<SyncSender<()>>,
+        stopped: Option<SyncSender<()>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl SilentLifecycleProbe {
+        fn record(&self, name: &'static str) {
+            self.events.lock().unwrap_or_else(PoisonError::into_inner).push((name, std::thread::current().id()));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Drop for SilentLifecycleProbe {
+        fn drop(&mut self) {
+            self.record("drop");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Plugin for SilentLifecycleProbe {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            &RESTART_TEST_INFO
+        }
+        fn prepare(&mut self, _rate: f32, _block: usize, _channels: usize) {}
+        fn reset(&mut self) {}
+        fn suspend(&mut self) {
+            self.record("suspend");
+            if let Some(tx) = self.stopped.take() {
+                let _ = tx.try_send(());
+            }
+        }
+        fn set_param(&mut self, _id: &str, _value: f32) -> bool {
+            false
+        }
+        fn param(&self, _id: &str) -> Option<f32> {
+            None
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            if let Some(tx) = self.processed.take() {
+                let _ = tx.try_send(());
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn silent_lifecycle_player(session: Arc<Session>) -> Player {
+        let rate = session.sample_rate.as_f64() as f32;
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let (garbage_tx, garbage_rx) = channel();
+        Player::silent_clock_with(shared, tx, rx, session, Mutex::new(Side::new(rate, garbage_rx)), garbage_tx)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn silent_lifecycle_session() -> (Arc<Session>, TrackId) {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let mut session = Session::default();
+        let track = session.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.silent_shutdown"));
+        (Arc::new(session), track)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn silent_lifecycle_instance(
+        events: &Arc<Mutex<Vec<(&'static str, std::thread::ThreadId)>>>,
+        track: TrackId,
+        processed: Option<SyncSender<()>>,
+        stopped: Option<SyncSender<()>>,
+    ) -> PreparedInstance {
+        PreparedInstance {
+            track,
+            slot: 0,
+            id: "clap:test.silent_shutdown".into(),
+            ch: 2,
+            plugin: Box::new(SilentLifecycleProbe { events: Arc::clone(events), processed, stopped }),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn silent_clock_drop_stops_processing_then_reclaims_native_instance_on_control_thread() {
+        let control = std::thread::current().id();
+        let (session, track) = silent_lifecycle_session();
+        let player = silent_lifecycle_player(Arc::clone(&session));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (processed, rendered) = sync_channel(1);
+        player
+            .tx
+            .send(Cmd::Session(Arc::clone(&session), vec![silent_lifecycle_instance(&events, track, Some(processed), None)]))
+            .unwrap();
+        player.play(0, None, None);
+        assert!(rendered.recv_timeout(std::time::Duration::from_secs(3)).is_ok(), "fake plugin should process on silent clock");
+        drop(player);
+        let events = events.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(events.len(), 2, "exactly one stop and one native Box drop");
+        assert_eq!(events[0].0, "suspend");
+        assert_ne!(events[0].1, control, "stop_processing belongs to the render thread");
+        assert_eq!(events[1], ("drop", control), "native destruction belongs to the control thread");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn silent_clock_returns_unread_plugin_commands_for_control_thread_destruction() {
+        let control = std::thread::current().id();
+        let (session, track) = silent_lifecycle_session();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = channel();
+        let (garbage_tx, garbage_rx) = channel();
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            transport_generation: AtomicU64::new(0),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let audio = AudioState::new(rx, shared, Arc::clone(&session), 48_000.0, garbage_tx);
+        tx.send(Cmd::Session(session, vec![silent_lifecycle_instance(&events, track, None, None)])).unwrap();
+        // A stopped/disconnected callback may never consume Cmd::Session. The control
+        // thread must reclaim its plugin even if no audio block ever ran.
+        let stop = Arc::new(AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop);
+        let returned = std::thread::spawn(move || silent_clock_loop(audio, &worker_stop, &Fault::default())).join().unwrap();
+        assert!(events.lock().unwrap_or_else(PoisonError::into_inner).is_empty(), "the worker cannot drop queued native payloads");
+        drop(returned);
+        assert_eq!(*events.lock().unwrap_or_else(PoisonError::into_inner), vec![("drop", control)]);
+        drop(garbage_rx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn silent_clock_reclaims_retired_instances_after_output_fault() {
+        let control = std::thread::current().id();
+        let (session, track) = silent_lifecycle_session();
+        let player = silent_lifecycle_player(Arc::clone(&session));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (processed, rendered) = sync_channel(1);
+        let (stopped, suspended) = sync_channel(1);
+        player
+            .tx
+            .send(Cmd::Session(session, vec![silent_lifecycle_instance(&events, track, Some(processed), Some(stopped))]))
+            .unwrap();
+        player.play(0, None, None);
+        assert!(rendered.recv_timeout(std::time::Duration::from_secs(3)).is_ok());
+        // The next document change retires the plugin while keeping the Side receiver
+        // alive. Even if audio fails immediately afterwards, Player::Drop must drain it.
+        player.update_session(Arc::new(Session::default()));
+        assert!(suspended.recv_timeout(std::time::Duration::from_secs(3)).is_ok(), "session replacement must stop the old native instance");
+        player.fault.failed.store(true, Ordering::Release);
+        drop(player);
+        let events = events.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "suspend");
+        assert_ne!(events[0].1, control);
+        assert_eq!(events[1], ("drop", control), "retired plugin stays in the mailbox until UI reclamation");
     }
 
     #[test]
