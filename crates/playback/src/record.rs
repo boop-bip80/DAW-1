@@ -1690,6 +1690,20 @@ const CAPTURE_GATE_OPEN: u64 = 1;
 const MAX_CAPTURE_GATE_EPOCH: u64 = u64::MAX >> 1;
 static NEXT_INPUT_RING_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Checked atomic update using APIs available at the workspace's Rust 1.90 MSRV. On rejection,
+/// return the last observed value without writing it; a competing writer is retried. Used only
+/// while opening/arming a recorder on the control thread, never from an audio callback.
+fn checked_atomic_update(atom: &AtomicU64, ordering: Ordering, mut update: impl FnMut(u64) -> Option<u64>) -> Result<u64, u64> {
+    let mut observed = atom.load(ordering);
+    loop {
+        let Some(next) = update(observed) else { return Err(observed) };
+        match atom.compare_exchange_weak(observed, next, ordering, ordering) {
+            Ok(previous) => return Ok(previous),
+            Err(current) => observed = current,
+        }
+    }
+}
+
 /// A small interleaved FIFO from the input callback to the output callback, for input
 /// monitoring. Both sides only `try_lock`; it holds at most ~0.5 s and drops the oldest frames.
 /// The input device may run at a different rate than the session, so the reader converts
@@ -1722,7 +1736,7 @@ impl InputRing {
         let frames = if rate == 0 { 24_000 } else { rate as usize / 2 };
         // A theoretical lifetime exhaustion fails the delayed gate closed rather than reuse
         // an old stream identity (ABA). Normal monitoring can still run.
-        let ring_id = NEXT_INPUT_RING_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).unwrap_or(0);
+        let ring_id = checked_atomic_update(&NEXT_INPUT_RING_ID, Ordering::Relaxed, |id| id.checked_add(1)).unwrap_or(0);
         Arc::new(InputRing {
             state: Mutex::new(RingState { data: std::collections::VecDeque::with_capacity(rate.max(48_000) as usize * ch), phase: 0.0 }),
             ring_id,
@@ -1747,13 +1761,11 @@ impl InputRing {
         if self.ring_id == 0 {
             return Err("audio input stream identity exhausted; reconnect the input before recording".into());
         }
-        let old = self
-            .capture_gate
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
-                let epoch = state >> 1;
-                epoch.checked_add(1).filter(|next| *next <= MAX_CAPTURE_GATE_EPOCH).map(|next| (next << 1) | u64::from(!delayed))
-            })
-            .map_err(|_| "audio capture start epoch exhausted; reconnect the input before recording".to_owned())?;
+        let old = checked_atomic_update(&self.capture_gate, Ordering::SeqCst, |state| {
+            let epoch = state >> 1;
+            epoch.checked_add(1).filter(|next| *next <= MAX_CAPTURE_GATE_EPOCH).map(|next| (next << 1) | u64::from(!delayed))
+        })
+        .map_err(|_| "audio capture start epoch exhausted; reconnect the input before recording".to_owned())?;
         Ok(CaptureStartTicket { ring_id: self.ring_id, epoch: (old >> 1) + 1 })
     }
 
