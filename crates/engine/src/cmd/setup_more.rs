@@ -49,6 +49,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             engine_settings(e, p)
         }),
+        cmd!(noundo "setup.record_latency", "Recording Latency Offset", [], None, "{samples?: integer | milliseconds?: finite number} — manual take alignment ±500 ms; positive places audio earlier; query with {}", always, record_latency),
         cmd!(noundo "setup.disk_allocation", "Disk Allocation...", ["Setup"], None, "{path?, track?} — the record folder for the session, or for one track", always, disk_allocation),
         cmd!(noundo "setup.peripherals", "Peripherals...", ["Setup"], None, "{settings?: {name: number|bool|string}} — control surface / sync device settings", always, peripherals),
         cmd!(
@@ -337,6 +338,44 @@ fn offset_setting(e: &mut Engine, p: &Value, key: &str) -> Result<Value> {
     Ok(json!({"samples": samples, "frames": samples / per_frame.max(1e-9)}))
 }
 
+/// Manual input-latency compensation for overdubs, in *session* samples (not device frames).
+/// This does not measure hardware latency; each session starts at zero until the user calibrates.
+fn record_latency(e: &mut Engine, p: &Value) -> Result<Value> {
+    const ID: &str = "setup.record_latency";
+    let rate = e.session().sample_rate.hz();
+    let limit = i64::from(rate) / 2;
+    let requested = match (p.get("samples"), p.get("milliseconds")) {
+        (Some(_), Some(_)) => return Err(bad(ID, "give `samples` or `milliseconds`, not both")),
+        (Some(value), None) => {
+            let samples = value
+                .as_i64()
+                .filter(|n| (-limit..=limit).contains(n))
+                .ok_or_else(|| bad(ID, "`samples` must be a signed integer within ±500 ms at the session rate"))?;
+            Some(samples)
+        }
+        (None, Some(value)) => {
+            let millis = value
+                .as_f64()
+                .filter(|n| n.is_finite() && (-500.0..=500.0).contains(n))
+                .ok_or_else(|| bad(ID, "`milliseconds` must be a finite number from -500 to 500"))?;
+            Some(soundcraft_time::to_samples(millis * f64::from(rate) / 1_000.0).clamp(-limit, limit))
+        }
+        (None, None) => None,
+    };
+    if let Some(samples) = requested {
+        e.session_mut().edit.values.insert(crate::io::RECORD_LATENCY_KEY.into(), samples as f64);
+    }
+    let samples = crate::io::record_latency_samples(e.session());
+    Ok(json!({
+        "samples": samples,
+        "milliseconds": samples as f64 * 1_000.0 / f64::from(rate),
+        "max_abs_samples": limit,
+        "max_abs_milliseconds": 500,
+        "positive_offset": "places the recording earlier",
+        "measured": false,
+    }))
+}
+
 fn click_countoff(e: &mut Engine, p: &Value) -> Result<Value> {
     let s = e.session_mut();
     store_value(&mut s.edit, p, "volume_db", "click.volume_db", -60.0, 12.0);
@@ -590,6 +629,34 @@ mod tests {
         assert_eq!(r["enabled"], json!(["Keys"]));
         let r = e.execute("setup.video_sync_offset", &json!({"frames": 2})).unwrap();
         assert_eq!(r["samples"], 3200.0);
+    }
+
+    #[test]
+    fn recording_latency_is_manual_bounded_and_queryable_in_session_samples() {
+        let mut e = Engine::default();
+        let query = e.execute("setup.record_latency", &json!({})).unwrap();
+        assert_eq!((query["samples"].as_i64(), query["max_abs_samples"].as_i64(), query["measured"].as_bool()), (Some(0), Some(24_000), Some(false)));
+
+        let r = e.execute("setup.record_latency", &json!({"samples": 321})).unwrap();
+        assert_eq!(r["samples"], 321);
+        assert_eq!(r["milliseconds"], 6.6875);
+        assert_eq!(e.execute("setup.record_latency", &json!({"milliseconds": -10.5})).unwrap()["samples"], -504);
+        assert_eq!(e.execute("setup.record_latency", &json!({"milliseconds": 500.0})).unwrap()["samples"], 24_000);
+
+        for bad in [
+            json!({"samples": 24_001}),
+            json!({"samples": -24_001}),
+            json!({"samples": 1.5}),
+            json!({"samples": null}),
+            json!({"milliseconds": 501.0}),
+            json!({"milliseconds": "2"}),
+            json!({"samples": 0, "milliseconds": 0}),
+        ] {
+            assert!(e.execute("setup.record_latency", &bad).is_err(), "accepted invalid {bad}");
+            assert_eq!(e.execute("setup.record_latency", &json!({})).unwrap()["samples"], 24_000, "invalid command changed the setting");
+        }
+        e.session_mut().edit.values.insert(crate::io::RECORD_LATENCY_KEY.into(), 1e300);
+        assert_eq!(e.execute("setup.record_latency", &json!({})).unwrap()["samples"], 24_000, "loaded settings must be bounded too");
     }
 
     #[test]

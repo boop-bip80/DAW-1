@@ -673,6 +673,12 @@ unsafe extern "C" fn out_events_try_push(list: *const clap_output_events, event:
 
 // ---- state streams -------------------------------------------------------------------------
 
+/// Session-provided plugin state has the same cap as state produced by the save stream.
+/// Check before invoking third-party code; oversized input must not reach plugin callbacks.
+fn bounded_state_input(data: &[u8], max_bytes: usize) -> Option<&[u8]> {
+    (data.len() <= max_bytes).then_some(data)
+}
+
 /// Read side of an in-memory state blob.
 struct ReadCursor<'a> {
     data: &'a [u8],
@@ -1177,8 +1183,10 @@ impl Instance {
         (!self.state_ext.is_null()).then(|| Arc::clone(&self.gui))
     }
 
-    /// `clap_plugin_state.load` from memory. `false` without the extension or when refused.
+    /// `clap_plugin_state.load` from memory. `false` without the extension, when oversized or
+    /// when the plugin refuses the data. Reject oversized state before calling native code.
     pub fn load_state(&self, data: &[u8]) -> bool {
+        let Some(data) = bounded_state_input(data, MAX_STATE_BYTES) else { return false };
         // SAFETY: the extension pointer, when non-null, points to a static vtable in the plugin.
         let Some(load) = (unsafe { self.state_ext.as_ref() }).and_then(|s| s.load) else { return false };
         let mut cursor = ReadCursor { data, pos: 0 };
@@ -1642,6 +1650,16 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_input_uses_the_same_size_cap_as_state_saving() {
+        // A tiny injected cap exercises exact boundaries without allocating a 64 MiB blob.
+        assert_eq!(bounded_state_input(b"", 3), Some(&b""[..]));
+        assert_eq!(bounded_state_input(b"abc", 3), Some(&b"abc"[..]));
+        assert_eq!(bounded_state_input(b"abcd", 3), None);
+        assert_eq!(bounded_state_input(b"abc", 2), None);
+        assert_eq!(bounded_state_input(&[], MAX_STATE_BYTES), Some(&b""[..]));
+    }
 
     #[test]
     fn the_transport_reaches_clap_in_fixed_point() {

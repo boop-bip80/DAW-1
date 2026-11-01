@@ -605,7 +605,14 @@ mod tests {
         std::fs::create_dir_all(take.parent().unwrap()).unwrap();
         let audio: Vec<u8> = (0..480).flat_map(|i| (i as f32 / 1000.0).to_le_bytes()).collect();
         std::fs::write(&take, [soundcraft_audio_io::wav_float_header(1, 48_000, 100).unwrap(), audio].concat()).unwrap();
-        let plan = Recording { start: 48_000, pass: None, punch: None, rate: 48_000, takes: vec![Take { track, path: take, channels: 1 }] };
+        let plan = Recording {
+            start: 48_000,
+            pass: None,
+            punch: None,
+            rate: 48_000,
+            offset_samples: Some(75),
+            takes: vec![Take { track, path: take, channels: 1 }],
+        };
         let clips = |e: &Engine| e.session().track(track).unwrap().clips().iter().map(|c| (c.start, c.length)).collect::<Vec<_>>();
         let w = Autosaver::new(root.clone());
         w.write(e.session_arc(), None, Some(plan.clone()));
@@ -614,14 +621,14 @@ mod tests {
         assert!(left[0].recording);
         let mut r = Engine::default();
         recover(&mut r, &left[0]).unwrap();
-        assert_eq!(clips(&r), [(48_000, 480)], "all of the take, its last second included");
+        assert_eq!(clips(&r), [(47_925, 480)], "recovery must honor the take's recorded offset snapshot");
         discard(&left[0]);
         let w = Autosaver::new(root.clone());
         w.write(r.session_arc(), None, Some(plan));
         drop(w);
         let mut again = Engine::default();
         recover(&mut again, &leftovers(&root)[0]).unwrap();
-        assert_eq!((clips(&again), again.session().sources.len()), (vec![(48_000, 480)], 1), "placed once");
+        assert_eq!((clips(&again), again.session().sources.len()), (vec![(47_925, 480)], 1), "placed once with the same offset");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -657,6 +664,7 @@ mod tests {
             pass: None,
             punch: None,
             rate: 48_000,
+            offset_samples: None,
             takes: paths.iter().map(|p| Take { track, path: p.clone(), channels: 1 }).collect(),
         };
         let w = Autosaver::new(root.clone());

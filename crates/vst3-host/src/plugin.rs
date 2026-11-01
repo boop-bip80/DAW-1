@@ -14,6 +14,16 @@ const MAX_CHANNELS: usize = 64;
 /// An `unsynced` slot with no value waiting (a NaN pattern, which `set_param` never stores).
 const SYNCED: u64 = u64::MAX;
 
+/// Restore parameter values consumed for a failed state save. Only replace the empty sentinel:
+/// a newer audio-thread edit must win over the older value captured by the reader.
+fn restore_pending_after_failed_save(slots: &[AtomicU64], consumed: &[(usize, u64)]) {
+    for &(index, bits) in consumed {
+        if let Some(slot) = slots.get(index) {
+            let _ = slot.compare_exchange(SYNCED, bits, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+}
+
 /// How a SoundCraft parameter value maps to the VST3 normalized value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mapping {
@@ -467,16 +477,25 @@ impl Plugin for Vst3Plugin {
 
     fn state_reader(&mut self) -> Option<Box<dyn soundcraft_dsp::PluginStateReader>> {
         let (link, ids, unsynced) = (self.inst.state_link(), self.ids.clone(), Arc::clone(&self.unsynced));
+        let plugin_id = self.info.id.to_owned();
         Some(Box::new(move || {
             // A parameter only the controller stores (no processor state) would otherwise be
-            // saved with the controller's stale value.
-            for (&id, u) in ids.iter().zip(unsynced.iter()) {
+            // saved with the controller's stale value. Track the values consumed for this attempt:
+            // a plugin that refuses to save must not erase the next save's chance to retry.
+            let mut consumed = Vec::new();
+            for (index, (&id, u)) in ids.iter().zip(unsynced.iter()).enumerate() {
                 let bits = u.swap(SYNCED, Ordering::Relaxed);
                 if bits != SYNCED {
+                    consumed.push((index, bits));
                     link.sync_param(id, f64::from_bits(bits));
                 }
             }
-            link.save_state()
+            let saved = link.save_state();
+            if saved.is_none() {
+                restore_pending_after_failed_save(&unsynced, &consumed);
+                log::warn!("VST3 plugin {plugin_id}: state save failed; pending parameter changes retained for retry");
+            }
+            saved
         }))
     }
 }
@@ -574,6 +593,27 @@ impl PluginEditor for Vst3Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_state_save_restores_pending_values_but_preserves_newer_edits() {
+        let old_a = 0.25f64.to_bits();
+        let old_b = 0.5f64.to_bits();
+        let newer_b = 0.75f64.to_bits();
+        let slots = [AtomicU64::new(old_a), AtomicU64::new(old_b)];
+        let a = slots[0].swap(SYNCED, Ordering::Relaxed);
+        let b = slots[1].swap(SYNCED, Ordering::Relaxed);
+        assert_eq!((a, b), (old_a, old_b));
+
+        // Another thread changes the second parameter while state saving is in progress.
+        slots[1].store(newer_b, Ordering::Relaxed);
+        restore_pending_after_failed_save(&slots, &[(0, a), (1, b)]);
+        assert_eq!(slots[0].load(Ordering::Relaxed), old_a, "failed save may retry the original value");
+        assert_eq!(slots[1].load(Ordering::Relaxed), newer_b, "never overwrite a newer edit");
+
+        // A successful subsequent save consumes the retried value normally.
+        assert_eq!(slots[0].swap(SYNCED, Ordering::Relaxed), old_a);
+        assert_eq!(slots[0].load(Ordering::Relaxed), SYNCED);
+    }
 
     /// A saturated host queue must prioritize release events without allocating.
     #[test]

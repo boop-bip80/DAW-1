@@ -11,8 +11,8 @@ use soundcraft_engine::{
     midi_record::{MAX_MIDI_DRAIN_PER_POLL, MidiRecordBridge},
 };
 use soundcraft_midi::{
-    device::{self, MidiCaptureQueue, MidiInputStream},
-    live::TimedMidiMessage,
+    device::{self, MidiCaptureQueue, MidiInputPortInfo, MidiInputStream},
+    live::{LiveMidiMessage, TimedMidiMessage},
 };
 use soundcraft_time::Samples;
 use std::time::{Duration, Instant};
@@ -22,6 +22,29 @@ const MAX_OPEN_PORTS: usize = 16;
 /// At stop, preserve up to 16 control-thread polls before closing each bounded hardware queue.
 const MAX_STOP_DRAINS: usize = 16;
 const PORT_RESCAN_INTERVAL: Duration = Duration::from_secs(1);
+const FILTER_KEYS: [&str; 8] = ["notes", "pitch_bend", "mono_aftertouch", "poly_aftertouch", "program", "cc", "sysex", "realtime"];
+
+#[derive(Debug, Clone, Copy)]
+struct MidiInputFilter([bool; FILTER_KEYS.len()]);
+
+impl MidiInputFilter {
+    fn from_engine(engine: &Engine) -> Self {
+        Self(FILTER_KEYS.map(|name| engine.session().edit.flag(&format!("midi.filter.{name}"))))
+    }
+
+    fn rejects(self, message: LiveMidiMessage) -> bool {
+        let index = match message {
+            LiveMidiMessage::NoteOn { .. } | LiveMidiMessage::NoteOff { .. } => 0,
+            LiveMidiMessage::PitchBend { .. } => 1,
+            LiveMidiMessage::ChannelPressure { .. } => 2,
+            LiveMidiMessage::PolyPressure { .. } => 3,
+            LiveMidiMessage::ProgramChange { .. } => 4,
+            LiveMidiMessage::ControlChange { .. } => 5,
+            LiveMidiMessage::Realtime(_) => 7,
+        };
+        self.0[index]
+    }
+}
 
 /// Read-only connection information for Setup > Playback Engine and other UI panels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +64,26 @@ pub(crate) fn selected_names(engine: &Engine) -> Vec<String> {
 
 fn port_key(name: &str) -> String {
     name.chars().filter(|c| !c.is_control() && *c != '=').take(64).collect::<String>().trim().to_owned()
+}
+
+/// Resolve preference names against a fresh native scan. A port index is *never* persisted:
+/// unplugging or adding a device can reorder the OS-provided list between sessions.
+fn matching_ports(selected: &[String], available: &[MidiInputPortInfo]) -> Result<Vec<MidiInputPortInfo>, String> {
+    if selected.is_empty() {
+        return Err("no MIDI input selected; enable a port under Setup > Playback Engine > MIDI Inputs".into());
+    }
+    let mut matching = Vec::new();
+    for selected_name in selected {
+        let ports: Vec<_> = available.iter().filter(|port| port_key(&port.name) == *selected_name).cloned().collect();
+        if ports.is_empty() {
+            return Err(format!("selected MIDI input '{selected_name}' is unavailable; rescan MIDI Inputs in Setup > Playback Engine"));
+        }
+        matching.extend(ports);
+        if matching.len() > MAX_OPEN_PORTS {
+            return Err(format!("at most {MAX_OPEN_PORTS} simultaneous MIDI input ports can be recorded"));
+        }
+    }
+    Ok(matching)
 }
 
 enum InputSource {
@@ -91,17 +134,7 @@ impl MidiInputSources {
             return Err("no MIDI input selected; enable a port under Setup > Playback Engine > MIDI Inputs".into());
         }
         let available = device::input_ports().map_err(|e| format!("scan MIDI inputs: {e}"))?;
-        let mut matching = Vec::new();
-        for selected_name in &selected {
-            let ports: Vec<_> = available.iter().filter(|port| port_key(&port.name) == *selected_name).collect();
-            if ports.is_empty() {
-                return Err(format!("selected MIDI input '{selected_name}' is unavailable; rescan MIDI Inputs in Setup > Playback Engine"));
-            }
-            matching.extend(ports);
-            if matching.len() > MAX_OPEN_PORTS {
-                return Err(format!("at most {MAX_OPEN_PORTS} simultaneous MIDI input ports can be recorded"));
-            }
-        }
+        let matching = matching_ports(&selected, &available)?;
         let feeds = matching
             .into_iter()
             .map(|port| {
@@ -138,6 +171,7 @@ impl MidiInputSources {
 pub(crate) struct MidiInputRuntime {
     bridge: MidiRecordBridge,
     feeds: Vec<MidiPortFeed>,
+    input_filter: MidiInputFilter,
     sample_rate_hz: u64,
     last_emitted_micros: u64,
     last_rescan: Instant,
@@ -154,6 +188,7 @@ impl MidiInputRuntime {
         Ok(Self {
             bridge,
             feeds: sources.feeds,
+            input_filter: MidiInputFilter::from_engine(engine),
             sample_rate_hz: u64::from(engine.session().sample_rate.hz()),
             last_emitted_micros: 0,
             last_rescan: Instant::now(),
@@ -184,14 +219,19 @@ impl MidiInputRuntime {
         for feed in &self.feeds {
             self.bridge.add_input_loss(feed.source.queue().take_dropped_events(), feed.source.queue().take_truncated_packets());
         }
-        while self.batch.len() < limit {
+        let mut consumed = 0;
+        while consumed < limit {
             let mut received = false;
             for feed in &mut self.feeds {
-                if self.batch.len() >= limit {
+                if consumed >= limit {
                     break;
                 }
                 let Some(mut event) = feed.source.queue().try_recv() else { continue };
                 received = true;
+                consumed += 1;
+                if self.input_filter.rejects(event.message) {
+                    continue;
+                }
                 let (origin, at_micros) = *feed.anchor.get_or_insert((event.timestamp_micros, base_micros));
                 if event.timestamp_micros < origin {
                     return Err(format!("MIDI input '{}' timestamp moved backwards", feed.name));
@@ -217,7 +257,7 @@ impl MidiInputRuntime {
                 }
             }
         }
-        Ok(self.batch.len())
+        Ok(consumed)
     }
 
     pub(crate) fn poll(&mut self, at_sample: Samples) -> Result<usize, String> {
@@ -227,16 +267,30 @@ impl MidiInputRuntime {
     /// Drain pending callbacks once more at Stop, then close all hardware connections before
     /// committing. A pathological backlog beyond this limit is explicitly marked as lost.
     pub(crate) fn finish(&mut self, engine: &mut Engine, at_sample: Samples) -> Result<serde_json::Value, String> {
+        let mut drain_warning = None;
         for _ in 0..MAX_STOP_DRAINS {
             if self.feeds.iter().all(|feed| feed.source.queue().pending() == 0) {
                 break;
             }
-            self.drain(at_sample, MAX_MIDI_DRAIN_PER_POLL, false)?;
+            if let Err(err) = self.drain(at_sample, MAX_MIDI_DRAIN_PER_POLL, false) {
+                drain_warning = Some(err);
+                break;
+            }
+        }
+        for feed in &self.feeds {
+            self.bridge.add_input_loss(feed.source.queue().take_dropped_events(), feed.source.queue().take_truncated_packets());
         }
         let discarded = self.feeds.iter().map(|feed| feed.source.queue().pending() as u64).sum();
         self.bridge.add_input_loss(discarded, 0);
         self.feeds.clear(); // Drop midir connections before session changes or a retry.
-        self.bridge.finish(engine, at_sample).map_err(|e| e.to_string())
+        let mut result = self.bridge.finish(engine, at_sample).map_err(|e| e.to_string())?;
+        if let Some(warning) = drain_warning {
+            engine.message(format!("MIDI input interrupted while stopping; the partial take was kept: {warning}"));
+            if let serde_json::Value::Object(ref mut map) = result {
+                map.insert("capture_warning".into(), serde_json::Value::String(warning));
+            }
+        }
+        Ok(result)
     }
 
     #[cfg(test)]
@@ -285,6 +339,7 @@ mod tests {
         assert!(app.recorder.is_none(), "a MIDI-only pass must never require a physical microphone");
         assert!(app.take_plan.is_none(), "MIDI notes do not need an audio-file take plan");
         assert_eq!(app.midi_input_status().connected_ports, ["Fake Keyboard"]);
+        assert!(app.run("session.new", json!({})).is_err(), "a session switch must not destroy an uncommitted MIDI pass");
         producer.push_packet(1_000, &[0x90, 60, 100, 0xB0, 1, 75]);
         app.poll_midi_input();
         producer.push_packet(501_000, &[0x80, 60, 55]);
@@ -378,5 +433,54 @@ mod tests {
         app.start_recording();
         assert!(!app.engine.transport.recording);
         assert!(app.ui.status.contains("MIDI time-range punch"));
+    }
+
+    #[test]
+    fn stale_device_preference_does_not_open_an_unrelated_port_index() {
+        let available = vec![MidiInputPortInfo { name: "Keys A".into(), index: 0 }, MidiInputPortInfo { name: "Keys B".into(), index: 1 }];
+        assert_eq!(matching_ports(&["Keys B".into()], &available).unwrap(), vec![available[1].clone()]);
+        assert!(matching_ports(&["Disconnected Keys".into()], &available).unwrap_err().contains("unavailable"));
+        assert!(matching_ports(&[], &available).unwrap_err().contains("no MIDI input selected"));
+    }
+
+    #[test]
+    fn setup_midi_input_filter_is_honored_during_native_recording() {
+        let (mut app, track) = armed_midi_app();
+        app.engine.execute("setup.midi_input_filter", &json!({"filter": ["notes"]})).unwrap();
+        let (mut producer, queue) = device::capture_channel(8).unwrap();
+        app.midi_test_sources = Some(MidiInputSources::fake_many(vec![("Fake Keyboard", queue)]));
+        request_record(&mut app);
+        producer.push_packet(100, &[0x90, 60, 90, 0xB0, 7, 100]);
+        app.poll_midi_input();
+        producer.push_packet(500_100, &[0x80, 60, 64]);
+        request_stop(&mut app, 96_000);
+        let clips = app.engine.session().track(track).unwrap().clips();
+        assert_eq!(clips.len(), 1);
+        let ClipContent::Midi { sequence } = &clips[0].content else { panic!("MIDI take expected") };
+        assert!(sequence.notes.is_empty(), "note messages were filtered at capture");
+        assert_eq!(sequence.ctrls.len(), 1);
+        assert_eq!(app.midi_input_status().dropped_events, 0, "intentional input filtering is not device loss");
+    }
+
+    #[test]
+    fn invalidated_target_keeps_completed_take_in_memory_for_retry() {
+        let (mut app, track) = armed_midi_app();
+        let (mut producer, queue) = device::capture_channel(8).unwrap();
+        app.midi_test_sources = Some(MidiInputSources::fake_many(vec![("Fake Keyboard", queue)]));
+        request_record(&mut app);
+        producer.push_packet(100, &[0x90, 60, 100]);
+        app.poll_midi_input();
+        // A track can be made inactive while the transport runs; the commit must reject it
+        // atomically and keep all completed MIDI data until the user repairs the target.
+        app.engine.session_mut().track_mut(track).unwrap().inactive = true;
+        request_stop(&mut app, 96_000);
+        assert!(app.midi_capture.is_some());
+        assert!(app.ui.status.contains("kept in memory"));
+        assert!(app.run("session.new", json!({})).is_err());
+        app.engine.session_mut().track_mut(track).unwrap().inactive = false;
+        let result = app.retry_midi_commit().unwrap();
+        assert_eq!(result["clips"].as_array().map(Vec::len), Some(1));
+        assert!(app.midi_capture.is_none());
+        assert_eq!(app.engine.session().track(track).unwrap().clips().len(), 1);
     }
 }

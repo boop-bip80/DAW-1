@@ -4,7 +4,7 @@ use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
 use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
 use soundcraft_model::{BusId, ChannelFormat, Clip, ClipContent, Session, Source, SourceAudio, SourceId, TrackId, TrackKind};
-use soundcraft_time::{Range, Samples};
+use soundcraft_time::{MAX_POSITION, Range, Samples};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1716,6 +1716,9 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> std:
 /// A recording's plan, made when it starts: each record-enabled track's take file, where the
 /// takes start on the timeline, the loop length they split into when loop recording, and the
 /// punch range they're trimmed to.
+///
+/// The optional offset is a snapshot of the session's manual input-latency compensation. Old
+/// journals have no snapshot and use the recovered session setting instead.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Recording {
     pub start: Samples,
@@ -1723,7 +1726,38 @@ pub struct Recording {
     pub punch: Option<Range>,
     /// The input's sample rate, which the take files are written at.
     pub rate: u32,
+    /// Session samples. Positive values place the recorded audio earlier, negative later.
+    /// Bounded to half a second when the take is placed; missing in older crash journals.
+    #[serde(default)]
+    pub offset_samples: Option<Samples>,
     pub takes: Vec<Take>,
+}
+
+/// Session key for manual recorded-take placement compensation. This is not a device latency
+/// measurement: input and output run on separate streams and no duplex clock is calibrated.
+pub const RECORD_LATENCY_KEY: &str = "record.latency_offset_samples";
+
+/// Keep even a malformed session setting or recording journal within ±500 ms at the session rate.
+pub fn bounded_record_latency(samples: Samples, sample_rate: u32) -> Samples {
+    let limit = Samples::from(sample_rate) / 2;
+    samples.clamp(-limit, limit)
+}
+
+/// Manual take-placement correction configured in this session, in its own sample rate.
+pub fn record_latency_samples(session: &Session) -> Samples {
+    let configured = session.edit.value(RECORD_LATENCY_KEY, 0.0);
+    let limit = f64::from(session.sample_rate.hz()) / 2.0;
+    bounded_record_latency(soundcraft_time::to_samples(configured.clamp(-limit, limit)), session.sample_rate.hz())
+}
+
+impl Recording {
+    /// Capture the alignment setting at record start, before a later change to session settings.
+    /// Call this when creating a new take plan; old plans without a snapshot remain loadable.
+    #[must_use]
+    pub fn with_session_offset(mut self, session: &Session) -> Self {
+        self.offset_samples = Some(record_latency_samples(session));
+        self
+    }
 }
 
 /// One track's take file.
@@ -1736,14 +1770,34 @@ pub struct Take {
 
 /// Place recorded take files as `plan` says, as one undo step ("Record").
 pub fn place_recording(e: &mut Engine, plan: &Recording, takes: Vec<(TrackId, PathBuf)>) -> Vec<soundcraft_model::ClipId> {
-    add_recording_in(e, plan.start, takes, plan.pass, plan.punch)
+    let offset = bounded_record_latency(plan.offset_samples.unwrap_or_else(|| record_latency_samples(e.session())), e.session().sample_rate.hz());
+    add_recording_in(e, plan.start, takes, plan.pass, plan.punch, offset)
 }
 
 /// Turn recorded take files into clips at `start`, as one undo step ("Record"); each file is the
 /// source of its clips. With `pass` (loop recording), a take becomes one clip per pass (at most
 /// 1000), each pass after the first on a new playlist.
 pub fn add_recording(e: &mut Engine, start: Samples, takes: Vec<(TrackId, PathBuf)>, pass: Option<Samples>) -> Vec<soundcraft_model::ClipId> {
-    add_recording_in(e, start, takes, pass, None)
+    add_recording_in(e, start, takes, pass, None, 0)
+}
+
+/// The legal part of a single recorded pass after shifting it for input latency. Its source cut
+/// advances if the correction would move audio before timeline zero, outside a punch, or past the
+/// session's maximum position. Use i128 for untrusted legacy journal values and long recordings.
+fn kept_record_pass(start: Samples, frames: Samples, offset_samples: Samples, punch: Option<Range>) -> Option<(Samples, Samples, Samples)> {
+    if frames <= 0 {
+        return None;
+    }
+    let shifted_start = i128::from(start) - i128::from(offset_samples);
+    let shifted_end = shifted_start + i128::from(frames);
+    let earliest = i128::from(punch.map_or(0, |p| p.start)).max(0);
+    let latest = i128::from(punch.map_or(MAX_POSITION, |p| p.end)).min(i128::from(MAX_POSITION));
+    let first = shifted_start.max(earliest);
+    let last = shifted_end.min(latest);
+    if last <= first {
+        return None;
+    }
+    Some((Samples::try_from(first).ok()?, Samples::try_from(first - shifted_start).ok()?, Samples::try_from(last - first).ok()?))
 }
 
 /// [`add_recording`] limited to the `punch` range: each clip is cut to it before it's placed, so
@@ -1754,6 +1808,7 @@ fn add_recording_in(
     takes: Vec<(TrackId, PathBuf)>,
     pass: Option<Samples>,
     punch: Option<Range>,
+    offset_samples: Samples,
 ) -> Vec<soundcraft_model::ClipId> {
     let before = e.session_arc();
     let mut out = Vec::new();
@@ -1782,13 +1837,7 @@ fn add_recording_in(
             if offset > 0 && n < pass / 8 {
                 break;
             }
-            let (clip_start, cut, clip_len) = match punch {
-                Some(p) => {
-                    let Some(kept) = Range::new(start, start.saturating_add(n)).intersect(&p) else { continue };
-                    (kept.start, kept.start.saturating_sub(start), kept.len())
-                }
-                None => (start, 0, n),
-            };
+            let Some((clip_start, cut, clip_len)) = kept_record_pass(start, n, offset_samples, punch) else { continue };
             kept_passes.push((offset, clip_start, cut, clip_len));
         }
         if kept_passes.is_empty() {
@@ -1926,6 +1975,7 @@ mod record_tests {
             pass: None,
             punch: Some(Range::new(1_400, 1_600)),
             rate: 48_000,
+            offset_samples: None,
             takes: vec![Take { track: vox, path: take.clone(), channels: 1 }],
         };
         place_recording(&mut e, &plan, vec![(vox, take)]);
@@ -1956,6 +2006,7 @@ mod record_tests {
             pass: None,
             punch: Some(Range::new(5_000, 6_000)),
             rate: 48_000,
+            offset_samples: None,
             takes: vec![Take { track: vox, path: take.clone(), channels: 1 }],
         };
         let placed = place_recording(&mut e, &plan, vec![(vox, take)]);
@@ -1964,6 +2015,46 @@ mod record_tests {
         assert_eq!(e.session().pool.len(), pool);
         assert!(e.session().sources.iter().any(|x| x.id == shared));
         assert!(e.session().pool.contains(shared));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recording_offset_trims_at_zero_punch_and_timeline_max_without_losing_alignment() {
+        assert_eq!(kept_record_pass(100, 400, 250, None), Some((0, 150, 250)));
+        assert_eq!(kept_record_pass(100, 400, -250, None), Some((350, 0, 400)));
+        assert_eq!(kept_record_pass(1_000, 600, 100, Some(Range::new(1_200, 1_400))), Some((1_200, 300, 200)));
+        assert_eq!(kept_record_pass(MAX_POSITION - 100, 300, -50, None), Some((MAX_POSITION - 50, 0, 50)));
+        assert_eq!(kept_record_pass(0, 100, 200, None), None);
+        assert_eq!(kept_record_pass(Samples::MAX, 100, Samples::MIN, None), None);
+    }
+
+    #[test]
+    fn overdub_latency_applies_to_loop_passes_and_can_be_snapshotted_before_setting_changes() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-record-offset-{}", std::process::id()));
+        let path = dir.join("Audio Files/Vox_01.wav");
+        write_take(&path, 900);
+        let mut e = Engine::default();
+        let vox = armed(&mut e, "Vox", "mono", "In 1");
+        e.execute("setup.record_latency", &json!({"samples": 200})).unwrap();
+        let legacy = json!({"start": 1_000, "pass": 400, "punch": {"start": 950, "end": 1_250}, "rate": 48_000, "takes": []});
+        let plan: Recording = serde_json::from_value(legacy).unwrap();
+        assert_eq!(plan.offset_samples, None, "old take journals must deserialize without a new field");
+        let plan = plan.with_session_offset(e.session());
+        assert_eq!(plan.offset_samples, Some(200));
+        e.execute("setup.record_latency", &json!({"samples": -100})).unwrap();
+        let ids = place_recording(&mut e, &plan, vec![(vox, path.clone())]);
+        assert_eq!(ids.len(), 2, "last short loop pass lies outside the punch");
+        let t = e.session().track(vox).unwrap();
+        let passes: Vec<_> = t.playlists.iter().flat_map(|p| p.clips.iter().map(|c| (c.start, c.source_offset(), c.length))).collect();
+        assert_eq!(passes, [(950, 150, 250), (950, 550, 250)], "each loop pass independently takes the shifted punch intersection");
+
+        e.execute("edit.undo", &json!({})).unwrap();
+        // The legacy plan has no snapshot, so the recovered session's current setting applies.
+        let plan: Recording = serde_json::from_value(json!({"start": 100, "pass": null, "punch": null, "rate": 48_000, "takes": []})).unwrap();
+        e.execute("setup.record_latency", &json!({"samples": 250})).unwrap();
+        let ids = place_recording(&mut e, &plan, vec![(vox, path)]);
+        let clip = e.session().find_clip(ids[0]).unwrap().1;
+        assert_eq!((clip.start, clip.source_offset(), clip.length), (0, 150, 750), "audio before zero must be discarded, not slid later");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

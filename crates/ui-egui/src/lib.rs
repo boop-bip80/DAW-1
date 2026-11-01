@@ -601,6 +601,11 @@ impl SoundApp {
         if matches!(id, "session.new" | "session.open" | "session.close" | "session.revert") && bounce::refuses_session_switch(self) {
             return Err(self.ui.status.clone());
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(id, "session.new" | "session.open" | "session.close" | "session.revert") && self.midi_capture.is_some() {
+            self.ui.status = "Stop MIDI recording and resolve any pending MIDI take before replacing the session.".into();
+            return Err(self.ui.status.clone());
+        }
         if let Some(r) = menus::run_ui_command(self, id, &params) {
             return r;
         }
@@ -756,6 +761,11 @@ impl SoundApp {
             self.record_hint = Some((self.last_frame.unwrap_or_default(), why));
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.midi_capture.is_some() {
+            self.ui.status = "An unfinished MIDI take is awaiting recovery; retry its commit before starting another recording.".into();
+            return;
+        }
         let audio_armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive);
         let midi_armed = self.engine.session().tracks.iter().filter(|t| t.mixer.record_arm && t.kind.is_midi() && !t.inactive).count();
         if !audio_armed && midi_armed == 0 {
@@ -780,10 +790,6 @@ impl SoundApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let midi_sources = if midi_armed > 0 {
-            if self.midi_capture.is_some() {
-                self.ui.status = "An unfinished MIDI take is awaiting recovery; retry its commit before starting another recording.".into();
-                return;
-            }
             #[cfg(test)]
             let opened: Result<_, String> =
                 self.midi_test_sources.take().map(Ok).unwrap_or_else(|| midi_input_runtime::MidiInputSources::open_selected(&self.engine));
@@ -866,7 +872,10 @@ impl SoundApp {
     /// autosave that plan with the session.
     fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, pass: Option<Samples>) {
         let rate = self.recorder.as_ref().map_or(0, |r| r.sample_rate);
-        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
+        self.take_plan = Some(
+            soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, offset_samples: None, takes }
+                .with_session_offset(self.engine.session()),
+        );
         if let Some(root) = self.autosave_dir.clone() {
             self.queue_autosave(root);
         }
@@ -1086,6 +1095,11 @@ impl SoundApp {
     pub fn recover(&mut self, left: &soundcraft_engine::autosave::Leftover) {
         if self.engine.transport.recording {
             self.ui.status = "Stop recording before recovering other work.".into();
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.midi_capture.is_some() {
+            self.ui.status = "Resolve the unfinished MIDI take before recovering another session.".into();
             return;
         }
         self.close_autosave();
@@ -1311,6 +1325,10 @@ impl SoundApp {
                     } else {
                         format!("Recorded {clips} MIDI clip(s)")
                     });
+                    if let Some(warning) = result.get("capture_warning").and_then(Value::as_str) {
+                        self.midi_status.error = Some(warning.to_owned());
+                        summaries.push(format!("MIDI input interruption: {warning}"));
+                    }
                 }
                 Err(err) => {
                     log::warn!("MIDI take commit: {err}");
