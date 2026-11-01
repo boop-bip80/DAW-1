@@ -8,7 +8,7 @@
 
 use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
-use soundcraft_model::{ClipContent, Session, SourceId, TrackId, TrackKind};
+use soundcraft_model::{ClipContent, Route, Session, SourceId, Track, TrackId, TrackKind};
 use soundcraft_time::FrameRate;
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -79,6 +79,38 @@ fn timecode(frames: u64, fps: u32) -> String {
     format!("{:02}:{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60, ff)
 }
 
+/// An EDL describes raw source edits, not the sound of a mixed track. Do not export a cut list
+/// that appears to preserve playback when the chosen track contains processing the file cannot
+/// carry. Recording arm, input routing and input monitoring are capture setup, not clip effects.
+fn reject_track_processing(track: &Track) -> Result<()> {
+    let mixer = &track.mixer;
+    if mixer.mute || mixer.solo || mixer.solo_safe {
+        return Err(unsupported("track mute/solo state is not represented; clear it before exporting"));
+    }
+    if mixer.volume_db != 0.0 || mixer.trim_db != 0.0 {
+        return Err(unsupported("track fader/trim gain must be 0 dB; render the mixed audio before exporting"));
+    }
+    if mixer.phase_invert || mixer.pan.len() != 1 || mixer.pan[0] != 0.0 || mixer.surround.is_some() {
+        return Err(unsupported("track phase/pan processing is not represented; render or reset it before exporting"));
+    }
+    if mixer.inserts.iter().any(Option::is_some) || track.instrument.is_some() {
+        return Err(unsupported("track inserts/instrument processing cannot be represented in an EDL"));
+    }
+    if mixer.sends.iter().any(Option::is_some) {
+        return Err(unsupported("configured track sends cannot be represented in an EDL"));
+    }
+    if mixer.vca.is_some() || !track.automation.is_empty() {
+        return Err(unsupported("track VCA assignment or automation lanes cannot be represented in an EDL"));
+    }
+    if mixer.output != Route::Main {
+        return Err(unsupported("track output routing must be the main output for an EDL"));
+    }
+    if track.frozen || track.elastic.is_some() {
+        return Err(unsupported("frozen/Elastic track processing must be rendered before EDL export"));
+    }
+    Ok(())
+}
+
 /// Export exactly one selected audio track as a conforming cut-only CMX 3600 event list.
 ///
 /// Every sample boundary must fall on the target frame grid. No file is written if a clip is
@@ -89,6 +121,7 @@ pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Ex
     if track.kind != TrackKind::Audio || track.channels() != 1 || track.inactive {
         return Err(unsupported("select an active mono audio track (A1) for this EDL"));
     }
+    reject_track_processing(track)?;
     let title = ascii_remark(&session.name, "session title", 72)?;
     let rate = session.sample_rate.hz();
     let mut clips = track.clips().iter().collect::<Vec<_>>();
@@ -309,7 +342,7 @@ pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32
 mod tests {
     use super::*;
     use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
-    use soundcraft_model::{ChannelFormat, Clip, Source, TrackKind};
+    use soundcraft_model::{AutoParam, AutomationLane, ChannelFormat, Clip, Insert, Mixer, SendSlot, Source, TrackKind};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -409,6 +442,66 @@ mod tests {
         session.track_mut(track).unwrap().playlist_mut().unwrap().clips[0].fade_in.len = 0;
         session.track_mut(track).unwrap().playlist_mut().unwrap().clips[0].start = 2_000;
         assert!(matches!(export_audio(&session, track, 24), Err(EngineError::Unsupported(message)) if message.contains("leading silence")));
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn refuses_unrendered_track_mixer_processing_but_allows_recording_setup() {
+        let (mut session, media, track) = fixture();
+        let mixer = &mut session.track_mut(track).unwrap().mixer;
+        mixer.record_arm = true;
+        mixer.input = Route::Hardware("In 2".into());
+        mixer.input_monitor = true;
+        assert!(export_audio(&session, track, 24).is_ok(), "capture settings must not block editorial interchange");
+
+        for (case, expected) in [
+            (0, "mute/solo"),
+            (1, "mute/solo"),
+            (2, "fader/trim"),
+            (3, "fader/trim"),
+            (4, "phase/pan"),
+            (5, "phase/pan"),
+            (6, "inserts"),
+            (7, "sends"),
+            (8, "VCA"),
+            (9, "VCA"),
+            (10, "output routing"),
+            (11, "frozen/Elastic"),
+            (12, "frozen/Elastic"),
+            (13, "inserts"),
+        ] {
+            let t = session.track_mut(track).unwrap();
+            t.mixer = Mixer::new(ChannelFormat::Mono);
+            t.automation.clear();
+            t.frozen = false;
+            t.elastic = None;
+            t.instrument = None;
+            match case {
+                0 => t.mixer.mute = true,
+                1 => t.mixer.solo = true,
+                2 => t.mixer.volume_db = -3.0,
+                3 => t.mixer.trim_db = 2.0,
+                4 => t.mixer.phase_invert = true,
+                5 => t.mixer.pan[0] = 0.25,
+                6 => t.mixer.inserts[0] = Some(Insert::new("eq7")),
+                7 => t.mixer.sends[0] = Some(SendSlot::new(Route::Main)),
+                8 => t.mixer.vca = Some(123),
+                9 => t.automation.push(AutomationLane::new(AutoParam::Volume)),
+                10 => t.mixer.output = Route::Hardware("Out 2".into()),
+                11 => t.frozen = true,
+                12 => t.elastic = Some("polyphonic".into()),
+                13 => t.instrument = Some(Insert::new("sampler")),
+                _ => {}
+            }
+            let err = export_audio(&session, track, 24).err().unwrap();
+            assert!(format!("{err}").contains(expected), "case {case} returned wrong error: {err}");
+        }
+        // The same validation runs before a command writes any output.
+        session.track_mut(track).unwrap().mixer.volume_db = -6.0;
+        let document = media.with_extension("edl");
+        let mut engine = Engine::new(session);
+        assert!(engine.execute("file.export_edl", &json!({"path": document.to_str().unwrap(), "track": track.0, "fps": 24})).is_err());
+        assert!(!document.exists());
         std::fs::remove_file(media).unwrap();
     }
 
