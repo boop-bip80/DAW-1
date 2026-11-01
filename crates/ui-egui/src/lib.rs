@@ -1479,11 +1479,29 @@ impl SoundApp {
         }
     }
 
-    /// Stop the transport, keeping a take in progress, when the audio output fails.
+    /// Stop a failing output and retain the recorder's exact finalization/recovery report.
     fn watch_output(&mut self) {
         let Some(p) = &self.player else { return };
         let Some(trouble) = p.trouble() else { return };
         let name = p.device_name.clone();
+        let (recording, playing) = (self.engine.transport.recording, self.engine.transport.playing);
+        // `stop_play` calls `finish_recording`, which may report completed clips and the
+        // escaped paths of failed WAVs left on disk for manual recovery. Do not replace that
+        // report with a generic, potentially false claim that a take was successfully kept.
+        let had_finalization = recording && self.take_plan.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let had_finalization = had_finalization || (recording && self.midi_capture.is_some());
+        if recording || playing {
+            self.stop_play();
+        }
+        let finalization = had_finalization.then(|| self.ui.status.clone());
+        self.report_output_trouble(trouble, &name, recording, playing, finalization.as_deref());
+    }
+
+    /// Called on the UI thread after finalization, never from the audio callback. Preserve the
+    /// exact take summary (including *unimported* recoverable WAV paths) alongside the reason
+    /// playback stopped; neither output failure nor recording guarantees a completed clip.
+    fn report_output_trouble(&mut self, trouble: OutputTrouble, name: &str, recording: bool, playing: bool, finalization: Option<&str>) {
         let (cause, then) = match trouble {
             OutputTrouble::Bug => (
                 "the audio engine hit an internal error (see the log)".to_string(),
@@ -1494,12 +1512,13 @@ impl SoundApp {
             }
             OutputTrouble::Stalled => (format!("“{name}” stopped asking for audio"), "Use Reconnect audio device in Setup › Playback Engine."),
         };
-        let (recording, playing) = (self.engine.transport.recording, self.engine.transport.playing);
-        if recording || playing {
-            self.stop_play();
-        }
         self.ui.status = if recording {
-            format!("Recording stopped: {cause}. The take is kept up to there. {then}")
+            let mut status = format!("Recording stopped: {cause}. {then}");
+            if let Some(summary) = finalization.filter(|summary| !summary.is_empty()) {
+                status.push_str(" Finalization: ");
+                status.push_str(summary);
+            }
+            status
         } else if playing {
             format!("Playback stopped: {cause}. {then}")
         } else {
@@ -2579,7 +2598,9 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{MonitorFifoHealth, MonitorNoticeState, Services, SoundApp, Trouble, automation_step_due, prefer_recording_capture_notice};
+    use super::{
+        MonitorFifoHealth, MonitorNoticeState, OutputTrouble, Services, SoundApp, Trouble, automation_step_due, prefer_recording_capture_notice,
+    };
     use serde_json::json;
     use soundcraft_model::TrackId;
 
@@ -2688,6 +2709,59 @@ mod tests {
         app.report_input_trouble(Trouble::Disk("input still unavailable".into()), false, Some("stale take path".into()));
         assert!(app.ui.status.starts_with("Audio input: input still unavailable"));
         assert!(!app.ui.status.contains("stale take path"));
+    }
+
+    /// Output failures finalize audio through the same writer, but the old output status
+    /// immediately replaced its manual recovery notice with "the take is kept". Two failed
+    /// zero-frame WAVs are *not* imported, even when their files remain recoverable on disk.
+    #[test]
+    fn output_failure_keeps_exact_unimported_wav_recovery_paths_and_zero_clip_count() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        assert!(app.player.is_none() && app.recorder.is_none(), "the test never opens an audio device");
+        let first = "Audio Files/FailedVox.wav";
+        let second = "Audio Files/Failed\nGuitar.wav";
+        let finalized = format!(
+            "Recorded 0 clip(s); audio input: synthetic disk full; 2 failed WAV file(s) left on disk for possible manual recovery \
+             (not added to the session): {first:?}, {second:?}"
+        );
+        app.report_output_trouble(OutputTrouble::Gone, "Studio Output", true, true, Some(&finalized));
+        let status = &app.ui.status;
+        assert!(status.contains("Recording stopped: “Studio Output” is unavailable"), "output failure reason was lost: {status}");
+        assert!(status.contains("Check the audio device"), "reconnect advice was lost: {status}");
+        assert!(status.contains(&finalized), "the finalizer's original recovery report must remain byte-for-byte intact: {status}");
+        assert!(status.contains("Recorded 0 clip(s)") && status.contains("not added to the session"));
+        assert!(!status.contains("take is kept up to there"), "failed WAVs are not completed session clips: {status}");
+        assert!(!status.contains('\n'), "the escaped recovery path must never inject a new status line");
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo(), "diagnostics must not mutate the document");
+    }
+
+    #[test]
+    fn output_failure_keeps_successful_partial_clips_without_claiming_all_takes_survived() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let summary =
+            "Recorded 1 clip(s); audio input: writer I/O error; Audio Files/FailedBass.wav remains for manual recovery (not added to session)";
+        app.report_output_trouble(OutputTrouble::Stalled, "Studio Output", true, true, Some(summary));
+        assert!(app.ui.status.contains("Recording stopped: “Studio Output” stopped asking for audio"));
+        assert!(app.ui.status.contains(summary), "keep the exact imported clip count and failed WAV notice");
+        assert!(!app.ui.status.contains("take is kept up to there"));
+
+        app.report_output_trouble(OutputTrouble::Bug, "Studio Output", true, true, None);
+        assert!(app.ui.status.contains("Recording stopped: the audio engine hit an internal error"));
+        assert!(!app.ui.status.contains("Finalization:"), "no take was finalized, so avoid attaching stale status");
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+    }
+
+    #[test]
+    fn output_failure_playback_only_and_idle_status_do_not_replay_old_take_details() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let old = "Recorded 0 clip(s); stale failed WAV path";
+        app.report_output_trouble(OutputTrouble::Gone, "Speakers", false, true, Some(old));
+        assert!(app.ui.status.starts_with("Playback stopped: “Speakers” is unavailable"));
+        assert!(!app.ui.status.contains(old), "ordinary playback must not inherit a previous take's notice");
+        app.report_output_trouble(OutputTrouble::Bug, "Speakers", false, false, Some(old));
+        assert!(app.ui.status.starts_with("Audio output: the audio engine hit an internal error"));
+        assert!(!app.ui.status.contains(old));
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
