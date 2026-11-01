@@ -1016,7 +1016,9 @@ mod tests {
         drop(take);
 
         let decoded = decode(&path);
-        assert_eq!(decoded, vec![input.chunks_exact(4).map(|f| f[3]).collect::<Vec<_>>(), input.chunks_exact(4).map(|f| f[1]).collect::<Vec<_>>()]);
+        let (quadruples, remainder) = input.as_chunks::<4>();
+        assert!(remainder.is_empty());
+        assert_eq!(decoded, vec![quadruples.iter().map(|f| f[3]).collect::<Vec<_>>(), quadruples.iter().map(|f| f[1]).collect::<Vec<_>>()]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
