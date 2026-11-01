@@ -374,10 +374,30 @@ impl Engine {
         }
     }
 
-    /// Whether command `id` must wait for the take being recorded: nothing may replace the
-    /// session or quit under it.
+    /// Whether command `id` must wait for the take being recorded. A recording may
+    /// neither lose its session nor jump/restart the playback clock underneath
+    /// the continuously captured audio and MIDI device timestamps.
     pub fn blocked_while_recording(&self, id: &str) -> bool {
-        self.transport.recording && matches!(id, "session.new" | "session.open" | "session.close" | "session.revert" | "app.quit")
+        self.transport.recording
+            && matches!(
+                id,
+                "session.new"
+                    | "session.open"
+                    | "session.close"
+                    | "session.revert"
+                    | "app.quit"
+                    | "transport.play"
+                    | "transport.play_selection"
+                    | "transport.locate"
+                    | "transport.rtz"
+                    | "transport.go_to_end"
+                    | "transport.rewind"
+                    | "transport.fast_forward"
+                    | "edit.play_timeline"
+                    | "markers.recall"
+                    | "markers.next"
+                    | "markers.previous"
+            )
     }
 
     /// Run a command by id. Never panics: escaped panics become `EngineError::Internal` and the

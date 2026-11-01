@@ -32,6 +32,12 @@ pub fn specs() -> Vec<CommandSpec> {
 
 fn tab(e: &mut Engine, p: &Value) -> Result<Value> {
     let (back, extend) = (bool_or(p, "back", false), bool_or(p, "extend", false));
+    // Plain Tab also locates playback; moving that clock mid-take would make
+    // the recorded device-time samples disagree with the take's session start.
+    // Extending an edit selection does not locate playback and remains allowed.
+    if e.transport.recording && !extend {
+        return Err(crate::EngineError::Disabled("edit.tab".into(), "stop recording first".into()));
+    }
     let s = e.session();
     let sel = s.edit.selection;
     let to = |from| stop(s, from, back);
