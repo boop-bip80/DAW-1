@@ -256,6 +256,28 @@ impl Shared {
     }
 }
 
+/// Handle one already-converted callback chunk without blocking. The gate snapshot belongs
+/// to the *whole original* CPAL block, so a Play ACK during chunk conversion cannot admit
+/// samples that arrived before the output callback accepted Play.
+fn capture_converted_part(shared: &Shared, monitor: &InputRing, samples: &[f32], callback_gate: u64, owed: &mut usize, seen_epoch: &mut u64) {
+    monitor.push(samples);
+    if callback_gate & CAPTURE_GATE_OPEN == 0 {
+        *owed = 0;
+    } else if shared.armed.load(Ordering::SeqCst) {
+        if !shared.capture_if_armed(|| {
+            if monitor.capture_allowed_from(callback_gate) {
+                shared.capture_for_arm(samples, owed, seen_epoch);
+            } else {
+                *owed = 0;
+            }
+        }) {
+            *owed = 0;
+        }
+    } else {
+        *owed = 0;
+    }
+}
+
 pub struct Recorder {
     shared: Arc<Shared>,
     /// Live input for monitoring (always fed while the input stream runs).
@@ -298,6 +320,7 @@ where
         config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
             crate::mark_audio_thread();
+            let callback_gate = mon.capture_gate_snapshot();
             sh.guarded(|| {
                 // Capture timestamps belong only to this input stream. The output stream's
                 // timestamp origin may differ; this observation cannot measure duplex latency.
@@ -307,14 +330,7 @@ where
                     for (o, x) in s.iter_mut().zip(part) {
                         *o = f32::from_sample(*x);
                     }
-                    mon.push(s);
-                    if sh.armed.load(Ordering::SeqCst) {
-                        if !sh.capture_if_armed(|| sh.capture_for_arm(s, &mut owed, &mut seen_epoch)) {
-                            owed = 0;
-                        }
-                    } else {
-                        owed = 0;
-                    }
+                    capture_converted_part(&sh, &mon, s, callback_gate, &mut owed, &mut seen_epoch);
                 }
             });
         },
@@ -437,9 +453,22 @@ impl Recorder {
     /// Create each take's file and start recording into them: a track's take records the given
     /// input channels into a new file.
     pub fn arm(&mut self, takes: Vec<(TrackId, Vec<usize>, PathBuf)>) -> Result<(), String> {
-        self.arm_with_spawn(takes, |shared, takes, channels| {
-            std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels))
-        })
+        self.arm_with_mode(takes, false).map(|_| ())
+    }
+
+    /// Prepare disk capture but wait for the matching output callback to accept Play before
+    /// admitting input callbacks. Only use when playback is currently stopped; live punch-in
+    /// uses [`Self::arm`] and continues recording immediately. This is **not** ADC/DAC alignment.
+    pub fn arm_wait_for_play(&mut self, takes: Vec<(TrackId, Vec<usize>, PathBuf)>) -> Result<CaptureStartTicket, String> {
+        self.arm_with_mode(takes, true)
+    }
+
+    fn arm_with_mode(&mut self, takes: Vec<(TrackId, Vec<usize>, PathBuf)>, delayed: bool) -> Result<CaptureStartTicket, String> {
+        self.arm_with_spawn(
+            takes,
+            |shared, takes, channels| std::thread::Builder::new().name("take writer".into()).spawn(move || write_takes(&shared, takes, channels)),
+            delayed,
+        )
     }
 
     /// Separate thread creation so tests can inject a deterministic spawn failure after all
@@ -448,7 +477,8 @@ impl Recorder {
         &mut self,
         takes: Vec<(TrackId, Vec<usize>, PathBuf)>,
         spawn: impl FnOnce(Arc<Shared>, Vec<TakeWriter>, usize) -> std::io::Result<std::thread::JoinHandle<Takes>>,
-    ) -> Result<(), String> {
+        delayed: bool,
+    ) -> Result<CaptureStartTicket, String> {
         if self.writer.is_some() {
             return Err("already recording".into());
         }
@@ -487,6 +517,14 @@ impl Recorder {
         let ring = &self.shared.ring;
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let ticket = match self.monitor.prepare_capture_gate(delayed) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                // Refuse a theoretically exhausted epoch before publishing armed=true.
+                drop(takes);
+                return Err(cleanup_new_takes(error, paths));
+            }
+        };
         self.shared.begin_arm();
         match spawn(Arc::clone(&self.shared), takes, self.channels) {
             Ok(w) => self.writer = Some((w, live)),
@@ -495,7 +533,7 @@ impl Recorder {
                 return Err(cleanup_new_takes(e.to_string(), paths));
             }
         }
-        Ok(())
+        Ok(ticket)
     }
 
     /// What the take recording onto `track` holds so far.
@@ -841,6 +879,77 @@ mod tests {
         soundcraft_audio_io::decode(&std::fs::read(path).unwrap(), None).unwrap().1.channels
     }
 
+    /// A backend callback can exceed the fixed conversion scratch buffer. If the output ACK
+    /// arrives between scratch chunks, *none* of the earlier ADC block may enter the WAV FIFO.
+    #[test]
+    fn capture_start_ack_mid_callback_excludes_the_entire_pre_ack_block() {
+        let shared = Shared::with_channels(CaptureRing::new(64), 2);
+        let monitor = InputRing::new(2, 48_000);
+        let ticket = monitor.prepare_capture_gate(true).unwrap();
+        shared.begin_arm();
+        let (mut owed, mut epoch) = (0, 0);
+        let original_callback = monitor.capture_gate_snapshot();
+        capture_converted_part(&shared, &monitor, &[0.1, -0.1], original_callback, &mut owed, &mut epoch);
+        monitor.acknowledge_capture_start(ticket);
+        capture_converted_part(&shared, &monitor, &[0.2, -0.2], original_callback, &mut owed, &mut epoch);
+        let mut captured = Vec::new();
+        shared.ring.pop_all(&mut captured);
+        assert!(captured.is_empty(), "an ACK mid-block must not admit the remaining scratch chunks");
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 0, "deliberate pre-start gating is not an input overrun");
+
+        let next_callback = monitor.capture_gate_snapshot();
+        capture_converted_part(&shared, &monitor, &[0.3, -0.3], next_callback, &mut owed, &mut epoch);
+        shared.ring.pop_all(&mut captured);
+        assert_eq!(captured, [0.3, -0.3]);
+        assert_eq!(owed, 0);
+    }
+
+    /// Late output commands must not activate a different take (or a replacement input ring),
+    /// including when Stop and the next arm both happen between input callbacks.
+    #[test]
+    fn capture_start_tickets_reject_stale_acks_after_stop_and_rearm() {
+        let shared = Shared::new(CaptureRing::new(32));
+        let monitor = InputRing::new(1, 48_000);
+        let first = monitor.prepare_capture_gate(true).unwrap();
+        shared.begin_arm();
+        shared.armed.store(false, Ordering::SeqCst);
+        let second = monitor.prepare_capture_gate(true).unwrap();
+        shared.begin_arm();
+        monitor.acknowledge_capture_start(first);
+        let before = monitor.capture_gate_snapshot();
+        assert_eq!(before & CAPTURE_GATE_OPEN, 0, "the earlier take's ACK cannot open this take");
+        let other_stream = InputRing::new(1, 48_000);
+        other_stream.acknowledge_capture_start(second);
+        assert_eq!(other_stream.capture_gate_snapshot(), CAPTURE_GATE_OPEN, "input stream identities cannot be substituted");
+        let (mut owed, mut epoch) = (0, 0);
+        capture_converted_part(&shared, &monitor, &[0.1], before, &mut owed, &mut epoch);
+        let mut captured = Vec::new();
+        shared.ring.pop_all(&mut captured);
+        assert!(captured.is_empty());
+
+        monitor.acknowledge_capture_start(second);
+        capture_converted_part(&shared, &monitor, &[0.2], monitor.capture_gate_snapshot(), &mut owed, &mut epoch);
+        shared.ring.pop_all(&mut captured);
+        assert_eq!(captured, [0.2]);
+    }
+
+    #[test]
+    fn live_punch_capture_opens_immediately_and_exhausted_epoch_fails_closed() {
+        let shared = Shared::new(CaptureRing::new(32));
+        let monitor = InputRing::new(1, 48_000);
+        monitor.prepare_capture_gate(false).unwrap();
+        shared.begin_arm();
+        let (mut owed, mut epoch) = (0, 0);
+        capture_converted_part(&shared, &monitor, &[0.75], monitor.capture_gate_snapshot(), &mut owed, &mut epoch);
+        let mut captured = Vec::new();
+        shared.ring.pop_all(&mut captured);
+        assert_eq!(captured, [0.75], "on-the-fly punch must not wait for another Play");
+
+        monitor.capture_gate.store(u64::MAX - 1, Ordering::SeqCst);
+        assert!(monitor.prepare_capture_gate(true).is_err(), "exhausted epochs must never wrap and accept a stale ACK");
+        assert_eq!(monitor.capture_gate_snapshot(), u64::MAX - 1);
+    }
+
     #[test]
     fn a_full_ring_owes_the_lost_samples_as_silence() {
         let shared = Shared::new(CaptureRing::new(8));
@@ -1089,6 +1198,37 @@ mod tests {
         }
     }
 
+    /// An armed/stopped transport that never receives output Play must not create a completed
+    /// WAV. After it is stopped, a new take can start and is not opened by the old ACK.
+    #[test]
+    fn stop_before_output_play_keeps_the_wav_empty_and_rearm_starts_only_after_new_ack() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-capture-start-ack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first_path = dir.join("not-started.wav");
+        let second_path = dir.join("started.wav");
+        let shared = Arc::new(Shared::new(CaptureRing::new(1024)));
+        let mut recorder = recorder(&shared);
+        let first = recorder.arm_wait_for_play(vec![(TrackId(1), vec![0], first_path.clone())]).unwrap();
+        let (mut owed, mut epoch) = (0, 0);
+        capture_converted_part(&shared, &recorder.monitor, &[0.1, 0.2], recorder.monitor.capture_gate_snapshot(), &mut owed, &mut epoch);
+        let (takes, error) = recorder.finish();
+        assert!(takes.is_empty() && error.is_none(), "a Play that never started is not a usable take: {error:?}");
+        assert!(!first_path.exists(), "only the successful empty scratch WAV is discarded");
+
+        let second = recorder.arm_wait_for_play(vec![(TrackId(1), vec![0], second_path.clone())]).unwrap();
+        recorder.monitor.acknowledge_capture_start(first);
+        let stale = recorder.monitor.capture_gate_snapshot();
+        assert_eq!(stale & CAPTURE_GATE_OPEN, 0);
+        capture_converted_part(&shared, &recorder.monitor, &[0.3], stale, &mut owed, &mut epoch);
+        recorder.monitor.acknowledge_capture_start(second);
+        capture_converted_part(&shared, &recorder.monitor, &[0.4, -0.4], recorder.monitor.capture_gate_snapshot(), &mut owed, &mut epoch);
+        let (takes, error) = recorder.finish();
+        assert!(error.is_none(), "successful second take must not report a writer failure: {error:?}");
+        assert_eq!(takes, vec![(TrackId(1), second_path.clone())]);
+        assert_eq!(decode(&second_path), vec![vec![0.4, -0.4]]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A stalled armed input, a panicking callback and a lost device all surface as `Trouble`; a quiet input that is
     /// not recording does not.
     #[test]
@@ -1280,12 +1420,16 @@ mod tests {
         let shared = Arc::new(Shared::new(CaptureRing::new(512)));
         let mut r = recorder(&shared);
         let error = r
-            .arm_with_spawn(vec![(TrackId(1), vec![0], first.clone()), (TrackId(2), vec![0], second.clone())], |_shared, takes, _channels| {
-                assert_eq!(takes.len(), 2);
-                assert!(first.exists() && second.exists(), "failure is injected after both WAV headers were created");
-                drop(takes);
-                Err(std::io::Error::other("synthetic thread spawn failure"))
-            })
+            .arm_with_spawn(
+                vec![(TrackId(1), vec![0], first.clone()), (TrackId(2), vec![0], second.clone())],
+                |_shared, takes, _channels| {
+                    assert_eq!(takes.len(), 2);
+                    assert!(first.exists() && second.exists(), "failure is injected after both WAV headers were created");
+                    drop(takes);
+                    Err(std::io::Error::other("synthetic thread spawn failure"))
+                },
+                false,
+            )
             .unwrap_err();
         assert!(error.contains("synthetic thread spawn failure"), "{error}");
         assert!(!first.exists() && !second.exists(), "neither brand-new file should remain after failed arm");
@@ -1534,12 +1678,28 @@ pub struct MonitorFifoHealth {
     pub silent_output_frames: u64,
 }
 
+/// A once-only output callback acknowledgment for the *specific* input stream and take
+/// that requested it. It never compares CPAL's independent input/output clock origins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureStartTicket {
+    ring_id: u64,
+    epoch: u64,
+}
+
+const CAPTURE_GATE_OPEN: u64 = 1;
+const MAX_CAPTURE_GATE_EPOCH: u64 = u64::MAX >> 1;
+static NEXT_INPUT_RING_ID: AtomicU64 = AtomicU64::new(1);
+
 /// A small interleaved FIFO from the input callback to the output callback, for input
 /// monitoring. Both sides only `try_lock`; it holds at most ~0.5 s and drops the oldest frames.
 /// The input device may run at a different rate than the session, so the reader converts
 /// rates with linear interpolation (cheap, allocation-free, fine for monitoring).
 pub struct InputRing {
     state: Mutex<RingState>,
+    /// A process-unique stream identity, never reused even if a recorder is replaced.
+    ring_id: u64,
+    /// Epoch in the high bits, open in bit 0. CAS ties output ACK to the exact arm.
+    capture_gate: AtomicU64,
     pub channels: std::sync::atomic::AtomicUsize,
     /// Input device sample rate in Hz (0 when unknown, which reads as "same as the session").
     rate: u32,
@@ -1560,8 +1720,13 @@ impl InputRing {
     pub fn new(channels: usize, rate: u32) -> Arc<InputRing> {
         let ch = channels.max(1);
         let frames = if rate == 0 { 24_000 } else { rate as usize / 2 };
+        // A theoretical lifetime exhaustion fails the delayed gate closed rather than reuse
+        // an old stream identity (ABA). Normal monitoring can still run.
+        let ring_id = NEXT_INPUT_RING_ID.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).unwrap_or(0);
         Arc::new(InputRing {
             state: Mutex::new(RingState { data: std::collections::VecDeque::with_capacity(rate.max(48_000) as usize * ch), phase: 0.0 }),
+            ring_id,
+            capture_gate: AtomicU64::new(CAPTURE_GATE_OPEN),
             channels: std::sync::atomic::AtomicUsize::new(ch),
             rate,
             cap: frames * ch,
@@ -1573,6 +1738,43 @@ impl InputRing {
             evicted_oldest_frames: AtomicU64::new(0),
             silent_output_frames: AtomicU64::new(0),
         })
+    }
+
+    /// Begin a new capture epoch *before* the recorder publishes `armed=true`.
+    /// Existing low-level `Recorder::arm` immediately opens the gate; stopped-transport
+    /// capture reserves a closed gate until the output callback accepts its Play command.
+    pub(crate) fn prepare_capture_gate(&self, delayed: bool) -> Result<CaptureStartTicket, String> {
+        if self.ring_id == 0 {
+            return Err("audio input stream identity exhausted; reconnect the input before recording".into());
+        }
+        let old = self
+            .capture_gate
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |state| {
+                let epoch = state >> 1;
+                epoch.checked_add(1).filter(|next| *next <= MAX_CAPTURE_GATE_EPOCH).map(|next| (next << 1) | u64::from(!delayed))
+            })
+            .map_err(|_| "audio capture start epoch exhausted; reconnect the input before recording".to_owned())?;
+        Ok(CaptureStartTicket { ring_id: self.ring_id, epoch: (old >> 1) + 1 })
+    }
+
+    /// The output callback calls this *only* when it has accepted the matching Play.
+    /// A late acknowledgment from another stream/old take can never open a newer arm.
+    pub(crate) fn acknowledge_capture_start(&self, ticket: CaptureStartTicket) {
+        if ticket.ring_id != self.ring_id {
+            return;
+        }
+        let closed = ticket.epoch << 1;
+        let _ = self.capture_gate.compare_exchange(closed, closed | CAPTURE_GATE_OPEN, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Snapshot once at the *beginning of the original input callback*, before its chunks.
+    /// An acknowledgment arriving mid-block cannot admit older ADC samples from that block.
+    pub(crate) fn capture_gate_snapshot(&self) -> u64 {
+        self.capture_gate.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn capture_allowed_from(&self, callback_gate: u64) -> bool {
+        callback_gate & CAPTURE_GATE_OPEN != 0 && self.capture_gate.load(Ordering::SeqCst) == callback_gate
     }
 
     /// An allocation-free, lock-free diagnostic snapshot of this stream's monitor FIFO. Each

@@ -900,9 +900,22 @@ impl SoundApp {
     }
 
     fn start_play(&mut self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        let _ = self.start_play_with_capture_gate(from, end, looped, None);
+    }
+
+    /// For a stopped-transport Record, the output callback must accept the matching Play
+    /// command before the input callback admits audio. Ordinary Play and live punch-in do
+    /// not use this gate. This orders callbacks, not physical ADC/DAC sample origins.
+    fn start_play_with_capture_gate(
+        &mut self,
+        from: Samples,
+        end: Option<Samples>,
+        looped: Option<Range>,
+        gate: Option<soundcraft_playback::record::CaptureStartTicket>,
+    ) -> Result<(), String> {
         #[cfg(not(target_arch = "wasm32"))]
         if !self.midi_thru_ready_for_transport("Play") {
-            return;
+            return Err(self.ui.status.clone());
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(output) = &self.midi_output
@@ -913,8 +926,15 @@ impl SoundApp {
         }
         if let Some(p) = &self.player {
             p.update_session(self.engine.session_arc());
-            p.play(from, end, looped);
+            if let Some(ticket) = gate {
+                p.play_with_capture_start(from, end, looped, ticket)?;
+            } else {
+                p.play(from, end, looped);
+            }
         } else {
+            if gate.is_some() {
+                return Err("the recording output clock is unavailable".into());
+            }
             self.sim = Some((from, end, looped));
         }
         self.engine.transport.playing = true;
@@ -926,6 +946,7 @@ impl SoundApp {
         self.edit_layout.follow_hold = false;
         self.edit_layout.last_scroll = self.engine.session().edit.zoom.scroll;
         self.edit_layout.last_follow_to = None;
+        Ok(())
     }
 
     fn stop_play(&mut self) {
@@ -1042,17 +1063,18 @@ impl SoundApp {
         } else {
             None
         };
-        let takes = if audio_armed {
+        let already_playing = self.is_playing();
+        let (takes, capture_gate) = if audio_armed {
             self.ensure_input();
-            match self.arm_recorder() {
-                Ok(takes) => takes,
+            match self.arm_recorder(!already_playing) {
+                Ok(armed) => armed,
                 Err(err) => {
                     self.ui.status = format!("Cannot record: {err}");
                     return;
                 }
             }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         self.affected_frames_shown = 0;
         self.pressure_warned = false;
@@ -1062,7 +1084,6 @@ impl SoundApp {
         if let Some(p) = &self.player {
             p.set_recording(true);
         }
-        let already_playing = self.is_playing();
         self.engine.transport.recording = true;
         if already_playing {
             // Punch in on the fly at the current playhead.
@@ -1076,9 +1097,13 @@ impl SoundApp {
             if edit.loop_record && !sel.is_empty() {
                 self.record_start = sel.start;
                 self.punch = None;
-                self.start_play(sel.start, None, Some(sel));
                 if audio_armed {
                     self.plan_recording(takes, Some(sel.len()));
+                }
+                if let Err(error) = self.start_play_with_capture_gate(sel.start, None, Some(sel), capture_gate) {
+                    self.stop_play();
+                    self.ui.status = format!("Recording playback could not begin: {error}. The take was stopped before input capture.");
+                    return;
                 }
             } else {
                 // Audio selection punch and pre/post-roll retain their existing behavior.
@@ -1087,9 +1112,13 @@ impl SoundApp {
                 self.record_start = from;
                 self.punch = (!sel.is_empty()).then_some(sel);
                 let end = (!sel.is_empty()).then_some(sel.end + post);
-                self.start_play(from, end, None);
                 if audio_armed {
                     self.plan_recording(takes, None);
+                }
+                if let Err(error) = self.start_play_with_capture_gate(from, end, None, capture_gate) {
+                    self.stop_play();
+                    self.ui.status = format!("Recording playback could not begin: {error}. The take was stopped before input capture.");
+                    return;
                 }
             }
         }
@@ -1129,7 +1158,10 @@ impl SoundApp {
 
     /// Arm the input for the record-enabled tracks; a session never saved records into its
     /// autosave folder. Returns the takes it records.
-    fn arm_recorder(&mut self) -> Result<Vec<soundcraft_engine::io::Take>, String> {
+    fn arm_recorder(
+        &mut self,
+        wait_for_play: bool,
+    ) -> Result<(Vec<soundcraft_engine::io::Take>, Option<soundcraft_playback::record::CaptureStartTicket>), String> {
         let name = soundcraft_engine::io::sanitize_name(&self.engine.session().name);
         let unsaved_dir = self.autosave_dir.as_ref().map_or_else(std::env::temp_dir, |d| d.join(name));
         let Some(r) = &mut self.recorder else { return Err("no audio input device".into()) };
@@ -1148,8 +1180,13 @@ impl SoundApp {
             .iter()
             .map(|(track, inputs, path)| soundcraft_engine::io::Take { track: *track, path: path.clone(), channels: inputs.len() })
             .collect();
-        r.arm(plan)?;
-        Ok(takes)
+        let ticket = if wait_for_play {
+            Some(r.arm_wait_for_play(plan)?)
+        } else {
+            r.arm(plan)?;
+            None
+        };
+        Ok((takes, ticket))
     }
 
     /// Reads every live third-party plugin's state and stores it on its insert
