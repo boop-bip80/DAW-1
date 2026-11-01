@@ -88,6 +88,9 @@ fn finite(x: f32) -> f32 {
 
 struct Shared {
     armed: AtomicBool,
+    /// Every arming transition advances this generation. The input callback may never see the
+    /// brief disarmed interval between adjacent takes, so its pending silence must use an epoch.
+    arm_epoch: AtomicU64,
     /// Callbacks that have committed to capturing a block. Stop must wait for them before the
     /// writer's final ring drain, or their last samples could arrive after the WAV is finalized.
     capturing: AtomicUsize,
@@ -121,6 +124,7 @@ impl Shared {
         let (beats, fault, failed) = (AtomicU64::new(0), AtomicU8::new(0), Mutex::new(None));
         Shared {
             armed: AtomicBool::new(false),
+            arm_epoch: AtomicU64::new(0),
             capturing: AtomicUsize::new(0),
             ring,
             dropped: AtomicUsize::new(0),
@@ -149,6 +153,24 @@ impl Shared {
         let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().map_or(0.0, finite)) } else { 0 };
         *owed = owed.saturating_add(data.len() - kept);
         self.dropped.fetch_add(data.len() - kept, Ordering::Relaxed);
+    }
+
+    /// Carry overflow silence only within one take. Stop and re-arm can both happen between two
+    /// CPAL callbacks, so checking `armed` alone cannot reset the callback's persistent `owed`.
+    fn capture_for_arm(&self, data: &[f32], owed: &mut usize, seen_epoch: &mut u64) {
+        let epoch = self.arm_epoch.load(Ordering::SeqCst);
+        if *seen_epoch != epoch {
+            *owed = 0;
+            *seen_epoch = epoch;
+        }
+        self.capture(data, owed);
+    }
+
+    /// Publish a new generation before allowing the callback to capture into its take. Atomic
+    /// `fetch_add` wraps without panicking; every successive arming transition has a new value.
+    fn begin_arm(&self) {
+        self.arm_epoch.fetch_add(1, Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
     }
 
     /// Register before the final armed check: a callback accepted before stop remains visible to
@@ -202,6 +224,7 @@ where
     let mut scratch = vec![0.0f32; 8192 * usize::from(config.channels).max(1)];
     let chunk = scratch.len();
     let mut owed = 0;
+    let mut seen_epoch = 0;
     device.build_input_stream(
         config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
@@ -217,7 +240,7 @@ where
                     }
                     mon.push(s);
                     if sh.armed.load(Ordering::SeqCst) {
-                        if !sh.capture_if_armed(|| sh.capture(s, &mut owed)) {
+                        if !sh.capture_if_armed(|| sh.capture_for_arm(s, &mut owed, &mut seen_epoch)) {
                             owed = 0;
                         }
                     } else {
@@ -395,7 +418,7 @@ impl Recorder {
         let ring = &self.shared.ring;
         ring.tail.store(ring.head.load(Ordering::Acquire), Ordering::Release);
         *self.shared.failed.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.shared.armed.store(true, Ordering::SeqCst);
+        self.shared.begin_arm();
         match spawn(Arc::clone(&self.shared), takes, self.channels) {
             Ok(w) => self.writer = Some((w, live)),
             Err(e) => {
@@ -653,14 +676,56 @@ mod tests {
     #[test]
     fn a_full_ring_owes_the_lost_samples_as_silence() {
         let shared = Shared::new(CaptureRing::new(8));
-        let (mut owed, mut out) = (0, Vec::new());
-        shared.capture(&[1.0; 6], &mut owed);
-        shared.capture(&[2.0; 4], &mut owed);
+        shared.begin_arm();
+        let (mut owed, mut seen_epoch, mut out) = (0, 0, Vec::new());
+        shared.capture_for_arm(&[1.0; 6], &mut owed, &mut seen_epoch);
+        shared.capture_for_arm(&[2.0; 4], &mut owed, &mut seen_epoch);
         shared.ring.pop_all(&mut out);
-        shared.capture(&[3.0; 2], &mut owed);
+        shared.capture_for_arm(&[3.0; 2], &mut owed, &mut seen_epoch);
         shared.ring.pop_all(&mut out);
         assert_eq!(out, [vec![1.0; 6], vec![2.0; 2], vec![0.0; 2], vec![3.0; 2]].concat());
         assert_eq!((owed, shared.dropped.load(Ordering::Relaxed)), (0, 2));
+        assert_eq!(seen_epoch, shared.arm_epoch.load(Ordering::SeqCst));
+    }
+
+    /// A full capture ring leaves callback-local owed silence. Stop and re-arm may finish before
+    /// the next input device callback, so that callback never sees `armed == false` to reset it.
+    /// The next take must start with only its own samples, not silence owed by the prior take.
+    #[test]
+    fn rapid_stop_then_rearm_does_not_copy_overflow_silence_into_the_next_take() {
+        let shared = Shared::new(CaptureRing::new(8));
+        let (mut owed, mut seen_epoch) = (0, 0);
+        shared.begin_arm();
+        shared.capture_for_arm(&[0.25; 8], &mut owed, &mut seen_epoch);
+        shared.capture_for_arm(&[0.5; 6], &mut owed, &mut seen_epoch);
+        assert_eq!(owed, 6, "the first take owes six dropped samples");
+
+        shared.armed.store(false, Ordering::SeqCst);
+        let mut first_take = Vec::new();
+        shared.ring.pop_all(&mut first_take);
+        assert_eq!(first_take, [0.25; 8]);
+        // No input callback ran while disarmed: `owed` is still six here.
+        shared.begin_arm();
+        shared.capture_for_arm(&[0.75; 4], &mut owed, &mut seen_epoch);
+        let mut second_take = Vec::new();
+        shared.ring.pop_all(&mut second_take);
+        assert_eq!(second_take, [0.75; 4]);
+        assert_eq!(owed, 0);
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 6, "the fresh take must not lose samples to prior debt");
+    }
+
+    #[test]
+    fn arm_epoch_wrap_resets_owed_silence_without_panicking() {
+        let shared = Shared::new(CaptureRing::new(8));
+        shared.arm_epoch.store(u64::MAX, Ordering::SeqCst);
+        let (mut owed, mut seen_epoch) = (5, u64::MAX);
+        shared.begin_arm();
+        assert_eq!(shared.arm_epoch.load(Ordering::SeqCst), 0);
+        shared.capture_for_arm(&[0.875; 4], &mut owed, &mut seen_epoch);
+        let mut second_take = Vec::new();
+        shared.ring.pop_all(&mut second_take);
+        assert_eq!(second_take, [0.875; 4]);
+        assert_eq!((owed, seen_epoch), (0, 0));
     }
 
     #[test]
