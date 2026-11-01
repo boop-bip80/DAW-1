@@ -125,6 +125,12 @@ impl StemBounceJob {
         if !self.finished || self.failed {
             return Err(EngineError::Io("cannot journal an unfinished stem export".into()));
         }
+        if !Arc::ptr_eq(&self.session, &engine.session_arc()) {
+            return Err(EngineError::BadParams(
+                "file.bounce_stems".into(),
+                "the session changed during stem export; completed files remain but cannot be journaled to a different session".into(),
+            ));
+        }
         let format = match self.options.format {
             FileFormat::Wav => "wav",
             FileFormat::Aiff => "aiff",
@@ -466,5 +472,37 @@ mod tests {
         );
         assert!(!engine.is_dirty(), "export must not edit the session");
         assert_eq!(engine.undo_history().len(), undo_before, "completed export is not undoable");
+    }
+
+    #[test]
+    fn completed_export_cannot_be_journaled_into_another_or_replaced_session() {
+        let dir = TestDir::new("foreign-engine");
+        let origin = engine();
+        let mut job = start(&origin, &dir);
+        loop {
+            if job.step(|| false).expect("complete export").is_some() {
+                break;
+            }
+        }
+        let mut other = engine();
+        let error = job.record_completed(&mut other).expect_err("another engine must not claim the finished export");
+        assert!(error.to_string().contains("session changed"), "{error}");
+        assert!(other.journal.is_empty(), "different engine cannot receive a fabricated completion event");
+        assert!(origin.journal.is_empty(), "the source session cannot be journaled by a different engine");
+        assert_eq!(dir.entries().len(), 2, "already committed files are not deleted on journal rejection");
+
+        let replaced_dir = TestDir::new("replaced-engine");
+        let mut engine = engine();
+        let mut job = start(&engine, &replaced_dir);
+        loop {
+            if job.step(|| false).expect("complete export").is_some() {
+                break;
+            }
+        }
+        engine.replace_session(Session::default());
+        let error = job.record_completed(&mut engine).expect_err("replaced session must refuse completed export journal");
+        assert!(error.to_string().contains("session changed"), "{error}");
+        assert!(engine.journal.is_empty());
+        assert_eq!(replaced_dir.entries().len(), 2, "finished files survive replacement without mis-journaling");
     }
 }
