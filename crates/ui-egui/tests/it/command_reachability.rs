@@ -23,8 +23,6 @@ const KNOWN_UNREACHED: &[&str] = &[
     "mix.phase_invert",
     "mix.send_surround_pan",
     "mix.solo_safe",
-    "options.post_roll",
-    "options.pre_roll",
     "setup.hardware",        // menu opens the Playback Engine window, which doesn't run it
     "setup.playback_engine", // same
     "setup.reset_edit_state",
