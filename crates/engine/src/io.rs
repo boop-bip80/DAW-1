@@ -830,13 +830,57 @@ pub fn bounce_stems(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions) -> Re
     bounce_stems_with(e, dir, r, opts, false)
 }
 
+/// Stable stem paths without sanitized-name collisions. Tilde is a reserved
+/// generated suffix marker (sanitize_name replaces user-supplied tildes).
+/// Validate the entire batch before creating any output directory or file.
+fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str) -> Result<Vec<String>> {
+    use std::collections::{HashMap, HashSet};
+
+    let names: Vec<_> = stems.iter().map(|(_, name)| sanitize_name(name)).collect();
+    let mut counts = HashMap::<String, usize>::new();
+    for name in &names {
+        // Distinct spellings that collide on case-insensitive filesystems must
+        // produce different outputs on every platform, not just on Windows.
+        *counts.entry(name.to_lowercase()).or_default() += 1;
+    }
+    let prefix = sanitize_name(session_name);
+    let mut seen = HashSet::new();
+    stems
+        .iter()
+        .zip(names)
+        .map(|((id, _), name)| {
+            let suffix = if counts.get(&name.to_lowercase()).copied().unwrap_or_default() > 1 {
+                format!("~{:016x}", id.0)
+            } else {
+                String::new()
+            };
+            let filename = format!("{prefix} - {name}{suffix}.{ext}");
+            // Common cross-platform component ceilings: UTF-8 bytes on Unix
+            // and UTF-16 code units on Windows. A too-long name is an error
+            // before any stem is written, rather than a partial export.
+            if filename.len() > 240 || filename.encode_utf16().count() > 240 {
+                return Err(EngineError::BadParams(
+                    "file.bounce_stems".into(),
+                    format!("stem filename exceeds the portable length limit: {filename}"),
+                ));
+            }
+            if !seen.insert(filename.to_lowercase()) {
+                return Err(EngineError::BadParams(
+                    "file.bounce_stems".into(),
+                    "stem names collide after filename conversion".into(),
+                ));
+            }
+            Ok(filename)
+        })
+        .collect()
+}
+
 /// [`bounce_stems`] in the main format, or folded down to stereo when `fold_stereo`.
 pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<Vec<String>> {
     let s = e.session();
     if r.len() > s.sample_rate.samples(MAX_BOUNCE_SECS) {
         return Err(EngineError::BadParams("file.bounce_stems".into(), "bounces are limited to 4 hours".into()));
     }
-    make_dir(dir)?;
     let ext = match opts.format {
         FileFormat::Aiff => "aif",
         FileFormat::Flac => "flac",
@@ -849,12 +893,18 @@ pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, 
         .filter(|t| matches!(t.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Midi) && !t.inactive && !t.mixer.mute)
         .map(|t| (t.id, t.name.clone()))
         .collect();
-    for (id, name) in stems {
+    // Distinct user-visible track names can sanitize to the same filename
+    // (e.g. "Kick/Room" and "Kick?Room"). Give every colliding member a
+    // stable TrackId suffix; never allow a later stem to overwrite an earlier
+    // one in the same export. Unambiguous legacy filenames stay unchanged.
+    let names = stem_output_names(&s.name, &stems, ext)?;
+    make_dir(dir)?;
+    for ((id, _), name) in stems.into_iter().zip(names) {
         let mut solo = s.clone();
         for t in &mut solo.tracks {
             t.mixer.solo = t.id == id;
         }
-        let path = Path::new(dir).join(format!("{} - {}.{ext}", sanitize_name(&s.name), sanitize_name(&name)));
+        let path = Path::new(dir).join(name);
         Bounce::new(Arc::new(solo), &path, r, opts, None, false, fold_stereo)?.run()?;
         out.push(path.to_string_lossy().into_owned());
     }
@@ -2693,6 +2743,91 @@ mod pipe_tests {
 
 #[cfg(test)]
 mod stem_tests {
+    #[test]
+    fn colliding_stem_names_render_two_distinct_correct_audio_files() {
+        use super::*;
+
+        const FRAMES: usize = 12_000;
+        const RATE: u32 = 48_000;
+        let mut session = Session::default();
+        assert_eq!(session.sample_rate.hz(), RATE);
+        session.name = "Stems".into();
+        let first = session.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Kick/Room"));
+        let second = session.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Kick?Room"));
+        for (track, frequency) in [(first, 400.0_f64), (second, 800.0)] {
+            let mut buffer = AudioBuffer::new(RATE, 1, FRAMES);
+            for (index, sample) in buffer.channels[0].iter_mut().enumerate() {
+                let radians = std::f64::consts::TAU * frequency * index as f64 / f64::from(RATE);
+                *sample = 0.28 * radians.sin() as f32;
+            }
+            let source = add_source(&mut session, "fixture", buffer, None, FileFormat::Wav);
+            let clip_id = session.new_clip_id();
+            session
+                .track_mut(track)
+                .unwrap()
+                .playlist_mut()
+                .unwrap()
+                .clips
+                .push(Clip::audio(clip_id, "fixture", source, 0, 0, FRAMES as i64));
+        }
+        // Noncolliding names retain the historical filename contract.
+        assert_eq!(
+            stem_output_names("Stems", &[(first, "Kick".into()), (second, "Room".into())], "wav").unwrap(),
+            vec!["Stems - Kick.wav".to_string(), "Stems - Room.wav".to_string()]
+        );
+        // Case-only collisions and overly long UTF-8 names are also safe.
+        let case_names = stem_output_names("Stems", &[(first, "Voice".into()), (second, "VOICE".into())], "wav").unwrap();
+        assert_ne!(case_names[0].to_lowercase(), case_names[1].to_lowercase());
+        assert!(stem_output_names("Stems", &[(first, "あ".repeat(100))], "wav").is_err());
+
+        let expected_names =
+            stem_output_names(&session.name, &[(first, "Kick/Room".into()), (second, "Kick?Room".into())], "wav").unwrap();
+        assert_eq!(expected_names.len(), 2);
+        assert_ne!(expected_names[0], expected_names[1]);
+        assert!(expected_names[0].contains(&format!("~{:016x}", first.0)));
+        assert!(expected_names[1].contains(&format!("~{:016x}", second.0)));
+
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("soundcraft-stem-collision-{}-{nonce}", std::process::id()));
+        let dir = root.join("rendered");
+        let engine = Engine::new(session);
+        let opts = EncodeOptions {
+            format: FileFormat::Wav,
+            bit_depth: soundcraft_audio_io::BitDepth::Float32,
+            dither: false,
+            bwf: None,
+        };
+        let paths = bounce_stems_with(&engine, &dir.to_string_lossy(), Range::new(0, FRAMES as i64), &opts, false).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1], "colliding names overwrote a previous stem");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "expected two different completed WAV files");
+        for (number, path) in paths.iter().enumerate() {
+            let (frequency, other) = if number == 0 { (400.0_f64, 800.0) } else { (800.0, 400.0) };
+            let file = Path::new(path);
+            assert_eq!(file.file_name().unwrap().to_string_lossy(), expected_names[number].as_str());
+            assert!(file.is_file());
+            let (info, audio) = soundcraft_audio_io::decode(&std::fs::read(file).unwrap(), Some("wav")).unwrap();
+            assert_eq!(info.sample_rate, RATE);
+            assert_eq!(audio.frames(), FRAMES);
+            assert_eq!(audio.num_channels(), 2);
+            assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()));
+            let measure = |hz| {
+                let (mut real, mut imag) = (0.0, 0.0);
+                for (sample_index, sample) in audio.channels[0].iter().enumerate() {
+                    let radians = std::f64::consts::TAU * hz * sample_index as f64 / f64::from(RATE);
+                    real += f64::from(*sample) * radians.cos();
+                    imag += f64::from(*sample) * radians.sin();
+                }
+                2.0 * real.hypot(imag) / FRAMES as f64
+            };
+            let wanted = measure(frequency);
+            let leakage = measure(other);
+            assert!(wanted > 0.15, "missing audio in disambiguated stem {number}: {wanted}");
+            assert!(leakage < wanted * 0.01, "stem {number} contains the other track: {leakage} vs {wanted}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn stems_one_file_per_track() {
         let mut e = crate::demo::demo_engine();
