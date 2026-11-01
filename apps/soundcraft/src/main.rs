@@ -187,6 +187,7 @@ fn services() -> Services {
                 "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
                 "file.export_edl" => rfd::FileDialog::new().add_filter("CMX3600 EDL", &["edl"]),
                 "file.export_otio" => rfd::FileDialog::new().add_filter("OpenTimelineIO", &["otio"]),
+                "file.export_otioz" => rfd::FileDialog::new().add_filter("OpenTimelineIO Bundle", &["otioz"]),
                 _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
             };
             if let Some(dir) = path.parent().filter(|dir| dir.is_dir()) {
