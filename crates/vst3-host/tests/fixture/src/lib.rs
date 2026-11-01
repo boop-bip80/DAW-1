@@ -1,4 +1,4 @@
-//! Test-only VST3 plugin for soundcraft-vst3-host (two audio module classes):
+//! Test-only VST3 plugin for soundcraft-vst3-host (three audio module classes):
 //!
 //! - "Fixture Gain" (`Fx`): stereo or mono in → out × gain, with a separate edit controller
 //!   (connected through IConnectionPoint, synced through the component state). Params: 7 "Gain"
@@ -7,6 +7,8 @@
 //!   Reports 3 samples of latency. State: the component stores the gain (one LE f64), the
 //!   controller the Freq value (one LE f64). Its controller has an editor view (`IPlugView`,
 //!   320×240, no real drawing) supporting NSView/HWND/X11.
+//! - "Fixture Headless" (`Fx`): a gain processor without any edit controller; its component
+//!   state is still loadable/savable, but controller-only state is never applicable.
 //! - "Fixture Synth" (`Instrument|Synth`): a single-component instrument (the component is also
 //!   its edit controller). No audio input, one stereo output, one event input; every output
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
@@ -28,6 +30,7 @@ use vst3::{Class, ComRef, ComWrapper, uid};
 const GAIN_CID: TUID = uid(0x5C0A1D00, 0x11112222, 0x33334444, 0x55556666);
 const GAIN_CTRL_CID: TUID = uid(0x5C0A1D01, 0x11112222, 0x33334444, 0x55556666);
 const SYNTH_CID: TUID = uid(0x5C0A1D02, 0x11112222, 0x33334444, 0x55556666);
+const HEADLESS_CID: TUID = uid(0x5C0A1D03, 0x11112222, 0x33334444, 0x55556666);
 
 fn copy_c8(src: &str, dst: &mut [c_char]) {
     for (d, s) in dst.iter_mut().zip(src.bytes().chain(std::iter::once(0))) {
@@ -68,6 +71,7 @@ struct GainProcessor {
     /// Normalized gain (plain = 2 × normalized).
     gain: AtomicU64,
     arrangement: AtomicU64,
+    no_controller: bool,
     _live: Live,
 }
 
@@ -99,6 +103,9 @@ impl IConnectionPointTrait for GainProcessor {
 
 impl IComponentTrait for GainProcessor {
     unsafe fn getControllerClassId(&self, class_id: *mut TUID) -> tresult {
+        if self.no_controller {
+            return kNotImplemented;
+        }
         unsafe { *class_id = GAIN_CTRL_CID };
         kResultOk
     }
@@ -637,8 +644,9 @@ impl Class for Factory {
     type Interfaces = (IPluginFactory2,);
 }
 
-const CLASSES: [(TUID, &str, &str, &str); 3] = [
+const CLASSES: [(TUID, &str, &str, &str); 4] = [
     (GAIN_CID, "Audio Module Class", "Fixture Gain", "Fx"),
+    (HEADLESS_CID, "Audio Module Class", "Fixture Headless", "Fx"),
     (GAIN_CTRL_CID, "Component Controller Class", "Fixture Gain", ""),
     (SYNTH_CID, "Audio Module Class", "Fixture Synth", "Instrument|Synth"),
 ];
@@ -667,10 +675,11 @@ impl IPluginFactoryTrait for Factory {
     unsafe fn createInstance(&self, cid: FIDString, iid: FIDString, obj: *mut *mut c_void) -> tresult {
         set_up_late_state();
         let cid = unsafe { *(cid as *const TUID) };
-        let unknown = if cid == GAIN_CID {
+        let unknown = if cid == GAIN_CID || cid == HEADLESS_CID {
             ComWrapper::new(GainProcessor {
                 gain: AtomicU64::new(0.25f64.to_bits()),
                 arrangement: AtomicU64::new(SpeakerArr::kStereo),
+                no_controller: cid == HEADLESS_CID,
                 _live: Live::new(&OBJECTS),
             })
             .to_com_ptr::<FUnknown>()
