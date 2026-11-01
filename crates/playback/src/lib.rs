@@ -1995,4 +1995,44 @@ mod tests {
         assert!(st.mix.input[0][..128].iter().all(|&x| x == 0.875), "even a rapid toggle must trim the old half-second backlog");
         assert!(out.iter().any(|x| x.abs() > 0.1));
     }
+
+    #[test]
+    fn playback_drains_input_even_before_monitoring_is_enabled() {
+        use soundcraft_model::{ChannelFormat, Clip, SourceAudio, SourceId, TrackKind};
+        let mut s = soundcraft_model::Session::default();
+        let backing = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        let monitor = s.add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        s.pool.insert(
+            SourceId(7),
+            Arc::new(SourceAudio::new(soundcraft_audio_io::AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.5; 48_000]] })),
+        );
+        let clip = s.new_clip_id();
+        s.track_mut(backing).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(clip, "Backing", SourceId(7), 0, 0, 48_000));
+        let shared = Arc::new(Shared {
+            position: AtomicI64::new(0),
+            playing: AtomicBool::new(false),
+            speed: AtomicU32::new(1000),
+            meters: Mutex::new(MeterSnapshot::default()),
+        });
+        let (tx, rx) = channel();
+        let mut st = AudioState::new(rx, shared, Arc::new(s.clone()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        let mut out = vec![0.0f32; 2 * BLOCK];
+        for _ in 0..10 {
+            ring.push(&[0.125; BLOCK]);
+            st.fill(&mut out, 2); // render_next drains input, even though no track is monitoring
+            assert!(out.iter().any(|x| x.abs() > 0.1), "backing playback must remain audible");
+        }
+
+        s.track_mut(monitor).unwrap().mixer.input_monitor = true;
+        tx.send(Cmd::Session(Arc::new(s), Vec::new())).unwrap();
+        ring.push(&[0.875; BLOCK]);
+        st.fill(&mut out, 2);
+        // The resampler deliberately retains one input frame for interpolation across blocks;
+        // playback has drained everything earlier, not accumulated a stale half-second.
+        assert!(st.mix.input[0][1..128].iter().all(|&x| x == 0.875), "monitoring must hear current input after the interpolation boundary");
+        assert!(out.iter().any(|x| x.abs() > 0.1), "enabling monitoring must not silence the backing track");
+    }
 }
