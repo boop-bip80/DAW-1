@@ -87,6 +87,8 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     v.push((OTIOZ_IMPORT_MENU, "file.import_otioz"));
     v.push((OTIO_EXPORT_MENU, "file.export_otio"));
     v.push((OTIOZ_EXPORT_MENU, "file.export_otioz"));
+    #[cfg(not(target_arch = "wasm32"))]
+    v.push((STEMS_MENU, "file.bounce_stems"));
     v.push((PASTE_CLIP_GAIN_MENU, "edit.paste_clip_gain"));
     v.push((PASTE_CLIP_EFFECTS_MENU, "edit.paste_clip_effects"));
     v.extend(mix_view_aliases().iter().copied());
@@ -102,6 +104,10 @@ const OTIO_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Audio...";
 const OTIOZ_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Bundle…";
 const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
 const OTIOZ_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Bundle…";
+/// Native stem export runs incrementally from its options dialog, not by executing the blocking
+/// file command on the UI thread. The engine command stays synchronous for CLI/MCP callers.
+#[cfg(not(target_arch = "wasm32"))]
+const STEMS_MENU: &str = "File > Bounce Stems…";
 /// SoundCraft additions: clipboard operations exist in the engine, but the observed catalog has
 /// no corresponding menu leaves. Keep them next to the other Paste Special operations.
 const PASTE_CLIP_GAIN_MENU: &str = "Edit > Paste Special > Clip Gain";
@@ -173,6 +179,7 @@ const DIALOG_COMMANDS: &[&str] = &[
     "clip.clear",
     "track.new",
     "file.bounce_mix",
+    "file.bounce_stems",
     "session.new",
     "file.import_audio",
     "file.import_midi",
@@ -232,6 +239,18 @@ pub fn tree() -> Vec<MenuNode> {
     insert_path(&mut roots, OTIOZ_IMPORT_MENU);
     insert_path(&mut roots, OTIO_EXPORT_MENU);
     insert_path(&mut roots, OTIOZ_EXPORT_MENU);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        insert_path(&mut roots, STEMS_MENU);
+        if let Some(file) = roots.iter_mut().find(|node| node.label == "File") {
+            let stem = file.children.iter().position(|node| node.path == STEMS_MENU);
+            if let Some(stem) = stem {
+                let stem = file.children.remove(stem);
+                let after_mix = file.children.iter().position(|node| node.path == "File > Bounce Mix...").map_or(file.children.len(), |idx| idx + 1);
+                file.children.insert(after_mix, stem);
+            }
+        }
+    }
     insert_path(&mut roots, PASTE_CLIP_GAIN_MENU);
     insert_path(&mut roots, PASTE_CLIP_EFFECTS_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
@@ -907,6 +926,29 @@ mod tests {
         app.dialogs.open = None;
         invoke_menu(&mut app, "ui.bounce_dialog", "File > Bounce Mix...");
         assert_eq!(app.dialogs.open_name(), Some("bounce"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn file_bounce_stems_menu_opens_incremental_options_without_export_or_document_mutation() {
+        let file = tree().into_iter().find(|node| node.label == "File").unwrap();
+        let stems_at = file.children.iter().position(|node| node.path == STEMS_MENU).expect("native File > Bounce Stems leaf");
+        assert_eq!(file.children.get(stems_at.wrapping_sub(1)).map(|node| node.path.as_str()), Some("File > Bounce Mix..."));
+        assert_eq!(file.children[stems_at].label, "Bounce Stems…");
+        let id = command_for_path(STEMS_MENU, &ui_aliases()).expect("real command alias");
+        assert_eq!(id, "file.bounce_stems");
+
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        app.engine.mark_clean();
+        let doc = app.engine.session().to_json();
+        let journal = app.engine.journal.clone();
+        invoke_menu(&mut app, &id, STEMS_MENU);
+        assert_eq!(app.dialogs.open_name(), Some("bounce_stems"), "menu must open options, not call the blocking command");
+        assert_eq!(app.engine.session().to_json(), doc);
+        assert_eq!(app.engine.journal, journal);
+        assert!(!app.engine.is_dirty());
+        assert!(!app.engine.can_undo());
+        assert!(app.dialogs.stem_bounce.is_none(), "opening the dialog must not start rendering or touch the export directory");
     }
 
     #[test]
