@@ -147,6 +147,15 @@ fn queue_param_update(queue: &mut Vec<Event>, values: &mut [f32], index: usize, 
     true
 }
 
+/// A failing plugin might have consumed only part of a block. Retry idempotent changes at
+/// the start of the next block, but never replay starts or other MIDI that could double-trigger.
+fn retain_idempotent_after_failed_process(queue: &mut Vec<Event>) {
+    queue.retain(|e| matches!(e, Event::Param { .. }) || release_index(e).is_some());
+    for e in queue {
+        e.set_time(0);
+    }
+}
+
 fn pick_main(ports: &[crate::ffi::PortInfo]) -> Option<usize> {
     ports.iter().position(|p| p.main && p.channels > 0).or_else(|| ports.iter().position(|p| p.channels > 0))
 }
@@ -255,10 +264,10 @@ impl Plugin for ClapPlugin {
             let offset = u32::try_from(start).unwrap_or(u32::MAX);
             let events = self.queue.get(..k).unwrap_or(&[]);
             let r = self.inst.process(n, self.steady, &mut self.inputs, &mut self.outputs, events, offset, self.transport.as_ref());
-            self.queue.drain(..k);
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
                 (Ok(_), Some(p)) => {
+                    self.queue.drain(..k);
                     let oc = self.outputs.channels(p);
                     for (c, dst) in io.iter_mut().take(ch).enumerate() {
                         let Some(dst) = dst.get_mut(start..start + n) else { continue };
@@ -273,8 +282,14 @@ impl Plugin for ClapPlugin {
                         }
                     }
                 }
-                (Err(e), _) => log::debug!("{}: {e}", self.info.id),
-                _ => {}
+                (Ok(_), None) => {
+                    self.queue.drain(..k);
+                }
+                (Err(e), _) => {
+                    retain_idempotent_after_failed_process(&mut self.queue);
+                    log::debug!("{}: {e}", self.info.id);
+                    return;
+                }
             }
             start += n;
         }
@@ -439,6 +454,35 @@ mod tests {
         assert_eq!(values, [0.5, 0.25]);
         assert_eq!(queue.iter().filter(|e| matches!(e, Event::Param { id: 7, value, .. } if *value == 0.5)).count(), 1);
         assert_eq!(queue.len(), queue.capacity(), "updates never grow the real-time queue");
+    }
+
+    #[test]
+    fn process_error_retains_only_idempotent_events_for_next_block() {
+        let mut queue = Vec::with_capacity(6);
+        for e in [
+            Event::Param { time: 1, id: 7, value: 0.75 },
+            Event::NoteOn { time: 2, key: 60, velocity: 0.8 },
+            Event::Midi { time: 3, data: [0xB0, 7, 100] },
+            Event::NoteOff { time: 4, key: 60 },
+            Event::Midi { time: 5, data: [0x80, 61, 0] },
+            Event::Midi { time: 6, data: [0x90, 62, 0] },
+        ] {
+            assert!(push_sorted(&mut queue, e, false));
+        }
+        retain_idempotent_after_failed_process(&mut queue);
+        assert_eq!(
+            queue,
+            vec![
+                Event::Param { time: 0, id: 7, value: 0.75 },
+                Event::NoteOff { time: 0, key: 60 },
+                Event::Midi { time: 0, data: [0x80, 61, 0] },
+                Event::Midi { time: 0, data: [0x90, 62, 0] },
+            ],
+            "parameter writes and releases survive in stable order, never starts or arbitrary CC"
+        );
+        assert_eq!(queue.capacity(), 6, "recovery never allocates");
+        retain_idempotent_after_failed_process(&mut queue);
+        assert_eq!(queue.len(), 4, "another failure cannot duplicate retained events");
     }
 
     #[test]
