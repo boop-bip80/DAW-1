@@ -3,7 +3,7 @@
 use crate::ClapError;
 use crate::ffi::{EVENT_CAP, Event, GuiLink, HostState, Instance, NotePort, PortBuffers};
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
-use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, Transport};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, PluginRestartReader, Transport};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -34,6 +34,12 @@ impl ClapRestartHandle {
     /// temporarily takes the bit, restores it on failure, and preserves newer callbacks.
     pub fn requested(&self) -> bool {
         self.state.restart.load(Ordering::Acquire)
+    }
+}
+
+impl PluginRestartReader for ClapRestartHandle {
+    fn requested(&self) -> bool {
+        ClapRestartHandle::requested(self)
     }
 }
 
@@ -429,6 +435,10 @@ impl Plugin for ClapPlugin {
         let link = self.inst.state_link()?;
         Some(Box::new(move || link.save_state()))
     }
+
+    fn restart_reader(&mut self) -> Option<Box<dyn PluginRestartReader>> {
+        Some(Box::new(self.restart_handle()))
+    }
 }
 
 /// A CLAP plugin's floating editor, driven from the main thread (see [`GuiLink`]).
@@ -477,6 +487,18 @@ impl PluginEditor for ClapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_handle_is_observable_through_an_erased_control_reader() {
+        let state = Arc::new(HostState::default());
+        let handle = ClapRestartHandle { state: Arc::clone(&state) };
+        let reader: Box<dyn PluginRestartReader> = Box::new(handle);
+        assert!(!reader.requested());
+        state.restart.store(true, Ordering::Release);
+        assert!(reader.requested());
+        drop(state);
+        assert!(reader.requested(), "the handle contains host atomics but no native instance pointer");
+    }
 
     #[test]
     fn restart_handle_survives_its_sender_and_activation_preserves_new_or_failed_requests() {
