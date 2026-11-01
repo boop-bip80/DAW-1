@@ -232,10 +232,7 @@ fn synth_native_process_error_retries_only_the_mapped_sustain_release() {
 
     let mut retry_io = vec![vec![9.0f32; 64]; 2];
     p.process(&mut retry_io, 64);
-    assert!(
-        retry_io.iter().flatten().all(|x| x.abs() < 1e-6),
-        "native retry did not deliver CC64=0 (or replayed the failure controller)"
-    );
+    assert!(retry_io.iter().flatten().all(|x| x.abs() < 1e-6), "native retry did not deliver CC64=0 (or replayed the failure controller)");
 }
 
 #[test]
