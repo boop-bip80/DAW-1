@@ -1227,7 +1227,10 @@ mod tests {
         };
         let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, services);
         assert!(app.dialogs.open_for_command(&app.engine, "file.export_otioz"));
-        let mut harness = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1000.0, 700.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
         harness.run_steps(3);
         assert!(harness.get_by_label("OpenTimelineIO bundle path (.otioz)").rect().width() > 0.0);
         harness.get_by_label("Browse…").click();
