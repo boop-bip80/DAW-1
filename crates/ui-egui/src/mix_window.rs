@@ -147,7 +147,11 @@ pub(crate) fn route_name(app: &SoundApp, r: &Route) -> String {
 
 pub(crate) fn input_name(app: &SoundApp, track: &Track) -> String {
     if track.kind.is_midi() {
-        return "All MIDI inputs".into();
+        let port = track.midi_input.port.as_deref().unwrap_or("All MIDI inputs");
+        return match track.midi_input.channel {
+            Some(channel) => format!("{port} · ch {channel}"),
+            None => port.to_string(),
+        };
     }
     if track.kind.has_playlist() && track.mixer.input == Route::None { "In 1".to_string() } else { route_name(app, &track.mixer.input) }
 }
@@ -1357,15 +1361,76 @@ fn input_route_choices(opened_channels: Option<usize>) -> usize {
     opened_channels.unwrap_or(8).clamp(1, 64)
 }
 
-/// MIDI and instrument tracks currently receive all enabled native MIDI inputs together.
-/// Until the recording bridge can filter by track and port, do not offer misleading per-track
-/// routing controls or physical audio input channels in their Input selector.
+/// The same input selector serves MIDI and instrument tracks in the Mix strip and Edit header.
+/// Offer only session-enabled port names; actual native connection is checked when recording.
 fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
-    let (name, armed) = app.engine.session().track(id).map_or(("track".to_string(), false), |track| (track.name.clone(), track.mixer.record_arm));
+    let Some(track) = app.engine.session().track(id) else { return };
+    let name = track.name.clone();
+    let armed = track.mixer.record_arm;
+    let selected_port = track.midi_input.port.clone();
+    let selected_channel = track.midi_input.channel;
     let status = app.midi_input_status();
+    let mut enabled_ports = status.enabled_ports.clone();
+    enabled_ports.sort();
+    enabled_ports.dedup();
+    let recording = app.engine.transport.recording;
+
     ui.strong(format!("MIDI input for {name}"));
-    ui.label("All enabled MIDI inputs");
-    ui.label(format!("{} enabled MIDI input name(s) in this session", status.enabled_ports.len()));
+    ui.label(format!(
+        "Selected: {} · {}",
+        selected_port.as_deref().unwrap_or("All enabled MIDI inputs"),
+        selected_channel.map_or_else(|| "All channels".into(), |channel| format!("Channel {channel}"))
+    ));
+    if recording {
+        ui.label("Stop recording to change this track's MIDI port or channel.");
+    }
+    ui.add_enabled_ui(!recording, |ui| {
+        ui.strong("Input port");
+        if ui.selectable_label(selected_port.is_none(), "All enabled MIDI inputs").clicked() && selected_port.is_some() {
+            if let Err(error) = app.run("track.midi_input", json!({"track": id.0, "port": null})) {
+                app.ui.status = format!("Could not change MIDI input port: {error}");
+            } else {
+                ui.close();
+            }
+        }
+        if enabled_ports.is_empty() {
+            ui.label("No MIDI input ports are enabled in this session.");
+        }
+        egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+            for port in &enabled_ports {
+                let selected = selected_port.as_deref() == Some(port.as_str());
+                if ui.selectable_label(selected, port).clicked() && !selected {
+                    if let Err(error) = app.run("track.midi_input", json!({"track": id.0, "port": port})) {
+                        app.ui.status = format!("Could not change MIDI input port: {error}");
+                    } else {
+                        ui.close();
+                    }
+                }
+            }
+        });
+        ui.separator();
+        ui.menu_button(format!("Channel: {}", selected_channel.map_or_else(|| "All channels".into(), |channel| channel.to_string())), |ui| {
+            for choice in 0u8..=16 {
+                let channel = (choice != 0).then_some(choice);
+                let selected = selected_channel == channel;
+                let label = channel.map_or_else(|| "All channels".into(), |value| format!("Channel {value}"));
+                if ui.selectable_label(selected, label).clicked() && !selected {
+                    let value = channel.map_or_else(|| json!("all"), |value| json!(value));
+                    if let Err(error) = app.run("track.midi_input", json!({"track": id.0, "channel": value})) {
+                        app.ui.status = format!("Could not change MIDI channel: {error}");
+                    } else {
+                        ui.close();
+                    }
+                }
+            }
+        });
+    });
+    if let Some(port) = &selected_port
+        && !enabled_ports.iter().any(|enabled| enabled == port)
+    {
+        ui.colored_label(Tokens::current().rec, format!("Selected port '{port}' is not enabled. Re-enable it in Setup or choose another input."));
+    }
+    ui.label(format!("{} enabled MIDI input name(s) in this session", enabled_ports.len()));
     if status.recording {
         ui.label(format!("Recording MIDI from {} connected input(s)", status.connected_ports.len()));
     } else {
@@ -1375,8 +1440,10 @@ fn midi_input_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
         ui.colored_label(Tokens::current().rec, format!("MIDI input error: {}", err.chars().take(240).collect::<String>()));
     }
     ui.label(
-        egui::RichText::new("Each armed MIDI/instrument track currently receives the enabled native inputs. Per-track port and channel filters are not available yet.")
-            .small(),
+        egui::RichText::new(
+            "Port and channel filters apply to future recorded takes. Listed port names come from session preferences; a disconnected device is detected at Record. Live instrument monitoring is not available yet.",
+        )
+        .small(),
     );
     if ui.button(if armed { "Disarm this MIDI track" } else { "Arm this MIDI track" }).clicked() {
         if let Err(err) = app.run("mix.record_arm", json!({"track": id.0, "value": !armed})) {
@@ -1440,9 +1507,10 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 mod tests {
     use super::{Readout, dragged_send_db, editable_readout, input_name, input_route_choices, midi_input_route_menu, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+    use egui_kittest::{Harness, kittest::Queryable};
 
     #[test]
-    fn midi_and_instrument_input_selectors_explain_shared_native_inputs() {
+    fn midi_and_instrument_input_selectors_show_port_and_channel_controls() {
         use soundcraft_model::{ChannelFormat, TrackKind};
         let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
         for kind in [TrackKind::Midi, TrackKind::Instrument] {
@@ -1462,8 +1530,76 @@ mod tests {
             output.textures_delta.clear();
             assert!(visible.iter().any(|t| t.contains("Manage MIDI input devices")), "missing route to Setup: {visible:?}");
             assert!(visible.iter().any(|t| t.contains("Arm this MIDI track")), "track record-arm affordance missing: {visible:?}");
-            assert!(visible.iter().any(|t| t.contains("Per-track port and channel filters")), "routing limitations not visible: {visible:?}");
+            assert!(visible.iter().any(|t| t.contains("All enabled MIDI inputs")), "no global input choice: {visible:?}");
+            assert!(visible.iter().any(|t| t.contains("Channel: All channels")), "channel selector missing: {visible:?}");
+            assert!(visible.iter().any(|t| t.contains("disconnected device is detected at Record")), "offline limits not disclosed: {visible:?}");
         }
+    }
+
+    #[test]
+    fn menu_clicks_persist_port_and_channel_per_track_without_probing_hardware() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Keys"));
+        app.run("setup.midi_input_devices", serde_json::json!({"enable": ["Keyboard A", "Keyboard B"]})).expect("enable synthetic port names");
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_size(vec2(800.0, 800.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| midi_input_route_menu(app, ui, id), app);
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "showing available inputs is read-only");
+
+        h.get_by_label("Keyboard A").click();
+        h.run_steps(2);
+        let track = h.state().engine.session().track(id).expect("MIDI track");
+        assert_eq!(track.midi_input.port.as_deref(), Some("Keyboard A"));
+        assert_eq!(input_name(h.state(), track), "Keyboard A");
+        assert!(h.state().engine.is_dirty());
+
+        h.get_by_label("Channel: All channels").click();
+        h.run_steps(2);
+        h.get_by_label("Channel 5").click();
+        h.run_steps(2);
+        let track = h.state().engine.session().track(id).expect("MIDI track");
+        assert_eq!(track.midi_input.channel, Some(5));
+        assert_eq!(input_name(h.state(), track), "Keyboard A · ch 5");
+        assert_eq!(
+            h.state_mut().run("midi.input_route", serde_json::json!({"track": id.0})).expect("read-only route query"),
+            serde_json::json!({"port": "Keyboard A", "channel": 5})
+        );
+
+        // Re-selecting an already active port is not an edit or an undo step.
+        h.state_mut().engine.mark_clean();
+        h.get_by_label("Keyboard A").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty());
+    }
+
+    #[test]
+    fn disabled_saved_port_remains_visible_with_a_setup_warning() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let id = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Synth"));
+        app.run("setup.midi_input_devices", serde_json::json!({"enable": ["Offline Keyboard"]})).expect("enable port");
+        app.run("track.midi_input", serde_json::json!({"track": id.0, "port": "Offline Keyboard"})).expect("select port");
+        app.run("setup.midi_input_devices", serde_json::json!({"disable": ["Offline Keyboard"]})).expect("disable port");
+        app.engine.mark_clean();
+
+        let track = app.engine.session().track(id).expect("instrument track");
+        assert_eq!(input_name(&app, track), "Offline Keyboard", "do not silently change a saved route");
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| midi_input_route_menu(&mut app, ui, id));
+        let text: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect();
+        output.textures_delta.clear();
+        assert!(text.iter().any(|line| line.contains("Selected port") && line.contains("not enabled")), "missing stale-port warning: {text:?}");
+        assert!(!app.engine.is_dirty(), "warning and session read must not alter the stored route");
     }
 
     #[test]
