@@ -1545,29 +1545,44 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
     make_dir(&dir)?;
-    // Atomic-ish write: temp file then rename.
+    // Reserve, write and sync the new project before touching the existing backup set.
+    // A stale .scraft.tmp (including a symlink) fails without rotating any backups.
     let tmp = p.with_extension("scraft.tmp");
-    if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) {
-        back_up(&p);
+    stage_file(&tmp, &p, text.as_bytes())?;
+    let pending_backup = if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) { back_up(&p) } else { None };
+    replace_with(&tmp, &p, Ok(()))?;
+    // Retention pruning is a consequence of a committed save, never a failed attempt.
+    if let Some(backup) = pending_backup {
+        backup.prune();
     }
-    replace_file(&tmp, &p, text.as_bytes())?;
     Ok((s, written, p))
 }
 
 /// Write `bytes` to `tmp`, flush it to disk and rename it over `file`, so `file` holds either the
 /// old or the new contents, never a mix.
 pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
+    stage_file(tmp, file, bytes)?;
+    replace_with(tmp, file, Ok(()))
+}
+
+/// Exclusively create and fully sync the next session file without touching the currently
+/// committed project. A pre-existing .scraft.tmp may hold crash recovery data or be a link:
+/// opening it must fail before any cleanup ownership is acquired.
+fn stage_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
 
     crate::file_access::check_write(file).map_err(EngineError::Io)?;
     crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
-    // A pre-existing .scraft.tmp may hold crash-recovery data (or be a symlink). Never
-    // truncate, follow or unlink it: only this call's newly reserved staging file is ours.
     let mut staged =
         std::fs::OpenOptions::new().write(true).create_new(true).open(tmp).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
     let written = staged.write_all(bytes).and_then(|()| staged.sync_all());
     drop(staged);
-    replace_with(tmp, file, written)
+    if let Err(err) = written {
+        // Exclusive creation succeeded: this path was created by this save and is ours.
+        let _ = std::fs::remove_file(tmp);
+        return Err(EngineError::Io(format!("{}: {err}", file.display())));
+    }
+    Ok(())
 }
 
 /// Renames `tmp` over `file` once it is `written`, or removes it when writing or renaming failed.
@@ -1598,17 +1613,35 @@ fn copy_new(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Copy the session file about to be replaced to `Backups/<name> backup <n>.<ext>`, keeping the
-/// newest ten.
-fn back_up(file: &Path) {
+/// A newly copied backup: old versions are pruned only after the new project commits.
+struct PreparedBackup {
+    backups: PathBuf,
+    prefix: String,
+    suffix: String,
+    numbers: Vec<u32>,
+    next: u32,
+}
+
+impl PreparedBackup {
+    fn prune(self) {
+        let Self { backups, prefix, suffix, numbers, next } = self;
+        for n in numbers.into_iter().filter(|n| n.saturating_add(10) <= next) {
+            let _ = std::fs::remove_file(backups.join(format!("{prefix}{n}{suffix}")));
+        }
+    }
+}
+
+/// Copy the current session to a new, exclusive numbered backup. Return a deferred retention
+/// plan; never prune old versions until the staged project rename succeeds.
+fn back_up(file: &Path) -> Option<PreparedBackup> {
     let (Some(dir), Some(stem), Some(ext)) = (file.parent(), file.file_stem().and_then(OsStr::to_str), file.extension().and_then(OsStr::to_str))
     else {
-        return;
+        return None;
     };
     let backups = dir.join("Backups");
     if let Err(err) = crate::file_access::check_write(&backups) {
         log::warn!("no backup of {}: {err}", file.display());
-        return;
+        return None;
     }
     let prefix = format!("{stem} backup ");
     let suffix = format!(".{ext}");
@@ -1620,20 +1653,18 @@ fn back_up(file: &Path) {
         .collect();
     let Some(next) = numbers.iter().max().map_or(Some(1), |n| n.checked_add(1)) else {
         log::warn!("no backup of {}: backup numbers are exhausted", file.display());
-        return;
+        return None;
     };
     let dest = backups.join(format!("{prefix}{next}{suffix}"));
     if let Err(err) = crate::file_access::check_write(&dest) {
         log::warn!("no backup of {}: {err}", file.display());
-        return;
+        return None;
     }
     if let Err(err) = std::fs::create_dir_all(&backups).and_then(|()| copy_new(file, &dest)) {
         log::warn!("no backup of {}: {err}", file.display());
-        return;
+        return None;
     }
-    for n in numbers.into_iter().filter(|n| n.saturating_add(10) <= next) {
-        let _ = std::fs::remove_file(backups.join(format!("{prefix}{n}{suffix}")));
-    }
+    Some(PreparedBackup { backups, prefix, suffix, numbers, next })
 }
 
 /// The file a session saved to `path` goes to: `path`, with `.scraft` added when it has no
@@ -2618,6 +2649,61 @@ mod save_tests {
     }
 
     #[test]
+    fn occupied_staging_file_does_not_rotate_backups_on_failed_session_save() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-failed-save-backups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.scraft");
+        let path_str = path.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &json!({"path": path_str})).unwrap();
+        let committed = std::fs::read(&path).unwrap();
+        e.execute("track.new", &json!({"name": "Unsaved after backup", "format": "mono"})).unwrap();
+        assert!(e.is_dirty());
+        let live = e.session().clone();
+
+        let backups = dir.join("Backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let original_backups: Vec<_> = (1..=10)
+            .map(|n| {
+                let path = backups.join(format!("Song backup {n}.scraft"));
+                let bytes = format!("original protected backup {n}").into_bytes();
+                std::fs::write(&path, &bytes).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let staging = path.with_extension("scraft.tmp");
+        let recovery = b"recovery bytes from an earlier interrupted save";
+        std::fs::write(&staging, recovery).unwrap();
+
+        let err = e.execute("session.save", &json!({})).unwrap_err();
+        assert!(err.to_string().contains("scraft.tmp"), "{err}");
+        assert_eq!(std::fs::read(&staging).unwrap(), recovery);
+        assert_eq!(std::fs::read(&path).unwrap(), committed, "the committed session must stay unchanged");
+        assert_eq!(*e.session(), live, "the failed save must preserve all live edits");
+        assert!(e.is_dirty(), "failed save must not mark the document clean");
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 10);
+        assert!(!backups.join("Song backup 11.scraft").exists());
+        for (path, bytes) in &original_backups {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "failed save may not prune or rewrite any prior backup");
+        }
+
+        std::fs::remove_file(&staging).unwrap();
+        e.execute("session.save", &json!({})).unwrap();
+        assert!(!e.is_dirty());
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 10, "successful save rotates once");
+        assert!(!original_backups[0].0.exists(), "oldest backup expires only after commit");
+        for (path, bytes) in original_backups.iter().skip(1) {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(std::fs::read(backups.join("Song backup 11.scraft")).unwrap(), committed);
+        let reopened = reopen(&path_str);
+        assert!(reopened.session().track_by_name("Unsaved after backup").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn saving_keeps_the_last_ten_versions_as_backups() {
         let dir = std::env::temp_dir().join(format!("soundcraft-backups-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2646,7 +2732,7 @@ mod save_tests {
         std::fs::write(&path, b"session").unwrap();
         let last = dir.join(format!("Backups/Song backup {}.scraft", u32::MAX));
         std::fs::write(&last, b"sentinel").unwrap();
-        back_up(&path);
+        let _ = back_up(&path);
         assert_eq!(std::fs::read(&last).unwrap(), b"sentinel");
         let dest = dir.join("Backups/Song backup 1.scraft");
         std::fs::write(&dest, b"taken").unwrap();
@@ -2666,7 +2752,7 @@ mod save_tests {
         let path = dir.join("Project/Song.scraft");
         std::fs::write(&path, b"session").unwrap();
         std::os::unix::fs::symlink(&outside, dir.join(format!("Project/Backups/Song backup {}.scraft", u32::MAX))).unwrap();
-        back_up(&path);
+        let _ = back_up(&path);
         let link = dir.join("Project/Backups/Song backup 1.scraft");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(copy_new(&path, &link).is_err());
