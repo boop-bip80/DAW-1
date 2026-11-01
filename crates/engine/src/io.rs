@@ -2692,16 +2692,25 @@ mod save_tests {
         let prior = dir.join("Preserved.scraft");
         std::fs::rename(&file, &prior).unwrap();
 
-        let listener = std::os::unix::net::UnixListener::bind(&file).unwrap();
-        let err = e.execute("session.save", &json!({})).unwrap_err();
-        assert!(err.to_string().contains("not a regular file"), "{err}");
-        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_socket());
-        assert_eq!(std::fs::read(&prior).unwrap(), committed);
-        assert_eq!(*e.session(), live);
-        assert!(e.is_dirty());
-        assert!(!file.with_extension("scraft.tmp").exists());
-        drop(listener);
-        std::fs::remove_file(&file).unwrap();
+        match std::os::unix::net::UnixListener::bind(&file) {
+            Ok(listener) => {
+                let err = e.execute("session.save", &json!({})).unwrap_err();
+                assert!(err.to_string().contains("not a regular file"), "{err}");
+                assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_socket());
+                assert_eq!(std::fs::read(&prior).unwrap(), committed);
+                assert_eq!(*e.session(), live);
+                assert!(e.is_dirty());
+                assert!(!file.with_extension("scraft.tmp").exists());
+                drop(listener);
+                std::fs::remove_file(&file).unwrap();
+            }
+            // Sandboxed Unix runners can deny AF_UNIX bind. Only the socket fixture
+            // is unavailable; symlink and directory rejection below still run.
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported) => {
+                assert!(!file.exists());
+            }
+            Err(err) => panic!("unexpected Unix socket bind failure: {err}"),
+        }
 
         std::os::unix::fs::symlink(&prior, &file).unwrap();
         let err = e.execute("session.save", &json!({})).unwrap_err();
