@@ -5,12 +5,28 @@ use crate::ffi::{EVENT_CAP, Event, GuiLink, HostState, Instance, NotePort, PortB
 use clap_sys::ext::note_ports::{CLAP_NOTE_DIALECT_CLAP, CLAP_NOTE_DIALECT_MIDI};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginInfo, PluginRestartReader, Transport};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Largest block we activate a plugin for.
 const MAX_BLOCK: usize = 1 << 16;
 /// Most channels a host strip may ask for.
 const MAX_CHANNELS: usize = 64;
+
+/// A different token for every live CLAP instance. Exhaustion fails closed (token 0 is invalid).
+static NEXT_RESTART_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn mint_restart_token(counter: &AtomicU64) -> u64 {
+    // compare_exchange_weak is available at our Rust 1.90 MSRV; try_update is only 1.95+.
+    // Minting occurs on the control thread, never while rendering audio.
+    let mut next = counter.load(Ordering::Relaxed);
+    loop {
+        let Some(after) = next.checked_add(1) else { return 0 };
+        match counter.compare_exchange_weak(next, after, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(actual) => next = actual,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NoteMode {
@@ -27,6 +43,7 @@ enum NoteMode {
 #[derive(Clone)]
 pub struct ClapRestartHandle {
     state: Arc<HostState>,
+    token: u64,
 }
 
 impl ClapRestartHandle {
@@ -41,6 +58,10 @@ impl PluginRestartReader for ClapRestartHandle {
     fn requested(&self) -> bool {
         ClapRestartHandle::requested(self)
     }
+
+    fn instance_token(&self) -> Option<u64> {
+        (self.token != 0).then_some(self.token)
+    }
 }
 
 /// A hosted CLAP plugin. Parameter ids are the CLAP param ids as decimal strings ("0", "17", …);
@@ -48,6 +69,7 @@ impl PluginRestartReader for ClapRestartHandle {
 pub struct ClapPlugin {
     inst: Instance,
     info: &'static PluginInfo,
+    restart_token: u64,
     /// CLAP id of each `info.params` entry (same order).
     ids: Vec<u32>,
     values: Vec<f32>,
@@ -75,6 +97,7 @@ impl ClapPlugin {
         ClapPlugin {
             inst,
             info,
+            restart_token: mint_restart_token(&NEXT_RESTART_TOKEN),
             ids,
             values,
             queue: Vec::with_capacity(EVENT_CAP),
@@ -96,7 +119,7 @@ impl ClapPlugin {
     /// Observe native restart requests independently of optional state or GUI extensions.
     /// Automatic reactivation is not wired into the mixer yet.
     pub fn restart_handle(&self) -> ClapRestartHandle {
-        ClapRestartHandle { state: self.inst.restart_state() }
+        ClapRestartHandle { state: self.inst.restart_state(), token: self.restart_token }
     }
 
     /// Re-reads every parameter value from the plugin (after a state load).
@@ -268,6 +291,10 @@ impl Plugin for ClapPlugin {
         // Called by the mixer before retirement, on the audio/render thread. Deactivation and
         // destruction remain deferred to the main thread that drops the retired instance.
         self.inst.stop_processing();
+    }
+
+    fn restart_instance_token(&self) -> Option<u64> {
+        (self.restart_token != 0).then_some(self.restart_token)
     }
 
     fn set_param(&mut self, id: &str, value: f32) -> bool {
@@ -489,11 +516,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restart_tokens_are_unique_and_fail_closed_at_exhaustion() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(mint_restart_token(&counter), u64::MAX - 1);
+        assert_eq!(mint_restart_token(&counter), 0, "no token is reused after counter exhaustion");
+        assert_eq!(mint_restart_token(&counter), 0);
+    }
+
+    #[test]
     fn restart_handle_is_observable_through_an_erased_control_reader() {
         let state = Arc::new(HostState::default());
-        let handle = ClapRestartHandle { state: Arc::clone(&state) };
+        let handle = ClapRestartHandle { state: Arc::clone(&state), token: 17 };
         let reader: Box<dyn PluginRestartReader> = Box::new(handle);
         assert!(!reader.requested());
+        assert_eq!(reader.instance_token(), Some(17));
         state.restart.store(true, Ordering::Release);
         assert!(reader.requested());
         drop(state);
@@ -503,7 +539,7 @@ mod tests {
     #[test]
     fn restart_handle_survives_its_sender_and_activation_preserves_new_or_failed_requests() {
         let state = Arc::new(HostState::default());
-        let handle = ClapRestartHandle { state: Arc::clone(&state) };
+        let handle = ClapRestartHandle { state: Arc::clone(&state), token: 17 };
         let observer = handle.clone();
         assert!(!handle.requested());
         state.restart.store(true, Ordering::Release);

@@ -200,6 +200,11 @@ pub trait Plugin: Send {
     /// on the main thread. Must not allocate, wait, deactivate, or destroy; repeated calls are safe.
     /// Built-ins and hosts without an explicit processing lifecycle need no action.
     fn suspend(&mut self) {}
+    /// A stable nonzero identity for this live instance, used only to reject stale restart
+    /// commands. Must be allocation-free and callable on the audio thread; not a session id.
+    fn restart_instance_token(&self) -> Option<u64> {
+        None
+    }
     /// Sets a parameter (clamped into range; NaN becomes the default). `false` if `id` is unknown.
     fn set_param(&mut self, id: &str, value: f32) -> bool;
     fn param(&self, id: &str) -> Option<f32>;
@@ -317,6 +322,11 @@ impl<F: FnMut() -> Option<Vec<u8>> + Send> PluginStateReader for F {
 /// coordinated audio-stop/main-thread-reactivation protocol must service the request.
 pub trait PluginRestartReader: Send {
     fn requested(&self) -> bool;
+    /// Matches the instance's `Plugin::restart_instance_token` when supported. Stable for
+    /// exactly one native instance; never persisted and never reused after replacement.
+    fn instance_token(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Recorded audio a sample-playing instrument reads: planar `f32` at its own sample rate (the
