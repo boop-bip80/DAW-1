@@ -389,22 +389,41 @@ fn repair_take(path: &Path, folders: &[PathBuf], channels: usize, rate: u32) -> 
     Ok(frames)
 }
 
-/// `head` is a take header like `expected` (the recorder's header for no frames yet): RIFF or
-/// RF64 WAVE, the same format chunk at the same place, and the data chunk right after it all.
-/// Only the sizes and frame counts may differ.
+/// `head` must have the exact invariant bytes of SoundCraft's take header, not just a matching
+/// `fmt ` chunk. A different WAV in `Audio Files` can have the same format and `data` marker but
+/// carry its own metadata; recovery must leave it untouched.
+///
+/// The writer refreshes RIFF/data lengths and the `fact` frame count every second. Above 4 GiB it
+/// changes RIFF/JUNK into RF64/ds64 in place. A crash can interrupt that one header write, so only
+/// these size/count fields and the JUNK→ds64 transition are exempt from the byte comparison.
 fn is_take_header(head: &[u8], expected: &[u8]) -> bool {
-    let magic = matches!(head.get(..4), Some(b"RIFF" | b"RF64")) && head.get(8..12) == Some(b"WAVE");
-    let fmt = expected.windows(4).position(|w| w == b"fmt ");
-    let fmt_len = fmt.and_then(|at| expected.get(at + 4..at + 8)).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes);
-    let same_fmt = match (fmt, fmt_len) {
-        (Some(at), Some(n)) => {
-            let end = at.saturating_add(8).saturating_add(n as usize);
-            expected.get(at..end).is_some_and(|chunk| head.get(at..end) == Some(chunk))
-        }
-        _ => false,
+    if head.len() != expected.len() || !matches!(head.get(..4), Some(b"RIFF" | b"RF64")) {
+        return false;
+    }
+    let ds64 = match head.get(12..16) {
+        Some(b"JUNK") => false,
+        Some(b"ds64") => true,
+        _ => return false,
     };
-    let data = expected.len().checked_sub(8).and_then(|at| head.get(at..at + 4)) == Some(b"data");
-    magic && same_fmt && data
+    let Some(fact_count) = expected.windows(4).position(|w| w == b"fact").and_then(|at| at.checked_add(8)) else {
+        return false;
+    };
+    let Some(fact_end) = fact_count.checked_add(4) else { return false };
+    let Some(data_count) = expected.len().checked_sub(4) else { return false };
+    let Some(data_tag) = data_count.checked_sub(4) else { return false };
+    if expected.get(fact_count..fact_end).is_none() || expected.get(data_tag..data_count) != Some(b"data") {
+        return false;
+    }
+    head.iter().zip(expected).enumerate().all(|(at, (got, want))| {
+        // Header magic/chunk kind are checked above. Data lengths, `fact` count and RF64 ds64
+        // lengths/counts may be stale or half-rewritten at a crash; all other bytes must match.
+        at < 8
+            || (12..16).contains(&at)
+            || (ds64 && (20..44).contains(&at))
+            || (fact_count..fact_end).contains(&at)
+            || at >= data_count
+            || got == want
+    })
 }
 
 /// Delete a leftover autosave.
@@ -633,6 +652,28 @@ mod tests {
     }
 
     #[test]
+    fn recorder_header_signature_allows_stale_sizes_and_partial_rf64_transitions() {
+        let expected = soundcraft_audio_io::wav_float_header(1, 48_000, 0).unwrap();
+        let stale = soundcraft_audio_io::wav_float_header(1, 48_000, 12_345).unwrap();
+        assert!(is_take_header(&stale, &expected), "the one-second header refresh can lag behind recorded samples");
+
+        let rf64 = soundcraft_audio_io::wav_float_header(1, 48_000, u64::from(u32::MAX)).unwrap();
+        assert_eq!(rf64.get(..4), Some(&b"RF64"[..]));
+        assert!(is_take_header(&rf64, &expected), "a completed RIFF-to-RF64 header transition remains recoverable");
+        let mut partial = stale;
+        partial[0..4].copy_from_slice(b"RF64");
+        assert!(is_take_header(&partial, &expected), "a crash after writing RF64 magic but before replacing JUNK must still recover");
+
+        let mut foreign = expected.clone();
+        foreign[20] = b'X';
+        assert!(!is_take_header(&foreign, &expected), "JUNK metadata that the recorder never writes is not ours to repair");
+        let mut bad_fact = expected.clone();
+        let fact = expected.windows(4).position(|w| w == b"fact").unwrap();
+        bad_fact[fact] = b'F';
+        assert!(!is_take_header(&bad_fact, &expected), "the `fact` chunk identity is invariant even when its count changes");
+    }
+
+    #[test]
     fn recovery_never_writes_a_file_that_isnt_a_take_in_a_take_folder() {
         use crate::io::Take;
         let dir = folder("autosave-hostile-take");
@@ -643,9 +684,17 @@ mod tests {
         let takes = root.join(sanitize_name(&e.session().name)).join("Audio Files");
         std::fs::create_dir_all(&takes).unwrap();
         let wav = [soundcraft_audio_io::wav_float_header(1, 48_000, 0).unwrap(), vec![0; 4_000]].concat();
+        // A foreign float WAV can have the same `fmt ` chunk and `data` tag as ours, but carry
+        // its own metadata inside JUNK. Recovery must never rewrite that file's header.
+        let mut foreign = wav.clone();
+        foreign[20] = b'X';
         let text = b"not audio at all, but long enough to be mistaken for a header if nobody looked at it ......".repeat(4);
-        let files =
-            [(takes.join("notes.wav"), text.clone()), (dir.join("Elsewhere/Vox_01.wav"), wav.clone()), (takes.join("../Vox_02.wav"), wav.clone())];
+        let files = [
+            (takes.join("notes.wav"), text.clone()),
+            (dir.join("Elsewhere/Vox_01.wav"), wav.clone()),
+            (takes.join("../Vox_02.wav"), wav.clone()),
+            (takes.join("Foreign.wav"), foreign),
+        ];
         for (path, bytes) in &files {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
