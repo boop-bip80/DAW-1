@@ -284,6 +284,7 @@ fn controllerless_plugin_rejects_unconsumable_controller_state_without_mutation(
     let id = id_of("Fixture Headless");
     assert!(soundcraft_vst3_host::plugin_info(&id).unwrap().params.is_empty());
     let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    assert!(p.editor().is_none(), "headless fixture unexpectedly exposes IEditController");
     // A controllerless component can still restore bare component states.
     assert!(p.load_state(&0.5f64.to_le_bytes()));
     // Its own framed state has an empty controller half and is also valid.
@@ -300,6 +301,7 @@ fn controllerless_plugin_rejects_unconsumable_controller_state_without_mutation(
     invalid.extend_from_slice(&0.25f64.to_le_bytes());
     invalid.extend_from_slice(&8u32.to_le_bytes());
     invalid.extend_from_slice(&1.0f64.to_le_bytes());
+    assert_eq!(invalid.len(), 4 + 4 + 8 + 4 + 8, "state blob must include the controller half");
     assert!(!p.load_state(&invalid));
     assert_eq!(p.save_state().as_deref(), Some(valid.as_slice()), "rejected state must not mutate the component");
 }
