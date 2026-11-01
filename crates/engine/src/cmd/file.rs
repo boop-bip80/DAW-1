@@ -100,7 +100,7 @@ pub fn specs() -> Vec<CommandSpec> {
             |e, p| {
                 let id = "file.import_otioz";
                 let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
-                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("otioz") {
+                if !std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str).is_some_and(|ext| ext.eq_ignore_ascii_case("otioz")) {
                     return Err(bad(id, "input path must end in .otioz"));
                 }
                 let imported = crate::otio_bundle_import::import_audio(e, std::path::Path::new(&path))?;
