@@ -31,7 +31,7 @@ pub mod record;
 
 pub use devices::AudioConfig;
 
-use soundcraft_dsp::{Plugin, PluginEditor, PluginStateReader};
+use soundcraft_dsp::{Plugin, PluginEditor, PluginRestartReader, PluginStateReader};
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
@@ -567,6 +567,8 @@ struct Side {
     editors: HashMap<(TrackId, usize), Box<dyn PluginEditor>>,
     /// State readers of the live instances.
     states: BTreeMap<(TrackId, usize), Box<dyn PluginStateReader>>,
+    /// Atomically observed restart requests of live instances, even with no editor/state extension.
+    restarts: BTreeMap<(TrackId, usize), Box<dyn PluginRestartReader>>,
     /// Instances that refused their stored state: saves keep that state until the plugin's editor
     /// is opened.
     refused: HashSet<(TrackId, usize)>,
@@ -583,6 +585,7 @@ impl Side {
             rate,
             editors: HashMap::new(),
             states: BTreeMap::new(),
+            restarts: BTreeMap::new(),
             refused: HashSet::new(),
             garbage,
             old_sessions: None,
@@ -621,6 +624,7 @@ impl Side {
     fn forget(&mut self, key: (TrackId, usize)) {
         self.shadow.remove(&key);
         self.states.remove(&key);
+        self.restarts.remove(&key);
         self.refused.remove(&key);
         if let Some(mut e) = self.editors.remove(&key) {
             e.close();
@@ -893,6 +897,13 @@ impl Player {
         self.side().capture_states_of(slots)
     }
 
+    /// Slots whose current plugin has requested a CLAP restart. Safe to poll on the UI/control
+    /// thread even if the plugin has no GUI or state extension. The signal is read-only,
+    /// repeatable and does not yet stop, deactivate or reactivate the native instance.
+    pub fn pending_plugin_restarts(&self) -> Vec<(TrackId, usize)> {
+        self.side().pending_restarts()
+    }
+
     /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
     /// the parameter edits made in open editors since the last call.
     pub fn idle(&self) -> Vec<EditorEdit> {
@@ -1045,6 +1056,10 @@ fn copy_meter_snapshot(source: &MeterSnapshot, out: &mut MeterSnapshot) {
 }
 
 impl Side {
+    fn pending_restarts(&self) -> Vec<(TrackId, usize)> {
+        self.restarts.iter().filter_map(|(key, reader)| reader.requested().then_some(*key)).collect()
+    }
+
     fn capture_states(&mut self) -> PluginStates {
         self.states.iter_mut().filter(|(k, _)| !self.refused.contains(*k)).filter_map(|(&(t, slot), r)| Some((t, slot, r.save_state()?))).collect()
     }
@@ -1072,6 +1087,20 @@ impl Side {
         e.open()?;
         self.refused.remove(&key);
         Ok(())
+    }
+
+    /// Retains only main-thread handles, not native processing pointers. Called before moving
+    /// the instance to the audio engine, including when it has no editor/state extension.
+    fn remember_handles(&mut self, key: (TrackId, usize), plugin: &mut dyn Plugin) {
+        if let Some(e) = plugin.editor() {
+            self.add_editor(key, e);
+        }
+        if let Some(r) = plugin.state_reader() {
+            self.states.insert(key, r);
+        }
+        if let Some(r) = plugin.restart_reader() {
+            self.restarts.insert(key, r);
+        }
     }
 
     /// Creates the third-party instances `s` needs that the audio thread does not have yet.
@@ -1102,12 +1131,7 @@ impl Side {
             log::debug!("plugin instance for {:?} slot {}: {} ({} ch, created: {})", spec.track, spec.slot, spec.id, spec.ch, made.is_some());
             self.shadow.insert(key, (spec.id.clone(), spec.ch, made.is_some()));
             if let Some(soundcraft_mix::NewInstance { mut plugin, refused_state }) = made {
-                if let Some(e) = plugin.editor() {
-                    self.add_editor(key, e);
-                }
-                if let Some(r) = plugin.state_reader() {
-                    self.states.insert(key, r);
-                }
+                self.remember_handles(key, plugin.as_mut());
                 if refused_state {
                     self.refused.insert(key);
                 }
@@ -1330,6 +1354,98 @@ mod tests {
             },
             rx,
         )
+    }
+
+    static RESTART_TEST_INFO: soundcraft_dsp::PluginInfo = soundcraft_dsp::PluginInfo {
+        id: "probe:restart",
+        name: "Restart Probe",
+        short_name: "Restart",
+        category: soundcraft_dsp::Category::Other,
+        params: &[],
+        is_instrument: false,
+        audiosuite: false,
+    };
+
+    struct RestartFlag(Arc<AtomicBool>);
+
+    impl PluginRestartReader for RestartFlag {
+        fn requested(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    /// An instance with a restart notification but no editor and no state extension.
+    struct RestartProbe(Arc<AtomicBool>);
+
+    impl Plugin for RestartProbe {
+        fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
+            &RESTART_TEST_INFO
+        }
+        fn prepare(&mut self, _rate: f32, _block: usize, _channels: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _id: &str, _value: f32) -> bool {
+            false
+        }
+        fn param(&self, _id: &str) -> Option<f32> {
+            None
+        }
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+        fn restart_reader(&mut self) -> Option<Box<dyn PluginRestartReader>> {
+            Some(Box::new(RestartFlag(Arc::clone(&self.0))))
+        }
+    }
+
+    #[test]
+    fn restart_requests_are_observable_without_plugin_editor_or_state_extension() {
+        let (player, _commands) = observer_test_player();
+        let (late, early) = ((TrackId(20), 0), (TrackId(4), 1));
+        let (late_flag, early_flag) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let mut a = RestartProbe(Arc::clone(&late_flag));
+        let mut b = RestartProbe(Arc::clone(&early_flag));
+        assert!(a.editor().is_none());
+        assert!(a.state_reader().is_none());
+        assert!(b.editor().is_none());
+        assert!(b.state_reader().is_none());
+        {
+            let mut side = player.side();
+            side.remember_handles(late, &mut a);
+            side.remember_handles(early, &mut b);
+            assert!(side.editors.is_empty());
+            assert!(side.states.is_empty());
+        }
+        assert!(player.pending_plugin_restarts().is_empty());
+        late_flag.store(true, Ordering::Release);
+        assert_eq!(player.pending_plugin_restarts(), vec![late]);
+        early_flag.store(true, Ordering::Release);
+        assert_eq!(player.pending_plugin_restarts(), vec![early, late], "results are deterministic by track/slot");
+        assert_eq!(player.pending_plugin_restarts(), vec![early, late], "observation must not consume the host signal");
+    }
+
+    #[test]
+    fn replacing_a_slot_forgets_stale_restart_handles() {
+        let (player, _commands) = observer_test_player();
+        let key = (TrackId(3), 2);
+        let (old, current) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+        let mut first = RestartProbe(Arc::clone(&old));
+        {
+            let mut side = player.side();
+            side.remember_handles(key, &mut first);
+        }
+        assert_eq!(player.pending_plugin_restarts(), vec![key]);
+
+        // Mirrors Side::prepare: detach all handles for the previous instance before adopting
+        // the replacement. Its Arc remains alive and may still be signaling on another thread.
+        let mut second = RestartProbe(Arc::clone(&current));
+        {
+            let mut side = player.side();
+            side.forget(key);
+            side.remember_handles(key, &mut second);
+        }
+        assert!(player.pending_plugin_restarts().is_empty(), "old instance's request must never be attributed to the replacement");
+        current.store(true, Ordering::Release);
+        assert_eq!(player.pending_plugin_restarts(), vec![key]);
+        player.side().forget(key);
+        assert!(player.pending_plugin_restarts().is_empty(), "removing a slot removes its request handle too");
     }
 
     #[test]
