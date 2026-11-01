@@ -1348,7 +1348,14 @@ fn send_route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, cu
     }
 }
 
-/// Input or output menu: no route and buses on both, plus the main output (outputs) or inputs 1-8 (inputs).
+/// The opened input device determines the hardware routes available. Before it opens,
+/// retain the previous eight-input picker so tracks can be configured offline.
+fn input_route_choices(opened_channels: Option<usize>) -> usize {
+    opened_channels.unwrap_or(8).clamp(1, 64)
+}
+
+/// Input or output menu: no route and buses on both, plus the main output (outputs) or
+/// the actual number of input channels when the device is opened.
 fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
     let key = if input { "input" } else { "output" };
     let cmd = if input { "track.input" } else { "track.output" };
@@ -1362,7 +1369,7 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
         ui.close();
     }
     if input {
-        for i in 1..=8 {
+        for i in 1..=input_route_choices(app.recorder.as_ref().map(|r| r.channels)) {
             if ui.button(format!("In {i}")).clicked() {
                 let _ = app.run(cmd, json!({"track": id.0, key: format!("In {i}")}));
                 ui.close();
@@ -1390,8 +1397,17 @@ fn route_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, input: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Readout, dragged_send_db, editable_readout, parse_db, parse_pan};
+    use super::{Readout, dragged_send_db, editable_readout, input_route_choices, parse_db, parse_pan};
     use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
+
+    #[test]
+    fn hardware_input_menu_matches_opened_device_channel_count() {
+        assert_eq!(input_route_choices(None), 8, "offline menu retains legacy choices");
+        assert_eq!(input_route_choices(Some(2)), 2);
+        assert_eq!(input_route_choices(Some(16)), 16);
+        assert_eq!(input_route_choices(Some(0)), 1);
+        assert_eq!(input_route_choices(Some(128)), 64, "hostile or extreme counts are capped");
+    }
 
     #[test]
     fn typed_db_accepts_console_notation_and_clamps() {

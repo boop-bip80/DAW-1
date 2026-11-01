@@ -1678,10 +1678,11 @@ fn read_bundle(bytes: &[u8], limits: BundleLimits) -> Result<(String, std::colle
     Ok((text, files))
 }
 
-/// The record-enabled audio tracks, each with the input channels it records (those its input
-/// route names, "In 3" → 2, wrapped to the device's `input_channels`) and a new take file
-/// `<track>_<NN>.wav` in the `Audio Files` of the session's folder (`unsaved_dir` until it is saved).
-pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<(TrackId, Vec<usize>, PathBuf)> {
+/// The record-enabled audio tracks and their selected physical inputs ("In 3" → channel 2),
+/// with a new `<track>_<NN>.wav` in the session's `Audio Files` folder.
+/// Refuse unavailable channels and non-hardware routes before creating any take files;
+/// wrapping to channel 1 would silently record the wrong microphone.
+pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> std::result::Result<Vec<(TrackId, Vec<usize>, PathBuf)>, String> {
     let dir = e.path.as_deref().and_then(|p| Path::new(p).parent()).unwrap_or(unsaved_dir);
     let s = e.session();
     let take_no = s.sources.len() + 1;
@@ -1689,16 +1690,25 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> Vec<
         .iter()
         .filter(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive)
         .map(|t| {
-            let first = match &t.mixer.input {
-                soundcraft_model::Route::Hardware(h) => {
-                    h.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1))
-                }
-                _ => 0,
-            };
-            let inputs = (0..t.channels()).map(|k| first.saturating_add(k) % input_channels.max(1)).collect();
+            let first = t
+                .mixer
+                .input
+                .recording_input_start()
+                .ok_or_else(|| format!("Track “{}” has no valid physical input route; choose In 1, In 2, etc.", t.name))?;
+            let end = first.checked_add(t.channels()).ok_or_else(|| format!("Track “{}” has an invalid input channel range", t.name))?;
+            if end > input_channels {
+                return Err(format!(
+                    "Track “{}” needs hardware input channels {}–{}, but the selected device has only {}",
+                    t.name,
+                    first + 1,
+                    end,
+                    input_channels
+                ));
+            }
+            let inputs = (first..end).collect();
             let file = |n: usize| dir.join("Audio Files").join(format!("{}_{n:02}.wav", sanitize_name(&t.name)));
             let path = (take_no..take_no + 1_000).map(file).find(|p| !p.exists()).unwrap_or_else(|| file(take_no));
-            (t.id, inputs, path)
+            Ok((t.id, inputs, path))
         })
         .collect()
 }
@@ -1842,9 +1852,10 @@ mod record_tests {
         let vox = armed(&mut e, "Vox", "mono", "In 2");
         let gtr = armed(&mut e, "Gtr", "stereo", "In 3-4");
         write_take(&dir.join("Audio Files/Vox_01.wav"), 10);
-        let plan = plan_takes(&e, &dir, 4);
+        let plan = plan_takes(&e, &dir, 4).unwrap();
         assert_eq!(plan, vec![(vox, vec![1], dir.join("Audio Files/Vox_02.wav")), (gtr, vec![2, 3], dir.join("Audio Files/Gtr_01.wav"))]);
-        assert_eq!(plan_takes(&e, &dir, 2)[1].1, vec![0, 1]);
+        let error = plan_takes(&e, &dir, 2).unwrap_err();
+        assert!(error.contains("Gtr") && error.contains("3–4") && error.contains("only 2"), "{error}");
 
         let session = dir.join("Song.scraft").to_string_lossy().into_owned();
         e.execute("session.save_as", &json!({"path": session})).unwrap();
@@ -1858,6 +1869,27 @@ mod record_tests {
         e.execute("edit.undo", &json!({})).unwrap();
         assert!(e.session().find_clip(clips[0]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recording_plan_checks_mono_surround_and_non_hardware_inputs() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-checked-routes-{}", std::process::id()));
+        let mut e = Engine::default();
+        let mono = armed(&mut e, "Vocal", "mono", "In 8");
+        assert_eq!(plan_takes(&e, &dir, 8).unwrap()[0].1, vec![7]);
+        assert!(plan_takes(&e, &dir, 7).unwrap_err().contains("only 7"));
+
+        let surround = e.session_mut().add_track(TrackKind::Audio, ChannelFormat::Surround51, Some("Surround"));
+        let t = e.session_mut().track_mut(surround).unwrap();
+        t.mixer.record_arm = true;
+        t.mixer.input = soundcraft_model::Route::Hardware("In 9".into());
+        assert_eq!(plan_takes(&e, &dir, 16).unwrap()[1].1, vec![8, 9, 10, 11, 12, 13]);
+        assert!(plan_takes(&e, &dir, 13).unwrap_err().contains("only 13"));
+
+        e.session_mut().track_mut(mono).unwrap().mixer.input = soundcraft_model::Route::Hardware("In 0".into());
+        assert!(plan_takes(&e, &dir, 16).unwrap_err().contains("Vocal"));
+        e.session_mut().track_mut(mono).unwrap().mixer.input = soundcraft_model::Route::Bus(soundcraft_model::BusId(1));
+        assert!(plan_takes(&e, &dir, 16).unwrap_err().contains("valid physical input"));
     }
 
     #[test]

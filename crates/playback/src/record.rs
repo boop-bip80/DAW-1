@@ -291,6 +291,22 @@ impl Recorder {
         if self.writer.is_some() {
             return Err("already recording".into());
         }
+        // Preflight every track before opening the first file. A stale input route from
+        // another interface must never wrap to input 1 or leave half-created take files.
+        for (_, inputs, path) in &takes {
+            if inputs.is_empty() {
+                return Err(format!("{}: no recording input channels selected", path.display()));
+            }
+            if let Some(channel) = inputs.iter().copied().find(|channel| *channel >= self.channels) {
+                return Err(format!(
+                    "{}: hardware input {} is unavailable on “{}” ({} input channels)",
+                    path.display(),
+                    channel.saturating_add(1),
+                    self.device_name,
+                    self.channels
+                ));
+            }
+        }
         let takes =
             takes.into_iter().map(|(id, inputs, path)| TakeWriter::create(id, inputs, path, self.sample_rate)).collect::<Result<Vec<_>, _>>()?;
         let live = takes.iter().map(|t| (t.id, Arc::clone(&t.live))).collect();
@@ -675,6 +691,41 @@ mod tests {
         assert_eq!(r.trouble(), None, "reported once");
         shared.armed.store(false, Ordering::Release);
         assert!(writer.join().unwrap().1.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_multitrack_route_fails_before_creating_any_take_file() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-input-bounds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shared = Arc::new(Shared::new(CaptureRing::new(1024)));
+        let mut r = recorder(&shared);
+        r.channels = 2;
+        let first = dir.join("Audio Files/Valid.wav");
+        let second = dir.join("Audio Files/Invalid.wav");
+        let error = r.arm(vec![(TrackId(1), vec![0], first.clone()), (TrackId(2), vec![2], second.clone())]).unwrap_err();
+        assert!(error.contains("hardware input 3") && error.contains("2 input channels"), "{error}");
+        assert!(!first.exists() && !second.exists(), "an invalid later track must not create the first take");
+        assert!(!shared.armed.load(Ordering::Acquire));
+        assert!(r.writer.is_none());
+        assert!(r.arm(vec![(TrackId(3), Vec::new(), first.clone())]).is_err());
+        assert!(!first.exists());
+    }
+
+    #[test]
+    fn multichannel_take_records_selected_physical_inputs_in_order() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-routed-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shared = Arc::new(Shared::new(CaptureRing::new(1024)));
+        let mut r = recorder(&shared);
+        r.channels = 4;
+        let path = dir.join("Audio Files/Room.wav");
+        r.arm(vec![(TrackId(1), vec![3, 1], path.clone())]).unwrap();
+        let input: Vec<f32> = (0..16).flat_map(|_| [0.1, 0.2, 0.3, 0.4]).collect();
+        shared.capture(&input, &mut 0);
+        let (takes, problem) = r.finish();
+        assert_eq!((takes.len(), problem), (1, None));
+        assert_eq!(decode(&path), vec![vec![0.4; 16], vec![0.2; 16]]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -420,6 +420,39 @@ pub enum Route {
     Hardware(String),
 }
 
+impl Route {
+    /// Zero-based first physical input for live monitoring and recording.
+    ///
+    /// Older sessions with no explicit input route used input 1, so `None` retains
+    /// that default. Bus/output routes and malformed hardware names are not physical
+    /// input routes. The device-channel bounds are checked by the caller.
+    pub fn recording_input_start(&self) -> Option<usize> {
+        match self {
+            Route::None => Some(0),
+            Route::Hardware(name) => {
+                if !name.get(..3)?.eq_ignore_ascii_case("In ") {
+                    return None;
+                }
+                let rest = name.get(3..)?;
+                // Session strings are untrusted, and this also runs on the audio thread.
+                // A physical channel number never needs a long route label.
+                if rest.len() > 32 {
+                    return None;
+                }
+                let (first, last) = rest.split_once('-').map_or((rest, None), |(first, last)| (first, Some(last)));
+                let first = first.trim().parse::<usize>().ok()?.checked_sub(1)?;
+                if let Some(last) = last
+                    && last.trim().parse::<usize>().ok()?.checked_sub(1)? < first
+                {
+                    return None;
+                }
+                Some(first)
+            }
+            Route::Main | Route::Bus(_) => None,
+        }
+    }
+}
+
 /// A plugin instance on an insert slot.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Insert {
@@ -621,6 +654,19 @@ pub fn fader_db_to_pos(db: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_input_routes_use_one_based_hardware_channels_without_wrapping() {
+        assert_eq!(Route::None.recording_input_start(), Some(0), "legacy unset input remains In 1");
+        assert_eq!(Route::Hardware("In 1".into()).recording_input_start(), Some(0));
+        assert_eq!(Route::Hardware("In 3-4".into()).recording_input_start(), Some(2));
+        assert_eq!(Route::Hardware("IN 16".into()).recording_input_start(), Some(15));
+        for name in ["In 0", "In 2-1", "In -1", "In two", "Microphone", "In 999999999999999999999999999999999999999"] {
+            assert_eq!(Route::Hardware(name.into()).recording_input_start(), None, "{name}");
+        }
+        assert_eq!(Route::Main.recording_input_start(), None);
+        assert_eq!(Route::Bus(crate::BusId(1)).recording_input_start(), None);
+    }
 
     #[test]
     fn insert_state_round_trips_through_json() {
