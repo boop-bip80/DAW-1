@@ -91,6 +91,24 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(
+            "file.import_otioz",
+            "OpenTimelineIO Bundle...",
+            ["File", "Import"],
+            None,
+            "{path} — import a strict .otioz audio/media bundle into a saved session as one undoable edit; ZIP traversal, unsupported references and oversized media fail before session mutation",
+            always,
+            |e, p| {
+                let id = "file.import_otioz";
+                let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("otioz") {
+                    return Err(bad(id, "input path must end in .otioz"));
+                }
+                let imported = crate::otio_bundle_import::import_audio(e, std::path::Path::new(&path))?;
+                Ok(json!({"path": path, "audio_tracks": imported.tracks, "audio_clips": imported.clips,
+                    "media_sources": imported.sources, "extracted_media_files": imported.extracted_media_files}))
+            }
+        ),
+        cmd!(
             "file.import_edl",
             "CMX3600 Audio EDL...",
             ["File", "Import"],
