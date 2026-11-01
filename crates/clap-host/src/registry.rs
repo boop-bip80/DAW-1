@@ -114,7 +114,21 @@ fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-fn param_info(inst: &Instance, p: &RawParam) -> ParamInfo {
+/// SoundCraft's public parameter API is f32 even though CLAP metadata uses f64. Discard
+/// ranges we cannot represent without infinities, a collapsed control, or an overflowing span.
+fn finite_f32_bounds(p: &RawParam) -> Option<(f32, f32, f32)> {
+    if !p.min.is_finite() || !p.max.is_finite() || !p.default.is_finite() || p.max < p.min {
+        return None;
+    }
+    let (min, max, default) = (p.min as f32, p.max as f32, p.default as f32);
+    if !min.is_finite() || !max.is_finite() || !default.is_finite() || (p.max > p.min && min >= max) || !(max - min).is_finite() {
+        return None;
+    }
+    Some((min, max, default.clamp(min, max)))
+}
+
+fn param_info(inst: &Instance, p: &RawParam) -> Option<ParamInfo> {
+    let (min, max, default) = finite_f32_bounds(p)?;
     let stepped = p.flags & CLAP_PARAM_IS_STEPPED != 0;
     let is_enum = p.flags & CLAP_PARAM_IS_ENUM != 0;
     let (mut unit, mut choices): (Unit, &'static [&'static str]) = (Unit::None, &[]);
@@ -131,22 +145,22 @@ fn param_info(inst: &Instance, p: &RawParam) -> ParamInfo {
         (true, false) => p.name.clone(),
         (false, false) => format!("{}/{}", p.module, p.name),
     };
-    ParamInfo {
+    Some(ParamInfo {
         id: leak(p.id.to_string()),
         name: leak(name),
-        min: p.min as f32,
-        max: p.max as f32,
-        default: p.default as f32,
+        min,
+        max,
+        default,
         unit,
         taper: Taper::Linear,
         choices,
-    }
+    })
 }
 
 /// Builds and leaks the `PluginInfo` for one plugin type. Called at most once per id (cached).
 fn build_info(d: &ClapDescriptor, inst: &Instance) -> &'static PluginInfo {
     let params: Vec<ParamInfo> =
-        inst.params().iter().filter(|p| p.flags & (CLAP_PARAM_IS_HIDDEN | CLAP_PARAM_IS_READONLY) == 0).map(|p| param_info(inst, p)).collect();
+        inst.params().iter().filter(|p| p.flags & (CLAP_PARAM_IS_HIDDEN | CLAP_PARAM_IS_READONLY) == 0).filter_map(|p| param_info(inst, p)).collect();
     let short: String = d.name.chars().take(8).collect();
     Box::leak(Box::new(PluginInfo {
         id: leak(d.id.clone()),
@@ -210,4 +224,29 @@ pub fn plugin_info(id: &str) -> Option<&'static PluginInfo> {
     }
     // Instantiate once to learn the parameters (CLAP exposes them only on an instance).
     instantiate_raw(id).ok().map(|(_, info)| info)
+}
+
+// f64-to-f32 boundary checks must never leak an infinity or an unusable control range to the UI.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(min: f64, max: f64, default: f64) -> RawParam {
+        RawParam { id: 7, name: "range".into(), module: String::new(), flags: 0, min, max, default }
+    }
+
+    #[test]
+    fn parameter_bounds_are_finite_and_preserve_meaningful_f32_travel() {
+        assert_eq!(finite_f32_bounds(&raw(0.0, 2.0, 1.5)), Some((0.0, 2.0, 1.5)));
+        assert_eq!(finite_f32_bounds(&raw(0.0, 2.0, 5.0)), Some((0.0, 2.0, 2.0)), "default is clamped");
+        assert_eq!(finite_f32_bounds(&raw(1.0, 1.0, 1.0)), Some((1.0, 1.0, 1.0)), "constant parameters remain valid");
+        assert_eq!(finite_f32_bounds(&raw(0.0, f64::from(f32::MAX), f64::from(f32::MAX))), Some((0.0, f32::MAX, f32::MAX)));
+
+        assert_eq!(finite_f32_bounds(&raw(0.0, f64::MAX, 1.0)), None, "finite f64 bound overflows to f32 infinity");
+        assert_eq!(finite_f32_bounds(&raw(-f64::MAX, 0.0, 0.0)), None);
+        assert_eq!(finite_f32_bounds(&raw(-f64::from(f32::MAX), f64::from(f32::MAX), 0.0)), None, "f32 span overflows");
+        assert_eq!(finite_f32_bounds(&raw(0.0, f64::MIN_POSITIVE, 0.0)), None, "nonzero range collapses to zero");
+        assert_eq!(finite_f32_bounds(&raw(1.0, 0.0, 0.0)), None, "reversed bounds");
+        assert_eq!(finite_f32_bounds(&raw(0.0, 2.0, f64::NAN)), None);
+    }
 }
