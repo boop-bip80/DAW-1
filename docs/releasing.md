@@ -11,7 +11,7 @@ User-facing names say **SoundCraft**. Files, binaries and ids stay lowercase
 
 ## Cutting a release
 
-1. **Bump the version** on `main`. The only place it lives is `[workspace.package] version` in
+1. **Bump the version** on `build/craft-update-495e597` (this fork's default branch). The only place it lives is `[workspace.package] version` in
    the root `Cargo.toml`; the app reads it from `CARGO_PKG_VERSION` (*About SoundCraft*,
    `soundcraft --version`, `soundcraft-cli --version`).
 
@@ -21,12 +21,13 @@ User-facing names say **SoundCraft**. Files, binaries and ids stay lowercase
    ```
 
    Commit the change (`Cargo.toml` + `Cargo.lock`) through the normal review flow.
-2. **Merge `main` into `release`** (or fast-forward it) and push. The workflow starts by itself.
+2. **Merge `build/craft-update-495e597` into `release`** (or fast-forward it) and push. The workflow starts by itself.
 3. **Wait for the draft.** After about 30 to 60 minutes (notarization and the FreeBSD VM are the
    slow parts), the Releases page has a draft `SoundCraft v0.2.0`, tagged `v0.2.0` on the pushed
    commit, with every artifact and `SHA256SUMS.txt`. The notes are generated from the merged PRs.
-4. **Check it.** Download an installer or two and look at the job summaries. Any `::warning::`
-   there means a signing secret was missing and that artifact is unsigned.
+4. **Check it.** Inspect job summaries and complete the [release-install smoke checks](#release-install-smoke-checks)
+   for every platform/architecture claimed by the release before publishing. A signing warning or an
+   unverified installer is **not** a passing smoke result.
 5. **Publish** the draft in the GitHub UI. Publishing creates the `v0.2.0` tag. Versions with a
    pre-release suffix (`-rc.1`) are marked as pre-releases.
 
@@ -39,6 +40,84 @@ with `cargo xtask version set` before building, so the binaries report it too. O
 jobs (macOS, Windows) and the draft-release job use the `release` environment, which only the
 `release` branch can use. On any other branch the run is a dry run: Linux, Flatpak, FreeBSD and
 web build and are checked, the signing jobs are refused, and no release is drafted.
+
+## Release-install smoke checks
+
+**Status: NOT EXECUTED (2026-11-01).** These are required acceptance steps for a
+human tester or a future hosted runner, **not** evidence of a passing macOS or Windows release.
+This fork currently has zero observed GitHub Actions runs. The packaging scripts verify file
+structure, signatures and a CLI version response at build time; they do **not** prove that an
+installed GUI can import audio, render and reopen a session. Do not mark a platform pass from a
+successful build alone.
+
+Use disposable, clean OS installations with no existing SoundCraft profile, and repeat for each
+shipped CPU family (macOS Apple silicon/Intel for a universal DMG; Windows x64/x86/ARM64 as
+applicable). Record the exact OS version, CPU, release version, artifact names, SHA-256 hashes,
+signing identity, timestamps and any failure logs. Keep a synthetic test session outside the
+application install folder; never use irreplaceable audio.
+
+### Shared audio workflow and pass criteria
+
+- [ ] Prepare a **newly synthesized**, non-silent 0.5-second, 48 kHz, mono PCM16 WAV tone named
+      `tone.wav` (e.g. an original 440 Hz sine). Do not use proprietary or customer recordings.
+      If FFmpeg is available, generate one with
+      `ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=0.5" -ac 1 -c:a pcm_s16le tone.wav`.
+- [ ] Start the **installed** SoundCraft GUI, create a disposable 48 kHz session, import the WAV
+      through the visible Import Audio action, and confirm the clip/waveform appears without an
+      error. An application crash, failed start or inaccessible import action is **FAIL**.
+- [ ] Bounce the imported audio **offline** to a new WAV (`before.wav`) using the GUI's Bounce Mix
+      workflow; save the session as `smoke.scraft` and quit the application. Use an audio-file
+      inspector to confirm the bounce opens, has 48 kHz sample rate, the requested 0.5-second
+      duration, finite samples and non-silent content. An empty/truncated or silent bounce is
+      **FAIL**.
+- [ ] Remove the *original* `tone.wav` from the disposable import location, relaunch SoundCraft,
+      reopen `smoke.scraft`, and bounce again to `after.wav`. The reopened project must locate its
+      saved `Audio Files/` media without a missing-media warning, retain its clip, and produce
+      matching content. Compare decoded samples (max absolute difference under 0.001 for a
+      16-bit WAV bounce); a missing clip/media or changed mix is **FAIL**.
+- [ ] Capture evidence: GUI launch/import/reopen screenshots, bounce metadata and sample
+      comparison, saved session location, stderr/logs on failure, and a **PASS / FAIL /
+      NOT EXECUTED** result for each tested OS and architecture. This is a software/file workflow
+      smoke, **not** a physical audio-interface, low-latency or plug-in compatibility test.
+
+### macOS (installed DMG, signed and notarized)
+
+- [ ] Download the release DMG and CLI ZIP named
+      `soundcraft-<version>-macos-<arch>.dmg` and
+      `soundcraft-cli-<version>-macos-<arch>.zip`; verify their SHA-256 values against
+      `SHA256SUMS.txt`. Open the DMG normally and drag `SoundCraft.app` to Applications.
+- [ ] On the **installed** `/Applications/SoundCraft.app`, run
+      `codesign --verify --strict --deep --verbose=2 /Applications/SoundCraft.app` and
+      `spctl --assess --type execute -vv /Applications/SoundCraft.app`; require valid Developer ID
+      signing and Gatekeeper acceptance for an official notarized release. Verify the unpacked
+      CLI signature and `soundcraft-cli --version` too. An ad-hoc signature, denied Gatekeeper
+      assessment or mismatched version is **FAIL** for the signed release, not an invitation to
+      bypass Gatekeeper or disable security checks.
+- [ ] Complete the shared GUI audio workflow above **on each advertised macOS architecture**.
+      Close the app and remove the *installed app* via Finder/Trash; confirm the app is gone and
+      the separately saved `smoke.scraft` remains accessible. Record the cleanup result.
+
+### Windows (installed MSI and signed executables)
+
+- [ ] Download the matching `soundcraft-<version>-windows-<arch>.msi` and portable ZIP; compare
+      SHA-256 hashes with `SHA256SUMS.txt`. On a clean Windows VM, inspect the MSI with
+      `Get-AuthenticodeSignature` and require `Status` = `Valid` from the expected release
+      publisher. Install normally with UAC prompts intact; do not disable signature/security
+      checks to make an installer pass.
+- [ ] Inspect the installed `soundcraft.exe` and `soundcraft-cli.exe` signatures with
+      `Get-AuthenticodeSignature`, require valid expected signer identity, and run the installed
+      `soundcraft-cli.exe --version`. A missing executable, signature failure or unexpected
+      version is **FAIL**. The build-time check of the portable CLI's PE subsystem and `--version`
+      does **not** substitute for this MSI installation check.
+- [ ] Launch SoundCraft from the installed Start Menu shortcut, complete the shared WAV
+      import→offline bounce→save/reopen workflow, and record the evidence. Then uninstall using
+      Windows Settings → Installed apps; confirm the installed binaries/shortcut are gone and the
+      disposable session remains outside Program Files. An install, GUI start, audio workflow or
+      uninstall failure is **FAIL**.
+
+**Release decision:** keep the release a draft while a required OS/architecture is failed or
+not executed. Any exception requires an explicit owner decision recorded with the release; do
+not silently count absent hardware, missing runners or unsigned artifacts as passing tests.
 
 ## What gets built
 
@@ -170,7 +249,8 @@ GitHub has no FreeBSD runners, so the `freebsd` job builds inside a FreeBSD 14.3
 (`vmactions/freebsd-vm`, pinned by commit) and runs `packaging/freebsd/package.sh`, which stages
 a `/usr/local`-style tree (binaries, desktop entry, MIME type, metainfo, icons, docs) as a
 `.tar.gz`. Install with `tar -xzf soundcraft-*-freebsd-x86_64.tar.gz --strip-components 1 -C /usr/local`.
-`.github/workflows/freebsd.yml` builds and tests the workspace there on every push to `main`.
+`.github/workflows/freebsd.yml` builds/tests nightly on the default branch, on `release` pushes,
+and on pull requests that change FreeBSD workflow or packaging files.
 
 ### Web
 
