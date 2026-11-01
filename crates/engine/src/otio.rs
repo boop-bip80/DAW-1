@@ -264,19 +264,23 @@ fn plain_composable(value: &Value) -> Result<()> {
 /// nearest sample (ties away from zero), bounding the result to losslessly representable values.
 /// Only Clip.2's media timecode origins may be negative; durations and native timeline positions
 /// remain nonnegative, and the final decoded-file offset must be checked separately.
-fn time_samples(value: &Value, rate: u32, allow_negative_start: bool) -> Result<i64> {
+fn time_samples_unrounded(value: &Value, rate: u32, allow_negative_start: bool) -> Result<f64> {
     expect_schema(value, "RationalTime.1")?;
     let t = value.get("value").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric value"))?;
     let base = value.get("rate").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric rate"))?;
     if !t.is_finite() || !base.is_finite() || (!allow_negative_start && t < 0.0) || base <= 0.0 || base > 384_000.0 {
         return Err(invalid_import("invalid RationalTime value or rate"));
     }
-    let samples = (t * f64::from(rate) / base).round();
+    let samples = t * f64::from(rate) / base;
     let minimum = if allow_negative_start { -(MAX_EXACT_SAMPLE as f64) } else { 0.0 };
     if !samples.is_finite() || !(minimum..=(MAX_EXACT_SAMPLE as f64)).contains(&samples) {
         return Err(invalid_import("time is outside the supported sample range"));
     }
-    Ok(samples as i64)
+    Ok(samples)
+}
+
+fn time_samples(value: &Value, rate: u32, allow_negative_start: bool) -> Result<i64> {
+    Ok(time_samples_unrounded(value, rate, allow_negative_start)?.round() as i64)
 }
 
 fn sample_range(value: &Value, rate: u32, allow_negative_start: bool) -> Result<(i64, i64)> {
@@ -479,23 +483,42 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         .checked_add(duration)
                         .filter(|v| *v <= MAX_EXACT_SAMPLE)
                         .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
-                    let source_end = offset.checked_add(duration).ok_or_else(|| invalid_import("source trim overflows"))?;
                     // OTIO's Clip.source_range uses the same media-timecode coordinates as
                     // ExternalReference.available_range. A WAV's first decoded frame corresponds
                     // to the available range's start, not necessarily media-timecode zero.
                     // Without this subtraction a valid 01:00:00-origin edit plays the wrong
                     // samples even though every file and JSON range is otherwise well formed.
                     let media_offset = if let Some(available) = available_range.filter(|range| !range.is_null()) {
-                        let (available_start, available_duration) = sample_range(available, rate, is_clip_two)?;
+                        let (_, available_duration) = sample_range(available, rate, is_clip_two)?;
                         if available_duration <= 0 {
                             return Err(invalid_import("media available range must have a positive duration"));
                         }
-                        let available_end =
-                            available_start.checked_add(available_duration).ok_or_else(|| invalid_import("media available range overflows"))?;
-                        if offset < available_start || source_end > available_end {
+                        // Do not subtract independently rounded absolute timecodes. At
+                        // 30000/1001 fps into 48 kHz, frame 2 rounds to 3203 samples and frame
+                        // 1 to 1602; 3203-1602 is 1601, yet the correct one-frame media offset
+                        // rounds to 1602. Subtract at OTIO's fractional precision, then round
+                        // exactly once to the nearest native sample.
+                        let source_start =
+                            time_samples_unrounded(range.get("start_time").ok_or_else(|| invalid_import("missing range start"))?, rate, is_clip_two)?;
+                        let available_start = time_samples_unrounded(
+                            available.get("start_time").ok_or_else(|| invalid_import("missing range start"))?,
+                            rate,
+                            is_clip_two,
+                        )?;
+                        let source_duration =
+                            time_samples_unrounded(range.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate, false)?;
+                        let available_duration =
+                            time_samples_unrounded(available.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate, false)?;
+                        let relative_start = source_start - available_start;
+                        let relative_end = relative_start + source_duration;
+                        if !relative_start.is_finite()
+                            || !(0.0..=(MAX_EXACT_SAMPLE as f64)).contains(&relative_start)
+                            || !relative_end.is_finite()
+                            || relative_end > available_duration
+                        {
                             return Err(invalid_import("clip source trim lies outside the media available range"));
                         }
-                        offset.checked_sub(available_start).ok_or_else(|| invalid_import("media source offset underflows"))?
+                        relative_start.round() as i64
                     } else {
                         offset
                     };
@@ -621,6 +644,11 @@ mod tests {
     // deliberately omits its trim (source_range: null); OTIO's Clip.trimmed_range() returns
     // ExternalReference.available_range [-48000, +48000] for that clip.
     const OFFICIAL_UNTRIMMED_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"Untrimmed reference","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Untrimmed lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1200.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Full source","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Trimmed back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Back","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":3000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-46000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
+
+    // JSON emitted by OpenTimelineIO 0.18.1's otio_json adapter at 30000/1001 fps.
+    // The first Clip.2 starts at frame 2 and its media begins at frame 1. Their exact
+    // *difference* is one video frame (1601.6 samples at 48k), not 3203-1602=1601 samples.
+    const OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"29.97 source-relative origin","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Fractional lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"One-frame offset","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":2.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":5.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Fractional back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Two-frame offset","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":3.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":5.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
 
     fn pack_negative_origin_bundle(timeline: &Value, wav: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
@@ -990,6 +1018,102 @@ mod tests {
         assert_eq!(*engine.session(), before);
         assert!(engine.redo());
         assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn official_fractional_media_timecode_uses_relative_offset_before_rounding() {
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-fractional-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("fractional.otioz");
+        let timeline: Value = serde_json::from_str(OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO).unwrap();
+        let mut left = vec![0.12; 10_000];
+        let mut right = vec![-0.07; 10_000];
+        // Frame 2 relative to frame 1 must decode at sample 1602; the old difference
+        // of independently rounded timecodes gave sample 1601 and missed these impulses.
+        left[1_602] = 0.74;
+        right[1_602] = -0.62;
+        left[3_203] = -0.41;
+        right[3_203] = 0.56;
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        std::fs::write(&archive, pack_negative_origin_bundle(&timeline, &wav)).unwrap();
+
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let result = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        assert_eq!(result["extracted_media_files"], 1);
+        let lead = engine.session().tracks.iter().find(|t| t.name == "Fractional lead").unwrap();
+        let back = engine.session().tracks.iter().find(|t| t.name == "Fractional back").unwrap();
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (1_602, 1_602));
+        assert_eq!((back.clips()[0].start, back.clips()[0].length), (0, 1_602));
+        assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 1_602, .. }));
+        assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 3_203, .. }));
+        for (track, position, frame) in [(lead.id, 1_602, 1_602), (back.id, 0, 3_203)] {
+            let audio = soundcraft_mix::render_clips(engine.session(), track, soundcraft_time::Range::new(position, position + 1));
+            assert_eq!(audio.len(), 2, "source channels must stay isolated");
+            assert!((audio[0][0] - left[frame]).abs() < 0.0001, "wrong left sample at source frame {frame}");
+            assert!((audio[1][0] - right[frame]).abs() < 0.0001, "wrong right sample at source frame {frame}");
+        }
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn fractional_media_relative_offsets_reject_invalid_ranges_without_staging_files() {
+        let folder = std::env::temp_dir().join(format!(
+            "soundcraft-otio-fractional-bad-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("bad-fractional.otioz");
+        let timeline: Value = serde_json::from_str(OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO).unwrap();
+        let wav = soundcraft_audio_io::encode(
+            &AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.23; 10_000], vec![-0.37; 10_000]] },
+            &EncodeOptions::default(),
+        )
+        .unwrap();
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let source_clip = "/tracks/children/0/children/1";
+        let reference_range = format!("{source_clip}/media_references/DEFAULT_MEDIA/available_range");
+        let mut negative_relative = timeline.clone();
+        negative_relative.pointer_mut(&format!("{source_clip}/source_range/start_time/value")).unwrap().clone_from(&json!(0.0));
+        let mut beyond_available = timeline.clone();
+        beyond_available.pointer_mut(&format!("{reference_range}/duration/value")).unwrap().clone_from(&json!(1.0));
+        let mut invalid_rate = timeline.clone();
+        invalid_rate.pointer_mut(&format!("{reference_range}/start_time/rate")).unwrap().clone_from(&json!(0.0));
+        let mut oversized_origin = timeline.clone();
+        oversized_origin.pointer_mut(&format!("{source_clip}/source_range/start_time/value")).unwrap().clone_from(&json!(100_000_000_000_000.0));
+        let mut unrendered_fade = timeline.clone();
+        unrendered_fade["tracks"]["children"][0]["children"][1]["metadata"]["soundcraft"]["fade_in_samples"] = json!(25);
+
+        for (case, invalid) in [
+            ("negative relative offset", negative_relative),
+            ("trim beyond available range", beyond_available),
+            ("invalid time rate", invalid_rate),
+            ("unbounded time", oversized_origin),
+            ("unrendered fade", unrendered_fade),
+        ] {
+            std::fs::write(&archive, pack_negative_origin_bundle(&invalid, &wav)).unwrap();
+            let error = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap_err();
+            assert_eq!(*engine.session(), before, "{case} mutated session: {error}");
+            assert!(!engine.can_undo(), "{case} added an undo step");
+            assert!(!project.join("Audio Files").exists(), "{case} left extracted media behind");
+        }
         std::fs::remove_dir_all(folder).unwrap();
     }
 
