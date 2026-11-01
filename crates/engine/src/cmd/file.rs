@@ -95,7 +95,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "CMX3600 Audio EDL...",
             ["File", "Import"],
             None,
-            "{path, fps?: 24|25|30} — append one A1 cut-only EDL with FROM FILE references, whole-frame trims and gaps; defaults to session non-drop timecode rate",
+            "{path, fps?: 24|25|30} — append one mono A1 (A) or linked stereo A1+A2 (AA) cut-only EDL with FROM FILE references; mixed lanes unsupported",
             always,
             |e, p| {
                 let path = str_param(p, "path").ok_or_else(|| bad("file.import_edl", "`path` required"))?.to_string();
@@ -166,7 +166,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(noundo "file.export_edl", "CMX3600 Audio EDL...", ["File", "Export"], None,
-            "{path, track?: selected mono audio track, fps?: 24|25|30, replace?: false} — frame-aligned A1 cuts only; no overlaps, fades or unrendered clip processing",
+            "{path, track?: selected mono or stereo audio track, fps?: 24|25|30, replace?: false} — frame-aligned A/AA cuts; no overlaps, fades or unrendered processing",
             always, |e, p| {
                 let id = "file.export_edl";
                 let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();

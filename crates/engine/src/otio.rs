@@ -373,6 +373,12 @@ fn reject_nontrivial_metadata(value: &Value) -> Result<()> {
 /// before modifying the current document. Unsupported OTIO structures are errors, never silently
 /// flattened. Referenced media must be available locally; the `.otio` file contains no audio.
 pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8]) -> Result<Import> {
+    import_audio_with_channels(engine, document, bytes, None)
+}
+
+/// Optional exact source-channel requirement for audio formats such as CMX3600's `A` / `AA`.
+/// Enforced after all decoded media is staged, but before any native session mutation.
+pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, bytes: &[u8], expected_channels: Option<usize>) -> Result<Import> {
     if bytes.len() > MAX_OTIO_BYTES {
         return Err(invalid_import("timeline JSON exceeds the 4 MiB limit"));
     }
@@ -517,6 +523,11 @@ pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8]) -> Resul
     }
     if clip_count == 0 {
         return Err(invalid_import("timeline contains no audio clips"));
+    }
+    if let Some(expected) = expected_channels
+        && (tracks.iter().any(|track| track.channels != expected) || sources.iter().any(|source| source.audio.num_channels() != expected))
+    {
+        return Err(invalid_import(format!("EDL requires exactly {expected} audio channel(s) in every media source")));
     }
 
     // Commit only after all parsing, path authorization, decoding and source-bound checks pass.
