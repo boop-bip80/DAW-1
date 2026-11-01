@@ -2563,8 +2563,7 @@ mod tests {
         );
         let finalization = app.ui.status.clone();
         let mut notice = MonitorNoticeState::default();
-        let mut health = MonitorFifoHealth::default();
-        health.skipped_input_frames = 10;
+        let health = MonitorFifoHealth { skipped_input_frames: 10, ..MonitorFifoHealth::default() };
         assert_eq!(notice.observe(web_time::Instant::now(), false, health), None);
         assert_eq!(app.ui.status, finalization, "a stopped/recoverable take cannot be overwritten by monitor telemetry");
         assert!(finalization.contains("synthetic disk full") && finalization.contains("not imported"));
