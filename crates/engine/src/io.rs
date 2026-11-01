@@ -1682,6 +1682,26 @@ fn read_bundle(bytes: &[u8], limits: BundleLimits) -> Result<(String, std::colle
     Ok((text, files))
 }
 
+const TAKE_NAME_ATTEMPTS: usize = 1_000;
+
+/// Find an unused filename, including names already reserved for other tracks in this same arm
+/// operation. `create_new` at arm time remains the final guard against a concurrent file creator.
+fn unused_take_path(dir: &Path, stem: &str, first: usize, reserved: &std::collections::HashSet<PathBuf>) -> std::result::Result<PathBuf, String> {
+    for offset in 0..TAKE_NAME_ATTEMPTS {
+        let Some(number) = first.checked_add(offset) else { break };
+        let path = dir.join("Audio Files").join(format!("{stem}_{number:02}.wav"));
+        if reserved.contains(&path) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+            Ok(_) => {}
+            Err(err) => return Err(format!("cannot inspect {}: {err}", path.display())),
+        }
+    }
+    Err(format!("no unused WAV take filename for “{stem}” within {TAKE_NAME_ATTEMPTS} candidates"))
+}
+
 /// The record-enabled audio tracks and their selected physical inputs ("In 3" → channel 2),
 /// with a new `<track>_<NN>.wav` in the session's `Audio Files` folder.
 /// Refuse unavailable channels and non-hardware routes before creating any take files;
@@ -1689,7 +1709,8 @@ fn read_bundle(bytes: &[u8], limits: BundleLimits) -> Result<(String, std::colle
 pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> std::result::Result<Vec<(TrackId, Vec<usize>, PathBuf)>, String> {
     let dir = e.path.as_deref().and_then(|p| Path::new(p).parent()).unwrap_or(unsaved_dir);
     let s = e.session();
-    let take_no = s.sources.len() + 1;
+    let take_no = s.sources.len().checked_add(1).ok_or("recording take numbering exhausted")?;
+    let mut reserved = std::collections::HashSet::new();
     s.tracks
         .iter()
         .filter(|t| t.mixer.record_arm && t.kind == TrackKind::Audio && !t.inactive)
@@ -1710,8 +1731,8 @@ pub fn plan_takes(e: &Engine, unsaved_dir: &Path, input_channels: usize) -> std:
                 ));
             }
             let inputs = (first..end).collect();
-            let file = |n: usize| dir.join("Audio Files").join(format!("{}_{n:02}.wav", sanitize_name(&t.name)));
-            let path = (take_no..take_no + 1_000).map(file).find(|p| !p.exists()).unwrap_or_else(|| file(take_no));
+            let path = unused_take_path(dir, &sanitize_name(&t.name), take_no, &reserved).map_err(|why| format!("Track “{}”: {why}", t.name))?;
+            reserved.insert(path.clone());
             Ok((t.id, inputs, path))
         })
         .collect()
@@ -1922,6 +1943,53 @@ mod record_tests {
         e.execute("edit.undo", &json!({})).unwrap();
         assert!(e.session().find_clip(clips[0]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn armed_tracks_with_colliding_sanitized_names_reserve_distinct_new_takes() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-unique-take-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut e = Engine::default();
+        let first = armed(&mut e, "Room 1", "mono", "In 1");
+        let second = armed(&mut e, "Room 2", "mono", "In 2");
+        let third = armed(&mut e, "Room 3", "mono", "In 3");
+        // Distinct track names can sanitize to the same WAV stem; identical names can too.
+        e.session_mut().track_mut(first).unwrap().name = "Vox:Lead".into();
+        e.session_mut().track_mut(second).unwrap().name = "Vox?Lead".into();
+        e.session_mut().track_mut(third).unwrap().name = "Vox?Lead".into();
+
+        let existing = dir.join("Audio Files/Vox_Lead_01.wav");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        let sentinel = b"an older take must not be overwritten";
+        std::fs::write(&existing, sentinel).unwrap();
+        let planned = plan_takes(&e, &dir, 3).unwrap();
+        assert_eq!(
+            planned,
+            vec![
+                (first, vec![0], dir.join("Audio Files/Vox_Lead_02.wav")),
+                (second, vec![1], dir.join("Audio Files/Vox_Lead_03.wav")),
+                (third, vec![2], dir.join("Audio Files/Vox_Lead_04.wav")),
+            ]
+        );
+        assert!(planned.iter().all(|(_, _, path)| !path.exists()), "every planned WAV must be available for create_new");
+        assert_eq!(std::fs::read(&existing).unwrap(), sentinel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exhausted_take_names_and_number_overflow_fail_instead_of_reusing_a_path() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-exhausted-take-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let candidate = |n: usize| dir.join("Audio Files").join(format!("Vox_{n:02}.wav"));
+        let reserved = (1..=TAKE_NAME_ATTEMPTS).map(candidate).collect();
+        let error = unused_take_path(&dir, "Vox", 1, &reserved).unwrap_err();
+        assert!(error.contains("1000 candidates") && error.contains("Vox"), "{error}");
+        assert!(!dir.exists(), "checking a fully reserved range must not create or touch files");
+
+        let reserved = std::collections::HashSet::from([candidate(usize::MAX)]);
+        let error = unused_take_path(&dir, "Vox", usize::MAX, &reserved).unwrap_err();
+        assert!(error.contains("no unused WAV take filename"), "{error}");
+        assert!(!dir.exists());
     }
 
     #[test]
