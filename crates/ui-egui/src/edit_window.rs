@@ -4566,3 +4566,4 @@ mod tests {
             assert_eq!(h.state().engine.session().track(track).unwrap().clips(), clips.as_slice(), "{tool}");
         }
     }
+}
