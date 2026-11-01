@@ -148,25 +148,37 @@ fn portable_otioz_cli_import_survives_archive_and_exporter_removal() {
     // The two cut clips retain independent trims and share one embedded stereo
     // source. CLI argv carries JSON as one argument, so spaces/Windows paths work.
     let import_wav = format!("file.import_audio={}", serde_json::json!({"path": source.to_string_lossy()}));
-    let export_bundle = format!("file.export_otioz={}", serde_json::json!({"path": archive.to_string_lossy()}));
+    // Imported source buffers start out unsaved. Persist the original session
+    // and its Audio Files before running the exporter, which requires a real
+    // on-disk source rather than an unsaved in-memory recording.
     let original = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_wav])
         .args(["--cmd", r#"edit.select={"tracks":["Stereo"]}"#])
         .args(["--cmd", r#"edit.separate={"tracks":["Stereo"],"at":12000}"#])
-        .args(["--cmd", &export_bundle])
-        .arg("--bounce")
-        .arg(&baseline)
-        .args(["--start", "0", "--end", "0.5"])
         .arg("--save")
         .arg(&project)
         .output()
         .unwrap();
-    checked("create/edit/export OTIOZ", &original);
-    assert_eq!(command_result(&original, "file.export_otioz")["audio_tracks"], 1);
-    assert_eq!(command_result(&original, "file.export_otioz")["audio_clips"], 2);
-    assert_eq!(command_result(&original, "file.export_otioz")["media_sources"], 1);
-    assert!(archive.is_file() && std::fs::metadata(&archive).unwrap().len() > 512, "missing or empty exported bundle");
+    checked("create, split and save original", &original);
     assert!(project.is_file(), "exporter project was not saved");
+
+    let export_bundle = format!("file.export_otioz={}", serde_json::json!({"path": archive.to_string_lossy()}));
+    let exported = cli()
+        .arg("run")
+        .arg("--in")
+        .arg(&project)
+        .arg("--cmd")
+        .arg(&export_bundle)
+        .arg("--bounce")
+        .arg(&baseline)
+        .args(["--start", "0", "--end", "0.5"])
+        .output()
+        .unwrap();
+    checked("export OTIOZ from saved source and bounce", &exported);
+    assert_eq!(command_result(&exported, "file.export_otioz")["audio_tracks"], 1);
+    assert_eq!(command_result(&exported, "file.export_otioz")["audio_clips"], 2);
+    assert_eq!(command_result(&exported, "file.export_otioz")["media_sources"], 1);
+    assert!(archive.is_file() && std::fs::metadata(&archive).unwrap().len() > 512, "missing or empty exported bundle");
     let expected = read_mix(&baseline);
     check_channel_isolation(&expected);
 
