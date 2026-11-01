@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (portable audio-only OTIOZ import/export and public MIDI SMF roundtrip evidence; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (official OTIO signed media-timecode origins and literal-percent URLs, MIDI/EDL no-clobber export guards; AAF/OMF/PTX still missing) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every format Pro Tools reads or writes, and ours. The Pro Tools list comes from the document types
 its bundle declares (`CFBundleDocumentTypes` in Info.plist: names only, nothing else read) and its
@@ -22,9 +22,9 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | AAF (Advanced Authoring Format) | import/export | ❌ | ❌ | #40. The post-production handoff from picture editors (G-03) |
 | OMF | import/export | ❌ | ❌ | Legacy, still delivered by some editors |
 | Media Composer–compatible session | export | ❌ | ❌ | AAF variant |
-| OpenTimelineIO `.otio` audio timeline | not a native Pro Tools session format | 🟡 | 🟡 | `file.import_otio` reads local audio tracks, gaps, clips and trims, resamples sources and commits atomically with undo; Clip.2 official fixture tested. `file.export_otio` writes eligible audio; unsupported effects, transitions, video, offline/unsaved/stretched media fail explicitly |
-| Portable OpenTimelineIO `.otioz` bundle (audio only) | media-inclusive OTIO ZIP, not a Pro Tools session | 🟡 supported audio subset | 🟡 supported audio subset | `file.import_otioz` / `file.export_otioz` and File-menu Import/Export read/write `content.otio`, `version.txt` and deduplicated local media with 256/512 MiB media caps and strict ZIP traversal/CRC checks. Import needs a saved target session and is undoable; CLI tests preserve stereo/trims after exporter-media and archive deletion. Unsupported gain/fades/mixer/video fail explicitly; not AAF, OMF or `.ptx` compatibility |
-| CMX3600 `.edl` audio cuts | edit decision list interchange, not a full Pro Tools session | 🟡 | 🟡 | `file.import_edl` / `file.export_edl` handle mono `A`, linked stereo `AA`, or two independently edited mono `A1`/`A2` cut lanes; source/record trims are frame aligned, record cuts may overlap across mono lanes, and unsupported formats/processing fail closed. Engine fixtures include an official OTIO parser check; mono/AA CLI roundtrip tested. Not arbitrary multitrack EDL, AAF, OMF or `.ptx` interchange |
+| OpenTimelineIO `.otio` audio timeline | not a native Pro Tools session format | 🟡 | 🟡 | `file.import_otio` reads local audio tracks, gaps, clips and trims, resamples sources and commits atomically with undo; official Clip.2 fixtures test positive/negative available-range timecode origins. `file.export_otio` writes eligible audio; unsupported effects, transitions, video, offline/unsaved/stretched media fail explicitly |
+| Portable OpenTimelineIO `.otioz` bundle (audio only) | media-inclusive OTIO ZIP, not a Pro Tools session | 🟡 supported audio subset | 🟡 supported audio subset | `file.import_otioz` / `file.export_otioz` and File-menu Import/Export read/write `content.otio`, `version.txt` and deduplicated local media with 256/512 MiB media caps and strict ZIP traversal/CRC checks. Import requires a saved target session and is undoable; official Clip.2 media with signed timecode origins and literal `%` names tested, plus public CLI deletion/reopen/rebounce. Unsupported gain/fades/mixer/video fail explicitly; not AAF, OMF or `.ptx` compatibility |
+| CMX3600 `.edl` audio cuts | edit decision list interchange, not a full Pro Tools session | 🟡 | 🟡 | `file.import_edl` / `file.export_edl` handle mono `A`, linked stereo `AA`, or two independently edited mono `A1`/`A2` cut lanes; source/record trims are frame aligned, record cuts may overlap across mono lanes, unsupported formats/processing fail closed. Export now preserves existing files unless `replace:true`. Engine and CLI waveform roundtrips tested. Not arbitrary multitrack EDL, AAF, OMF or `.ptx` interchange |
 | ADM BWF (Dolby Atmos master) | import/export | ❌ | ❌ | G-12 |
 | SoundCraft session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
 | Import Session Data (from another session) | Pro Tools sessions | 🟡 | — | From `.scraft` only |
@@ -56,7 +56,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Format | Pro Tools | Read | Write | Tests / notes |
 |---|---|---|---|---|
-| Standard MIDI File (type 0/1) | import/export | ✅ | 🟡 | A public Type-1 CLI import → save/reopen → export → fresh-import test verifies note pitch/velocity/duration/channel, CC7, program, pitch bend, tempo and meter. Broader MIDI fidelity and requested track filtering remain incomplete (#98); no physical playback evidence |
+| Standard MIDI File (type 0/1) | import/export | ✅ | 🟡 | A public Type-1 CLI import → save/reopen → export → fresh-import test verifies note pitch/velocity/duration/channel, CC7, program, pitch bend, tempo and meter. Export refuses to clobber an existing destination without `replace:true`. Broader fidelity and requested track filtering remain incomplete (#98); no physical playback evidence |
 | MusicXML (to Sibelius) | export | — | ✅ | `file.export_sibelius`, `score.rs` |
 | Printable score | print | — | ✅ (SVG) | |
 
@@ -83,6 +83,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Official OpenTimelineIO Clip.2 signed media timecode origins and literal-percent URLs import, with strict source bounds/ZIP checks; default non-overwriting MIDI/EDL export; AAF/OMF/PTX still unsupported |
 | 2026-11-01 | minor | Added secure, undoable audio-only `.otioz` import alongside export; CLI regression survives deletion of exporter/archive. Public Type-1 MIDI roundtrip verifies controller/program/pitch and tempo/meter semantics; AAF/OMF/PTX still missing |
 | 2026-11-01 | minor | Added File-menu audio-only `.otioz` portable bundle export with bounded deduplicated media; import remains unsupported, AAF/OMF/PTX gap unchanged |
 | 2026-11-01 | minor | CMX3600 import/export now accepts two independently edited mono A1/A2 audio lanes with overlapping record cuts, source trims and strict fail-closed checks; not arbitrary multitrack or AAF/OMF/PTX interchange |
