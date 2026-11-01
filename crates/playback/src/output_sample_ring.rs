@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Maximum interleaved output channels (SoundCraft's widest live mix).
 pub const MAX_OUTPUT_CHANNELS: usize = 16;
-/// Maximum capacity in complete frames. At 16 channels the slots consume 2 MiB.
+/// Maximum caller-visible capacity in complete frames. Internal power-of-two padding
+/// never exceeds this bound, so 16-channel slots consume at most 2 MiB.
 pub const MAX_OUTPUT_RING_FRAMES: usize = 32_768;
 
 /// Invalid construction parameters; the ring never silently clamps a requested layout.
@@ -34,6 +35,8 @@ pub enum OutputRingConfigError {
 pub struct OutputSampleRing {
     channels: usize,
     capacity_frames: usize,
+    /// Physical storage is a power of two, so mask indexing survives usize wraparound.
+    storage_mask: usize,
     slots: Box<[AtomicU32]>,
     /// Number of complete frames published by the producer (only producer writes).
     head: AtomicUsize,
@@ -45,7 +48,8 @@ pub struct OutputSampleRing {
 
 impl OutputSampleRing {
     /// Allocates every slot once, on the control thread before either endpoint starts.
-    /// Capacity is exact, not rounded up or truncated.
+    /// Usable capacity is exact. Physical storage rounds up to a power of two so
+    /// wrapped usize counters retain the correct slot phase for any logical capacity.
     pub fn new(channels: usize, capacity_frames: usize, generation: u64) -> Result<Self, OutputRingConfigError> {
         if !(1..=MAX_OUTPUT_CHANNELS).contains(&channels) {
             return Err(OutputRingConfigError::InvalidChannels(channels));
@@ -53,12 +57,14 @@ impl OutputSampleRing {
         if !(1..=MAX_OUTPUT_RING_FRAMES).contains(&capacity_frames) {
             return Err(OutputRingConfigError::InvalidCapacityFrames(capacity_frames));
         }
-        let Some(samples) = channels.checked_mul(capacity_frames) else {
+        let storage_frames = capacity_frames.next_power_of_two();
+        let Some(samples) = channels.checked_mul(storage_frames) else {
             return Err(OutputRingConfigError::InvalidCapacityFrames(capacity_frames));
         };
         Ok(Self {
             channels,
             capacity_frames,
+            storage_mask: storage_frames - 1,
             slots: (0..samples).map(|_| AtomicU32::new(0)).collect(),
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
@@ -97,7 +103,7 @@ impl OutputSampleRing {
         let queued = head.wrapping_sub(tail).min(self.capacity_frames);
         let frames = (samples.len() / self.channels).min(self.capacity_frames - queued);
         for (offset, frame) in samples.chunks_exact(self.channels).take(frames).enumerate() {
-            let base = (head.wrapping_add(offset) % self.capacity_frames) * self.channels;
+            let base = (head.wrapping_add(offset) & self.storage_mask) * self.channels;
             for (channel, sample) in frame.iter().enumerate() {
                 self.slots[base + channel].store(sample.to_bits(), Ordering::Relaxed);
             }
@@ -118,7 +124,7 @@ impl OutputSampleRing {
         let head = self.head.load(Ordering::Acquire);
         let frames = (output.len() / self.channels).min(head.wrapping_sub(tail).min(self.capacity_frames));
         for (offset, frame) in output.chunks_exact_mut(self.channels).take(frames).enumerate() {
-            let base = (tail.wrapping_add(offset) % self.capacity_frames) * self.channels;
+            let base = (tail.wrapping_add(offset) & self.storage_mask) * self.channels;
             for (channel, sample) in frame.iter_mut().enumerate() {
                 *sample = f32::from_bits(self.slots[base + channel].load(Ordering::Relaxed));
             }
@@ -191,6 +197,47 @@ mod tests {
         let mut output = [99.0; 6];
         assert_eq!(ring.read_or_silence(&mut output), Some(2));
         assert_eq!(output, [20.0, 21.0, 30.0, 31.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn odd_mono_capacity_keeps_distinct_slots_across_usize_counter_wrap() {
+        let ring = ring(1, 3);
+        // A 32-bit device can reach this counter boundary in a long-running session.
+        // Modulo by logical capacity 3 would collide indices across usize overflow.
+        ring.head.store(usize::MAX - 1, Ordering::Relaxed);
+        ring.tail.store(usize::MAX - 1, Ordering::Relaxed);
+        assert_eq!(ring.try_write_interleaved(&[11.0, 22.0, 33.0]), Some(3));
+        assert_eq!(ring.try_write_interleaved(&[99.0]), Some(0));
+        let mut out = [0.0; 3];
+        assert_eq!(ring.read_or_silence(&mut out), Some(3));
+        assert_eq!(out, [11.0, 22.0, 33.0]);
+        assert_eq!(ring.try_write_interleaved(&[44.0, 55.0]), Some(2));
+        let mut after_wrap = [0.0; 2];
+        assert_eq!(ring.read_or_silence(&mut after_wrap), Some(2));
+        assert_eq!(after_wrap, [44.0, 55.0]);
+        assert_eq!(ring.queued_frames(), 0);
+    }
+
+    #[test]
+    fn odd_stereo_capacity_preserves_fifo_and_short_writes_across_usize_wrap() {
+        let ring = ring(2, 7);
+        ring.head.store(usize::MAX - 2, Ordering::Relaxed);
+        ring.tail.store(usize::MAX - 2, Ordering::Relaxed);
+        let first: Vec<f32> = (1..=7).flat_map(|frame| [frame as f32, -(frame as f32)]).collect();
+        let later: Vec<f32> = (8..=11).flat_map(|frame| [frame as f32, -(frame as f32)]).collect();
+        assert_eq!(ring.try_write_interleaved(&first), Some(7));
+        let mut initial = [0.0; 6];
+        assert_eq!(ring.read_or_silence(&mut initial), Some(3));
+        assert_eq!(initial.as_slice(), &first[..6]);
+        assert_eq!(ring.try_write_interleaved(&later), Some(3), "only three complete frames fit");
+        let mut remaining = [0.0; 14];
+        assert_eq!(ring.read_or_silence(&mut remaining), Some(7));
+        let expected: Vec<f32> = first[6..].iter().chain(later[..6].iter()).copied().collect();
+        assert_eq!(remaining.as_slice(), expected.as_slice());
+        assert_eq!(ring.try_write_interleaved(&later[6..]), Some(1));
+        let mut last = [0.0; 2];
+        assert_eq!(ring.read_or_silence(&mut last), Some(1));
+        assert_eq!(last.as_slice(), &later[6..]);
     }
 
     #[test]
