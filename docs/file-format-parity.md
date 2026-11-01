@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (audio-only OpenTimelineIO JSON import/export verified; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (mono/stereo straight-cut CMX3600 EDL and OpenTimelineIO audio interchange verified; no AAF/OMF/PTX parity change) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every format Pro Tools reads or writes, and ours. The Pro Tools list comes from the document types
 its bundle declares (`CFBundleDocumentTypes` in Info.plist: names only, nothing else read) and its
@@ -23,6 +23,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 | OMF | import/export | ❌ | ❌ | Legacy, still delivered by some editors |
 | Media Composer–compatible session | export | ❌ | ❌ | AAF variant |
 | OpenTimelineIO `.otio` audio timeline | not a native Pro Tools session format | 🟡 | 🟡 | `file.import_otio` reads local audio tracks, gaps, clips and trims, resamples sources and commits atomically with undo; Clip.2 official fixture tested. `file.export_otio` writes eligible audio; unsupported effects, transitions, video, offline/unsaved/stretched media fail explicitly |
+| CMX3600 `.edl` audio cuts | edit decision list interchange, not a full Pro Tools session | 🟡 | 🟡 | `file.import_edl` / `file.export_edl` handle single-lane `A` mono or linked `AA` stereo straight cuts with frame-aligned source trims and strict rejection of unsupported structures. Official OTIO parser fixture and CLI round-trip tests; no AAF/OMF or multitrack EDL promise |
 | ADM BWF (Dolby Atmos master) | import/export | ❌ | ❌ | G-12 |
 | SoundCraft session `.scraft` + `Audio Files/` | — | ✅ | ✅ | JSON (serde); mutated-file property test loads or fails cleanly; plugin state embedded. Fades save optional `curvature` (-1..1); missing values default to 0 and preserve legacy envelopes |
 | Import Session Data (from another session) | Pro Tools sessions | 🟡 | — | From `.scraft` only |
@@ -81,6 +82,7 @@ Legend: ✅ supported and tested · 🟡 partial · ❌ missing · — not appli
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Added frame-aligned CMX3600 audio EDL import/export for single mono `A` and linked stereo `AA` cuts, with strict rejection and waveform round-trip tests; not a substitute for AAF/OMF/PTX |
 | 2026-11-01 | minor | Added bounded, undoable OTIO audio import with official Clip.2 fixture and source-rate conversion; AAF, OMF and PTX still unsupported |
 | 2026-10-31 | minor | Added OTIO audio-only export; AAF, OMF and Pro Tools sessions remain unsupported |
 | 2026-10-19 | trivial | WAV and AIFF-C Float32 encoders retain finite headroom (#791); whole-file, streaming and bounce regression tests |

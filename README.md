@@ -17,18 +17,18 @@ These describe existing subsystems, **not a guarantee that every workflow is pro
 
 ## Newly integrated (November 1, 2026)
 
-- **Audio-only OpenTimelineIO interchange:** File → Import/Export → OpenTimelineIO Audio reads and writes eligible multitrack timelines with clips, gaps and source trims. Import validates local media, supports basic resampling, commits as one undoable edit, and rejects unsupported video, effects and transitions. This is not AAF/OMF/PTX session compatibility.
-- **MIDI capture foundation:** Setup → Playback Engine can discover native MIDI input ports and save selections. The bounded driver adapter and a tempo-aware, undoable armed-track MIDI take bridge are implemented and synthetically tested, **but not yet connected to the desktop Record/Stop lifecycle or live instrument audition**. An attached keyboard has not been tested end to end.
-- **Recording safeguards:** Recording refuses missing hardware input channels before creating takes, and monitoring no longer silently wraps to another microphone. Buffer-start fallback and recording-writer failures have regression coverage; shared-clock duplex recording and measured offset compensation remain open.
-- **Plugin reliability:** CLAP/VST3 note releases are protected during queue overload and transport stop. Bundle scans reject ambiguous executable fallbacks. Platform-specific native plugin hosting and AU editors remain incomplete.
-- **End-to-end automated audio check:** A hardware-free CLI test imports original PCM audio, bounces, saves a session, deletes the original source, reopens and bounces again. The full local Linux `cargo xtask ci` gate (including WebAssembly) passed on the exact merged code tree. GitHub Actions still reports no runs, and macOS/Windows/hardware testing remains unverified.
+- **Audio-only timeline interchange:** File → Import/Export → OpenTimelineIO Audio reads and writes eligible multitrack timelines with clips, gaps and source trims; import validates media, resamples when needed and commits one undoable edit. CMX3600 EDL import/export additionally supports frame-aligned straight cuts on one mono `A` lane or one linked stereo `AA` lane. Unsupported transitions, processing and advanced structures fail explicitly. Neither format replaces AAF/OMF/PTX session compatibility.
+- **Desktop MIDI recording:** Setup can discover and select native MIDI input ports. Desktop Record/Stop now connects captured events to armed MIDI/instrument tracks and commits undoable takes, with tests for multiple ports, timestamp alignment, stop draining and MIDI-only recording. **No physical keyboard or live instrument audition has been verified**; track-specific port/channel routing, external output and sync remain incomplete.
+- **Recording safeguards:** Recording rejects missing physical input channels rather than capturing from the wrong microphone. Tests cover device-buffer fallback, background writer failures and Stop draining the last callback before finalizing WAV takes. A bounded manual recording offset is available for aligning overdubs, but it does **not** measure hardware latency or create a single-clock duplex stream.
+- **Plugin reliability:** CLAP/VST3 note releases survive queue overload and transport stop. Bundle scans reject ambiguous executables, and VST3 state restore protects pending edits on failure. Native third-party plug-ins still execute in-process; platform-specific host/editor and signing gaps remain.
+- **Hardware-free integration tests:** CLI regressions cover import, bounce, save/reopen after removing the source path, mono CMX3600 EDL interchange and linked-stereo EDL waveforms. An earlier exact merged snapshot passed the full local Linux `cargo xtask ci` gate, including WebAssembly; current changes must still clear that gate. GitHub Actions reports no runs, and macOS/Windows/hardware testing remains unverified.
 
 ## Major blockers to professional use
 
 | Area | Current limitation |
 | --- | --- |
-| Audio interfaces | Physical channel routing, unified low-latency duplex monitoring and recording-offset compensation need completion and hardware verification. |
-| MIDI hardware | Live MIDI controller input/output, MIDI recording and external instrument I/O are incomplete. |
+| Audio interfaces | Basic physical input-channel selection and manual record offset exist; the full I/O matrix, measured latency, unified low-latency duplex monitoring and hardware verification remain incomplete. |
+| MIDI hardware | Synthetic native MIDI Record/Stop is implemented; physical controller recording, live instrument audition, track-specific input routing, external output and clock remain unverified or incomplete. |
 | Session interchange | Native `.scraft` sessions exist; AAF, OMF and Pro Tools `.ptx` interchange are not implemented. |
 | Plugins | Hosting, editors and signing/entitlements have OS- and format-specific gaps. |
 | Reliability | Recording recovery, real hardware stress tests, cross-platform runtime checks and regression coverage need further work. |

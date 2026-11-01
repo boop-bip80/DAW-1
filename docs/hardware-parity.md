@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (bounded multichannel recording input routes, MIDI take bridge and Setup selector; no physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (synthetic desktop MIDI Record/Stop, manual recording offset and safe callback/WAV draining; no physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 A DAW is judged by how it drives audio interfaces, MIDI gear, control surfaces and sync. This is
 SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal) and the new MIDI input-capture adapter and the absence of
@@ -22,18 +22,18 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 | Duplex stream on one clock | ✅ | ❌ separate input/output streams | ❌ | ❌ | ❌ | ❌ |
 | Hardware I/O mapping (I/O Setup to physical channels) | ✅ | 🟡 per-track recording input start up to 64 channels and ordered multichannel output; no I/O matrix | 🟡 | 🟡 | 🟡 | ❌ |
 | Low-latency monitoring | ✅ | ❌ (`options.low_latency_monitoring` is a stored flag) | ❌ | ❌ | ❌ | ❌ |
-| Latency reporting and record offset compensation | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Latency reporting and record offset compensation | ✅ | 🟡 manual ±500 ms offset only; no measurement | 🟡 manual offset only | 🟡 manual offset only | ❌ | ❌ |
 | Sample rate follows the session; resample when it can't | ✅ (switches device) | 🟡 resamples (input pitch bug fixed, #28) | 🟡 | 🟡 | 🟡 | 🟡 |
 | Avid HDX / HD Native DSP, Hybrid Engine DSP mode | ✅ | ❌ (out of reach: Avid hardware) | ❌ | ❌ | ❌ | ❌ |
 | Disk allocation / record to disk | ✅ | 🟡 WAV takes stream to disk through a background writer; hardware unverified | 🟡 same writer | 🟡 same writer | ❌ | ❌ |
 
 ## MIDI
 
-A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. `MidiRecordBridge` maps anchored capture timestamps through the tempo map and commits bounded, undoable MIDI clips on armed MIDI/instrument tracks in tests. The desktop transport still does **not** start/drain/stop this bridge or route its events to live instruments. No physical keyboard was tested; Web has no native adapter. Hardware readiness percentages remain unchanged.
+A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. The desktop Record/Stop lifecycle opens selected native inputs, drains callbacks and commits tempo-mapped, undoable MIDI takes to armed MIDI/instrument tracks; synthetic tests cover MIDI-only recording, timestamp normalization and Stop draining. It does **not** provide live instrument audition or external MIDI output, and track-specific port/channel input assignment is incomplete. No physical keyboard was tested; Web has no native adapter. Hardware readiness percentages remain unchanged.
 
 | Feature | Pro Tools | SoundCraft (all platforms) |
 |---|---|---|
-| MIDI input devices (keyboards, pads) | ✅ | 🟡 native discovery/selector/capture and synthetic armed-track recording bridge; not wired to app record transport or instruments; unverified on hardware |
+| MIDI input devices (keyboards, pads) | ✅ | 🟡 desktop native input Record/Stop to armed tracks tested synthetically; no hardware test, live audition or per-track port/channel assignment yet |
 | MIDI output to external gear | ✅ | ❌ |
 | MIDI Thru, input filter | ✅ | ❌ (stored flags only) |
 | MIDI Beat Clock out, MTC generate/chase | ✅ | ❌ |
@@ -74,6 +74,7 @@ A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Desktop Record/Stop now drives native MIDI input and undoable armed-track takes in synthetic tests; manual ±500 ms recording offset and callback-drain safeguards, no measured duplex latency or physical keyboard evidence |
 | 2026-11-01 | minor | Bounded recording routes avoid wrong-channel capture; native MIDI selector and synthetic recording bridge added, still not wired to app transport; no physical or duplex validation |
 | 2026-10-31 | minor | Native MIDI port discovery and capture API added but not wired to playback or armed tracks; corrected WAV take-to-disk evidence; hardware and duplex tests remain open |
 | 2026-10-13 | trivial | bounces of a bus fed by an aux compensate its latency (#246) |
