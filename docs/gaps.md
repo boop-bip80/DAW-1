@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (OTIOZ export-only, MIDI input filter/output device worker and release quality dependency; alpha gate remains) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (portable OTIOZ audio import/export, MIDI output routing/worker safety, CPAL rate diagnostics and CLI regression evidence; alpha gate remains) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -46,7 +46,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
   device, sample rate and device buffer size (kept with the preferences, per machine; `ui.audio_device`
   for agents); f32 and 16/32-bit integer devices; ASIO behind the opt-in `asio` build feature
   (verified on Windows with an SSL 2+ at 128 samples).
-- **Partial (2026-11-01):** The Mix input selector now offers up to 64 physical channels when the device exposes them; recording rejects invalid routes before creating takes, and monitoring silences missing channels instead of wrapping to another microphone. A manual ±500 ms record placement offset is bounded and exposed in Playback Engine; Stop drains in-flight callbacks before WAV finalization. None of this measures actual hardware latency or supplies a full physical I/O matrix.
+- **Partial (2026-11-01):** The Mix input selector now offers up to 64 physical channels when the device exposes them; recording rejects invalid routes before creating takes, and monitoring silences missing channels instead of wrapping to another microphone. A manual ±500 ms record placement offset is bounded and exposed in Playback Engine; Stop drains in-flight callbacks before WAV finalization. A separate monitor FIFO discards stale samples on resume, and per-stream CPAL input/output timestamps provide diagnostic clock-rate deviation without assuming shared origins. None of this measures actual hardware latency, synchronizes two device clocks or supplies a full physical I/O matrix.
 - **Missing:** complete I/O Setup channel mapping, one duplex stream on one clock (input and
   output are still separate cpal streams), measured hardware latency reporting/automatic compensation, ASIO
   in official builds (owner decision: Steinberg's SDK is proprietary or GPLv3), JACK, and
@@ -61,7 +61,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 ### G-02. MIDI devices
 
-- **Partial foundation (2026-11-01):** `soundcraft-midi::live` decodes timestamped MIDI, `soundcraft-midi::device` captures native input ports through bounded queues, and Setup › Playback Engine selects enabled inputs. Desktop Record/Stop uses `MidiRecordBridge` to commit tempo-mapped, undoable takes to armed MIDI/instrument tracks. `track.midi_input` persists named enabled input ports and all/1–16 channel filters; Mix/Edit expose selectors, and synthetic tests cover port-tagged events, channel filtering, missing/ambiguous-port preflight, MIDI-only recording and callback draining. Setup › MIDI › MIDI Input Filter exposes eight saved event-kind switches, sampled at Record start (SysEx not decoded); native MIDI output discovery and a bounded worker have fake-sink tests but no track/transport playback.
+- **Partial foundation (2026-11-01):** `soundcraft-midi::live` decodes timestamped MIDI, `soundcraft-midi::device` captures native input ports through bounded queues, and Setup › Playback Engine selects enabled inputs. Desktop Record/Stop uses `MidiRecordBridge` to commit tempo-mapped, undoable takes to armed MIDI/instrument tracks. `track.midi_input` persists named enabled input ports and all/1–16 channel filters; Mix/Edit expose selectors, and synthetic tests cover port-tagged events, channel filtering, missing/ambiguous-port preflight, MIDI-only recording and callback draining. Setup › MIDI › MIDI Input Filter exposes eight saved event-kind switches, sampled at Record start (SysEx not decoded). Tracks can also save opt-in named external MIDI output ports and channels, and playback has a pure MIDI clip-event collector; the native worker supports generation cancellation and priority note cleanup in fake-device tests, but there is still no DAW track/transport hardware playback.
 - **Missing:** physical MIDI controller verification, live instrument audition, routed track/transport MIDI output or thru, clock and MTC. The output worker is not a user-playable MIDI track. Driver and audio clocks do not have sample-accurate common timing.
 - **Impact:** A hardware-free MIDI recording pathway exists, but it is not verified for musical performance using a controller and instrument.
 - **Estimate:** ≈ 20–35 h (device layer, realtime input to armed tracks and instruments with
@@ -71,7 +71,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 - **Missing:** opening or saving `.ptx`/`.ptf`, AAF and OMF import and export (#40), Media
   Composer–compatible sessions. Our session format is `.scraft` JSON.
-- **Partial interchange (2026-11-01):** `file.export_otio` and `file.import_otio` now write/read eligible audio-only OpenTimelineIO timelines (multiple tracks, gaps, source trims, local media, sample-rate conversion), through File menu paths. `file.export_otioz` additionally exports portable, media-inclusive audio-only `.otioz` bundles with deduped media and bounded source sizes via File › Export; there is no direct `.otioz` import. CMX3600 `file.export_edl` / `file.import_edl` cover one mono `A`, linked-stereo `AA`, or exactly two independently edited mono `A1`/`A2` lanes, with frame-exact straight cuts (including cross-lane record overlap) and strict unsupported-structure validation. Arbitrary multitrack EDL, fades and mixer processing are not carried. Neither substitutes for AAF, OMF or `.ptx`; advanced OTIO/video/automation/plugin structures are rejected.
+- **Partial interchange (2026-11-01):** `file.export_otio` and `file.import_otio` now write/read eligible audio-only OpenTimelineIO timelines (multiple tracks, gaps, source trims, local media, sample-rate conversion), through File menu paths. `file.export_otioz` and `file.import_otioz` export/import portable media-inclusive audio-only `.otioz` bundles with deduplicated, size-capped media and strict ZIP traversal/CRC checks. Import requires an already saved recipient session, is undoable, and has a public CLI reopen/rebounce regression after deleting the exporting project, media and archive. CMX3600 `file.export_edl` / `file.import_edl` cover one mono `A`, linked-stereo `AA`, or exactly two independently edited mono `A1`/`A2` lanes, with frame-exact straight cuts (including cross-lane record overlap) and strict unsupported-structure validation. Arbitrary multitrack EDL, fades and mixer processing are not carried. Neither substitutes for AAF, OMF or `.ptx`; advanced OTIO/video/automation/plugin structures are rejected.
 - **Impact:** the standard's main-format bar for beta. A Pro Tools user cannot bring a project in
   or hand one back; post-production (picture editors deliver AAF) is blocked.
 - **Estimate:** AAF/OMF import + export ≈ 50–90 h (FilmCraft already writes AAF/OMF; we can learn
@@ -237,6 +237,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Portable audio-only OTIOZ import/export (saved recipient and hostile-archive guards), opt-in MIDI output routes with cancellation-safe worker but no playback, independent CPAL rate diagnostics and CLI OTIOZ/SMF tests; alpha blockers unchanged |
 | 2026-11-01 | minor | OTIOZ media-inclusive audio export-only, MIDI Input Filter GUI and device-level output worker documented; release requires three-OS quality before packaging but still has zero hosted run evidence; alpha blockers unchanged |
 | 2026-11-01 | minor | Per-track named MIDI port/channel input routing is saved, exposed in Mix/Edit and synthetically tested; independent mono A1/A2 CMX3600 EDL cuts now interchange; physical keyboard, AAF/OMF/PTX and alpha blockers remain |
 | 2026-11-01 | minor | Desktop MIDI recording integrated for synthetic tests, manual bounded audio record offset, mono/stereo straight-cut CMX3600 EDL and full callback drain; still no hardware or AAF/OMF/PTX validation |
