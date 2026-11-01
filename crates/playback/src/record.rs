@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -500,6 +500,78 @@ impl Drop for Recorder {
     }
 }
 
+const RECOVERY_PATH_PREVIEW_BYTES: usize = 160;
+
+/// A bounded, escaped preview for the UI status and log. The path may contain newlines or an
+/// unexpectedly long name; formatting directly into a capped sink avoids even a large temporary
+/// allocation on the writer thread. It does not reopen, canonicalize, or change the file path.
+fn recovery_path_preview(path: &Path) -> String {
+    struct Capped {
+        text: String,
+        truncated: bool,
+    }
+    impl std::fmt::Write for Capped {
+        fn write_str(&mut self, part: &str) -> std::fmt::Result {
+            let mut end = RECOVERY_PATH_PREVIEW_BYTES.saturating_sub(self.text.len()).min(part.len());
+            while !part.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.text.push_str(&part[..end]);
+            if end < part.len() {
+                self.truncated = true;
+                return Err(std::fmt::Error);
+            }
+            Ok(())
+        }
+    }
+    let mut capped = Capped { text: String::with_capacity(RECOVERY_PATH_PREVIEW_BYTES + 24), truncated: false };
+    let _ = std::fmt::write(&mut capped, format_args!("{path:?}"));
+    if capped.truncated {
+        capped.text.push_str("… [path abbreviated]");
+    }
+    capped.text
+}
+
+/// Multiple failed first chunks may leave *several* WAVs for manual recovery. The first disk
+/// error is already returned, but it contains only its own path: add enough bounded context to
+/// find the other files without constructing an unbounded status message.
+#[derive(Default)]
+struct RecoveryFiles {
+    count: usize,
+    examples: Vec<String>,
+}
+
+impl RecoveryFiles {
+    fn add(&mut self, path: &Path) {
+        self.count = self.count.saturating_add(1);
+        if self.examples.len() < 3 {
+            self.examples.push(recovery_path_preview(path));
+        }
+    }
+
+    fn append_to(self, problem: &mut Option<String>) {
+        if self.count == 0 {
+            return;
+        }
+        let others = self.count.saturating_sub(self.examples.len());
+        let mut notice = format!(
+            "{} failed WAV file(s) were left on disk for possible manual recovery (not added to the session): {}",
+            self.count,
+            self.examples.join(", ")
+        );
+        if others > 0 {
+            notice.push_str(&format!("; {others} more path(s) omitted — inspect the recording folders"));
+        }
+        match problem {
+            Some(first_error) => {
+                first_error.push_str("; ");
+                first_error.push_str(&notice);
+            }
+            None => *problem = Some(notice),
+        }
+    }
+}
+
 fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> Takes {
     let (mut block, mut header_written, mut reported) = (Vec::new(), Instant::now(), false);
     loop {
@@ -531,6 +603,7 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
         std::thread::sleep(Duration::from_millis(10));
     }
     let (mut done, mut problem) = (Vec::new(), None);
+    let mut recoverable = RecoveryFiles::default();
     for mut t in takes {
         t.write_header();
         let TakeWriter { id, path, file, frames, error, .. } = t;
@@ -543,9 +616,12 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
             done.push((id, path));
         } else if error.is_none() {
             let _ = std::fs::remove_file(&path);
+        } else {
+            recoverable.add(&path);
         }
         problem = problem.or(error);
     }
+    recoverable.append_to(&mut problem);
     (done, problem)
 }
 
@@ -1161,25 +1237,57 @@ mod tests {
     fn zero_counted_frames_after_io_error_preserve_recoverable_wav_but_not_empty_takes() {
         let dir = std::env::temp_dir().join(format!("soundcraft-recover-first-failed-chunk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (failed_path, empty_path, existing_path) = (dir.join("Failed.wav"), dir.join("Empty.wav"), dir.join("Existing.wav"));
+        let (failed_path, second_path, empty_path, existing_path) =
+            (dir.join("Failed.wav"), dir.join("SecondFailed.wav"), dir.join("Empty.wav"), dir.join("Existing.wav"));
         let mut failed = TakeWriter::create(TrackId(1), vec![0], failed_path.clone(), 48_000).unwrap();
         // Simulate the on-disk aftermath of a short write before the first complete chunk.
         failed.file.write_all(&0.375f32.to_le_bytes()).unwrap();
         failed.error = Some("synthetic disk failure after a recoverable sample".into());
         assert_eq!(failed.frames, 0);
+        let mut second_failed = TakeWriter::create(TrackId(3), vec![0], second_path.clone(), 48_000).unwrap();
+        second_failed.file.write_all(&0.25f32.to_le_bytes()).unwrap();
+        second_failed.error = Some("another failed WAV write".into());
         let empty = TakeWriter::create(TrackId(2), vec![0], empty_path.clone(), 48_000).unwrap();
         let sentinel = b"pre-existing recording must remain untouched";
         std::fs::write(&existing_path, sentinel).unwrap();
 
         let shared = Shared::new(CaptureRing::new(32)); // disarmed: flush and finalize at once
-        let (done, problem) = write_takes(&shared, vec![failed, empty], 1);
+        let (done, problem) = write_takes(&shared, vec![failed, second_failed, empty], 1);
         assert!(done.is_empty(), "a failed zero-count WAV is not imported as a completed take");
-        assert!(problem.is_some_and(|p| p.contains("synthetic disk failure")));
+        let problem = problem.expect("the first disk error and all retained file paths are reported");
+        assert!(problem.starts_with("synthetic disk failure"), "preserve the original first I/O error: {problem}");
+        assert!(problem.contains("2 failed WAV file(s)"), "show how many unimported files remain: {problem}");
+        assert!(
+            problem.contains(&format!("{failed_path:?}")) && problem.contains(&format!("{second_path:?}")),
+            "both distinct preserved paths must be discoverable: {problem}"
+        );
+        assert!(problem.contains("not added to the session"), "never imply a failed file became a successful take: {problem}");
         assert!(failed_path.exists(), "a short failed write can contain recoverable audio");
         assert_eq!(decode(&failed_path), vec![vec![0.375]]);
+        assert_eq!(decode(&second_path), vec![vec![0.25]]);
         assert!(!empty_path.exists(), "a successfully opened but empty take is disposable");
         assert_eq!(std::fs::read(existing_path).unwrap(), sentinel);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_notice_escapes_controls_and_bounds_long_or_numerous_paths() {
+        let strange = PathBuf::from(format!("recordings/line\nbreak/{}", "x".repeat(4_096)));
+        let preview = recovery_path_preview(&strange);
+        assert!(preview.contains("\\n") && !preview.contains('\n'), "path controls must be escaped: {preview}");
+        assert!(preview.contains("[path abbreviated]"));
+        assert!(preview.len() <= RECOVERY_PATH_PREVIEW_BYTES + "… [path abbreviated]".len());
+
+        let mut paths = RecoveryFiles::default();
+        for _ in 0..10 {
+            paths.add(&strange);
+        }
+        let mut problem = Some("original disk failure".into());
+        paths.append_to(&mut problem);
+        let problem = problem.unwrap();
+        assert!(problem.starts_with("original disk failure; "));
+        assert!(problem.contains("10 failed WAV file(s)") && problem.contains("7 more path(s) omitted"));
+        assert!(problem.len() < 800, "ten hostile paths must not create an unbounded status: {} bytes", problem.len());
     }
 
     #[test]
