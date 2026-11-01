@@ -1,14 +1,16 @@
-//! Export the audio edit of a session to OpenTimelineIO (`.otio`) JSON.
+//! Import and export the audio edit of a session as OpenTimelineIO (`.otio`) JSON.
 //!
 //! This is a deliberately bounded interchange format, not an AAF/OMF or Pro Tools session
 //! reader. OTIO carries the edit decisions (tracks, source trims, gaps, muted clips), while a
 //! consumer must have access to the referenced audio files. MIDI, buses, automation and plug-in
 //! processing do not have an equivalent representation in this audio-only export.
 
-use crate::{EngineError, Result};
+use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
-use soundcraft_model::{ClipContent, Session, Source, TrackKind};
-use std::path::{Path, PathBuf};
+use soundcraft_audio_io::{AudioBuffer, FileFormat};
+use soundcraft_model::{ChannelFormat, Clip, ClipContent, Session, Source, TrackKind};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 // OTIO RationalTime uses floating-point values. Integers through 2^53 are exact; larger sample
 // positions must be rejected instead of silently shifting edits on import into another tool.
@@ -16,6 +18,11 @@ const MAX_EXACT_SAMPLE: i64 = (1_i64 << 53) - 1;
 const MAX_TRACKS: usize = 2_048;
 const MAX_CLIPS: usize = 100_000;
 const MAX_PATH_BYTES: usize = 8_192;
+const MAX_OTIO_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MEDIA_BYTES: usize = 256 * 1024 * 1024;
+const MAX_TOTAL_MEDIA_BYTES: usize = 512 * 1024 * 1024;
+const MAX_TOTAL_SAMPLES: usize = 64 * 1024 * 1024;
+const MAX_SOURCES: usize = 1_024;
 
 /// Completed JSON and a truthful summary of what it contains.
 pub struct Export {
@@ -198,10 +205,343 @@ pub fn export_audio(session: &Session) -> Result<Export> {
     Ok(Export { json, tracks: audio_tracks, clips: count, processing_metadata_clips })
 }
 
+/// The audio-only portion of an OTIO timeline that was appended to the current session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Import {
+    pub tracks: usize,
+    pub clips: usize,
+    pub sources: usize,
+}
+
+struct ImportedSource {
+    path: PathBuf,
+    name: String,
+    audio: AudioBuffer,
+    format: FileFormat,
+}
+
+struct ImportedClip {
+    name: String,
+    source: usize,
+    offset: i64,
+    start: i64,
+    length: i64,
+    muted: bool,
+}
+
+struct ImportedTrack {
+    name: String,
+    inactive: bool,
+    clips: Vec<ImportedClip>,
+    channels: usize,
+}
+
+fn invalid_import(message: impl Into<String>) -> EngineError {
+    EngineError::Unsupported(format!("OpenTimelineIO audio import: {}", message.into()))
+}
+
+fn expect_schema<'a>(value: &'a Value, schema: &str) -> Result<&'a Value> {
+    if value.get("OTIO_SCHEMA").and_then(Value::as_str) != Some(schema) {
+        return Err(invalid_import(format!("expected {schema}")));
+    }
+    Ok(value)
+}
+
+fn children(value: &Value) -> Result<&Vec<Value>> {
+    value.get("children").and_then(Value::as_array).ok_or_else(|| invalid_import("missing composition children"))
+}
+
+fn plain_composable(value: &Value) -> Result<()> {
+    for field in ["effects", "markers"] {
+        if value.get(field).is_some_and(|v| v.as_array().is_none_or(|items| !items.is_empty())) {
+            return Err(invalid_import(format!("{field} are not supported")));
+        }
+    }
+    Ok(())
+}
+
+/// OTIO's time bases can differ from the current session's. Convert every boundary to the
+/// nearest sample (ties away from zero), bounding the result to losslessly representable values.
+fn time_samples(value: &Value, rate: u32) -> Result<i64> {
+    expect_schema(value, "RationalTime.1")?;
+    let t = value.get("value").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric value"))?;
+    let base = value.get("rate").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric rate"))?;
+    if !t.is_finite() || !base.is_finite() || t < 0.0 || base <= 0.0 || base > 384_000.0 {
+        return Err(invalid_import("invalid RationalTime value or rate"));
+    }
+    let samples = (t * f64::from(rate) / base).round();
+    if !samples.is_finite() || !(0.0..=(MAX_EXACT_SAMPLE as f64)).contains(&samples) {
+        return Err(invalid_import("time is outside the supported sample range"));
+    }
+    Ok(samples as i64)
+}
+
+fn sample_range(value: &Value, rate: u32) -> Result<(i64, i64)> {
+    expect_schema(value, "TimeRange.1")?;
+    let start = time_samples(value.get("start_time").ok_or_else(|| invalid_import("missing range start"))?, rate)?;
+    let length = time_samples(value.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate)?;
+    start.checked_add(length).ok_or_else(|| invalid_import("time range overflows"))?;
+    Ok((start, length))
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Decode only local `file:///` URLs and path-relative references. Relative paths must remain
+/// below the OTIO document's directory; every resulting path gets the engine's read-root check.
+fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
+    if uri.len() > MAX_PATH_BYTES || uri.is_empty() || uri.chars().any(|c| matches!(c, '?' | '#' | '\0')) {
+        return Err(invalid_import("media URL is empty, too long or has a query/fragment"));
+    }
+    let text = if let Some(path) = uri.strip_prefix("file://") {
+        if !path.starts_with('/') || path.starts_with("//") {
+            return Err(invalid_import("remote media authorities are not supported"));
+        }
+        path
+    } else {
+        if uri.contains("://") || uri.starts_with("file:") || uri.contains(':') {
+            return Err(invalid_import("only local file URLs are supported"));
+        }
+        uri
+    };
+    let mut decoded = Vec::with_capacity(text.len());
+    let mut input = text.bytes();
+    while let Some(b) = input.next() {
+        if b == b'%' {
+            let hi = input.next().and_then(hex_digit).ok_or_else(|| invalid_import("invalid media URL escape"))?;
+            let lo = input.next().and_then(hex_digit).ok_or_else(|| invalid_import("invalid media URL escape"))?;
+            decoded.push((hi << 4) | lo);
+        } else {
+            decoded.push(b);
+        }
+    }
+    let path = String::from_utf8(decoded).map_err(|_| invalid_import("media URL is not UTF-8"))?;
+    if path.contains('\0') || path.len() > MAX_PATH_BYTES {
+        return Err(invalid_import("invalid or too long decoded media path"));
+    }
+    #[cfg(windows)]
+    let path = if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') { &path[1..] } else { path.as_str() };
+    let referenced = Path::new(&path);
+    if referenced.components().any(|part| part == Component::ParentDir) {
+        return Err(invalid_import("media path contains parent directory traversal"));
+    }
+    if referenced.is_absolute() {
+        return Ok(referenced.to_path_buf());
+    }
+    if referenced.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
+        return Err(invalid_import("relative media path escapes the timeline directory"));
+    }
+    let parent = document.parent().unwrap_or_else(|| Path::new("."));
+    Ok(parent.join(referenced))
+}
+
+fn clip_media(clip: &Value) -> Result<&str> {
+    let media = match clip.get("OTIO_SCHEMA").and_then(Value::as_str) {
+        Some("Clip.1") => clip.get("media_reference"),
+        Some("Clip.2") => {
+            let key = clip.get("active_media_reference_key").and_then(Value::as_str).unwrap_or("DEFAULT_MEDIA");
+            clip.get("media_references").and_then(|refs| refs.get(key))
+        }
+        _ => return Err(invalid_import("only Clip.1 and Clip.2 are supported")),
+    }
+    .ok_or_else(|| invalid_import("clip has no active media reference"))?;
+    expect_schema(media, "ExternalReference.1")?;
+    media.get("target_url").and_then(Value::as_str).ok_or_else(|| invalid_import("clip has no external media URL"))
+}
+
+fn reject_nontrivial_metadata(value: &Value) -> Result<()> {
+    let Some(metadata) = value.pointer("/metadata/soundcraft") else { return Ok(()) };
+    if metadata.get("gain_db").and_then(Value::as_f64).is_some_and(|v| v != 0.0)
+        || metadata.get("gain_env").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
+        || metadata.get("fade_in_samples").and_then(Value::as_i64).is_some_and(|v| v > 0)
+        || metadata.get("fade_out_samples").and_then(Value::as_i64).is_some_and(|v| v > 0)
+    {
+        return Err(invalid_import("render SoundCraft clip processing before import; OTIO edits alone do not preserve it"));
+    }
+    Ok(())
+}
+
+/// Append an OTIO audio timeline as new native tracks, one undoable edit.
+///
+/// The input JSON, every trim/gap, every referenced path and *all decoded audio* are checked
+/// before modifying the current document. Unsupported OTIO structures are errors, never silently
+/// flattened. Referenced media must be available locally; the `.otio` file contains no audio.
+pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8]) -> Result<Import> {
+    if bytes.len() > MAX_OTIO_BYTES {
+        return Err(invalid_import("timeline JSON exceeds the 4 MiB limit"));
+    }
+    let timeline: Value = serde_json::from_slice(bytes).map_err(|err| invalid_import(format!("invalid JSON: {err}")))?;
+    expect_schema(&timeline, "Timeline.1")?;
+    if timeline.get("global_start_time").is_some_and(|v| !v.is_null()) {
+        return Err(invalid_import("global timeline offsets are not supported"));
+    }
+    let stack = expect_schema(timeline.get("tracks").ok_or_else(|| invalid_import("timeline has no tracks"))?, "Stack.1")?;
+    plain_composable(stack)?;
+    if stack.get("source_range").is_some_and(|v| !v.is_null()) {
+        return Err(invalid_import("stack trims are not supported"));
+    }
+    let audio_tracks = children(stack)?;
+    if audio_tracks.is_empty() || audio_tracks.len() > MAX_TRACKS {
+        return Err(invalid_import("timeline must contain between 1 and 2048 audio tracks"));
+    }
+    let rate = engine.session().sample_rate.hz();
+    if rate == 0 {
+        return Err(invalid_import("session sample rate is zero"));
+    }
+
+    let mut sources = Vec::<ImportedSource>::new();
+    let mut source_index = BTreeMap::<PathBuf, usize>::new();
+    let mut tracks = Vec::with_capacity(audio_tracks.len());
+    let mut clip_count = 0usize;
+    let mut total_bytes = 0usize;
+    let mut total_samples = 0usize;
+    for (track_number, value) in audio_tracks.iter().enumerate() {
+        expect_schema(value, "Track.1")?;
+        if value.get("kind").and_then(Value::as_str) != Some("Audio") {
+            return Err(invalid_import(format!("track {} is not an audio track", track_number + 1)));
+        }
+        plain_composable(value)?;
+        if value.get("source_range").is_some_and(|v| !v.is_null()) {
+            return Err(invalid_import("track trims are not supported"));
+        }
+        let mut track = ImportedTrack {
+            name: value.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("OTIO Audio").to_owned(),
+            inactive: value.get("enabled").and_then(Value::as_bool) == Some(false),
+            clips: Vec::new(),
+            channels: 1,
+        };
+        let mut cursor = 0i64;
+        for child in children(value)? {
+            plain_composable(child)?;
+            match child.get("OTIO_SCHEMA").and_then(Value::as_str) {
+                Some("Gap.1") => {
+                    let (_, duration) = sample_range(child.get("source_range").ok_or_else(|| invalid_import("gap has no duration"))?, rate)?;
+                    if duration <= 0 {
+                        return Err(invalid_import("gap must have a positive duration"));
+                    }
+                    cursor = cursor
+                        .checked_add(duration)
+                        .filter(|v| *v <= MAX_EXACT_SAMPLE)
+                        .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
+                }
+                Some("Clip.1" | "Clip.2") => {
+                    reject_nontrivial_metadata(child)?;
+                    clip_count = clip_count.checked_add(1).filter(|n| *n <= MAX_CLIPS).ok_or_else(|| invalid_import("more than 100000 clips"))?;
+                    let range = child.get("source_range").ok_or_else(|| invalid_import("clip source trim is required"))?;
+                    let (offset, duration) = sample_range(range, rate)?;
+                    if duration <= 0 {
+                        return Err(invalid_import("clip must have a positive duration"));
+                    }
+                    let end = cursor
+                        .checked_add(duration)
+                        .filter(|v| *v <= MAX_EXACT_SAMPLE)
+                        .ok_or_else(|| invalid_import("timeline exceeds the sample limit"))?;
+                    let url = clip_media(child)?;
+                    let referenced = reference_path(url, document)?;
+                    let media = crate::io::checked_media_path(&referenced)?;
+                    let source = if let Some(&index) = source_index.get(&media) {
+                        index
+                    } else {
+                        if sources.len() >= MAX_SOURCES {
+                            return Err(invalid_import("more than 1024 unique audio sources"));
+                        }
+                        let bytes = crate::io::read_file_limited(&media, MAX_MEDIA_BYTES)?;
+                        total_bytes = total_bytes
+                            .checked_add(bytes.len())
+                            .filter(|n| *n <= MAX_TOTAL_MEDIA_BYTES)
+                            .ok_or_else(|| invalid_import("total media exceeds the 512 MiB limit"))?;
+                        let name = media.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("Audio").to_owned();
+                        let ext = media.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
+                        let probe = soundcraft_audio_io::probe(&bytes, ext.as_deref())
+                            .map_err(|err| EngineError::Io(format!("{}: {err}", media.display())))?;
+                        if probe.sample_rate == 0 || !(1..=8).contains(&probe.channels) || probe.frames == 0 {
+                            return Err(invalid_import("media has an invalid sample rate, channel count or duration"));
+                        }
+                        // Probe before allocating the decoded buffer, particularly for compressed
+                        // formats whose decoded size can dwarf their on-disk size.
+                        let estimated = u128::from(probe.frames)
+                            .saturating_mul(u128::from(probe.channels))
+                            .saturating_mul(u128::from(rate))
+                            .checked_div(u128::from(probe.sample_rate))
+                            .unwrap_or(u128::MAX);
+                        if estimated > (MAX_TOTAL_SAMPLES - total_samples) as u128 {
+                            return Err(invalid_import("decoded media exceeds the 64-million-sample limit"));
+                        }
+                        let (info, decoded) = soundcraft_audio_io::decode(&bytes, ext.as_deref())
+                            .map_err(|err| EngineError::Io(format!("{}: {err}", media.display())))?;
+                        let audio =
+                            crate::io::at_rate(decoded, rate, MAX_TOTAL_SAMPLES).ok_or_else(|| invalid_import("decoded media is too large"))?;
+                        let channels = audio.num_channels();
+                        if !(1..=8).contains(&channels) || audio.frames() == 0 {
+                            return Err(invalid_import("media has no audio or an unsupported channel count"));
+                        }
+                        let samples = channels.checked_mul(audio.frames()).ok_or_else(|| invalid_import("decoded media size overflows"))?;
+                        total_samples = total_samples
+                            .checked_add(samples)
+                            .filter(|n| *n <= MAX_TOTAL_SAMPLES)
+                            .ok_or_else(|| invalid_import("decoded media exceeds the 64-million-sample limit"))?;
+                        let index = sources.len();
+                        source_index.insert(media.clone(), index);
+                        sources.push(ImportedSource { path: media, name, audio, format: info.format });
+                        index
+                    };
+                    let src = &sources[source];
+                    let source_end = offset.checked_add(duration).ok_or_else(|| invalid_import("source trim overflows"))?;
+                    if source_end > i64::try_from(src.audio.frames()).unwrap_or(i64::MAX) {
+                        return Err(invalid_import(format!(
+                            "clip `{}` exceeds the available media duration",
+                            child.get("name").and_then(Value::as_str).unwrap_or("Audio")
+                        )));
+                    }
+                    track.channels = track.channels.max(src.audio.num_channels());
+                    track.clips.push(ImportedClip {
+                        name: child.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("Audio").to_owned(),
+                        source,
+                        offset,
+                        start: cursor,
+                        length: duration,
+                        muted: child.get("enabled").and_then(Value::as_bool) == Some(false),
+                    });
+                    cursor = end;
+                }
+                _ => return Err(invalid_import("only sequential audio clips and gaps are supported (no transitions or nested compositions)")),
+            }
+        }
+        tracks.push(track);
+    }
+    if clip_count == 0 {
+        return Err(invalid_import("timeline contains no audio clips"));
+    }
+
+    // Commit only after all parsing, path authorization, decoding and source-bound checks pass.
+    // Engine::execute captures the prior session for undo and also rolls back failed commands.
+    let source_count = sources.len();
+    let track_count = tracks.len();
+    let session = engine.session_mut();
+    let ids = sources.into_iter().map(|src| crate::io::add_source(session, &src.name, src.audio, src.path.to_str(), src.format)).collect::<Vec<_>>();
+    for track in tracks {
+        let id = session.add_track(TrackKind::Audio, ChannelFormat::for_channels(track.channels), Some(&track.name));
+        session.track_mut(id).ok_or_else(|| invalid_import("new track missing"))?.inactive = track.inactive;
+        for clip in track.clips {
+            let clip_id = session.new_clip_id();
+            let mut native = Clip::audio(clip_id, clip.name, ids[clip.source], clip.offset, clip.start, clip.length);
+            native.muted = clip.muted;
+            session.track_mut(id).and_then(|t| t.playlist_mut()).ok_or_else(|| invalid_import("new playlist missing"))?.clips.push(native);
+        }
+    }
+    Ok(Import { tracks: track_count, clips: clip_count, sources: source_count })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundcraft_audio_io::FileFormat;
+    use soundcraft_audio_io::{EncodeOptions, FileFormat};
     use soundcraft_model::{ChannelFormat, Clip, SourceId, TrackKind};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -232,6 +572,22 @@ mod tests {
         let cid = s.new_clip_id();
         s.track_mut(second).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(cid, "Take B", id, 96_000, 0, 48_000));
         (s, media)
+    }
+
+    /// The exporter only needs a source path; import tests require an actual decodable WAV.
+    fn decodable_fixture() -> (Session, PathBuf) {
+        let (session, media) = fixture();
+        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.125; 480_000]] };
+        let wav = soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap();
+        std::fs::write(&media, wav).unwrap();
+        (session, media)
+    }
+
+    fn write_interchange(session: &Session, media: &Path) -> PathBuf {
+        let document = media.with_extension("otio");
+        let output = export_audio(session).unwrap();
+        std::fs::write(&document, &output.json).unwrap();
+        document
     }
 
     #[test]
@@ -320,6 +676,140 @@ mod tests {
         );
         engine.execute("file.export_otio", &json!({"path": path_str, "replace": true})).unwrap();
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn import_export_roundtrip_keeps_two_tracks_gaps_trims_and_undo() {
+        let (session, media) = decodable_fixture();
+        let document = write_interchange(&session, &media);
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let result = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        let imported = &engine.session().tracks;
+        let percussion = imported.iter().find(|t| t.name == "Percussion").unwrap();
+        let first = &percussion.clips()[0];
+        assert_eq!((first.start, first.length), (48_000, 96_000));
+        assert!(matches!(&first.content, ClipContent::Audio { offset: 12_000, .. }));
+        let overdub = imported.iter().find(|t| t.name == "Overdub").unwrap();
+        let second = &overdub.clips()[0];
+        assert_eq!((second.start, second.length), (0, 48_000));
+        assert!(matches!(&second.content, ClipContent::Audio { offset: 96_000, .. }));
+        assert_eq!(engine.session().sources.len(), 1, "a reused media reference must decode only once");
+        assert!(engine.can_undo());
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn accepts_official_clip_two_media_references_and_muted_audio() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut value: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let clips = value["tracks"]["children"][0]["children"].as_array_mut().unwrap();
+        let first = clips.last_mut().unwrap();
+        let media_reference = first.as_object_mut().unwrap().remove("media_reference").unwrap();
+        first["OTIO_SCHEMA"] = json!("Clip.2");
+        first["media_references"] = json!({"DEFAULT_MEDIA": media_reference});
+        first["active_media_reference_key"] = json!("DEFAULT_MEDIA");
+        first["enabled"] = json!(false);
+        value["tracks"]["children"][0]["enabled"] = json!(false);
+        std::fs::write(&document, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut engine = Engine::default();
+        let result = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_clips"], 2);
+        let percussion = engine.session().tracks.iter().find(|t| t.name == "Percussion").unwrap();
+        assert!(percussion.inactive);
+        assert!(percussion.clips()[0].muted);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_second_clip_without_adding_first_clip_or_source() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut value: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        value["tracks"]["children"][1]["children"][0]["media_reference"]["target_url"] = json!("https://invalid.example/audio.wav");
+        std::fs::write(&document, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+        assert!(format!("{error}").contains("only local file URLs"));
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn rejects_non_audio_tracks_nested_compositions_and_unrendered_processing() {
+        let (session, media) = decodable_fixture();
+        let export = export_audio(&session).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let mut value: Value = serde_json::from_slice(&export.json).unwrap();
+        value["tracks"]["children"][0]["kind"] = json!("Video");
+        assert!(import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["tracks"]["children"][0]["kind"] = json!("Audio");
+        value["tracks"]["children"][0]["children"][1]["OTIO_SCHEMA"] = json!("Transition.1");
+        assert!(import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&value).unwrap()).is_err());
+        value["tracks"]["children"][0]["children"][1]["OTIO_SCHEMA"] = json!("Clip.1");
+        value["tracks"]["children"][0]["children"][1]["metadata"]["soundcraft"]["gain_db"] = json!(6.0);
+        assert!(import_audio(&mut engine, &media.with_extension("otio"), &serde_json::to_vec(&value).unwrap()).is_err());
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn rejects_traversal_and_outside_automation_root_before_reading_media() {
+        let (session, media) = decodable_fixture();
+        let document = write_interchange(&session, &media);
+        let mut value: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        value["tracks"]["children"][0]["children"][1]["media_reference"]["target_url"] = json!("../drums%20%231.wav");
+        let mut engine = Engine::default();
+        assert!(
+            matches!(import_audio(&mut engine, &document, &serde_json::to_vec(&value).unwrap()), Err(EngineError::Unsupported(message)) if message.contains("traversal"))
+        );
+        // The document lives inside the allowed root; the audio does not.
+        let allowed = media.parent().unwrap().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let allowed_document = allowed.join("import.otio");
+        std::fs::copy(&document, &allowed_document).unwrap();
+        let roots = crate::file_access::AutomationRoots::new(&[allowed.as_path()], &[]).unwrap().unwrap();
+        let error =
+            crate::file_access::confine(Some(&roots), || engine.execute("file.import_otio", &json!({"path": allowed_document.to_str().unwrap()})));
+        assert!(matches!(error, Err(EngineError::Io(message)) if message.contains("outside the read root")));
+        assert!(engine.session().sources.is_empty());
+        std::fs::remove_file(allowed_document).unwrap();
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn bounded_json_missing_media_and_inexact_times_fail_closed() {
+        let (session, media) = decodable_fixture();
+        let document = write_interchange(&session, &media);
+        let mut engine = Engine::default();
+        std::fs::write(&document, vec![b' '; MAX_OTIO_BYTES + 1]).unwrap();
+        let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+        assert!(format!("{error}").contains("import limit"));
+        assert_eq!(engine.session().tracks.len(), Engine::default().session().tracks.len());
+
+        let mut value: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        value["tracks"]["children"][0]["children"][1]["source_range"]["duration"]["value"] = json!(1_000_000_000.0);
+        assert!(import_audio(&mut engine, &document, &serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(reference_path("file://remote/share.wav", &document).is_err());
+        assert!(reference_path("./%2E%2E/file.wav", &document).is_err());
+        assert!(reference_path("%2E%2E/file.wav", &document).is_err());
+        assert!(reference_path("file:///tmp/a%ZZ.wav", &document).is_err());
+        assert_eq!(time_samples(&json!({"OTIO_SCHEMA": "RationalTime.1", "value": 441.0, "rate": 44100.0}), 48_000).unwrap(), 480);
+        std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
 }
