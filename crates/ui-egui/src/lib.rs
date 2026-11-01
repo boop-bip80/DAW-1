@@ -346,6 +346,12 @@ fn prefer_recording_capture_notice(capture: Option<String>, monitor: Option<Stri
     }
 }
 
+/// A missing native Player uses the existing input-device preflight. With a Player,
+/// both WAV capture and MIDI device timestamps require a 1× transport sample clock.
+fn recording_at_full_speed(player: Option<&Player>) -> bool {
+    player.is_none_or(|player| player.speed() == 1.0)
+}
+
 pub struct SoundApp {
     pub engine: Engine,
     /// The session path as of the last frame, and whether the recent list changed since the host
@@ -969,10 +975,6 @@ impl SoundApp {
     }
 
     fn start_recording(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if !self.midi_thru_ready_for_transport("Record") {
-            return;
-        }
         let armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm);
         if !armed {
             let why = if self.engine.session().tracks.is_empty() {
@@ -993,6 +995,17 @@ impl SoundApp {
         let midi_armed = self.engine.session().tracks.iter().filter(|t| t.mixer.record_arm && t.kind.is_midi() && !t.inactive).count();
         if !audio_armed && midi_armed == 0 {
             self.ui.status = "Record-enable an active audio, MIDI or instrument track first.".into();
+            return;
+        }
+        // WAV input is captured in device time, and MIDI input timestamps are mapped to
+        // session samples at 1×. A variable-speed transport misaligns either take.
+        // Reject before opening MIDI/audio input or creating any WAV file.
+        if !recording_at_full_speed(self.player.as_ref()) {
+            self.ui.status = "Recording requires 1× playback speed. Stop variable-speed playback before recording; no take was started.".into();
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.midi_thru_ready_for_transport("Record") {
             return;
         }
         if midi_armed > 64 {
@@ -1807,10 +1820,14 @@ impl SoundApp {
                     self.start_play(sel.start, Some(sel.end.max(sel.start + 1)), None);
                 }
                 TransportRequest::HalfSpeed => {
-                    if let Some(p) = &self.player {
-                        p.set_speed(0.5);
+                    if self.engine.transport.recording {
+                        self.ui.status = "Half-speed playback cannot start during recording. Stop Record before changing transport speed; this take was left unchanged.".into();
+                    } else {
+                        if let Some(p) = &self.player {
+                            p.set_speed(0.5);
+                        }
+                        self.play_from_selection();
                     }
-                    self.play_from_selection();
                 }
                 TransportRequest::Scrub(at) => {
                     #[cfg(not(target_arch = "wasm32"))]
@@ -3099,6 +3116,94 @@ mod tests {
         assert!(maximizes(2400.0, 1));
         assert!(!maximizes(1600.0, 1));
         assert!(!maximizes(2400.0, 2));
+    }
+
+    /// No physical input is opened: a live Player can be running at half-speed, but
+    /// its sample-time recording plan must never arm an incorrectly aligned WAV.
+    #[test]
+    fn audio_record_request_at_half_speed_never_opens_an_input_or_creates_a_take() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        use soundcraft_playback::Player;
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        engine.session_mut().track_mut(track).unwrap().mixer.record_arm = true;
+        engine.mark_clean();
+        let player = Player::new(engine.session_arc());
+        assert!(super::recording_at_full_speed(Some(&player)));
+        assert!(super::recording_at_full_speed(None), "missing output keeps the established input preflight");
+        player.set_speed(0.5);
+        assert!(!super::recording_at_full_speed(Some(&player)));
+        let mut app = SoundApp::new(engine, Some(player), Services::default());
+
+        app.start_recording();
+
+        assert!(app.ui.status.contains("requires 1× playback speed"), "{}", app.ui.status);
+        assert!(app.recorder.is_none(), "the input device must not open on an invalid-speed request");
+        assert!(app.take_plan.is_none(), "no WAV path or take may be planned");
+        assert!(!app.engine.transport.recording && !app.is_playing());
+        assert_eq!(app.player.as_ref().map(Player::speed), Some(0.5));
+        assert!(app.engine.session().track(track).unwrap().mixer.record_arm);
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+
+        // The gate only excludes out-of-time capture, not ordinary 1× recording.
+        let player = app.player.as_ref().unwrap();
+        player.set_speed(1.0);
+        assert!(super::recording_at_full_speed(Some(player)));
+        player.set_speed(1.5);
+        assert!(!super::recording_at_full_speed(Some(player)));
+    }
+
+    /// MIDI callback timestamps advance in physical microseconds, whereas a half-speed
+    /// Player advances only half as many session samples. An armed MIDI-only take must
+    /// be refused before opening even a selected MIDI hardware input port.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn midi_only_record_at_half_speed_is_refused_before_input_startup() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        use soundcraft_playback::Player;
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let track = engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Mono, None);
+        engine.session_mut().track_mut(track).unwrap().mixer.record_arm = true;
+        engine.mark_clean();
+        let player = Player::new(engine.session_arc());
+        player.set_speed(0.5);
+        let mut app = SoundApp::new(engine, Some(player), Services::default());
+
+        app.start_recording();
+
+        assert!(app.ui.status.contains("Recording requires 1× playback speed"), "{}", app.ui.status);
+        assert!(app.midi_capture.is_none(), "no MIDI input port may open");
+        assert!(app.recorder.is_none() && app.take_plan.is_none());
+        assert!(!app.engine.transport.recording && !app.is_playing());
+        assert_eq!(app.player.as_ref().map(Player::speed), Some(0.5));
+        assert!(app.engine.session().track(track).unwrap().mixer.record_arm);
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+    }
+
+    /// A request arriving while Record is active must not restart/reposition the
+    /// transport or change playback speed, even with no input device in the test.
+    #[test]
+    fn half_speed_transport_request_during_record_is_rejected_without_stopping_the_take() {
+        use soundcraft_playback::Player;
+
+        let engine = soundcraft_engine::Engine::default();
+        let player = Player::new(engine.session_arc());
+        let mut app = SoundApp::new(engine, Some(player), Services::default());
+        app.engine.transport.recording = true;
+        app.engine.transport.position = 12_345;
+        app.engine.execute("transport.half_speed", &json!({})).unwrap();
+
+        app.handle_transport(1.0 / 60.0);
+
+        assert!(app.engine.transport.recording, "an invalid speed request cannot stop Record");
+        assert!(!app.is_playing() && app.sim.is_none(), "it cannot start unrelated playback");
+        assert_eq!(app.engine.transport.position, 12_345, "it cannot seek a running take");
+        assert_eq!(app.player.as_ref().map(Player::speed), Some(1.0));
+        assert!(app.ui.status.contains("cannot start during recording"), "{}", app.ui.status);
+        assert!(app.recorder.is_none() && app.take_plan.is_none());
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
     }
 
     #[test]
