@@ -36,11 +36,14 @@ use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, SyncSender, channel, sync_channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 const BLOCK: usize = 512;
+const PARK_PENDING: u8 = 0;
+const PARKED: u8 = 1;
+const PARK_REJECTED: u8 = 2;
 
 /// Room for replaced snapshots on their way back; `update_session` empties it before each send.
 const OLD_SESSIONS: usize = 16;
@@ -104,9 +107,53 @@ pub type PluginStates = Vec<(TrackId, usize, Vec<u8>)>;
 /// A parameter edit made in a plugin's own editor: `(track, slot, param id, value)`.
 pub type EditorEdit = (TrackId, usize, String, f32);
 
+/// Atomic acknowledgment of a requested audio-thread plugin park. A park only suspends
+/// processing; it does not transfer ownership or perform CLAP main-thread reactivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginParkStatus {
+    Pending,
+    Parked,
+    Rejected,
+}
+
+/// A temporary, non-Send UI/control-thread lease on an audio-thread park. Dropping this
+/// ticket always schedules a token-checked audio-thread resume, including if the acknowledgment
+/// has not arrived yet. The token never refers to a serializable session ID.
+pub struct PluginParkTicket {
+    ack: Arc<AtomicU8>,
+    tx: Sender<Cmd>,
+    track: TrackId,
+    slot: usize,
+    token: u64,
+    // The ticket must not be dropped in an audio callback (Drop sends a control command).
+    _control_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl PluginParkTicket {
+    /// Nonblocking; Pending also covers a stopped device that has not delivered a callback.
+    pub fn status(&self) -> PluginParkStatus {
+        match self.ack.load(Ordering::Acquire) {
+            PARKED => PluginParkStatus::Parked,
+            PARK_REJECTED => PluginParkStatus::Rejected,
+            _ => PluginParkStatus::Pending,
+        }
+    }
+}
+
+impl Drop for PluginParkTicket {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Cmd::ResumeRestart { track: self.track, slot: self.slot, token: self.token });
+    }
+}
+
 enum Cmd {
     /// A new snapshot plus the third-party instances it needs (created on the UI thread).
     Session(Arc<Session>, Vec<PreparedInstance>),
+    /// Nonautomatic restart prerequisite: stop exactly this live instance on the audio thread,
+    /// leave ownership in the mix and publish a lock-free acknowledgment.
+    ParkRestart { track: TrackId, slot: usize, token: u64, ack: Arc<AtomicU8> },
+    /// Cancellation/RAII release of a park; stale tokens never revive a replacement instance.
+    ResumeRestart { track: TrackId, slot: usize, token: u64 },
     /// Where the callback sends the snapshots it replaces (freeing one takes thousands of frees).
     OldSessions(SyncSender<Arc<Session>>),
     Input(Arc<record::InputRing>),
@@ -347,6 +394,24 @@ impl AudioState {
                         let _ = tx.try_send(old);
                     }
                 }
+                Cmd::ParkRestart { track, slot, token, ack } => {
+                    // If an earlier command changed the session, adopt its slots first; do not
+                    // acknowledge a request against an instance that has already been replaced.
+                    if changed {
+                        self.mix.ensure_synced(&self.session);
+                        changed = false;
+                    }
+                    let parked = self.mix.park_external_for_restart(track, slot, token);
+                    ack.store(if parked { PARKED } else { PARK_REJECTED }, Ordering::Release);
+                }
+                Cmd::ResumeRestart { track, slot, token } => {
+                    if changed {
+                        self.mix.ensure_synced(&self.session);
+                        changed = false;
+                    }
+                    // Native start_processing is deferred to the next render block.
+                    let _ = self.mix.resume_external_for_restart(track, slot, token);
+                }
                 Cmd::OldSessions(tx) => self.old_sessions = Some(tx),
                 Cmd::Play { from, end, looped } => {
                     self.pos = from;
@@ -569,6 +634,8 @@ struct Side {
     states: BTreeMap<(TrackId, usize), Box<dyn PluginStateReader>>,
     /// Atomically observed restart requests of live instances, even with no editor/state extension.
     restarts: BTreeMap<(TrackId, usize), Box<dyn PluginRestartReader>>,
+    /// One in-flight UI lease per slot; weak references do not keep abandoned tickets alive.
+    park_tickets: HashMap<(TrackId, usize), Weak<AtomicU8>>,
     /// Instances that refused their stored state: saves keep that state until the plugin's editor
     /// is opened.
     refused: HashSet<(TrackId, usize)>,
@@ -586,6 +653,7 @@ impl Side {
             editors: HashMap::new(),
             states: BTreeMap::new(),
             restarts: BTreeMap::new(),
+            park_tickets: HashMap::new(),
             refused: HashSet::new(),
             garbage,
             old_sessions: None,
@@ -625,6 +693,7 @@ impl Side {
         self.shadow.remove(&key);
         self.states.remove(&key);
         self.restarts.remove(&key);
+        self.park_tickets.remove(&key);
         self.refused.remove(&key);
         if let Some(mut e) = self.editors.remove(&key) {
             e.close();
@@ -902,6 +971,33 @@ impl Player {
     /// repeatable and does not yet stop, deactivate or reactivate the native instance.
     pub fn pending_plugin_restarts(&self) -> Vec<(TrackId, usize)> {
         self.side().pending_restarts()
+    }
+
+    /// Explicitly request an audio-thread stop for a currently signaling restartable plugin.
+    /// This is a *park/ACK only*: the live native instance stays in the mixer, not on the UI
+    /// thread, and no deactivate/activate or state handoff occurs. Poll the returned ticket.
+    /// Dropping it sends a separate audio-thread resume; duplicate in-flight parks are refused.
+    pub fn park_plugin_for_restart(&self, track: TrackId, slot: usize) -> Option<PluginParkTicket> {
+        let key = (track, slot);
+        let ack = Arc::new(AtomicU8::new(PARK_PENDING));
+        let token = {
+            let mut side = self.side();
+            if side.park_tickets.get(&key).is_some_and(|prior| prior.upgrade().is_some()) {
+                return None;
+            }
+            let reader = side.restarts.get(&key)?;
+            if !reader.requested() {
+                return None;
+            }
+            let token = reader.instance_token().filter(|&token| token != 0)?;
+            side.park_tickets.insert(key, Arc::downgrade(&ack));
+            token
+        };
+        if self.tx.send(Cmd::ParkRestart { track, slot, token, ack: Arc::clone(&ack) }).is_err() {
+            self.side().park_tickets.remove(&key);
+            return None;
+        }
+        Some(PluginParkTicket { ack, tx: self.tx.clone(), track, slot, token, _control_thread: std::marker::PhantomData })
     }
 
     /// Per-UI-frame housekeeping: drops retired instances and services plugin editors. Returns
@@ -1323,6 +1419,7 @@ fn pick_output_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     /// Exercise the real Player control API without opening an audio device or
     /// starting a silent-clock thread. The queued commands can be delivered to
@@ -1366,32 +1463,66 @@ mod tests {
         audiosuite: false,
     };
 
-    struct RestartFlag(Arc<AtomicBool>);
+    struct RestartFlag {
+        pending: Arc<AtomicBool>,
+        token: u64,
+    }
 
     impl PluginRestartReader for RestartFlag {
         fn requested(&self) -> bool {
-            self.0.load(Ordering::Acquire)
+            self.pending.load(Ordering::Acquire)
+        }
+        fn instance_token(&self) -> Option<u64> {
+            (self.token != 0).then_some(self.token)
         }
     }
 
     /// An instance with a restart notification but no editor and no state extension.
-    struct RestartProbe(Arc<AtomicBool>);
+    struct RestartProbe {
+        pending: Arc<AtomicBool>,
+        token: u64,
+        stopped: Arc<AtomicUsize>,
+        processed: Arc<AtomicUsize>,
+        reset_calls: Arc<AtomicUsize>,
+    }
+
+    impl RestartProbe {
+        fn new(pending: Arc<AtomicBool>, token: u64) -> Self {
+            Self {
+                pending,
+                token,
+                stopped: Arc::new(AtomicUsize::new(0)),
+                processed: Arc::new(AtomicUsize::new(0)),
+                reset_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
 
     impl Plugin for RestartProbe {
         fn info(&self) -> &'static soundcraft_dsp::PluginInfo {
             &RESTART_TEST_INFO
         }
         fn prepare(&mut self, _rate: f32, _block: usize, _channels: usize) {}
-        fn reset(&mut self) {}
+        fn reset(&mut self) {
+            self.reset_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        fn suspend(&mut self) {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
+        fn restart_instance_token(&self) -> Option<u64> {
+            (self.token != 0).then_some(self.token)
+        }
         fn set_param(&mut self, _id: &str, _value: f32) -> bool {
             false
         }
         fn param(&self, _id: &str) -> Option<f32> {
             None
         }
-        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+        fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {
+            self.processed.fetch_add(1, Ordering::SeqCst);
+        }
         fn restart_reader(&mut self) -> Option<Box<dyn PluginRestartReader>> {
-            Some(Box::new(RestartFlag(Arc::clone(&self.0))))
+            Some(Box::new(RestartFlag { pending: Arc::clone(&self.pending), token: self.token }))
         }
     }
 
@@ -1400,8 +1531,8 @@ mod tests {
         let (player, _commands) = observer_test_player();
         let (late, early) = ((TrackId(20), 0), (TrackId(4), 1));
         let (late_flag, early_flag) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let mut a = RestartProbe(Arc::clone(&late_flag));
-        let mut b = RestartProbe(Arc::clone(&early_flag));
+        let mut a = RestartProbe::new(Arc::clone(&late_flag), 0);
+        let mut b = RestartProbe::new(Arc::clone(&early_flag), 0);
         assert!(a.editor().is_none());
         assert!(a.state_reader().is_none());
         assert!(b.editor().is_none());
@@ -1426,7 +1557,7 @@ mod tests {
         let (player, _commands) = observer_test_player();
         let key = (TrackId(3), 2);
         let (old, current) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
-        let mut first = RestartProbe(Arc::clone(&old));
+        let mut first = RestartProbe::new(Arc::clone(&old), 0);
         {
             let mut side = player.side();
             side.remember_handles(key, &mut first);
@@ -1435,7 +1566,7 @@ mod tests {
 
         // Mirrors Side::prepare: detach all handles for the previous instance before adopting
         // the replacement. Its Arc remains alive and may still be signaling on another thread.
-        let mut second = RestartProbe(Arc::clone(&current));
+        let mut second = RestartProbe::new(Arc::clone(&current), 0);
         {
             let mut side = player.side();
             side.forget(key);
@@ -1446,6 +1577,92 @@ mod tests {
         assert_eq!(player.pending_plugin_restarts(), vec![key]);
         player.side().forget(key);
         assert!(player.pending_plugin_restarts().is_empty(), "removing a slot removes its request handle too");
+    }
+
+    #[test]
+    fn audio_callback_parks_exact_restart_instance_and_ticket_resumes_without_losing_state() {
+        use soundcraft_model::{ChannelFormat, Insert, TrackKind};
+        let (player, commands) = observer_test_player();
+        let (garbage_tx, _garbage_rx) = channel();
+        let mut audio = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, garbage_tx);
+        let mut session = Session::default();
+        let track = session.add_track(TrackKind::Audio, ChannelFormat::Stereo, None);
+        session.track_mut(track).unwrap().mixer.inserts[0] = Some(Insert::new("clap:test.park"));
+        let session = Arc::new(session);
+        let (key, flag) = ((track, 0), Arc::new(AtomicBool::new(true)));
+        let mut probe = RestartProbe::new(Arc::clone(&flag), 71);
+        let stopped = Arc::clone(&probe.stopped);
+        let processed = Arc::clone(&probe.processed);
+        let resets = Arc::clone(&probe.reset_calls);
+        player.side().remember_handles(key, &mut probe);
+        player
+            .tx
+            .send(Cmd::Session(
+                Arc::clone(&session),
+                vec![PreparedInstance { track, slot: 0, id: "clap:test.park".into(), ch: 2, plugin: Box::new(probe) }],
+            ))
+            .unwrap();
+        player.play(0, None, None);
+        audio.drain();
+        audio.render_next(16);
+        let baseline = processed.load(Ordering::SeqCst);
+        assert!(baseline > 0, "fake plugin must receive actual mix processing before park");
+
+        let ticket = player.park_plugin_for_restart(track, 0).unwrap();
+        assert_eq!(ticket.status(), PluginParkStatus::Pending);
+        assert!(player.park_plugin_for_restart(track, 0).is_none(), "only one live ticket per slot");
+        audio.drain();
+        assert_eq!(ticket.status(), PluginParkStatus::Parked);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        audio.render_next(16);
+        assert_eq!(processed.load(Ordering::SeqCst), baseline, "parked plugin must not be called again");
+
+        let before_stop_reset = resets.load(Ordering::SeqCst);
+        player.stop();
+        audio.drain();
+        assert_eq!(resets.load(Ordering::SeqCst), before_stop_reset, "stopping transport cannot call parked native plugin");
+
+        drop(ticket); // Drop enqueues an identity-checked resume; no native call on the UI.
+        audio.drain();
+        player.play(0, None, None);
+        audio.drain();
+        audio.render_next(16);
+        assert!(processed.load(Ordering::SeqCst) > baseline, "audio-thread processing resumes with the same instance");
+
+        // Abandoning a ticket before an ACK queues Park then Resume on the same sender, so no
+        // permanently parked instance remains, even if the UI frame never polls the status.
+        let abandoned = player.park_plugin_for_restart(track, 0).unwrap();
+        drop(abandoned);
+        audio.drain();
+        let after_cancel = processed.load(Ordering::SeqCst);
+        audio.render_next(16);
+        assert!(processed.load(Ordering::SeqCst) > after_cancel, "abandoned ticket must not strand processing");
+        assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stale_or_unavailable_park_requests_fail_closed_without_touching_native_plugins() {
+        let (player, commands) = observer_test_player();
+        let key = (TrackId(77), 3);
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut probe = RestartProbe::new(Arc::clone(&flag), 91);
+        player.side().remember_handles(key, &mut probe);
+        let (garbage_tx, _garbage_rx) = channel();
+        let mut audio = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, garbage_tx);
+        let ticket = player.park_plugin_for_restart(key.0, key.1).unwrap();
+        audio.drain(); // The synthetic audio engine never adopted this slot.
+        assert_eq!(ticket.status(), PluginParkStatus::Rejected);
+        assert_eq!(probe.stopped.load(Ordering::SeqCst), 0);
+        drop(ticket);
+        audio.drain();
+        assert_eq!(probe.stopped.load(Ordering::SeqCst), 0);
+
+        let (player, commands) = observer_test_player();
+        let mut probe = RestartProbe::new(Arc::new(AtomicBool::new(true)), 92);
+        player.side().remember_handles(key, &mut probe);
+        drop(commands); // No audio/control receiver: no pending ACK may be advertised.
+        assert!(player.park_plugin_for_restart(key.0, key.1).is_none());
+        assert!(player.side().park_tickets.is_empty(), "send failure rolls back the UI ticket reservation");
     }
 
     #[test]
