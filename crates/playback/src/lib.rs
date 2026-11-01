@@ -898,6 +898,7 @@ impl Player {
                             watch: Mutex::new(None),
                             tx,
                             side: new_side(grx),
+                            #[cfg(not(target_arch = "wasm32"))]
                             silent_clock: None,
                             _stream: Some(stream),
                             device_name: name,
