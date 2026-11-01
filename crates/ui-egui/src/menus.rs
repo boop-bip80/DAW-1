@@ -84,6 +84,7 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     v.push((EDL_IMPORT_MENU, "file.import_edl"));
     v.push((EDL_EXPORT_MENU, "file.export_edl"));
     v.push((OTIO_IMPORT_MENU, "file.import_otio"));
+    v.push((OTIOZ_IMPORT_MENU, "file.import_otioz"));
     v.push((OTIO_EXPORT_MENU, "file.export_otio"));
     v.push((OTIOZ_EXPORT_MENU, "file.export_otioz"));
     v.extend(mix_view_aliases().iter().copied());
@@ -96,6 +97,7 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
 const EDL_IMPORT_MENU: &str = "File > Import > CMX3600 Audio EDL...";
 const EDL_EXPORT_MENU: &str = "File > Export > CMX3600 Audio EDL...";
 const OTIO_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Audio...";
+const OTIOZ_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Bundle…";
 const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
 const OTIOZ_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Bundle…";
 
@@ -221,6 +223,7 @@ pub fn tree() -> Vec<MenuNode> {
     insert_path(&mut roots, EDL_IMPORT_MENU);
     insert_path(&mut roots, EDL_EXPORT_MENU);
     insert_path(&mut roots, OTIO_IMPORT_MENU);
+    insert_path(&mut roots, OTIOZ_IMPORT_MENU);
     insert_path(&mut roots, OTIO_EXPORT_MENU);
     insert_path(&mut roots, OTIOZ_EXPORT_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
@@ -789,6 +792,23 @@ mod tests {
                 && path.ends_with(".otioz")
                 && key == "path"));
         assert!(!app.engine.is_dirty(), "opening an export dialog is not a session edit");
+        assert!(!app.engine.can_undo());
+    }
+
+    #[test]
+    fn portable_otio_bundle_import_is_reachable_and_opens_a_file_prompt() {
+        let file = tree().into_iter().find(|node| node.label == "File").unwrap();
+        let import = file.children.iter().find(|node| node.label == "Import").unwrap();
+        let bundle = import.children.iter().find(|node| node.path == OTIOZ_IMPORT_MENU).unwrap();
+        assert_eq!(bundle.label, "OpenTimelineIO Bundle…");
+        let command = command_for_path(&bundle.path, &ui_aliases()).unwrap();
+        assert_eq!(command, "file.import_otioz");
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        invoke_menu(&mut app, &command, &bundle.path);
+        assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, title, key, .. })
+            if cmd == "file.import_otioz" && title.contains("OpenTimelineIO Bundle") && key == "path"));
+        assert!(!app.engine.is_dirty(), "choosing a bundle to import has not edited the session");
         assert!(!app.engine.can_undo());
     }
 

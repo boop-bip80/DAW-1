@@ -202,6 +202,9 @@ impl Dialogs {
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
             "file.import_edl" => Dialog::PathPrompt { cmd: id.into(), title: "Import CMX3600 Audio EDL".into(), path: home, key: "path".into() },
             "file.import_otio" => Dialog::PathPrompt { cmd: id.into(), title: "Import OpenTimelineIO Audio".into(), path: home, key: "path".into() },
+            "file.import_otioz" => {
+                Dialog::PathPrompt { cmd: id.into(), title: "Import OpenTimelineIO Bundle".into(), path: home, key: "path".into() }
+            }
             "session.open" => Dialog::PathPrompt { cmd: id.into(), title: "Open Session".into(), path: home, key: "path".into() },
             "session.save" if e.path.is_some() => return false,
             "session.save" | "session.save_as" | "session.save_copy" => Dialog::PathPrompt {
@@ -586,7 +589,11 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
                 Dialog::PathPrompt { cmd, path, key, .. } => {
-                    let label = if cmd == "file.export_otioz" { "OpenTimelineIO bundle path (.otioz)" } else { "Path" };
+                    let label = match cmd.as_str() {
+                        "file.export_otioz" => "OpenTimelineIO bundle path (.otioz)",
+                        "file.import_otioz" => "OpenTimelineIO bundle to import (.otioz)",
+                        _ => "Path",
+                    };
                     crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), label);
                     if let Some(pick) = &app.services.pick_open
                         && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_otioz" | "file.export_edl")
@@ -1238,6 +1245,31 @@ mod tests {
         assert!(matches!(&harness.state().dialogs.open, Some(Dialog::PathPrompt { cmd, path, .. })
             if cmd == "file.export_otioz" && path == "/tmp/portable-timeline.otioz"));
         assert!(!harness.state().engine.is_dirty(), "picking an export filename is not a session edit");
+    }
+
+    #[test]
+    fn otioz_import_dialog_has_an_accessible_filename_and_uses_the_open_picker() {
+        let services = crate::Services {
+            pick_open: Some(Box::new(|purpose, extensions| {
+                assert_eq!(purpose, "file.import_otioz");
+                assert!(extensions.is_empty(), "native picker uses its purpose-specific filter");
+                Some("/tmp/from-other-daw.otioz".into())
+            })),
+            ..Default::default()
+        };
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, services);
+        assert!(app.dialogs.open_for_command(&app.engine, "file.import_otioz"));
+        let mut harness = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(1000.0, 700.0))
+            .build_ui_state(|ui, app: &mut SoundApp| show(app, ui.ctx()), app);
+        harness.run_steps(3);
+        assert!(harness.get_by_label("OpenTimelineIO bundle to import (.otioz)").rect().width() > 0.0);
+        harness.get_by_label("Browse…").click();
+        harness.run_steps(2);
+        assert!(matches!(&harness.state().dialogs.open, Some(Dialog::PathPrompt { cmd, path, .. })
+            if cmd == "file.import_otioz" && path == "/tmp/from-other-daw.otioz"));
+        assert!(!harness.state().engine.is_dirty(), "selecting an import path must not import until OK");
     }
 
     #[test]
