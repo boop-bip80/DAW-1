@@ -1738,12 +1738,16 @@ fn back_up(file: &Path) -> Result<Option<PreparedBackup>> {
         return Ok(None);
     };
     let backups = dir.join("Backups");
+    // The parent itself must be authorized before inspecting its child with
+    // symlink_metadata; checking Backups first would follow an out-of-root link
+    // and quietly skip the backup instead of refusing an unsafe directory.
+    let checked_dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    crate::file_access::check_write(checked_dir).map_err(EngineError::Io)?;
+    check_backup_dir_before_create(&backups)?;
     if let Err(err) = crate::file_access::check_write(&backups) {
         log::warn!("no backup of {}: {err}", file.display());
         return Ok(None);
     }
-    // Do not follow a pre-existing symlink or file named Backups into another folder.
-    check_backup_dir_before_create(&backups)?;
     if let Err(err) = std::fs::create_dir_all(&backups) {
         log::warn!("no backup of {}: {err}", file.display());
         return Ok(None);
@@ -2980,6 +2984,16 @@ mod save_tests {
             for (candidate, bytes) in outside_backups {
                 assert_eq!(std::fs::read(candidate).unwrap(), bytes, "must not prune an unrelated directory");
             }
+            // A confined command must still report this unsafe child rather than
+            // silently skipping backups after write-root resolution follows the link.
+            let roots = crate::file_access::AutomationRoots::new(&[project.as_path()], &[project.as_path()]).unwrap().unwrap();
+            crate::file_access::confine(Some(&roots), || {
+                let err = e.execute("session.save", &json!({})).unwrap_err();
+                assert!(err.to_string().contains("Backups"), "{err}");
+            });
+            assert_eq!(std::fs::read(&file).unwrap(), committed);
+            assert!(e.is_dirty());
+            assert!(!outside.join("Song backup 11.scraft").exists());
             std::fs::remove_file(&backups).unwrap();
         }
 
