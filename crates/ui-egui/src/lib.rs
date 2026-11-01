@@ -42,7 +42,11 @@ use serde_json::{Value, json};
 use soundcraft_engine::{Engine, TransportRequest};
 use soundcraft_model::{TrackId, TrackKind};
 #[cfg(not(target_arch = "wasm32"))]
+use soundcraft_playback::midi_live_thru::MidiThruPhase;
+#[cfg(not(target_arch = "wasm32"))]
 use soundcraft_playback::midi_out_runtime::{MidiOutputRuntime, MidiOutputRuntimePhase, MidiOutputRuntimeStatus};
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_playback::midi_thru_runtime::MidiThruRuntimeStatus;
 use soundcraft_playback::record::Trouble;
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
@@ -500,6 +504,19 @@ fn automation_step_due(pos: Samples, last: Samples, step: Samples) -> bool {
     last == i64::MIN || pos.saturating_sub(last) >= step || last.saturating_sub(pos) >= step
 }
 
+/// Pure safety gate, tested with synthetic runtime snapshots so UI tests never
+/// need to discover or open physical MIDI ports. A panic failure is not an ACK.
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_thru_transport_block(status: &MidiThruRuntimeStatus) -> Option<&'static str> {
+    if status.phase == MidiThruPhase::Failed {
+        Some("MIDI thru cleanup failed; disable external MIDI transmission and inspect the synth before retrying.")
+    } else if status.enabled || status.cleanup_pending || status.phase == MidiThruPhase::CleaningUp {
+        Some("MIDI thru is releasing notes; wait for output-worker acknowledgment before retrying.")
+    } else {
+        None
+    }
+}
+
 impl SoundApp {
     /// Build an app around an engine and optional player, initialising UI, recording, autosave, control and
     /// synthetic-input state.
@@ -744,12 +761,67 @@ impl SoundApp {
         }
     }
 
+    /// Second, independent MIDI hardware permission. A saved input/output
+    /// route and even an already enabled external *playback* connection never
+    /// implicitly enable keyboard thru. Status reads cannot touch MIDI drivers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn midi_thru_status(&self) -> MidiThruRuntimeStatus {
+        self.midi_output.as_ref().map_or_else(MidiThruRuntimeStatus::default, MidiOutputRuntime::thru_status)
+    }
+
+    /// User-initiated live MIDI input-to-external-output monitoring while the
+    /// transport is idle. Do not create a MIDI output runtime here: the user
+    /// must have separately consented to hardware output and waited for Ready.
+    /// `false` is always accepted, including on failures or during playback.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_midi_thru_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if !enabled {
+            return self.midi_output.as_ref().map_or(Ok(()), |output| output.set_thru_enabled(false).map_err(|error| error.to_string()));
+        }
+        if self.engine.transport.playing || self.engine.transport.recording || self.midi_capture.is_some() {
+            return Err("Stop playback and recording before enabling live external MIDI thru.".into());
+        }
+        let Some(output) = &self.midi_output else {
+            return Err("Enable external MIDI transmission and wait for its Ready state before enabling MIDI thru.".into());
+        };
+        let status = output.status();
+        if !status.enabled || status.phase != MidiOutputRuntimePhase::Ready || status.cleanup_pending {
+            return Err("External MIDI output must be enabled, connected, and idle before enabling MIDI thru.".into());
+        }
+        output.set_thru_enabled(true).map_err(|error| error.to_string())
+    }
+
+    /// Trigger priority All Notes Off on existing output workers, then defer
+    /// any new Play/Record until its asynchronous generation ACK completes.
+    /// This does not join a MIDI device or block the UI/audio callback.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn midi_thru_ready_for_transport(&mut self, requested: &str) -> bool {
+        let Some(output) = &self.midi_output else { return true };
+        let before = output.thru_status();
+        if before.enabled {
+            if let Err(error) = output.set_thru_enabled(false) {
+                self.ui.status = format!("Cannot start {requested} until MIDI thru notes are released: {error}");
+                return false;
+            }
+        }
+        let now = output.thru_status();
+        if let Some(reason) = midi_thru_transport_block(&now) {
+            self.ui.status = format!("{reason} {requested} was not started.");
+            return false;
+        }
+        true
+    }
+
     /// Current transport position (playhead while playing, else the edit insertion).
     pub fn position(&self) -> Samples {
         if self.engine.transport.playing { self.engine.transport.position } else { self.engine.session().edit.selection.start }
     }
 
     fn start_play(&mut self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.midi_thru_ready_for_transport("Play") {
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(output) = &self.midi_output
             && let Err(error) = output.update_session(self.engine.session_arc())
@@ -775,6 +847,10 @@ impl SoundApp {
     }
 
     fn stop_play(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(output) = &self.midi_output {
+            let _ = output.set_thru_enabled(false);
+        }
         if let Some(p) = &self.player {
             // Half-speed is a separate command. Stop must not leave that rate for the next Play.
             p.set_speed(1.0);
@@ -816,6 +892,10 @@ impl SoundApp {
     }
 
     fn start_recording(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.midi_thru_ready_for_transport("Record") {
+            return;
+        }
         let armed = self.engine.session().tracks.iter().any(|t| t.mixer.record_arm);
         if !armed {
             let why = if self.engine.session().tracks.is_empty() {
@@ -1591,6 +1671,10 @@ impl SoundApp {
                     }
                 }
                 TransportRequest::Locate(at) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(output) = &self.midi_output {
+                        let _ = output.set_thru_enabled(false);
+                    }
                     if self.is_playing() {
                         if let Some(p) = &self.player {
                             p.locate(at);
@@ -1612,8 +1696,20 @@ impl SoundApp {
                     }
                     self.play_from_selection();
                 }
-                TransportRequest::Scrub(at) => self.engine.transport.position = at,
-                TransportRequest::AllNotesOff => {}
+                TransportRequest::Scrub(at) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(output) = &self.midi_output {
+                        let _ = output.set_thru_enabled(false);
+                    }
+                    self.engine.transport.position = at;
+                }
+                TransportRequest::AllNotesOff =>
+                {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(output) = &self.midi_output {
+                        let _ = output.set_thru_enabled(false);
+                    }
+                }
             }
         }
         // Read back the position.
@@ -2360,6 +2456,60 @@ mod tests {
         assert!(app.set_midi_output_enabled(true).is_err());
         assert_eq!(app.set_midi_output_enabled(false), Ok(()));
         assert!(!app.midi_output_status().enabled);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_midi_thru_requires_second_explicit_consent_and_never_opens_from_session_restore() {
+        use soundcraft_model::{ChannelFormat, MidiInputRoute, MidiOutputRoute, TrackKind};
+        use soundcraft_playback::midi_live_thru::MidiThruPhase;
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let id = engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let Some(track) = engine.session_mut().track_mut(id) else { panic!("synthetic MIDI track") };
+        track.mixer.record_arm = true;
+        track.midi_input = MidiInputRoute { port: Some("Fake Keyboard".into()), channel: Some(1) };
+        track.midi_output = Some(MidiOutputRoute { port: "Fake Synth".into(), channel: Some(2) });
+        let mut app = SoundApp::new(engine, None, Services::default());
+        assert_eq!(app.midi_thru_status().phase, MidiThruPhase::Disabled);
+        assert!(!app.midi_thru_status().enabled);
+        assert!(app.midi_thru_status().connected_inputs.is_empty());
+        assert!(app.set_midi_thru_enabled(true).unwrap_err().contains("Enable external MIDI transmission"));
+        assert_eq!(app.set_midi_thru_enabled(false), Ok(()));
+        assert!(!app.midi_thru_status().enabled);
+        app.document_replaced();
+        assert!(!app.midi_thru_status().enabled, "session replacement must not restore MIDI thru consent");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_midi_thru_cannot_enable_during_playback_or_recording_and_transport_gate_requires_ack() {
+        use soundcraft_playback::{midi_live_thru::MidiThruPhase, midi_thru_runtime::MidiThruRuntimeStatus};
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.engine.transport.playing = true;
+        assert!(app.set_midi_thru_enabled(true).unwrap_err().contains("Stop playback"));
+        assert_eq!(app.set_midi_thru_enabled(false), Ok(()));
+        app.engine.transport.playing = false;
+        app.engine.transport.recording = true;
+        assert!(app.set_midi_thru_enabled(true).unwrap_err().contains("Stop playback"));
+        assert_eq!(app.set_midi_thru_enabled(false), Ok(()));
+
+        let mut status = MidiThruRuntimeStatus::default();
+        assert_eq!(super::midi_thru_transport_block(&status), None);
+        status.enabled = true;
+        status.phase = MidiThruPhase::Enabled;
+        assert!(super::midi_thru_transport_block(&status).is_some());
+        status.enabled = false;
+        status.phase = MidiThruPhase::CleaningUp;
+        status.cleanup_pending = true;
+        assert!(super::midi_thru_transport_block(&status).unwrap().contains("acknowledgment"));
+        status.cleanup_pending = false;
+        assert!(super::midi_thru_transport_block(&status).is_some(), "cleanup phase alone must defer Record");
+        status.phase = MidiThruPhase::Failed;
+        assert!(super::midi_thru_transport_block(&status).unwrap().contains("cleanup failed"));
+        status.phase = MidiThruPhase::Disabled;
+        assert_eq!(super::midi_thru_transport_block(&status), None);
     }
 
     #[test]

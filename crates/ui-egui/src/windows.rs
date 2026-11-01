@@ -10,7 +10,11 @@ use soundcraft_model::{AutomationMode, ClipContent};
 use soundcraft_playback::AudioConfig;
 use soundcraft_playback::devices::{AudioSystem, DeviceInfo};
 #[cfg(not(target_arch = "wasm32"))]
+use soundcraft_playback::midi_live_thru::MidiThruPhase;
+#[cfg(not(target_arch = "wasm32"))]
 use soundcraft_playback::midi_out_runtime::{MidiOutputRuntimePhase, MidiOutputRuntimeStatus};
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_playback::midi_thru_runtime::MidiThruRuntimeStatus;
 use std::sync::Arc;
 
 pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
@@ -569,7 +573,7 @@ fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputSc
     midi_capture_status(ui, &app.midi_input_status());
     ui.label(
         egui::RichText::new(
-            "Enable a MIDI input and arm a MIDI/instrument track to record. All armed tracks currently share enabled inputs; per-track filtering and live instrument monitoring are not available yet.",
+            "Enable an input and arm a MIDI/instrument track to record. Individual tracks can filter the input port and channel in their Mix/Edit input menus. Software-instrument audition is not yet available; external MIDI thru has a separate opt-in below.",
         )
             .small()
             .color(Tokens::current().text_dim),
@@ -640,11 +644,78 @@ fn midi_output_transmission_controls(ui: &mut egui::Ui, app: &mut SoundApp) {
     }
 }
 
+/// Pure widget: painting status never enumerates MIDI ports or opens inputs.
+/// Only a human click returns a new, temporary MIDI-thru consent intent.
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_thru_widget(ui: &mut egui::Ui, status: &MidiThruRuntimeStatus, output: &MidiOutputRuntimeStatus, stopped: bool) -> Option<bool> {
+    ui.separator();
+    ui.heading("Live external MIDI thru (idle only)");
+    let mut enabled = status.enabled;
+    let output_ready = output.enabled && output.phase == MidiOutputRuntimePhase::Ready && !output.cleanup_pending;
+    let can_enable = stopped && output_ready && !status.cleanup_pending && status.phase != MidiThruPhase::Failed;
+    let response = ui
+        .add_enabled(enabled || can_enable, egui::Checkbox::new(&mut enabled, "Enable live MIDI thru (this launch only)"))
+        .on_hover_text("Requires a separate external MIDI transmission permission and named armed MIDI/instrument routes. Always OFF after restarting SoundCraft.");
+    let requested = (response.changed() && enabled != status.enabled).then_some(enabled);
+    if !status.enabled && !output_ready {
+        ui.label("Enable external MIDI transmission above and wait until its output state says Ready before enabling thru.");
+    }
+    if !status.enabled && !stopped {
+        ui.label("Stop playback and recording before enabling live MIDI thru.");
+    }
+    let phase = match status.phase {
+        MidiThruPhase::Disabled if status.enabled => "Connecting to selected MIDI inputs…",
+        MidiThruPhase::Disabled => "Disabled — no MIDI thru input streams opened",
+        MidiThruPhase::Enabled => "Monitoring keyboard MIDI to selected external outputs",
+        MidiThruPhase::CleaningUp => "Disabling — releasing held MIDI notes and closing inputs…",
+        MidiThruPhase::Failed => "Failed — MIDI thru stopped; check the device/error below",
+    };
+    ui.label(format!("Live MIDI thru state: {phase}"));
+    if !status.connected_inputs.is_empty() {
+        ui.label(format!("Connected thru input(s): {}", status.connected_inputs.join(", ")));
+    }
+    if status.enabled || status.sent_packets > 0 {
+        ui.label(format!("{} live MIDI packet(s) queued", status.sent_packets));
+    }
+    if status.held_notes > 0 {
+        ui.label(format!("{} held MIDI note(s)", status.held_notes));
+    }
+    if status.dropped_inputs > 0 {
+        ui.colored_label(Tokens::current().rec, format!("MIDI thru input loss: {} dropped/truncated message(s)", status.dropped_inputs));
+    }
+    if status.cleanup_pending {
+        ui.colored_label(Tokens::current().rec, "MIDI thru note release is pending; wait for acknowledgment before pressing Play or Record.");
+    }
+    if let Some(error) = &status.last_error {
+        ui.colored_label(Tokens::current().rec, format!("MIDI thru error: {}", error.chars().take(240).collect::<String>()));
+    }
+    ui.label(
+        egui::RichText::new(
+            "Thru opens MIDI keyboard inputs only after this second, per-launch opt-in. It sends to explicitly routed external MIDI gear while stopped, not to software instruments. Disable to release held notes. Timing is best effort—not sample accurate or physically hardware-verified.",
+        )
+        .small()
+        .color(Tokens::current().text_dim),
+    );
+    requested
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_thru_controls(ui: &mut egui::Ui, app: &mut SoundApp) {
+    let status = app.midi_thru_status();
+    let output = app.midi_output_status();
+    let stopped = !app.is_playing() && !app.engine.transport.recording;
+    if let Some(enabled) = midi_thru_widget(ui, &status, &output, stopped)
+        && let Err(error) = app.set_midi_thru_enabled(enabled)
+    {
+        app.ui.status = format!("Could not change live MIDI thru: {error}");
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn midi_output_transmission_unsupported(ui: &mut egui::Ui) {
     ui.separator();
     ui.heading("External MIDI hardware transmission");
-    ui.label("External MIDI hardware transmission is unavailable in the browser. Saved routes remain inactive until explicitly enabled in a desktop app launch.");
+    ui.label("External MIDI hardware transmission and live MIDI thru are unavailable in the browser. Saved routes remain inactive until explicitly enabled in a desktop app launch.");
 }
 
 /// The input runtime snapshots these eight flags when a native MIDI take begins. Never call the
@@ -834,6 +905,8 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         midi_input_controls(ui, app, &midi_scan, &mut rescan_midi);
         #[cfg(not(target_arch = "wasm32"))]
         midi_output_transmission_controls(ui, app);
+        #[cfg(not(target_arch = "wasm32"))]
+        midi_thru_controls(ui, app);
         #[cfg(target_arch = "wasm32")]
         {
             ui.separator();
@@ -1303,6 +1376,92 @@ mod midi_input_tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod midi_thru_optin_tests {
+    use super::*;
+    use egui::accesskit::Role;
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
+
+    const TOGGLE: &str = "Enable live MIDI thru (this launch only)";
+
+    fn ready_output() -> MidiOutputRuntimeStatus {
+        MidiOutputRuntimeStatus { enabled: true, phase: MidiOutputRuntimePhase::Ready, ..MidiOutputRuntimeStatus::default() }
+    }
+
+    /// Pure widget-intent fixture; no player, SoundApp, MIDI driver or native
+    /// device discovery exists in this harness, even after a simulated click.
+    fn harness(status: MidiThruRuntimeStatus, output: MidiOutputRuntimeStatus, stopped: bool) -> Harness<'static, Vec<bool>> {
+        Harness::builder().with_context_setup(crate::fonts::install).with_size(vec2(970.0, 700.0)).build_ui_state(
+            move |ui, requests: &mut Vec<bool>| {
+                if let Some(on) = midi_thru_widget(ui, &status, &output, stopped) {
+                    requests.push(on);
+                }
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn live_thru_defaults_off_and_paint_never_opens_or_requests_a_port() {
+        let status = MidiThruRuntimeStatus::default();
+        assert!(!status.enabled);
+        let mut h = harness(status, ready_output(), true);
+        h.run_steps(4);
+        assert!(h.get_by_role_and_label(Role::CheckBox, TOGGLE).rect().width() > 0.0);
+        assert!(h.query_by_label_contains("no MIDI thru input streams opened").is_some());
+        assert!(h.query_by_label_contains("best effort").is_some());
+        assert!(h.state().is_empty(), "painting must never request or open a MIDI port");
+        h.get_by_role_and_label(Role::CheckBox, TOGGLE).click();
+        h.run_steps(2);
+        assert_eq!(h.state().as_slice(), &[true], "only a user click grants the second per-launch consent");
+    }
+
+    #[test]
+    fn thru_enable_requires_preapproved_ready_output_idle_transport_and_finished_cleanup() {
+        let cases = [
+            (MidiThruRuntimeStatus::default(), MidiOutputRuntimeStatus::default(), true),
+            (MidiThruRuntimeStatus::default(), ready_output(), false),
+            (MidiThruRuntimeStatus { cleanup_pending: true, ..MidiThruRuntimeStatus::default() }, ready_output(), true),
+            (MidiThruRuntimeStatus { phase: MidiThruPhase::Failed, ..MidiThruRuntimeStatus::default() }, ready_output(), true),
+        ];
+        for (status, output, stopped) in cases {
+            let mut h = harness(status, output, stopped);
+            h.run_steps(2);
+            assert!(h.get_by_role_and_label(Role::CheckBox, TOGGLE).accesskit_node().is_disabled());
+            h.get_by_role_and_label(Role::CheckBox, TOGGLE).click();
+            h.run_steps(2);
+            assert!(h.state().is_empty(), "disabled state must not request a driver connection");
+        }
+    }
+
+    #[test]
+    fn thru_disable_remains_actionable_while_playing_or_hardware_failed() {
+        let status = MidiThruRuntimeStatus {
+            enabled: true,
+            phase: MidiThruPhase::Enabled,
+            connected_inputs: vec!["Synthetic Keyboard".into()],
+            sent_packets: 12,
+            dropped_inputs: 2,
+            held_notes: 3,
+            cleanup_pending: true,
+            last_error: Some("synthetic callback overflow".into()),
+        };
+        let mut h = harness(status, MidiOutputRuntimeStatus::default(), false);
+        h.run_steps(3);
+        assert!(!h.get_by_role_and_label(Role::CheckBox, TOGGLE).accesskit_node().is_disabled(), "panic disable is always actionable");
+        for expected in ["Synthetic Keyboard", "12 live MIDI", "3 held MIDI", "2 dropped", "note release is pending", "synthetic callback overflow"] {
+            assert!(h.query_by_label_contains(expected).is_some(), "missing status disclosure {expected}");
+        }
+        assert!(h.state().is_empty());
+        h.get_by_role_and_label(Role::CheckBox, TOGGLE).click();
+        h.run_steps(2);
+        assert_eq!(h.state().as_slice(), &[false], "Disable must return a cleanup request despite playback/error");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod midi_output_optin_tests {
     use super::*;
     use egui::accesskit::Role;
@@ -1419,6 +1578,7 @@ mod midi_output_web_tests {
             .collect();
         output.textures_delta.clear();
         assert!(text.iter().any(|line| line.contains("unavailable in the browser")));
+        assert!(text.iter().any(|line| line.contains("live MIDI thru")));
         assert!(!text.iter().any(|line| line.contains("Enable external MIDI transmission")));
     }
 }
