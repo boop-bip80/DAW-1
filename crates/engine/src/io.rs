@@ -962,7 +962,7 @@ fn render_stem(s: &Session, id: TrackId, path: &Path, r: Range, opts: &EncodeOpt
 /// Recoverable failures roll back newly published names; multi-file publication is not
 /// crash-atomic if the process terminates mid-commit.
 pub fn bounce_stems_with(e: &Engine, dir: &str, r: Range, opts: &EncodeOptions, fold_stereo: bool) -> Result<Vec<String>> {
-    bounce_stems_with_publisher(e, dir, r, opts, fold_stereo, std::fs::hard_link)
+    bounce_stems_with_publisher(e, dir, r, opts, fold_stereo, |from, to| std::fs::hard_link(from, to))
 }
 
 /// Publisher injection is used only by tests to deterministically emulate a path appearing
