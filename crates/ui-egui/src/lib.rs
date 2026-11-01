@@ -798,11 +798,9 @@ impl SoundApp {
     fn midi_thru_ready_for_transport(&mut self, requested: &str) -> bool {
         let Some(output) = &self.midi_output else { return true };
         let before = output.thru_status();
-        if before.enabled {
-            if let Err(error) = output.set_thru_enabled(false) {
-                self.ui.status = format!("Cannot start {requested} until MIDI thru notes are released: {error}");
-                return false;
-            }
+        if before.enabled && let Err(error) = output.set_thru_enabled(false) {
+            self.ui.status = format!("Cannot start {requested} until MIDI thru notes are released: {error}");
+            return false;
         }
         let now = output.thru_status();
         if let Some(reason) = midi_thru_transport_block(&now) {
