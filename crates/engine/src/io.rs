@@ -1431,9 +1431,17 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
 /// Write `bytes` to `tmp`, flush it to disk and rename it over `file`, so `file` holds either the
 /// old or the new contents, never a mix.
 pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
     crate::file_access::check_write(file).map_err(EngineError::Io)?;
     crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
-    replace_with(tmp, file, write_synced(tmp, bytes))
+    // A pre-existing .scraft.tmp may hold crash-recovery data (or be a symlink). Never
+    // truncate, follow or unlink it: only this call's newly reserved staging file is ours.
+    let mut staged =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(tmp).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
+    let written = staged.write_all(bytes).and_then(|()| staged.sync_all());
+    drop(staged);
+    replace_with(tmp, file, written)
 }
 
 /// Renames `tmp` over `file` once it is `written`, or removes it when writing or renaming failed.
@@ -1450,13 +1458,6 @@ fn replace_with(tmp: &Path, file: &Path, written: std::io::Result<()>) -> Result
 fn sync_dir(dir: &Path) {
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
     let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
-}
-
-fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()
 }
 
 /// Copies `from` to `to`, which must not exist yet; an existing entry, even a link, is never followed.
@@ -2324,6 +2325,65 @@ mod save_tests {
         let mut r = Engine::default();
         assert_eq!(open_session(&mut r, path).unwrap(), Vec::<String>::new());
         r
+    }
+
+    #[test]
+    fn session_save_preserves_existing_staging_file_and_dirty_edits() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-save-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.scraft");
+        let path_str = path.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &serde_json::json!({"path": path_str})).unwrap();
+        let prior_session = std::fs::read(&path).unwrap();
+
+        e.execute("track.new", &serde_json::json!({"name": "Unsaved edits", "format": "mono"})).unwrap();
+        assert!(e.is_dirty());
+        let staging = path.with_extension("scraft.tmp");
+        let recovery = b"recovery data from a previous interrupted save";
+        std::fs::write(&staging, recovery).unwrap();
+        let err = e.execute("session.save", &serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("scraft.tmp"), "{err}");
+        assert_eq!(std::fs::read(&staging).unwrap(), recovery, "save must not replace a recovery sidecar");
+        assert_eq!(std::fs::read(&path).unwrap(), prior_session, "failed save must leave the committed project alone");
+        assert!(e.is_dirty(), "failed save must not mark the live document clean");
+        assert!(e.session().track_by_name("Unsaved edits").is_some(), "failed save must preserve live edits");
+
+        std::fs::remove_file(&staging).unwrap();
+        e.execute("session.save", &serde_json::json!({})).unwrap();
+        assert!(!e.is_dirty());
+        assert!(!staging.exists(), "successful save must commit and remove its own staging file");
+        let reopened = reopen(&path_str);
+        assert!(reopened.session().track_by_name("Unsaved edits").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_save_never_follows_or_unlinks_an_existing_staging_symlink() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-save-stage-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.scraft");
+        let mut e = Engine::default();
+        e.execute("session.save_as", &serde_json::json!({"path": path.to_string_lossy()})).unwrap();
+        let prior_session = std::fs::read(&path).unwrap();
+        e.execute("track.new", &serde_json::json!({"name": "Pending", "format": "mono"})).unwrap();
+
+        let unrelated = dir.join("unrelated-user-file.txt");
+        let marker = b"never truncate this file";
+        std::fs::write(&unrelated, marker).unwrap();
+        let staging = path.with_extension("scraft.tmp");
+        std::os::unix::fs::symlink(&unrelated, &staging).unwrap();
+        let err = e.execute("session.save", &serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("scraft.tmp"), "{err}");
+        assert!(std::fs::symlink_metadata(&staging).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&unrelated).unwrap(), marker);
+        assert_eq!(std::fs::read(&path).unwrap(), prior_session);
+        assert!(e.is_dirty());
+        assert!(e.session().track_by_name("Pending").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
