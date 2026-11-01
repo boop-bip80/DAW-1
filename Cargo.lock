@@ -4261,9 +4261,11 @@ dependencies = [
  "serde_json",
  "soundcraft-audio-io",
  "soundcraft-dsp",
+ "soundcraft-midi",
  "soundcraft-mix",
  "soundcraft-model",
  "soundcraft-time",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

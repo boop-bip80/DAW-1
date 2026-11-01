@@ -269,6 +269,18 @@ impl MidiInputRoute {
     }
 }
 
+/// Explicit external MIDI destination. `Track::midi_output == None` means no
+/// hardware output, including for sessions written before this field existed.
+/// The optional channel is one-based (1..=16); `None` preserves each note's
+/// or controller's original zero-based channel. Port names are persisted, but
+/// ephemeral OS port indexes and driver IDs are not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MidiOutputRoute {
+    pub port: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+}
+
 /// A track.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
@@ -285,6 +297,10 @@ pub struct Track {
     /// enabled ports and channels; this field does not affect audio routing.
     #[serde(default, skip_serializing_if = "MidiInputRoute::is_all_enabled")]
     pub midi_input: MidiInputRoute,
+    /// Explicit external MIDI destination. Absent by default, including in old sessions;
+    /// recording and ordinary audio playback never infer a hardware route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi_output: Option<MidiOutputRoute>,
     pub automation: Vec<AutomationLane>,
     /// Which lane the track shows: `waveform`/`blocks`/`notes`/`regions` or an automation param id.
     pub view: String,
@@ -341,6 +357,7 @@ impl Track {
             active_playlist: 0,
             mixer: Mixer::new(format),
             midi_input: MidiInputRoute::default(),
+            midi_output: None,
             automation: Vec::new(),
             view: view.into(),
             hidden: false,
@@ -417,6 +434,7 @@ mod tests {
         assert_eq!(m.format, ChannelFormat::Mono);
         assert_eq!(m.view, "notes");
         assert!(m.midi_input.is_all_enabled());
+        assert!(m.midi_output.is_none());
     }
 
     #[test]
@@ -431,6 +449,21 @@ mod tests {
         let restored: Track = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.midi_input, t.midi_input);
         assert!(!saved.contains("port_index"), "transient OS indexes must never be serialized");
+    }
+
+    #[test]
+    fn midi_output_is_opt_in_and_legacy_sessions_remain_silent() {
+        let mut track = Track::new(TrackId(5), "Synth", TrackKind::Instrument, ChannelFormat::Stereo, TRACK_COLORS[0]);
+        let legacy = serde_json::to_value(&track).unwrap();
+        assert!(legacy.get("midi_output").is_none());
+        let old: Track = serde_json::from_value(legacy).unwrap();
+        assert!(old.midi_output.is_none(), "legacy sessions must not select any external device");
+
+        track.midi_output = Some(MidiOutputRoute { port: "External Synth".into(), channel: Some(12) });
+        let saved = serde_json::to_string(&track).unwrap();
+        let reloaded: Track = serde_json::from_str(&saved).unwrap();
+        assert_eq!(reloaded.midi_output, track.midi_output);
+        assert!(!saved.contains("port_index") && !saved.contains("driver_id"));
     }
 
     #[test]

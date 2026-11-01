@@ -11,10 +11,12 @@ repository.workspace = true
 soundcraft-time.workspace = true
 soundcraft-audio-io.workspace = true
 soundcraft-model.workspace = true
+soundcraft-midi.workspace = true
 soundcraft-mix.workspace = true
 soundcraft-dsp.workspace = true
 log.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal.workspace = true
