@@ -663,7 +663,10 @@ fn queue_output_param(out: &mut Vec<(u32, f64)>, id: u32, value: f64) -> bool {
 /// This never blocks or grows the audio-thread queues when the UI is busy.
 fn publish_output_param_edits(status: i32, out: &mut Vec<(u32, f64)>, edits: &Mutex<Vec<(u32, f64)>>) -> bool {
     let success = matches!(status, CLAP_PROCESS_CONTINUE | CLAP_PROCESS_CONTINUE_IF_NOT_QUIET | CLAP_PROCESS_TAIL | CLAP_PROCESS_SLEEP);
-    if success && !out.is_empty() && let Ok(mut pending) = edits.try_lock() {
+    if success
+        && !out.is_empty()
+        && let Ok(mut pending) = edits.try_lock()
+    {
         for &event in out.iter().take(pending.capacity().saturating_sub(pending.len())) {
             pending.push(event);
         }
@@ -1442,11 +1445,8 @@ impl Instance {
         // untouched until the call returns.
         let status = unsafe { process(self.plugin, &p) };
         if !publish_output_param_edits(status, &mut self.out_params, &self.state.edits) {
-            let reason = if status == CLAP_PROCESS_ERROR {
-                "plugin reported a processing error"
-            } else {
-                "plugin returned an invalid processing status"
-            };
+            let reason =
+                if status == CLAP_PROCESS_ERROR { "plugin reported a processing error" } else { "plugin returned an invalid processing status" };
             return Err(ClapError::Process(reason.into()));
         }
         Ok(status)
