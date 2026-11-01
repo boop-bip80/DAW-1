@@ -909,6 +909,13 @@ pub(crate) fn preflight_stem_paths(paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// Publish one private, completed stem on the same filesystem. The batch preflight checks every
+/// final name and sidecar; hard_link itself fails rather than replacing an occupied name.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn publish_stem_link_no_replace(from: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(from, destination)
+}
+
 /// An exclusively created, same-filesystem staging directory and the complete files this
 /// batch linked into its destination. Failure/cancellation removes only files this batch
 /// published; the private staging directory is always cleaned.

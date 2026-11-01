@@ -115,7 +115,7 @@ impl StemBounceJob {
     /// hard link; even an always-false budget advances at least one unit before yielding.
     /// `Some(paths)` means the entire batch was committed successfully.
     pub fn step(&mut self, more: impl FnMut() -> bool) -> Result<Option<Vec<String>>> {
-        self.step_with_publisher(more, |from, to| std::fs::hard_link(from, to))
+        self.step_with_publisher(more, io::publish_stem_link_no_replace)
     }
 
     /// Publisher injection preserves the synchronous command's existing race/rollback tests.
