@@ -1518,8 +1518,8 @@ pub fn session_file(path: &str) -> PathBuf {
     if p.extension().is_none() && !is_file { p.with_extension(soundcraft_model::SESSION_EXTENSION) } else { p }
 }
 
-/// True when `command` would write a session over the existing `file`. Save, Save As and Save
-/// Copy In may write the open session's own file; other commands never ask.
+/// True when `command` would overwrite an existing destination. Save, Save As and Save Copy
+/// may write the open session's own file; other commands never ask.
 pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
     match command {
         "session.save" | "session.save_as" | "session.save_copy" => {
@@ -1529,7 +1529,9 @@ pub fn replaces(e: &Engine, command: &str, file: &Path) -> bool {
         | "file.export_selected_tracks_as_session"
         | "file.export_session_text"
         | "file.export_otio"
-        | "file.export_otioz" => file.exists(),
+        | "file.export_otioz"
+        | "file.export_edl"
+        | "file.export_midi" => file.exists(),
         _ => false,
     }
 }
