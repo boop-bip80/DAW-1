@@ -162,8 +162,9 @@ pub fn specs() -> Vec<CommandSpec> {
             let files = crate::io::bounce_stems_with(e, &dir, r, &soundcraft_audio_io::EncodeOptions { format, bit_depth, dither: bool_or(p, "dither", true), bwf: None }, fold)?;
             Ok(json!({"files": files}))
         }),
-        cmd!(noundo "file.export_midi", "MIDI...", ["File", "Export"], None, "{path, tracks?}", always, |e, p| {
+        cmd!(noundo "file.export_midi", "MIDI...", ["File", "Export"], None, "{path, tracks?, replace?: false}", always, |e, p| {
             let path = str_param(p, "path").ok_or_else(|| bad("file.export_midi", "`path` required"))?.to_string();
+            refuse_replacing(e, "file.export_midi", std::path::Path::new(&path), p)?;
             let only = if p.get("tracks").is_some() || p.get("track").is_some() { Some(tracks_param(e, "file.export_midi", p)?) } else { None };
             let bytes = crate::io::export_midi(e, only.as_deref())?;
             crate::io::write_file(&path, &bytes)?;
@@ -547,6 +548,37 @@ mod tests {
     }
 
     #[test]
+    fn edl_export_preserves_existing_file_until_explicit_replace() {
+        let dir = std::env::temp_dir().join(format!("sc-edl-export-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Two 24 fps frames at 48 kHz. Saving makes the source media portable/linked for EDL.
+        let (mut e, _) = tone_engine();
+        let clip = e.session().tracks[0].clips()[0].id;
+        e.session_mut().find_clip_mut(clip).unwrap().length = 4_000;
+        let project = dir.join("source.scraft");
+        e.execute("session.save_as", &json!({"path": project.to_string_lossy()})).unwrap();
+
+        let path = dir.join("cuts.edl");
+        let original = b"important existing EDL contents";
+        std::fs::write(&path, original).unwrap();
+        let params = json!({"path": path.to_string_lossy(), "track": "Tone", "fps": 24});
+        let err = e.execute("file.export_edl", &params).unwrap_err();
+        assert!(err.to_string().contains("replace: true"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let output = e.execute("file.export_edl", &json!({"path": path.to_string_lossy(), "track": "Tone", "fps": 24, "replace": true})).unwrap();
+        assert_eq!(output["edits"], 1);
+        let exported = std::fs::read_to_string(&path).unwrap();
+        assert!(exported.contains("FCM: NON-DROP FRAME"));
+        assert!(exported.contains("001  SC000001 A     C"), "{exported}");
+        assert!(exported.contains("* FROM FILE: file://"), "{exported}");
+        assert_ne!(exported.as_bytes(), original);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn import_audio_honours_new_tracks() {
         let dir = std::env::temp_dir().join(format!("sc-import-new-tracks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -800,6 +832,31 @@ mod tests {
 
         let err = e.execute("file.export_midi", &json!({"path": dir.join("nope.mid").to_string_lossy(), "tracks": ["Room"]})).unwrap_err();
         assert!(err.to_string().contains("none of the requested tracks hold MIDI"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn midi_export_preserves_existing_file_until_explicit_replace() {
+        let dir = std::env::temp_dir().join(format!("sc-midi-export-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("performance.mid");
+        let original = b"important existing MIDI contents";
+        std::fs::write(&path, original).unwrap();
+
+        let mut e = midi_engine();
+        let err = e.execute("file.export_midi", &json!({"path": path.to_string_lossy()})).unwrap_err();
+        assert!(err.to_string().contains("replace: true"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let output = e.execute("file.export_midi", &json!({"path": path.to_string_lossy(), "replace": true})).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(output["bytes"].as_u64(), Some(bytes.len() as u64));
+        assert!(bytes.starts_with(b"MThd"), "replacement is not a Standard MIDI File");
+        let ctrls = cc_numbers(&bytes);
+        assert!(ctrls.iter().any(|(track, cc, value)| track == "Keys" && *cc == 7 && *value == 90));
+        assert!(ctrls.iter().any(|(track, cc, value)| track == "Drums" && *cc == 11 && *value == 40));
+        assert_ne!(bytes, original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
