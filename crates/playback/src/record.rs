@@ -27,6 +27,8 @@ const LIVE_BLOCKS: usize = 1 << 22;
 pub type LiveTake = Vec<Vec<(f32, f32)>>;
 
 const RING_SECONDS: usize = 4;
+/// Maximum scratch bytes allocated per WAV take, even when the input ring has filled up.
+const TAKE_WRITE_CHUNK_BYTES: usize = 64 * 1024;
 /// How long a recording input may go without a callback before it counts as gone.
 const STALL: Duration = Duration::from_secs(2);
 const GONE: u8 = 1;
@@ -503,6 +505,46 @@ fn write_takes(shared: &Shared, mut takes: Vec<TakeWriter>, channels: usize) -> 
     (done, problem)
 }
 
+/// Encode full interleaved frames and drain them with `write_all`. Return the number of *whole*
+/// frames committed before the first I/O error: a later failing chunk must not hide previously
+/// written audio from a take's WAV header. `scratch` is reused, never grown beyond 64 KiB.
+fn write_interleaved_chunks(
+    sink: &mut impl Write,
+    scratch: &mut Vec<u8>,
+    block: &[f32],
+    channels: usize,
+    inputs: &[usize],
+) -> (usize, Option<std::io::Error>) {
+    let Some(frame_bytes) = inputs.len().checked_mul(std::mem::size_of::<f32>()).filter(|&n| n > 0 && n <= TAKE_WRITE_CHUNK_BYTES) else {
+        return (0, Some(std::io::Error::new(std::io::ErrorKind::InvalidInput, "too many recording channels for the WAV write buffer")));
+    };
+    let frames_per_chunk = TAKE_WRITE_CHUNK_BYTES / frame_bytes;
+    let mut committed = 0;
+    let mut pending = 0;
+    scratch.clear();
+    for frame in block.chunks_exact(channels.max(1)) {
+        for &input in inputs {
+            scratch.extend_from_slice(&frame.get(input).copied().unwrap_or(0.0).to_le_bytes());
+        }
+        pending += 1;
+        if pending == frames_per_chunk {
+            if let Err(e) = sink.write_all(scratch) {
+                return (committed, Some(e));
+            }
+            committed += pending;
+            pending = 0;
+            scratch.clear();
+        }
+    }
+    if pending > 0 {
+        if let Err(e) = sink.write_all(scratch) {
+            return (committed, Some(e));
+        }
+        committed += pending;
+    }
+    (committed, None)
+}
+
 /// One take's file. After an error it stops writing; its header keeps covering what was written.
 struct TakeWriter {
     id: TrackId,
@@ -513,14 +555,19 @@ struct TakeWriter {
     frames: u64,
     error: Option<String>,
     live: Arc<Mutex<LiveTake>>,
+    /// Writer-thread-only reusable buffer; the audio callback never touches it.
+    scratch: Vec<u8>,
 }
 
 impl TakeWriter {
     fn create(id: TrackId, inputs: Vec<usize>, path: PathBuf, rate: u32) -> Result<TakeWriter, String> {
+        // Reserve before creating the take so allocation failure cannot orphan a new WAV.
+        let mut scratch = Vec::new();
+        scratch.try_reserve_exact(TAKE_WRITE_CHUNK_BYTES).map_err(|e| format!("{}: cannot reserve WAV write buffer: {e}", path.display()))?;
         let file = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| File::create_new(&path));
         let file = file.map_err(|e| format!("{}: {e}", path.display()))?;
         let live = Arc::new(Mutex::new(vec![Vec::new(); inputs.len()]));
-        let mut take = TakeWriter { id, inputs, path, file, rate, frames: 0, error: None, live };
+        let mut take = TakeWriter { id, inputs, path, file, rate, frames: 0, error: None, live, scratch };
         take.write_header();
         if let Some(error) = take.error.take() {
             let path = take.path.clone();
@@ -536,16 +583,15 @@ impl TakeWriter {
         if self.error.is_some() {
             return;
         }
-        let bytes: Vec<u8> = block
-            .chunks_exact(channels)
-            .flat_map(|f| self.inputs.iter().flat_map(move |&i| f.get(i).copied().unwrap_or(0.0).to_le_bytes()))
-            .collect();
-        match self.file.write_all(&bytes) {
-            Ok(()) => {
-                self.summarize(block, channels);
-                self.frames += (block.len() / channels) as u64;
-            }
-            Err(e) => self.fail(e),
+        let (committed, error) = write_interleaved_chunks(&mut self.file, &mut self.scratch, block, channels, &self.inputs);
+        // A late disk error may follow several fully written chunks. Keep those frames playable
+        // and visible in live-take summaries instead of discarding their count.
+        if committed > 0 {
+            self.summarize(&block[..committed * channels], channels);
+            self.frames = self.frames.saturating_add(committed as u64);
+        }
+        if let Some(e) = error {
+            self.fail(e);
         }
     }
 
@@ -945,6 +991,78 @@ mod tests {
         assert_eq!((takes.len(), problem), (1, None));
         assert_eq!(decode(&path), vec![vec![0.4; 16], vec![0.2; 16]]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_interleaved_take_preserves_routing_across_bounded_write_chunks() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-bounded-wav-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("Audio Files/Room.wav");
+        let mut take = TakeWriter::create(TrackId(1), vec![3, 1], path.clone(), 48_000).unwrap();
+        let scratch = take.scratch.as_ptr();
+        let frames = 100_007;
+        let input: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let value = (i % 97) as f32 / 100.0;
+                [value, -value, value / 2.0, 1.0 - value]
+            })
+            .collect();
+        take.write(&input, 4);
+        assert_eq!(take.frames, frames as u64);
+        assert_eq!(take.error, None);
+        assert_eq!(take.scratch.as_ptr(), scratch, "chunked writes reuse the same preallocated scratch");
+        assert!(take.scratch.len() <= TAKE_WRITE_CHUNK_BYTES);
+        take.write_header();
+        drop(take);
+
+        let decoded = decode(&path);
+        assert_eq!(decoded, vec![input.chunks_exact(4).map(|f| f[3]).collect::<Vec<_>>(), input.chunks_exact(4).map(|f| f[1]).collect::<Vec<_>>()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deliberately return short writes, then fail partway into the following chunk. `write_all`
+    /// must complete each earlier chunk, and a failed chunk must not count as complete frames.
+    #[test]
+    fn short_writes_and_late_io_error_report_only_committed_full_chunks() {
+        struct LimitedWriter {
+            bytes: Vec<u8>,
+            fail_at: usize,
+            largest_request: usize,
+        }
+        impl Write for LimitedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.largest_request = self.largest_request.max(bytes.len());
+                if self.bytes.len() >= self.fail_at {
+                    return Err(std::io::Error::other("synthetic disk failure"));
+                }
+                let n = bytes.len().min(7).min(self.fail_at - self.bytes.len());
+                self.bytes.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let input: Vec<f32> = (0..20_001).flat_map(|i| [i as f32, 0.5, -0.5, -(i as f32)]).collect();
+        let mut scratch = Vec::with_capacity(TAKE_WRITE_CHUNK_BYTES);
+        let mut short = LimitedWriter { bytes: Vec::new(), fail_at: usize::MAX, largest_request: 0 };
+        let (written, error) = write_interleaved_chunks(&mut short, &mut scratch, &input, 4, &[3, 1]);
+        assert!(error.is_none());
+        assert_eq!(written, 20_001);
+        assert_eq!(short.bytes.len(), written * 2 * std::mem::size_of::<f32>());
+        assert!(short.largest_request <= TAKE_WRITE_CHUNK_BYTES);
+        assert_eq!(&short.bytes[..8], &[(-0.0f32).to_le_bytes(), 0.5f32.to_le_bytes()].concat());
+
+        let mut fail = LimitedWriter { bytes: Vec::new(), fail_at: TAKE_WRITE_CHUNK_BYTES + 3, largest_request: 0 };
+        let (written, error) = write_interleaved_chunks(&mut fail, &mut scratch, &input, 4, &[3, 1]);
+        assert_eq!(written, TAKE_WRITE_CHUNK_BYTES / 8, "only the first complete chunk is committed");
+        assert!(error.is_some_and(|e| e.to_string().contains("synthetic disk failure")));
+        assert_eq!(fail.bytes.len(), TAKE_WRITE_CHUNK_BYTES + 3, "a late error may leave bytes from the unfinished chunk on disk");
+        assert_eq!(fail.bytes[..TAKE_WRITE_CHUNK_BYTES], short.bytes[..TAKE_WRITE_CHUNK_BYTES]);
+        assert!(fail.largest_request <= TAKE_WRITE_CHUNK_BYTES);
+        assert!(scratch.len() <= TAKE_WRITE_CHUNK_BYTES);
     }
 
     #[test]
