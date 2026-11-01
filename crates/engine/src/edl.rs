@@ -295,10 +295,10 @@ fn finish_cut(cut: Cut, edits: &mut Vec<Cut>) -> Result<()> {
     if cut.media_url.as_deref().is_none_or(str::is_empty) {
         return Err(unsupported("each event requires a `* FROM FILE:` media URL; reel-only EDLs require relinking"));
     }
-    if let Some(prior) = edits.first() {
-        if prior.lane.independent() != cut.lane.independent() || (!prior.lane.independent() && prior.lane != cut.lane) {
-            return Err(unsupported("mixed A and AA or independent A1/A2 events have ambiguous channel semantics"));
-        }
+    if let Some(prior) = edits.first()
+        && (prior.lane.independent() != cut.lane.independent() || (!prior.lane.independent() && prior.lane != cut.lane))
+    {
+        return Err(unsupported("mixed A and AA or independent A1/A2 events have ambiguous channel semantics"));
     }
     if let Some(prior) = edits.iter().rev().find(|prior| prior.lane == cut.lane) {
         if cut.record_in < prior.record_out {
