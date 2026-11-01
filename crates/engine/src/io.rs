@@ -1577,13 +1577,30 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
     // Finish the already-exclusive stage before backup rotation or project replacement.
     stage.write_and_sync(text.as_bytes(), &p)?;
-    let pending_backup = if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) { back_up(&p)? } else { None };
+    // An existing destination must be a regular file, not a link or device. A failed
+    // read of the prior project is not evidence that no backup is needed.
+    let existed = existing_session_target(&p)?;
+    let pending_backup = if !overwrite && existed && read_file(&p)? != text.as_bytes() { back_up(&p)? } else { None };
     stage.publish(&p)?;
     // Retention pruning is a consequence of a committed save, never a failed attempt.
     if let Some(backup) = pending_backup {
         backup.prune();
     }
     Ok((s, written, p))
+}
+
+/// Whether the destination exists as an ordinary regular file. Do not treat
+/// unreadable files, symlinks, sockets, directories or other entries as absence.
+/// The caller must still revalidate/rename carefully; path checks are not atomic
+/// against another process replacing entries between inspection and publication.
+fn existing_session_target(path: &Path) -> Result<bool> {
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(true),
+        Ok(_) => Err(EngineError::Io(format!("{}: existing session target is not a regular file", path.display()))),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(EngineError::Io(format!("{}: {err}", path.display()))),
+    }
 }
 
 /// A session-save staging file reserved before any new source media is written.
@@ -2621,6 +2638,99 @@ mod save_tests {
         let mut r = Engine::default();
         assert_eq!(open_session(&mut r, path).unwrap(), Vec::<String>::new());
         r
+    }
+
+    #[test]
+    fn existing_session_save_needs_read_authority_but_autosave_remains_write_only() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-session-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Song.scraft");
+        let path = file.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &json!({"path": path})).unwrap();
+        let committed = std::fs::read(&file).unwrap();
+        e.execute("track.new", &json!({"name": "Not yet saved", "format": "mono"})).unwrap();
+        assert!(e.is_dirty());
+        let live = e.session().clone();
+
+        let roots = crate::file_access::AutomationRoots::new(&[], &[dir.as_path()]).unwrap().unwrap();
+        let autosave = dir.join("Snapshot.scraft");
+        crate::file_access::confine(Some(&roots), || {
+            let err = e.execute("session.save", &json!({})).unwrap_err();
+            assert!(err.to_string().contains("read authority is absent"), "{err}");
+            // Explicitly writable autosave copies do not need read rights to an old snapshot.
+            assert_eq!(save_copy(&e, &autosave.to_string_lossy()).unwrap(), 0);
+            assert_eq!(save_copy(&e, &autosave.to_string_lossy()).unwrap(), 0);
+        });
+        assert_eq!(std::fs::read(&file).unwrap(), committed, "denied read must never permit an unbacked overwrite");
+        assert_eq!(*e.session(), live);
+        assert!(e.is_dirty());
+        assert!(!file.with_extension("scraft.tmp").exists());
+
+        e.execute("session.save", &json!({})).unwrap();
+        assert!(!e.is_dirty());
+        assert!(reopen(&path).session().track_by_name("Not yet saved").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_session_save_refuses_socket_symlink_and_directory_destinations() {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let dir = std::env::temp_dir().join(format!("soundcraft-session-target-type-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Song.scraft");
+        let path = file.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &json!({"path": path})).unwrap();
+        let committed = std::fs::read(&file).unwrap();
+        e.execute("track.new", &json!({"name": "Still dirty", "format": "mono"})).unwrap();
+        let live = e.session().clone();
+        let prior = dir.join("Preserved.scraft");
+        std::fs::rename(&file, &prior).unwrap();
+
+        match std::os::unix::net::UnixListener::bind(&file) {
+            Ok(listener) => {
+                let err = e.execute("session.save", &json!({})).unwrap_err();
+                assert!(err.to_string().contains("not a regular file"), "{err}");
+                assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_socket());
+                assert_eq!(std::fs::read(&prior).unwrap(), committed);
+                assert_eq!(*e.session(), live);
+                assert!(e.is_dirty());
+                assert!(!file.with_extension("scraft.tmp").exists());
+                drop(listener);
+                std::fs::remove_file(&file).unwrap();
+            }
+            // Sandboxed Unix runners can deny AF_UNIX bind. Only the socket fixture
+            // is unavailable; symlink and directory rejection below still run.
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported) => {
+                assert!(!file.exists());
+            }
+            Err(err) => panic!("unexpected Unix socket bind failure: {err}"),
+        }
+
+        std::os::unix::fs::symlink(&prior, &file).unwrap();
+        let err = e.execute("session.save", &json!({})).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&prior).unwrap(), committed);
+        assert!(e.is_dirty());
+        std::fs::remove_file(&file).unwrap();
+
+        std::fs::create_dir(&file).unwrap();
+        let err = e.execute("session.save", &json!({})).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(std::fs::symlink_metadata(&file).unwrap().is_dir());
+        assert_eq!(std::fs::read(&prior).unwrap(), committed);
+        assert!(e.is_dirty());
+        std::fs::remove_dir(&file).unwrap();
+
+        e.execute("session.save", &json!({})).unwrap();
+        assert!(reopen(&path).session().track_by_name("Still dirty").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
