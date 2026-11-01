@@ -25,6 +25,7 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
     with:
       os: '["ubuntu-24.04","macos-latest","windows-latest"]'
+      windows-env: 'SOUNDCRAFT_REQUIRE_WINRES=1'
       timeout-minutes: 90
       packages: >-
         pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
