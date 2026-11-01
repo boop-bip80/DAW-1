@@ -261,6 +261,12 @@ pub trait Plugin: Send {
     fn state_reader(&mut self) -> Option<Box<dyn PluginStateReader>> {
         None
     }
+    /// An optional control-thread observation of a pending plugin restart request. The handle
+    /// owns no audio-thread reference to this trait object and does not perform a restart.
+    /// Hosts without a restart protocol use the default `None`.
+    fn restart_reader(&mut self) -> Option<Box<dyn PluginRestartReader>> {
+        None
+    }
 }
 
 /// A plugin's editor (GUI), driven from the main (UI) thread. Obtained from
@@ -303,6 +309,14 @@ impl<F: FnMut() -> Option<Vec<u8>> + Send> PluginStateReader for F {
     fn save_state(&mut self) -> Option<Vec<u8>> {
         self()
     }
+}
+
+/// UI/control-thread-only observation of a plugin's coalesced restart request.
+///
+/// This does not stop processing, deactivate, destroy or recreate an instance. A future
+/// coordinated audio-stop/main-thread-reactivation protocol must service the request.
+pub trait PluginRestartReader: Send {
+    fn requested(&self) -> bool;
 }
 
 /// Recorded audio a sample-playing instrument reads: planar `f32` at its own sample rate (the
