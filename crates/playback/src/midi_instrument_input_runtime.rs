@@ -347,7 +347,7 @@ impl NativeMonitorWorker {
                 let mut poller = match opened.and_then(|inputs| MonitorPoller::new(router, inputs, current, initial_revision)) {
                     Ok(poller) => poller,
                     Err(error) => {
-                        let epoch = worker_port.invalidate_if(owning_epoch).unwrap_or(owning_epoch);
+                        let epoch = worker_port.cancel_owned(owning_epoch);
                         let _ = worker_cleanup.compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire);
                         let mut latest = worker_status.lock().unwrap_or_else(PoisonError::into_inner);
                         *latest = MonitorInputStatus {
@@ -384,7 +384,7 @@ impl NativeMonitorWorker {
     pub fn request_stop(&self) -> u64 {
         let mut epoch = self.cleanup_epoch.load(Ordering::Acquire);
         if epoch == 0 {
-            let requested = self.port.invalidate_if(self.owning_epoch).unwrap_or(self.owning_epoch);
+            let requested = self.port.cancel_owned(self.owning_epoch);
             epoch = match self.cleanup_epoch.compare_exchange(0, requested, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => requested,
                 Err(existing) => existing,
@@ -541,6 +541,31 @@ mod tests {
         drop(old_worker);
         drop(old_router);
         assert!(port.enabled(), "old worker Stop+Drop must not cancel a newer listener");
+    }
+
+    #[test]
+    fn worker_stop_preserves_unacknowledged_overflow_cleanup_epoch() {
+        let (router, _receiver, _) = fixture();
+        let port = router.control_port();
+        let owning_epoch = router.armed_epoch();
+        for _ in 0..MAX_MONITOR_EVENTS {
+            router.try_send("Keys", LiveMidiMessage::NoteOn { channel: 1, pitch: 60, velocity: 100 }).unwrap();
+        }
+        assert!(router.try_send("Keys", LiveMidiMessage::NoteOff { channel: 1, pitch: 60, velocity: 0 }).is_err());
+        let overflow_epoch = router.stop();
+        assert_eq!(overflow_epoch & 1, 0, "a full queue must atomically disable routing");
+        assert!(overflow_epoch > owning_epoch);
+        assert!(!router.cleanup_acknowledged(overflow_epoch));
+        let worker = NativeMonitorWorker {
+            stop: Arc::new(AtomicBool::new(false)),
+            port,
+            owning_epoch,
+            cleanup_epoch: Arc::new(AtomicU64::new(0)),
+            status: Arc::new(Mutex::new(MonitorInputStatus::default())),
+            thread: None,
+        };
+        assert_eq!(worker.request_stop(), overflow_epoch, "old armed token was already acknowledged; it cannot stand in for lost NoteOff cleanup");
+        assert!(worker.status().cleanup_pending);
     }
 
     #[test]

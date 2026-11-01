@@ -137,6 +137,17 @@ impl MonitorPort {
         self.state.epoch.compare_exchange(armed_epoch, next, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| next)
     }
 
+    /// Return the actual cleanup token when this route still owns the port, or the already
+    /// disabled token after its queue overflow. If a newer armed route exists, leave it alone
+    /// and return this route's old token (never pretend to have cleaned up the newer route).
+    pub fn cancel_owned(&self, armed_epoch: u64) -> u64 {
+        if let Some(next) = self.invalidate_if(armed_epoch) {
+            return next;
+        }
+        let current = self.state.epoch.load(Ordering::Acquire);
+        if current & 1 == 0 { current } else { armed_epoch }
+    }
+
     fn arm_new(&self) -> u64 {
         loop {
             let old = self.state.epoch.load(Ordering::Acquire);
@@ -219,7 +230,7 @@ impl MonitorRouter {
     /// Request immediate producer shutdown and priority callback-side held-note cleanup.
     /// Idempotent for a stale router: dropping/releasing an old route cannot disable a new one.
     pub fn stop(&self) -> u64 {
-        self.port.invalidate_if(self.epoch).unwrap_or(self.epoch)
+        self.port.cancel_owned(self.epoch)
     }
 
     pub fn cleanup_acknowledged(&self, epoch: u64) -> bool {
