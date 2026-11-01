@@ -1,10 +1,10 @@
 //! A deliberately narrow CMX 3600 audio Edit Decision List (EDL) interchange.
 //!
 //! CMX 3600 / SMPTE 258M is a *frame*-based cut list, not an audio project file. This module
-//! supports one audio lane: mono A1 (`A`) or linked stereo A1+A2 (`AA`), with straight cuts,
-//! source in/out, record in/out and common `FROM FILE` / `FROM CLIP NAME` remarks. Existing
-//! audio must be locally accessible. Separately edited A1/A2 lanes, video, fades, dissolves,
-//! source-speed changes and multitrack audio are not supported. AAF/OMF and
+//! supports mono (`A`), linked stereo (`AA`), or two independently edited mono lanes (`A1` and
+//! `A2`), with straight cuts, source/record trims and common file/name remarks. Existing media
+//! must be locally accessible and its channel count must match the event's semantics. Video,
+//! fades, dissolves, more than two lanes and source-speed changes are unsupported. AAF/OMF and
 //! proprietary Pro Tools sessions are different formats and are not handled here.
 
 use crate::{Engine, EngineError, Result};
@@ -113,85 +113,136 @@ fn reject_track_processing(track: &Track) -> Result<()> {
     Ok(())
 }
 
-/// Export exactly one selected audio track as a conforming cut-only CMX 3600 event list.
-///
-/// Every sample boundary must fall on the target frame grid. No file is written if a clip is
-/// unsupported, unrendered, offline, overlapping or extends past its source. Track automation,
-/// buses and plug-in processing are not represented by this edit-decision format.
+/// Compatibility entrypoint for a single mono (`A`) or linked-stereo (`AA`) track.
 pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Export> {
-    let track = session.track(track_id).ok_or_else(|| unsupported("selected track does not exist"))?;
-    if track.kind != TrackKind::Audio || !(1..=2).contains(&track.channels()) || track.inactive {
-        return Err(unsupported("select an active mono A1 or linked stereo A1+A2 audio track for this EDL"));
+    export_audio_tracks(session, &[track_id], fps)
+}
+
+struct PreparedCut<'a> {
+    lane: &'static str,
+    source: SourceId,
+    name: &'a str,
+    media_url: String,
+    source_in: u64,
+    source_out: u64,
+    record_in: u64,
+    record_out: u64,
+}
+
+/// Export one mono/stereo track, or exactly two independently edited mono tracks (`A1`, `A2`).
+///
+/// Each lane must begin at zero, have non-overlapping whole-frame cuts, matching channel-count
+/// source files and no unrendered processing. Lanes may have simultaneous cuts. Events are
+/// interleaved by record position with deterministic A1-before-A2 ordering on ties.
+pub fn export_audio_tracks(session: &Session, track_ids: &[TrackId], fps: u32) -> Result<Export> {
+    if !(1..=2).contains(&track_ids.len()) || (track_ids.len() == 2 && track_ids[0] == track_ids[1]) {
+        return Err(unsupported("choose one mono/stereo track or two different mono audio tracks"));
     }
-    reject_track_processing(track)?;
     let title = ascii_remark(&session.name, "session title", 72)?;
-    let channels = track.channels();
-    let event_audio = if channels == 2 { "AA" } else { "A" };
     let rate = session.sample_rate.hz();
-    let mut clips = track.clips().iter().collect::<Vec<_>>();
-    clips.sort_by_key(|c| (c.start, c.id.0));
-    if clips.is_empty() || clips.len() > MAX_EDITS {
-        return Err(unsupported("EDL requires between 1 and 999 cuts on one track"));
+    let mut events = Vec::<PreparedCut<'_>>::new();
+    for (position, track_id) in track_ids.iter().enumerate() {
+        let track = session.track(*track_id).ok_or_else(|| unsupported("selected track does not exist"))?;
+        let channels = track.channels();
+        if track.kind != TrackKind::Audio || !(1..=2).contains(&channels) || track.inactive || (track_ids.len() == 2 && channels != 1) {
+            return Err(unsupported("select one active mono or linked stereo audio track, or two active mono audio tracks"));
+        }
+        reject_track_processing(track)?;
+        let lane = if track_ids.len() == 2 {
+            if position == 0 { "A1" } else { "A2" }
+        } else if channels == 2 {
+            "AA"
+        } else {
+            "A"
+        };
+        let mut clips = track.clips().iter().collect::<Vec<_>>();
+        clips.sort_by_key(|c| (c.start, c.id.0));
+        if clips.is_empty() || clips.len() > MAX_EDITS.saturating_sub(events.len()) {
+            return Err(unsupported("EDL requires 1..=999 cuts across the selected tracks, with cuts on each lane"));
+        }
+        let mut cursor = 0_i64;
+        for (number, clip) in clips.iter().enumerate() {
+            let ClipContent::Audio { source, offset } = clip.content else {
+                return Err(unsupported(format!("clip `{}` is not audio", clip.name)));
+            };
+            if clip.start < cursor || clip.length <= 0 || offset < 0 {
+                return Err(unsupported("overlapping or invalid clips cannot be flattened to CMX3600 cuts"));
+            }
+            if number == 0 && clip.start != 0 {
+                return Err(unsupported("leading silence must be filled or moved to time zero before EDL export"));
+            }
+            if clip.muted
+                || clip.gain_db != 0.0
+                || !clip.gain_env.is_empty()
+                || clip.fade_in.len != 0
+                || clip.fade_out.len != 0
+                || !clip.stretch.is_finite()
+                || clip.stretch != 1.0
+            {
+                return Err(unsupported(format!("render unportable mute, gain, fades or stretch on clip `{}` before exporting", clip.name)));
+            }
+            let end = clip.start.checked_add(clip.length).ok_or_else(|| unsupported("record end overflows"))?;
+            let source_end = offset.checked_add(clip.length).ok_or_else(|| unsupported("source end overflows"))?;
+            let media = session.source(source).ok_or_else(|| unsupported("clip references missing source"))?;
+            if usize::from(media.channels) != channels || media.sample_rate != rate || u64::try_from(source_end).map_or(true, |n| n > media.frames) {
+                return Err(unsupported(format!("clip `{}` has no matching {channels}-channel media at the session rate", clip.name)));
+            }
+            let name = ascii_remark(&clip.name, "clip name", 80)?;
+            let (source_in, source_out) = (sample_frame(offset, rate, fps)?, sample_frame(source_end, rate, fps)?);
+            let (record_in, record_out) = (sample_frame(clip.start, rate, fps)?, sample_frame(end, rate, fps)?);
+            let media_url = crate::otio::media_url(session, media)?;
+            events.push(PreparedCut { lane, source, name, media_url, source_in, source_out, record_in, record_out });
+            cursor = end;
+        }
     }
+    events.sort_by_key(|event| (event.record_in, event.lane));
     let mut out = format!("TITLE: {title}\nFCM: NON-DROP FRAME\n\n");
     let mut reels = BTreeMap::<SourceId, usize>::new();
-    let mut cursor = 0_i64;
-    for (number, clip) in clips.iter().enumerate() {
-        let ClipContent::Audio { source, offset } = clip.content else {
-            return Err(unsupported(format!("clip `{}` is not audio", clip.name)));
-        };
-        if clip.start < cursor || clip.length <= 0 || offset < 0 {
-            return Err(unsupported("overlapping or invalid clips cannot be flattened to CMX3600 cuts"));
-        }
-        if number == 0 && clip.start != 0 {
-            return Err(unsupported("leading silence must be filled or moved to time zero before EDL export"));
-        }
-        if clip.muted
-            || clip.gain_db != 0.0
-            || !clip.gain_env.is_empty()
-            || clip.fade_in.len != 0
-            || clip.fade_out.len != 0
-            || !clip.stretch.is_finite()
-            || clip.stretch != 1.0
-        {
-            return Err(unsupported(format!("render unportable mute, gain, fades or stretch on clip `{}` before exporting", clip.name)));
-        }
-        let end = clip.start.checked_add(clip.length).ok_or_else(|| unsupported("record end overflows"))?;
-        let source_end = offset.checked_add(clip.length).ok_or_else(|| unsupported("source end overflows"))?;
-        let media = session.source(source).ok_or_else(|| unsupported("clip references missing source"))?;
-        if usize::from(media.channels) != channels || media.sample_rate != rate || u64::try_from(source_end).map_or(true, |n| n > media.frames) {
-            return Err(unsupported(format!("clip `{}` has no matching {channels}-channel media at the session rate", clip.name)));
-        }
-        let name = ascii_remark(&clip.name, "clip name", 80)?;
-        let (source_in, source_out) = (sample_frame(offset, rate, fps)?, sample_frame(source_end, rate, fps)?);
-        let (record_in, record_out) = (sample_frame(clip.start, rate, fps)?, sample_frame(end, rate, fps)?);
+    for (number, event) in events.iter().enumerate() {
         let next_reel = reels.len() + 1;
-        let reel = *reels.entry(source).or_insert(next_reel);
+        let reel = *reels.entry(event.source).or_insert(next_reel);
         let reel = format!("SC{reel:06}");
-        let url = crate::otio::media_url(session, media)?;
         writeln!(
             out,
-            "{:03}  {reel} {event_audio:<5} C        {} {} {} {}",
+            "{:03}  {reel} {:<5} C        {} {} {} {}",
             number + 1,
-            timecode(source_in, fps),
-            timecode(source_out, fps),
-            timecode(record_in, fps),
-            timecode(record_out, fps)
+            event.lane,
+            timecode(event.source_in, fps),
+            timecode(event.source_out, fps),
+            timecode(event.record_in, fps),
+            timecode(event.record_out, fps)
         )
         .map_err(|err| EngineError::Io(format!("EDL formatting failed: {err}")))?;
-        writeln!(out, "* FROM CLIP NAME: {name}").map_err(|err| EngineError::Io(format!("EDL formatting failed: {err}")))?;
-        writeln!(out, "* FROM FILE: {url}\n").map_err(|err| EngineError::Io(format!("EDL formatting failed: {err}")))?;
+        writeln!(out, "* FROM CLIP NAME: {}", event.name).map_err(|err| EngineError::Io(format!("EDL formatting failed: {err}")))?;
+        writeln!(out, "* FROM FILE: {}\n", event.media_url).map_err(|err| EngineError::Io(format!("EDL formatting failed: {err}")))?;
         if out.len() > MAX_EDL_BYTES {
             return Err(unsupported("EDL text exceeds the 2 MiB limit"));
         }
-        cursor = end;
     }
-    Ok(Export { bytes: out.into_bytes(), summary: ExportSummary { edits: clips.len(), unique_sources: reels.len() } })
+    Ok(Export { bytes: out.into_bytes(), summary: ExportSummary { edits: events.len(), unique_sources: reels.len() } })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioLane {
+    Mono,
+    LinkedStereo,
+    IndependentA1,
+    IndependentA2,
+}
+
+impl AudioLane {
+    fn channels(self) -> usize {
+        if self == Self::LinkedStereo { 2 } else { 1 }
+    }
+
+    fn independent(self) -> bool {
+        matches!(self, Self::IndependentA1 | Self::IndependentA2)
+    }
 }
 
 #[derive(Debug)]
 struct Cut {
-    channels: usize,
+    lane: AudioLane,
     reel: String,
     source_in: u64,
     source_out: u64,
@@ -222,10 +273,12 @@ fn parse_cut(line: &str, number: usize, fps: u32) -> Result<Cut> {
     if tokens[1].is_empty() || tokens[1].len() > 8 || !tokens[1].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(unsupported("source reel must be 1..=8 ASCII letters, digits or underscores"));
     }
-    let channels = match tokens[2] {
-        "A" => 1,
-        "AA" => 2,
-        _ => return Err(unsupported("only mono A1 (A) or linked stereo A1+A2 (AA) events are supported")),
+    let lane = match tokens[2] {
+        "A" => AudioLane::Mono,
+        "AA" => AudioLane::LinkedStereo,
+        "A1" => AudioLane::IndependentA1,
+        "A2" => AudioLane::IndependentA2,
+        _ => return Err(unsupported("only mono A, linked stereo AA, or independent mono A1/A2 events are supported")),
     };
     if tokens[3] != "C" {
         return Err(unsupported("only straight cuts (C) are supported"));
@@ -235,21 +288,23 @@ fn parse_cut(line: &str, number: usize, fps: u32) -> Result<Cut> {
     if source_out <= source_in || record_out <= record_in || source_out - source_in != record_out - record_in {
         return Err(unsupported("source and record durations must match and be positive"));
     }
-    Ok(Cut { channels, reel: tokens[1].into(), source_in, source_out, record_in, record_out, name: None, media_url: None })
+    Ok(Cut { lane, reel: tokens[1].into(), source_in, source_out, record_in, record_out, name: None, media_url: None })
 }
 
 fn finish_cut(cut: Cut, edits: &mut Vec<Cut>) -> Result<()> {
     if cut.media_url.as_deref().is_none_or(str::is_empty) {
         return Err(unsupported("each event requires a `* FROM FILE:` media URL; reel-only EDLs require relinking"));
     }
-    if let Some(prior) = edits.last() {
-        if cut.channels != prior.channels {
-            return Err(unsupported("mixed A and AA channel events are not a linked mono/stereo edit; import separate A1/A2 lanes elsewhere"));
-        }
+    if let Some(prior) = edits.first()
+        && (prior.lane.independent() != cut.lane.independent() || (!prior.lane.independent() && prior.lane != cut.lane))
+    {
+        return Err(unsupported("mixed A and AA or independent A1/A2 events have ambiguous channel semantics"));
+    }
+    if let Some(prior) = edits.iter().rev().find(|prior| prior.lane == cut.lane) {
         if cut.record_in < prior.record_out {
-            return Err(unsupported("EDL record timecodes overlap or are out of order"));
+            return Err(unsupported("EDL record timecodes overlap or are out of order within one audio lane"));
         }
-    } else if cut.record_in != 0 {
+    } else if !cut.lane.independent() && cut.record_in != 0 {
         return Err(unsupported("EDL must start at record time 00:00:00:00 (no implicit leading trim)"));
     }
     edits.push(cut);
@@ -264,7 +319,7 @@ fn range(start: u64, duration: u64, fps: u32) -> Value {
     json!({"OTIO_SCHEMA": "TimeRange.1", "start_time": time(start, fps), "duration": time(duration, fps)})
 }
 
-/// Parse a strict frame-based, mono or linked-stereo CMX3600 cut list, then use the OTIO importer
+/// Parse strict frame-based mono, linked-stereo or two independent mono CMX3600 lanes, then use the OTIO importer
 /// to authorize paths, bound/fully decode media, and commit the resulting edits atomically.
 /// Unsupported EDL constructs fail before any session change.
 pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32) -> Result<crate::otio::Import> {
@@ -328,26 +383,36 @@ pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32
         return Err(unsupported("EDL contains no valid audio events"));
     }
 
-    let expected_channels = cuts.first().map_or(1, |cut| cut.channels);
-
-    let mut children = Vec::with_capacity(cuts.len().saturating_mul(2));
-    let mut cursor = 0_u64;
+    let first_lane = cuts.first().map_or(AudioLane::Mono, |cut| cut.lane);
+    let expected_channels = first_lane.channels();
+    let independent = first_lane.independent();
+    let mut first_children = Vec::with_capacity(cuts.len().saturating_mul(2));
+    let mut second_children = Vec::new();
+    let mut first_cursor = 0_u64;
+    let mut second_cursor = 0_u64;
     for cut in cuts {
-        if cut.record_in > cursor {
-            children.push(json!({"OTIO_SCHEMA": "Gap.1", "source_range": range(0, cut.record_in - cursor, fps)}));
+        let (children, cursor) =
+            if cut.lane == AudioLane::IndependentA2 { (&mut second_children, &mut second_cursor) } else { (&mut first_children, &mut first_cursor) };
+        if cut.record_in > *cursor {
+            children.push(json!({"OTIO_SCHEMA": "Gap.1", "source_range": range(0, cut.record_in - *cursor, fps)}));
         }
         children.push(json!({
             "OTIO_SCHEMA": "Clip.1", "name": cut.name.unwrap_or(cut.reel),
             "source_range": range(cut.source_in, cut.source_out - cut.source_in, fps),
             "media_reference": {"OTIO_SCHEMA": "ExternalReference.1", "target_url": cut.media_url},
         }));
-        cursor = cut.record_out;
+        *cursor = cut.record_out;
+    }
+    let mut tracks = Vec::with_capacity(2);
+    if !first_children.is_empty() {
+        tracks.push(json!({"OTIO_SCHEMA": "Track.1", "name": if independent { "A1" } else { title }, "kind": "Audio", "children": first_children}));
+    }
+    if !second_children.is_empty() {
+        tracks.push(json!({"OTIO_SCHEMA": "Track.1", "name": "A2", "kind": "Audio", "children": second_children}));
     }
     let timeline = json!({
         "OTIO_SCHEMA": "Timeline.1", "name": title,
-        "tracks": {"OTIO_SCHEMA": "Stack.1", "children": [
-            {"OTIO_SCHEMA": "Track.1", "name": title, "kind": "Audio", "children": children}
-        ]}
+        "tracks": {"OTIO_SCHEMA": "Stack.1", "children": tracks}
     });
     let json = serde_json::to_vec(&timeline).map_err(|err| EngineError::Io(format!("EDL staging failed: {err}")))?;
     crate::otio::import_audio_with_channels(engine, document, &json, Some(expected_channels))
@@ -397,6 +462,40 @@ mod tests {
         let second = session.new_clip_id();
         session.track_mut(tid).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(second, "Voice 2", sid, 8_000, 6_000, 2_000));
         (session, media, tid)
+    }
+
+    fn fixture_two_lanes() -> (Session, PathBuf, PathBuf, [TrackId; 2]) {
+        let (mut session, first_media, a1) = fixture();
+        let second_media = first_media.parent().unwrap().join("independent #2.wav");
+        let second_audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![-0.42; 96_000]] };
+        std::fs::write(&second_media, soundcraft_audio_io::encode(&second_audio, &EncodeOptions::default()).unwrap()).unwrap();
+        let second_source = SourceId(session.alloc());
+        session.pool.insert(second_source, Arc::new(SourceAudio::new(second_audio)));
+        session.sources.push(Source {
+            id: second_source,
+            name: "Independent".into(),
+            path: second_media.to_str().unwrap().into(),
+            channels: 1,
+            frames: 96_000,
+            sample_rate: 48_000,
+            format: FileFormat::Wav,
+            time_reference: 0,
+            unsaved: false,
+        });
+        let a2 = session.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Other"));
+        let first = session.new_clip_id();
+        session.track_mut(a2).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(first, "Other 1", second_source, 6_000, 0, 2_000));
+        let second = session.new_clip_id();
+        session.track_mut(a2).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(second, "Other 2", second_source, 10_000, 4_000, 4_000));
+        (session, first_media, second_media, [a1, a2])
+    }
+
+    fn clean_two_lane_fixture(first_media: &Path, second_media: &Path, document: Option<&Path>) {
+        if let Some(document) = document {
+            std::fs::remove_file(document).unwrap();
+        }
+        std::fs::remove_file(first_media).unwrap();
+        std::fs::remove_file(second_media).unwrap();
     }
 
     #[test]
@@ -483,6 +582,151 @@ mod tests {
         assert_eq!(*engine.session(), before);
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn independent_a1_a2_cuts_keep_two_mono_sources_gaps_overlaps_and_one_undo_step() {
+        let (session, first_media, second_media, lanes) = fixture_two_lanes();
+        let range = soundcraft_time::Range::new(0, 8_000);
+        let originals = lanes.map(|id| soundcraft_mix::render_clips(&session, id, range));
+        assert_eq!(originals[0].len(), 1);
+        assert_eq!(originals[1].len(), 1);
+        assert!((originals[0][0][0] - 0.125).abs() < 0.00001);
+        assert!((originals[1][0][0] + 0.42).abs() < 0.00001);
+        assert_eq!(originals[0][0][5_000], 0.0);
+        assert_eq!(originals[1][0][3_000], 0.0);
+
+        let exported = export_audio_tracks(&session, &lanes, 24).unwrap();
+        assert_eq!(exported.summary, ExportSummary { edits: 4, unique_sources: 2 });
+        let text = String::from_utf8(exported.bytes.clone()).unwrap();
+        assert!(text.contains("001  SC000001 A1    C"));
+        assert!(text.contains("002  SC000002 A2    C"));
+        assert!(text.contains("003  SC000002 A2    C"));
+        assert!(text.contains("004  SC000001 A1    C"));
+        let first_url = crate::otio::media_url(&session, &session.sources[0]).unwrap();
+        let second_url = crate::otio::media_url(&session, &session.sources[1]).unwrap();
+        assert_eq!(
+            text.replace(&first_url, "file:///tmp/golden-a1.wav").replace(&second_url, "file:///tmp/golden-a2.wav"),
+            include_str!("../tests/fixtures/cmx3600_two_lanes.edl")
+        );
+
+        let document = first_media.with_extension("edl");
+        std::fs::write(&document, exported.bytes).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let result = engine.execute("file.import_edl", &json!({"path": document.to_str().unwrap(), "fps": 24})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 4);
+        assert_eq!(result["media_sources"], 2);
+        for (index, name) in ["A1", "A2"].iter().enumerate() {
+            let restored = engine.session().tracks.iter().find(|t| &t.name == name).unwrap();
+            assert_eq!(restored.format, ChannelFormat::Mono);
+            assert_eq!(restored.clips().len(), 2);
+            assert_eq!(restored.clips()[0].gain_db, 0.0);
+            let now = soundcraft_mix::render_clips(engine.session(), restored.id, range);
+            assert_eq!(now.len(), 1);
+            for (sample, (&original, &imported)) in originals[index][0].iter().zip(&now[0]).enumerate() {
+                assert!((original - imported).abs() < 0.00001, "lane {name} sample {sample}: {original} changed to {imported}");
+            }
+        }
+        assert!(engine.can_undo());
+        engine.undo();
+        assert_eq!(*engine.session(), before);
+
+        let explicit = first_media.with_file_name("explicit.edl");
+        let command = Engine::new(session.clone())
+            .execute("file.export_edl", &json!({"path": explicit.to_str().unwrap(), "tracks": [lanes[0].0, lanes[1].0], "fps": 24}))
+            .unwrap();
+        assert_eq!(command["edits"], 4);
+        assert_eq!(command["tracks"], json!([lanes[0], lanes[1]]));
+        assert_eq!(std::fs::read(&explicit).unwrap(), text.as_bytes());
+        std::fs::remove_file(explicit).unwrap();
+
+        let selected = first_media.with_file_name("selected.edl");
+        let mut selection_session = session;
+        selection_session.edit.selected_tracks = lanes.to_vec();
+        let selected_result =
+            Engine::new(selection_session).execute("file.export_edl", &json!({"path": selected.to_str().unwrap(), "fps": 24})).unwrap();
+        assert_eq!(selected_result["tracks"], json!([lanes[0], lanes[1]]));
+        assert_eq!(std::fs::read(&selected).unwrap(), text.as_bytes());
+        std::fs::remove_file(selected).unwrap();
+        clean_two_lane_fixture(&first_media, &second_media, Some(&document));
+    }
+
+    #[test]
+    fn independent_lane_import_accepts_initial_lane_gap_and_official_adapter_fixture() {
+        let (session, first_media, second_media, _) = fixture_two_lanes();
+        let a1 = crate::otio::media_url(&session, &session.sources[0]).unwrap();
+        let a2 = crate::otio::media_url(&session, &session.sources[1]).unwrap();
+        let fixture = include_str!("../tests/fixtures/cmx3600_two_lanes.edl")
+            .replace("file:///tmp/golden-a1.wav", &a1)
+            .replace("file:///tmp/golden-a2.wav", &a2);
+        // A2 begins one frame late; A1 still starts at zero. The independent-lane gap is explicit.
+        let shifted = fixture
+            .replace("00:00:00:03 00:00:00:04 00:00:00:00 00:00:00:01", "00:00:00:03 00:00:00:04 00:00:00:01 00:00:00:02")
+            .replace("00:00:00:05 00:00:00:07 00:00:00:02 00:00:00:04", "00:00:00:05 00:00:00:07 00:00:00:03 00:00:00:05");
+        let document = first_media.with_extension("edl");
+        let mut engine = Engine::default();
+        let imported = import_audio(&mut engine, &document, shifted.as_bytes(), 24).unwrap();
+        assert_eq!((imported.tracks, imported.clips, imported.sources), (2, 4, 2));
+        let lane_a2 = engine.session().tracks.iter().find(|t| t.name == "A2").unwrap();
+        assert_eq!(lane_a2.clips()[0].start, 2_000);
+        assert_eq!(lane_a2.clips()[1].start, 6_000);
+        clean_two_lane_fixture(&first_media, &second_media, None);
+    }
+
+    #[test]
+    fn independent_edl_rejects_mixed_lanes_overlap_wrong_channel_media_and_event_overflow_atomically() {
+        let (session, first_media, second_media, lanes) = fixture_two_lanes();
+        let document = first_media.with_extension("edl");
+        let good = String::from_utf8(export_audio_tracks(&session, &lanes, 24).unwrap().bytes).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let mut overflow = good.clone();
+        for number in 5..=1000 {
+            let begin = number as u64 - 1;
+            writeln!(overflow, "{number:03}  SC000001 A1    C        00:00:00:00 00:00:00:01 {} {}", timecode(begin, 24), timecode(begin + 1, 24))
+                .unwrap();
+            writeln!(overflow, "* FROM FILE: file:///tmp/not-read-until-validation.wav\n").unwrap();
+        }
+        let err = import_audio(&mut engine, &document, overflow.as_bytes(), 24).unwrap_err();
+        assert!(format!("{err}").contains("more than 999"), "unexpected event-cap error: {err}");
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        let broken = [
+            good.replace("003  SC000002 A2    C", "003  SC000002 AA    C"),
+            good.replace("004  SC000001 A1    C", "004  SC000001 A     C"),
+            good.replace(
+                "003  SC000002 A2    C        00:00:00:05 00:00:00:07 00:00:00:02 00:00:00:04",
+                "003  SC000002 A2    C        00:00:00:05 00:00:00:07 00:00:00:00 00:00:00:02",
+            ),
+            good.replace("003  SC000002 A2    C", "003  SC000002 A3    C"),
+            good.replace("001  SC000001 A1    C", "001  SC000001 A1    D"),
+        ];
+        for invalid in broken {
+            let err = import_audio(&mut engine, &document, invalid.as_bytes(), 24).unwrap_err();
+            assert!(matches!(err, EngineError::Unsupported(_)), "unexpected error: {err}");
+            assert_eq!(*engine.session(), before);
+            assert!(!engine.can_undo());
+        }
+        // Each A1/A2 lane accepts only mono source files, not one channel of linked stereo.
+        let (stereo_session, stereo_media, stereo_track) = fixture_channels(2);
+        let stereo_url = crate::otio::media_url(&stereo_session, &stereo_session.sources[0]).unwrap();
+        let mono_url = crate::otio::media_url(&session, &session.sources[0]).unwrap();
+        let second_url = crate::otio::media_url(&session, &session.sources[1]).unwrap();
+        let invalid = good.replace(&mono_url, &stereo_url);
+        let err = import_audio(&mut engine, &document, invalid.as_bytes(), 24).unwrap_err();
+        assert!(format!("{err}").contains("requires exactly"), "expected strict mono validation: {err}");
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        let missing = good.replace(&second_url, "file:///tmp/soundcraft-cmx3600-nonexistent-media.wav");
+        assert!(import_audio(&mut engine, &document, missing.as_bytes(), 24).is_err());
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        assert!(export_audio_tracks(&stereo_session, &[stereo_track, stereo_track], 24).is_err());
+        assert!(export_audio_tracks(&session, &[lanes[0], stereo_track], 24).is_err());
+        std::fs::remove_file(stereo_media).unwrap();
+        clean_two_lane_fixture(&first_media, &second_media, None);
     }
 
     #[test]
