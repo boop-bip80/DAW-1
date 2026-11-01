@@ -791,6 +791,14 @@ pub fn plugin_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId, slot: usize, oc
         if ui.button("no insert").clicked() {
             run_pick(app, ui, "mix.insert_remove", json!({"track": id.0, "slot": slot}));
         }
+        // The command swaps complete plugin slots, not just their labels. Explicitly name the
+        // destination so an occupied neighbour is not mistaken for a drag-and-shift operation.
+        if slot > 0 && ui.button(format!("Swap with Insert {}", char::from(b'A' + (slot - 1) as u8))).clicked() {
+            swap_insert(app, ui, id, slot, slot - 1);
+        }
+        if slot + 1 < soundcraft_model::INSERT_SLOTS && ui.button(format!("Swap with Insert {}", char::from(b'A' + (slot + 1) as u8))).clicked() {
+            swap_insert(app, ui, id, slot, slot + 1);
+        }
         ui.separator();
     }
     let mut cats: Vec<soundcraft_dsp::Category> = Vec::new();
@@ -881,6 +889,26 @@ fn pick_insert(app: &mut SoundApp, ui: &Ui, id: TrackId, slot: usize, plugin: &s
 fn run_pick(app: &mut SoundApp, ui: &Ui, cmd: &str, params: serde_json::Value) {
     if let Err(e) = app.run(cmd, params) {
         app.ui.status = e;
+    }
+    ui.close();
+}
+
+/// A slot swap changes both the audio graph and the identities found at the two editor keys.
+/// Close editors at those keys only on success, so an existing native plugin editor cannot
+/// accidentally edit the *other* plugin after the swap.
+fn swap_insert(app: &mut SoundApp, ui: &Ui, id: TrackId, from: usize, to: usize) {
+    match app.run("mix.insert_move", json!({"track": id.0, "from": from, "to": to})) {
+        Ok(_) => {
+            if let Some(player) = app.player.as_ref() {
+                player.close_editor(id, from);
+                player.close_editor(id, to);
+            }
+            app.ui.plugin_windows.retain(|(track, slot)| *track != id || (*slot != from && *slot != to));
+            if app.pending_open.is_some_and(|(track, slot)| track == id && (slot == from || slot == to)) {
+                app.pending_open = None;
+            }
+        }
+        Err(e) => app.ui.status = e,
     }
     ui.close();
 }
@@ -1757,6 +1785,69 @@ mod tests {
         Harness,
         kittest::{NodeT, Queryable},
     };
+
+    #[test]
+    fn insert_context_menu_swaps_effects_with_keyboard_and_undo_without_stale_editors() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let track = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Vox"));
+        app.run("mix.insert", serde_json::json!({"track": track.0, "slot": 0, "plugin": "eq_7band"})).expect("insert A");
+        app.run("mix.insert", serde_json::json!({"track": track.0, "slot": 1, "plugin": "eq_1band"})).expect("insert B");
+        app.ui.plugin_windows.extend([(track, 0), (track, 1)]);
+        app.pending_open = Some((track, 1));
+        app.engine.mark_clean();
+
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(550.0, 650.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::plugin_menu(app, ui, track, 0, true), app);
+        h.run_steps(3);
+        let undo_before = h.state().engine.undo_history().len();
+        let journal_before = h.state().engine.journal.len();
+        assert!(!h.state().engine.is_dirty(), "opening and repainting a plugin menu must not swap or dirty anything");
+        assert_eq!(h.state().engine.journal.len(), journal_before);
+
+        h.get_by_label("Swap with Insert B").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        let inserts = &h.state().engine.session().track(track).expect("Vox").mixer.inserts;
+        assert_eq!(inserts[0].as_ref().expect("new A").plugin, "eq_1band");
+        assert_eq!(inserts[1].as_ref().expect("new B").plugin, "eq_7band");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
+        assert!(h.state().engine.is_dirty());
+        assert!(!h.state().ui.plugin_windows.iter().any(|(id, slot)| *id == track && (*slot == 0 || *slot == 1)));
+        assert!(h.state().pending_open.is_none(), "a queued editor must not open on the wrong plugin after a swap");
+
+        h.state_mut().run("edit.undo", serde_json::json!({})).expect("undo insert swap");
+        let inserts = &h.state().engine.session().track(track).expect("Vox").mixer.inserts;
+        assert_eq!(inserts[0].as_ref().expect("restored A").plugin, "eq_7band");
+        assert_eq!(inserts[1].as_ref().expect("restored B").plugin, "eq_1band");
+        h.state_mut().run("edit.redo", serde_json::json!({})).expect("redo insert swap");
+        assert_eq!(h.state().engine.session().track(track).expect("Vox").mixer.inserts[0].as_ref().expect("redone A").plugin, "eq_1band");
+    }
+
+    #[test]
+    fn moving_insert_into_empty_neighbor_is_a_single_undoable_command() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let track = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Bass"));
+        app.run("mix.insert", serde_json::json!({"track": track.0, "slot": 0, "plugin": "eq_7band"})).expect("insert A");
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(550.0, 650.0))
+            .build_ui_state(move |ui, app: &mut crate::SoundApp| super::plugin_menu(app, ui, track, 0, true), app);
+        h.run_steps(2);
+        let undo_before = h.state().engine.undo_history().len();
+        h.get_by_label("Swap with Insert B").click();
+        h.run_steps(2);
+        let inserts = &h.state().engine.session().track(track).expect("Bass").mixer.inserts;
+        assert!(inserts[0].is_none());
+        assert_eq!(inserts[1].as_ref().expect("moved insert").plugin, "eq_7band");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
+    }
 
     #[test]
     fn polarity_toggle_is_reachable_in_default_mix_view_and_undoable() {
