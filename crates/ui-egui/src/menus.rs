@@ -456,6 +456,8 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Setup > Appearance", "window.ui_customization"),
     ("Setup > Hardware...", "window.playback_engine"),
     ("Setup > Playback Engine...", "window.playback_engine"),
+    // The menu opens the device picker; direct setup.midi_input_devices calls still edit preferences.
+    ("Setup > MIDI > MIDI Input Devices...", "window.playback_engine"),
     ("Setup > I/O...", "window.io_setup"),
     ("Setup > Keyboard Shortcuts...", "window.shortcuts"),
     ("Setup > Session", "setup.session"),
@@ -807,6 +809,44 @@ mod tests {
         app.dialogs.open = None;
         invoke_menu(&mut app, "ui.bounce_dialog", "File > Bounce Mix...");
         assert_eq!(app.dialogs.open_name(), Some("bounce"));
+    }
+
+    #[test]
+    fn midi_input_devices_menu_opens_the_picker_without_changing_the_session() {
+        const PATH: &str = "Setup > MIDI > MIDI Input Devices...";
+        let setup = tree().into_iter().find(|node| node.label == "Setup").unwrap();
+        let midi = setup.children.iter().find(|node| node.label == "MIDI").unwrap();
+        let devices = midi.children.iter().find(|node| node.path == PATH).unwrap();
+        assert_eq!(devices.label, "MIDI Input Devices...");
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let id = command_for_path(&devices.path, &ui_aliases()).unwrap();
+        assert_eq!(id, "window.playback_engine");
+        assert_eq!(item_state(&app, PATH, Some(&id)), (true, false));
+        assert!(!app.ui.show_playback_engine);
+        assert!(!app.engine.is_dirty());
+        assert!(!app.engine.can_undo());
+        let original = app.engine.session().to_json();
+
+        invoke_menu(&mut app, &id, PATH);
+        assert!(app.ui.show_playback_engine);
+        assert_eq!(app.engine.session().to_json(), original);
+        assert!(!app.engine.is_dirty());
+        assert!(!app.engine.can_undo());
+
+        // Re-opening from the menu must not toggle an already-open picker shut.
+        invoke_menu(&mut app, &id, PATH);
+        assert!(app.ui.show_playback_engine);
+    }
+
+    #[test]
+    fn midi_input_devices_command_still_updates_preferences_without_opening_a_window() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        let updated = app.run("setup.midi_input_devices", json!({"enable": ["Test MIDI Port"]})).unwrap();
+        assert_eq!(updated["enabled"], json!(["Test MIDI Port"]));
+        assert!(app.engine.session().edit.flag("midi.input.Test MIDI Port"));
+        assert!(app.engine.is_dirty());
+        assert!(!app.ui.show_playback_engine);
     }
 
     #[test]
