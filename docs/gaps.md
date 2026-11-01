@@ -1,6 +1,6 @@
 # Where SoundCraft falls short of Pro Tools
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** minor (MIDI hardware input capture foundation, OTIO export, record and plugin safeguards, UI regressions and CI triggers) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (OTIO import, MIDI take bridge, bounded input mapping and Linux smoke/full-gate evidence; alpha gap remains) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Every known shortfall, one entry each, ranked by how much it stops a Pro Tools user from doing
 real work in SoundCraft. This is the work list: pick from the top. Rows marked **alpha blocker**
@@ -15,8 +15,8 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 | # | Gap | Dimension | Doc | Est. (h) |
 |---|---|---|---|---:|
-| G-01 | **Alpha blocker.** No channel routing or duplex low-latency path (device, rate and buffer choice done; ASIO opt-in) | Hardware | [hardware-parity.md](hardware-parity.md) | 15–25 |
-| G-02 | **Alpha blocker.** Native MIDI capture API present; no armed-track/instrument routing or MIDI output | Hardware / MIDI | [hardware-parity.md](hardware-parity.md) | 20–35 |
+| G-01 | **Alpha blocker.** Per-track input routes now bounded; no complete I/O matrix, duplex clock or latency compensation | Hardware | [hardware-parity.md](hardware-parity.md) | 15–25 |
+| G-02 | **Alpha blocker.** Native input API and undoable take bridge present, not connected to desktop transport/instruments or MIDI output | Hardware / MIDI | [hardware-parity.md](hardware-parity.md) | 20–35 |
 | G-03 | **Alpha blocker.** Cannot exchange sessions with Pro Tools (no AAF/OMF, no `.ptx`) | File formats | [file-format-parity.md](file-format-parity.md) | 50–90 |
 | G-04 | Open correctness bugs in features counted as done (~25 issues) | Stability | this file | 25–40 |
 | G-05 | (Entitlement part: alpha blocker for the mix row) Third-party VST3s blocked in the signed macOS build; AU editors missing | Ecosystem | [plugin-parity.md](plugin-parity.md) | 15–25 |
@@ -28,7 +28,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 | G-11 | No external sync (MTC, LTC, MIDI clock, video reference) | Hardware | [hardware-parity.md](hardware-parity.md) | 15–25 |
 | G-12 | Immersive delivery: no Dolby Atmos/ADM BWF, MPEG-H, binaural | Features | [file-format-parity.md](file-format-parity.md) | 50–80 |
 | G-13 | Sidechain inputs, ARA, out-of-process plugin sandboxing | Ecosystem | [plugin-parity.md](plugin-parity.md) | 30–50 |
-| G-14 | Windows/Linux/Web exercised only lightly at runtime; no PR CI running the tests | Platforms / Stability | this file | 20–40 |
+| G-14 | Linux full gate and headless audio round-trip pass; no GitHub Actions runs or macOS/Windows/hardware runtime evidence | Platforms / Stability | this file | 20–40 |
 | G-15 | Elastic Audio depth: one algorithm, no Elastic Pitch | Features | [target-app-parity.md](target-app-parity.md) | 30–45 |
 | G-16 | Session templates, track presets, workspace browser, batch rename | Features | [target-app-parity.md](target-app-parity.md) | 25–40 |
 | G-17 | Video: HEVC/DNx decode, video export, external timecode | Features / Formats | [file-format-parity.md](file-format-parity.md) | 30–50 |
@@ -46,7 +46,8 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
   device, sample rate and device buffer size (kept with the preferences, per machine; `ui.audio_device`
   for agents); f32 and 16/32-bit integer devices; ASIO behind the opt-in `asio` build feature
   (verified on Windows with an SSL 2+ at 128 samples).
-- **Missing:** routing to physical channels (I/O Setup), one duplex stream on one clock (input and
+- **Partial (2026-11-01):** The Mix input selector now offers up to 64 physical channels when the device exposes them; recording rejects invalid routes before creating takes, and monitoring silences missing channels instead of wrapping to another microphone. This is not a full physical I/O matrix or hardware validation.
+- **Missing:** complete I/O Setup channel mapping, one duplex stream on one clock (input and
   output are still separate cpal streams), latency reporting and record-offset compensation, ASIO
   in official builds (owner decision: Steinberg's SDK is proprietary or GPLv3), JACK, and
   verification on macOS and Linux. The mix still runs in fixed 512-sample blocks.
@@ -60,8 +61,8 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 ### G-02. MIDI devices
 
-- **Partial foundation (2026-10-31):** `soundcraft-midi::live` decodes timestamped MIDI 1.0 streams and assembles note/controller takes. `soundcraft-midi::device` now discovers and opens native MIDI input ports with a bounded nonblocking event queue (Linux/macOS/Windows), overflow counters and best-effort disconnect checks. No physical controller test yet.
-- **Missing:** the adapter is not wired into the DAW's record-enabled tracks, live instruments, MIDI thru/playback or saved takes. External MIDI output, MIDI clock and MTC remain absent. `setup.midi_input_devices` and `setup.midi_studio` still store names independently of the capture adapter. `midi_editor.rs:288` notes audition "needs a live MIDI input path".
+- **Partial foundation (2026-11-01):** `soundcraft-midi::live` decodes timestamped MIDI, `soundcraft-midi::device` discovers native input ports and captures through a bounded queue, and Setup › Playback Engine lists and stores input-device selections. `MidiRecordBridge` converts anchored device timestamps through the tempo map and can commit bounded, undoable takes on armed MIDI/instrument tracks (`midi.record_take`); synthetic recordings and undo are tested.
+- **Missing:** the desktop record/stop lifecycle does not open the selected MIDI port or drive the bridge; live audition, MIDI thru/output, clock and MTC remain absent. The driver and audio clocks have no sample-accurate shared timestamp. Physical keyboard tests are still needed.
 - **Impact:** MIDI production is limited to drawing notes and importing SMF.
 - **Estimate:** ≈ 20–35 h (device layer, realtime input to armed tracks and instruments with
   timestamps, MIDI record/merge/loop, thru, output tracks, clock out).
@@ -70,7 +71,7 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
 
 - **Missing:** opening or saving `.ptx`/`.ptf`, AAF and OMF import and export (#40), Media
   Composer–compatible sessions. Our session format is `.scraft` JSON.
-- **Partial interchange (2026-10-31):** `file.export_otio` writes eligible multitrack audio timelines to OpenTimelineIO JSON (clips, gaps, source trims, media references). This does **not** import/export AAF, OMF or `.ptx`.
+- **Partial interchange (2026-11-01):** `file.export_otio` and `file.import_otio` now write/read eligible audio-only OpenTimelineIO timelines (multiple tracks, gaps, source trims, local media, sample-rate conversion), through File menu paths. Import validates all media before one undoable mutation and accepts official OTIO Clip.2 references. No AAF, OMF or `.ptx` interchange; advanced OTIO/video/automation/plugin structures are rejected.
 - **Impact:** the standard's main-format bar for beta. A Pro Tools user cannot bring a project in
   or hand one back; post-production (picture editors deliver AAF) is blocked.
 - **Estimate:** AAF/OMF import + export ≈ 50–90 h (FilmCraft already writes AAF/OMF; we can learn
@@ -78,6 +79,8 @@ When you close a gap, delete its entry (or shrink it) in the same PR, and bump t
   black-box format study is in the clean-room rules; not included in the estimate.
 
 ### G-04. Correctness bugs in "done" features
+
+**Fixed (2026-11-01):** Recording validates every selected input route before WAV creation; monitor channels no longer wrap to unavailable microphones. CLAP/VST3 plugin scans do not guess among ambiguous bundle executables. A CLI test covers import → bounce → save → reopen → bounce, surviving removal of the original import path.
 
 **Fixed (2026-10-31):** A panicked recording writer is reported rather than silently treated as an empty successful take. Recording input startup retries the driver's default buffer when stream build or play fails. CLAP and VST3 note-off queues preserve releases under overload and after transport stop. Exact-modifier shortcuts avoid stealing unrelated keys; command-palette changes reset selection to avoid invoking stale results. These are focused regressions, not closure of the broader G-04 backlog.
 
@@ -181,8 +184,10 @@ cannot be hosted (#109): Avid's AAX SDK licence and PACE signing; owner decision
 ### G-14. Platforms and CI
 
 The default-branch and PR CI workflows now target this fork's active branch and request
-`cargo xtask ci` on Linux, macOS and Windows (2026-10-31). However, GitHub reports **zero
-workflow runs**, so runner enablement/permissions and three-OS results remain unverified. Runtime
+`cargo xtask ci` on Linux, macOS and Windows (2026-10-31). On 2026-11-01 a local Linux
+`cargo xtask ci` run passed fmt, strict Clippy, workspace tests, doctests, assets, layers and
+WebAssembly, with an additional headless CLI media round-trip regression. However, GitHub still
+reports **zero workflow runs**, so runner enablement/permissions and three-OS results remain unverified. Runtime
 smoke tests are also outstanding; Windows/Linux startup reports include #41, #45, #107 and #142.
 ≈ 20–40 h for runner verification, smoke tests and any platform fixes.
 
@@ -231,6 +236,7 @@ missing. Out of scope unless the owner decides otherwise.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Added OTIO audio import, MIDI synthetic take bridge, bounded hardware input routing, safe plugin scans and Linux smoke/full-gate evidence; no hardware or GitHub Actions evidence, alpha gaps remain |
 | 2026-10-31 | minor | Documented bounded native MIDI input capture and its missing routing; OTIO audio export; record fallback, plugin and palette safeguards; CI trigger without runner evidence. Alpha gaps remain |
 | 2026-10-25 | trivial | G-04: Clip Looping (#1030) lacks the loop crossfade option, and Number of Loops stops at 512 while length and fill make up to 1000 loops |
 | 2026-10-24 | trivial | G-08: 27 processors + 3 instruments, as the plugin registry holds; G-20: the sampler shipped (#108), so it is no longer listed as missing |
