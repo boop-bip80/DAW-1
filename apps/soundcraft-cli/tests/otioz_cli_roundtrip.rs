@@ -54,10 +54,7 @@ fn checked(step: &str, output: &Output) {
 fn command_result(output: &Output, command: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let prefix = format!("{command}: ");
-    let line = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("no {command} result in stdout: {stdout}"));
+    let line = stdout.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap_or_else(|| panic!("no {command} result in stdout: {stdout}"));
     serde_json::from_str(line).unwrap()
 }
 
@@ -298,15 +295,7 @@ fn portable_otioz_cli_import_survives_archive_and_exporter_removal() {
     std::fs::remove_dir_all(&original_dir).unwrap();
     std::fs::remove_file(&archive).unwrap();
     assert!(!source.exists() && !project.exists() && !archive.exists());
-    let reopened = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&recipient)
-        .arg("--bounce")
-        .arg(&reopened_bounce)
-        .args(["--start", "0", "--end", "0.5"])
-        .output()
-        .unwrap();
+    let reopened = cli().arg("run").arg("--in").arg(&recipient).arg("--bounce").arg(&reopened_bounce).args(["--start", "0", "--end", "0.5"]).output().unwrap();
     checked("reopen and rebounce without archive or original media", &reopened);
     assert!(
         !String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"),
