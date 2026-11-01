@@ -12,10 +12,12 @@ fn id_of(name: &str) -> String {
 }
 
 #[test]
-fn scan_lists_both_audio_modules_but_not_the_controller_class() {
+fn scan_lists_all_audio_modules_but_not_the_controller_class() {
     let dir = fixture_dir();
     let found = soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]);
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
+    let headless = found.iter().find(|d| d.name == "Fixture Headless").unwrap();
+    assert!(!headless.is_instrument);
     let g = found.iter().find(|d| d.name == "Fixture Gain").unwrap();
     // `uid()` lays out the first 8 bytes differently on Windows (COM GUID order).
     let want = if cfg!(windows) { "vst3:001D0A5C111122223333444455556666" } else { "vst3:5C0A1D00111122223333444455556666" };
@@ -275,6 +277,31 @@ fn rejected_controller_state_reports_failure_and_allows_a_later_restore() {
     assert!(p.load_state(&blob));
     assert_eq!(p.param("7"), Some(0.5));
     assert!((p.param("12").unwrap() - 20_000.0).abs() < 1.0);
+}
+
+#[test]
+fn controllerless_plugin_rejects_unconsumable_controller_state_without_mutation() {
+    let id = id_of("Fixture Headless");
+    assert!(soundcraft_vst3_host::plugin_info(&id).unwrap().params.is_empty());
+    let mut p = soundcraft_vst3_host::create(&id).unwrap();
+    // A controllerless component can still restore bare component states.
+    assert!(p.load_state(&0.5f64.to_le_bytes()));
+    // Its own framed state has an empty controller half and is also valid.
+    let mut valid = b"SCV3".to_vec();
+    valid.extend_from_slice(&8u32.to_le_bytes());
+    valid.extend_from_slice(&0.75f64.to_le_bytes());
+    valid.extend_from_slice(&0u32.to_le_bytes());
+    assert!(p.load_state(&valid));
+    assert_eq!(p.save_state().as_deref(), Some(valid.as_slice()));
+
+    // An invalid controller half must be rejected before changing the valid component half.
+    let mut invalid = b"SCV3".to_vec();
+    invalid.extend_from_slice(&8u32.to_le_bytes());
+    invalid.extend_from_slice(&0.25f64.to_le_bytes());
+    invalid.extend_from_slice(&8u32.to_le_bytes());
+    invalid.extend_from_slice(&1.0f64.to_le_bytes());
+    assert!(!p.load_state(&invalid));
+    assert_eq!(p.save_state().as_deref(), Some(valid.as_slice()), "rejected state must not mutate the component");
 }
 
 #[test]
