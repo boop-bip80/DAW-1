@@ -295,8 +295,10 @@ pub struct SoundApp {
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
     recorder_failed: bool,
-    /// Input this take lost to a slow disk, as last reported (ms).
-    lost_shown: u64,
+    /// Damaged input frames in this take already reported to the user (not rounded milliseconds).
+    affected_frames_shown: u64,
+    /// An approaching-full ring is reported once per take, before any actual dropout.
+    pressure_warned: bool,
     /// Where the takes being recorded go, autosaved with the session so a crash can't lose them.
     take_plan: Option<soundcraft_engine::io::Recording>,
     pub ui: UiState,
@@ -519,7 +521,8 @@ impl SoundApp {
             record_start: 0,
             punch: None,
             recorder_failed: false,
-            lost_shown: 0,
+            affected_frames_shown: 0,
+            pressure_warned: false,
             take_plan: None,
             ui: UiState::default(),
             audio_health_report: None,
@@ -881,7 +884,8 @@ impl SoundApp {
         } else {
             Vec::new()
         };
-        self.lost_shown = 0;
+        self.affected_frames_shown = 0;
+        self.pressure_warned = false;
         self.take_plan = None;
         self.midi_status = MidiInputStatus::default();
         if let Some(p) = &self.player {
@@ -1291,12 +1295,21 @@ impl SoundApp {
     /// as a slow disk loses input.
     fn watch_input(&mut self) {
         let recording = self.engine.transport.recording;
+        let recording_audio = recording && self.take_plan.is_some();
         let Some(r) = &mut self.recorder else { return };
         let Some(trouble) = r.trouble() else {
-            let lost = r.lost_ms();
-            if recording && lost > self.lost_shown {
-                self.lost_shown = lost;
-                self.ui.status = format!("The disk is too slow: this take has lost {lost} ms of input so far.");
+            let pressure = r.capture_pressure();
+            if recording_audio && pressure.affected_frames > self.affected_frames_shown {
+                self.affected_frames_shown = pressure.affected_frames;
+                self.pressure_warned = true;
+                if let Some(warning) = pressure.warning(r.sample_rate) {
+                    self.ui.status = warning;
+                }
+            } else if recording_audio && !self.pressure_warned && pressure.peak_percent >= 80 {
+                self.pressure_warned = true;
+                if let Some(warning) = pressure.warning(r.sample_rate) {
+                    self.ui.status = warning;
+                }
             }
             return;
         };

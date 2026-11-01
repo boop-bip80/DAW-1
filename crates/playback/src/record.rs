@@ -43,6 +43,34 @@ pub enum Trouble {
     Disk(String),
 }
 
+/// Input capture FIFO pressure since the current take was armed. The peak is a bounded sample
+/// occupancy percentage, and `affected_frames` counts physical input frames with at least one
+/// sample dropped. This is a disk/writer backlog diagnostic, **not** an input/output clock or
+/// measured latency estimate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapturePressure {
+    pub peak_percent: u8,
+    pub affected_frames: u64,
+}
+
+impl CapturePressure {
+    /// A user-facing warning, constructed on the UI/writer thread rather than an audio callback.
+    pub fn warning(self, sample_rate: u32) -> Option<String> {
+        if self.affected_frames > 0 {
+            let ms = self.affected_frames.saturating_mul(1000) / u64::from(sample_rate.max(1));
+            let duration = if ms == 0 { "less than 1 ms".to_string() } else { format!("{ms} ms") };
+            Some(format!(
+                "Recording buffer overrun: {} input frame(s) had missing samples ({duration}); buffer peaked at {}%. Check disk throughput.",
+                self.affected_frames, self.peak_percent
+            ))
+        } else if self.peak_percent >= 80 {
+            Some(format!("Recording buffer reached {}% full. The disk may be falling behind; check disk throughput.", self.peak_percent))
+        } else {
+            None
+        }
+    }
+}
+
 /// Single-producer single-consumer FIFO of samples (input callback → writer thread). The slots
 /// are atomics, so it needs no lock and no `unsafe`.
 struct CaptureRing {
@@ -50,25 +78,43 @@ struct CaptureRing {
     mask: usize,
     head: AtomicUsize,
     tail: AtomicUsize,
+    /// Maximum queued sample slots this arm, updated by its sole realtime producer.
+    peak_samples: AtomicUsize,
 }
 
 impl CaptureRing {
     fn new(capacity: usize) -> CaptureRing {
         let n = capacity.max(2).next_power_of_two();
-        CaptureRing { slots: (0..n).map(|_| AtomicU32::new(0)).collect(), mask: n - 1, head: AtomicUsize::new(0), tail: AtomicUsize::new(0) }
+        CaptureRing {
+            slots: (0..n).map(|_| AtomicU32::new(0)).collect(),
+            mask: n - 1,
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            peak_samples: AtomicUsize::new(0),
+        }
     }
 
     /// Queue up to `n` samples (`sample(i)` is the i-th); returns how many fit.
     fn push(&self, n: usize, sample: impl Fn(usize) -> f32) -> usize {
         let head = self.head.load(Ordering::Relaxed);
-        let n = n.min(self.slots.len().saturating_sub(head.wrapping_sub(self.tail.load(Ordering::Acquire))));
+        let queued = head.wrapping_sub(self.tail.load(Ordering::Acquire)).min(self.slots.len());
+        let n = n.min(self.slots.len().saturating_sub(queued));
         for i in 0..n {
             if let Some(slot) = self.slots.get(head.wrapping_add(i) & self.mask) {
                 slot.store(sample(i).to_bits(), Ordering::Relaxed);
             }
         }
         self.head.store(head.wrapping_add(n), Ordering::Release);
+        // One atomic max per producer write, never an allocation or mutex. A concurrent drain
+        // can make this a conservative peak but never greater than the ring's actual capacity.
+        self.peak_samples.fetch_max(queued + n, Ordering::Relaxed);
         n
+    }
+
+    fn peak_percent(&self) -> u8 {
+        let capacity = self.slots.len().max(1) as u128;
+        let peak = self.peak_samples.load(Ordering::Relaxed).min(self.slots.len()) as u128;
+        (peak.saturating_mul(100) / capacity).min(100) as u8
     }
 
     fn pop_all(&self, out: &mut Vec<f32>) {
@@ -88,6 +134,8 @@ fn finite(x: f32) -> f32 {
 
 struct Shared {
     armed: AtomicBool,
+    /// Actual input-device channel count; each callback chunk begins on a complete frame.
+    capture_channels: usize,
     /// Every arming transition advances this generation. The input callback may never see the
     /// brief disarmed interval between adjacent takes, so its pending silence must use an epoch.
     arm_epoch: AtomicU64,
@@ -97,6 +145,8 @@ struct Shared {
     ring: CaptureRing,
     /// Samples lost while the ring was full.
     dropped: AtomicUsize,
+    /// Physical input frames that had at least one sample dropped; partial frames count too.
+    affected_frames: AtomicU64,
     /// Input callbacks so far, to tell a device that stopped sending.
     beats: AtomicU64,
     /// Approximate single-input-stream clock rate relative to its configured rate.
@@ -120,14 +170,21 @@ impl Drop for CaptureInFlight<'_> {
 }
 
 impl Shared {
+    #[cfg(test)]
     fn new(ring: CaptureRing) -> Shared {
+        Self::with_channels(ring, 1)
+    }
+
+    fn with_channels(ring: CaptureRing, channels: usize) -> Shared {
         let (beats, fault, failed) = (AtomicU64::new(0), AtomicU8::new(0), Mutex::new(None));
         Shared {
             armed: AtomicBool::new(false),
+            capture_channels: channels.max(1),
             arm_epoch: AtomicU64::new(0),
             capturing: AtomicUsize::new(0),
             ring,
             dropped: AtomicUsize::new(0),
+            affected_frames: AtomicU64::new(0),
             beats,
             input_rate: crate::clock::RateTelemetry::default(),
             fault,
@@ -153,6 +210,15 @@ impl Shared {
         let kept = if *owed == 0 { self.ring.push(data.len(), |i| data.get(i).copied().map_or(0.0, finite)) } else { 0 };
         *owed = owed.saturating_add(data.len() - kept);
         self.dropped.fetch_add(data.len() - kept, Ordering::Relaxed);
+        // `CaptureRing` has power-of-two slots, which need not divide 3/5/6/... channels. Its
+        // last accepted samples can therefore be a *partial* frame. Count that affected frame,
+        // not just dropped_samples / channels (which underreports even one damaged stereo frame).
+        let frames = data.len().div_ceil(self.capture_channels);
+        let intact = kept / self.capture_channels;
+        // A short/malformed backend block that was accepted in full has lost *nothing*; the
+        // final partial frame is only affected if a sample actually failed to enter the ring.
+        let affected = if kept == data.len() { 0 } else { frames.saturating_sub(intact) };
+        self.affected_frames.fetch_add(u64::try_from(affected).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
     /// Carry overflow silence only within one take. Stop and re-arm can both happen between two
@@ -169,6 +235,9 @@ impl Shared {
     /// Publish a new generation before allowing the callback to capture into its take. Atomic
     /// `fetch_add` wraps without panicking; every successive arming transition has a new value.
     fn begin_arm(&self) {
+        self.ring.peak_samples.store(0, Ordering::Relaxed);
+        self.affected_frames.store(0, Ordering::Relaxed);
+        self.dropped.store(0, Ordering::Relaxed);
         self.arm_epoch.fetch_add(1, Ordering::SeqCst);
         self.armed.store(true, Ordering::SeqCst);
     }
@@ -344,7 +413,7 @@ impl Recorder {
         config.buffer_size = crate::devices::buffer_size(audio.buffer_size, cfg.buffer_size());
         let channels = usize::from(config.channels).max(1);
         let ring = CaptureRing::new((config.sample_rate as usize).saturating_mul(channels * RING_SECONDS).min(1 << 25));
-        let shared = Arc::new(Shared::new(ring));
+        let shared = Arc::new(Shared::with_channels(ring, channels));
         let monitor = InputRing::new(usize::from(config.channels), config.sample_rate);
         let build = |config: cpal::StreamConfig| match format {
             cpal::SampleFormat::I32 => build_input::<i32>(&device, config, &shared, &monitor),
@@ -460,10 +529,16 @@ impl Recorder {
         (self.seen.1.elapsed() >= STALL).then(|| Trouble::Device(format!("“{name}” stopped sending audio")))
     }
 
-    /// Input the current take has lost to a slow disk so far, in milliseconds.
+    /// An allocation-free atomic snapshot of this take's FIFO pressure and damaged input frames.
+    /// Call `warning` from the UI thread for actionable, correctly rounded diagnostics.
+    pub fn capture_pressure(&self) -> CapturePressure {
+        CapturePressure { peak_percent: self.shared.ring.peak_percent(), affected_frames: self.shared.affected_frames.load(Ordering::Relaxed) }
+    }
+
+    /// Approximate duration of affected input frames in whole milliseconds (truncates below 1 ms).
+    /// Use `capture_pressure().affected_frames` to report even sub-millisecond dropouts precisely.
     pub fn lost_ms(&self) -> u64 {
-        let frames = self.shared.dropped.load(Ordering::Relaxed) / self.channels.max(1);
-        (frames as u64).saturating_mul(1000) / u64::from(self.sample_rate.max(1))
+        self.capture_pressure().affected_frames.saturating_mul(1000) / u64::from(self.sample_rate.max(1))
     }
 
     pub fn finish(&mut self) -> Takes {
@@ -475,10 +550,21 @@ impl Recorder {
             },
             None => (Vec::new(), None),
         };
-        let lost = self.shared.dropped.swap(0, Ordering::Relaxed) / self.channels.max(1);
-        let slow =
-            (lost > 0).then(|| format!("{} ms of input lost: the disk was too slow", lost.saturating_mul(1000) / self.sample_rate.max(1) as usize));
-        (takes, problem.or(slow))
+        let pressure = self.capture_pressure();
+        self.shared.affected_frames.store(0, Ordering::Relaxed);
+        self.shared.dropped.store(0, Ordering::Relaxed);
+        let slow = if pressure.affected_frames > 0 { pressure.warning(self.sample_rate) } else { None };
+        let problem = match (problem, slow) {
+            (Some(mut failure), Some(loss)) => {
+                failure.push_str("; ");
+                failure.push_str(&loss);
+                Some(failure)
+            }
+            (Some(failure), None) => Some(failure),
+            (None, Some(loss)) => Some(loss),
+            (None, None) => None,
+        };
+        (takes, problem)
     }
 }
 
@@ -781,6 +867,7 @@ mod tests {
         shared.capture_for_arm(&[0.25; 8], &mut owed, &mut seen_epoch);
         shared.capture_for_arm(&[0.5; 6], &mut owed, &mut seen_epoch);
         assert_eq!(owed, 6, "the first take owes six dropped samples");
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 6);
 
         shared.armed.store(false, Ordering::SeqCst);
         let mut first_take = Vec::new();
@@ -788,12 +875,93 @@ mod tests {
         assert_eq!(first_take, [0.25; 8]);
         // No input callback ran while disarmed: `owed` is still six here.
         shared.begin_arm();
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 0, "loss telemetry must start fresh with each take");
         shared.capture_for_arm(&[0.75; 4], &mut owed, &mut seen_epoch);
         let mut second_take = Vec::new();
         shared.ring.pop_all(&mut second_take);
         assert_eq!(second_take, [0.75; 4]);
         assert_eq!(owed, 0);
-        assert_eq!(shared.dropped.load(Ordering::Relaxed), 6, "the fresh take must not lose samples to prior debt");
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 0, "the fresh take must not lose samples to prior debt");
+    }
+
+    /// An eight-slot ring cannot hold whole three-channel frames at its capacity boundary.
+    /// When two samples of the next frame are accepted and one is lost, that *frame* is damaged,
+    /// as is the following wholly dropped frame. The old `dropped_samples / channels` rounded
+    /// four lost samples down to one frame. Peak occupancy remains available after a drain.
+    #[test]
+    fn capture_pressure_counts_partial_three_channel_frames_and_resets_each_take() {
+        let shared = Arc::new(Shared::with_channels(CaptureRing::new(8), 3));
+        let slots = shared.ring.slots.as_ptr(); // callback must reuse preallocated ring storage
+        shared.begin_arm();
+        let mut owed = 0;
+        shared.capture(&[0.1; 6], &mut owed);
+        let mut r = recorder(&shared);
+        r.channels = 3;
+        assert_eq!(r.capture_pressure(), CapturePressure { peak_percent: 75, affected_frames: 0 });
+        shared.capture(&[0.2; 6], &mut owed); // two samples kept, four discarded
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 4);
+        assert_eq!(r.capture_pressure(), CapturePressure { peak_percent: 100, affected_frames: 2 });
+        assert_eq!(r.lost_ms(), 0, "two damaged frames at 48 kHz are shorter than 1 ms");
+        assert_eq!(shared.ring.slots.as_ptr(), slots, "producer counters must not grow ring storage");
+
+        let mut drained = Vec::new();
+        shared.ring.pop_all(&mut drained);
+        assert_eq!(r.capture_pressure().peak_percent, 100, "high-water must survive a completed drain");
+        let (_, problem) = r.finish();
+        let problem = problem.expect("even a sub-millisecond loss must be reported");
+        assert!(problem.contains("2 input frame(s)") && problem.contains("less than 1 ms"), "{problem}");
+        assert!(!problem.contains("0 ms"), "never report a real dropout as zero duration: {problem}");
+
+        shared.begin_arm();
+        assert_eq!(r.capture_pressure(), CapturePressure::default());
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn capture_pressure_counts_a_single_partially_dropped_stereo_frame() {
+        let shared = Shared::with_channels(CaptureRing::new(4), 2);
+        shared.begin_arm();
+        // Model an incomplete queued frame at a callback boundary (also exercises defensive
+        // handling of malformed backend blocks). One slot remains for the following L/R pair.
+        assert_eq!(shared.ring.push(3, |_| 0.25), 3);
+        let mut owed = 0;
+        shared.capture(&[0.5, -0.5], &mut owed);
+        assert_eq!(shared.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.affected_frames.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.ring.peak_percent(), 100);
+        assert_eq!(CapturePressure { peak_percent: 79, affected_frames: 0 }.warning(48_000), None);
+        assert!(CapturePressure { peak_percent: 80, affected_frames: 0 }.warning(48_000).is_some());
+    }
+
+    #[test]
+    fn short_backend_block_without_fifo_loss_does_not_report_a_dropout() {
+        let shared = Shared::with_channels(CaptureRing::new(4), 3);
+        shared.begin_arm();
+        let mut owed = 0;
+        shared.capture(&[0.25, -0.25], &mut owed);
+        assert_eq!(owed, 0);
+        assert_eq!(shared.affected_frames.load(Ordering::Relaxed), 0);
+        assert_eq!(shared.ring.peak_percent(), 50);
+    }
+
+    /// The take writer's I/O failure must remain visible even if the input also overruns.
+    /// Previously `problem.or(slow)` silently hid the second failure from the user.
+    #[test]
+    fn finish_reports_both_writer_failure_and_short_capture_dropout() {
+        let shared = Arc::new(Shared::with_channels(CaptureRing::new(4), 2));
+        shared.begin_arm();
+        let mut owed = 0;
+        shared.capture(&[0.25; 6], &mut owed); // one frame dropped
+        let mut r = recorder(&shared);
+        r.channels = 2;
+        r.writer = Some((std::thread::spawn(|| (Vec::new(), Some("synthetic disk I/O failure".into()))), Vec::new()));
+
+        let (takes, problem) = r.finish();
+        assert!(takes.is_empty());
+        let problem = problem.expect("the disk error and capture loss both need reporting");
+        assert!(problem.contains("synthetic disk I/O failure"), "{problem}");
+        assert!(problem.contains("1 input frame(s)") && problem.contains("less than 1 ms"), "{problem}");
+        assert_eq!(r.capture_pressure().affected_frames, 0, "finished take pressure should be cleared");
     }
 
     #[test]
