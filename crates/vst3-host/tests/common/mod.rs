@@ -36,7 +36,7 @@ pub fn fixture_dir() -> &'static Path {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::copy(&built, bin.join(exe)).unwrap();
         assert_eq!(soundcraft_vst3_host::add_search_dir(&dir), 3);
-        let found = soundcraft_vst3_host::scan_paths(&[dir.to_path_buf()]);
+        let found = soundcraft_vst3_host::scan_paths(std::slice::from_ref(&dir));
         for name in ["Fixture Gain", "Fixture Synth", "Fixture Headless"] {
             assert!(found.iter().any(|d| d.name == name), "missing VST3 fixture class {name}: {found:?}");
         }
