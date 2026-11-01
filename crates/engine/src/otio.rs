@@ -1265,14 +1265,8 @@ mod tests {
         assert!(back.clips()[0].muted);
         assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 24_000, .. }));
         assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 2_000, .. }));
-        let source = engine
-            .session()
-            .source(match &lead.clips()[0].content {
-                ClipContent::Audio { source, .. } => *source,
-                _ => unreachable!(),
-            })
-            .unwrap();
-        assert_eq!(source.channels, 2, "asymmetric stereo media must not become mono");
+        assert_eq!(report["media_sources"], 1);
+        assert_eq!(engine.session().sources[0].channels, 2, "asymmetric stereo media must not become mono");
         assert!(engine.undo());
         assert_eq!(*engine.session(), before);
         assert!(engine.redo());
