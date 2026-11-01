@@ -498,6 +498,37 @@ fn midi_device_key(name: &str) -> String {
     format!("midi.input.{}", sanitized.trim())
 }
 
+/// Paint a read-only snapshot from the native capture lifecycle. A port being discovered or
+/// enabled is not proof that recording has opened it successfully.
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_capture_status(ui: &mut egui::Ui, status: &crate::MidiInputStatus) {
+    ui.separator();
+    ui.strong("MIDI capture status");
+    if status.recording {
+        ui.label(format!("Recording MIDI from {} connected input(s)", status.connected_ports.len()));
+    } else if status.enabled_ports.is_empty() {
+        ui.label("No MIDI inputs enabled. Select a connected device before recording.");
+    } else {
+        ui.label(format!("MIDI capture idle · {} enabled input(s); connections open when recording starts.", status.enabled_ports.len()));
+    }
+    if !status.connected_ports.is_empty() {
+        let names: Vec<String> =
+            status.connected_ports.iter().take(4).map(|name| name.chars().filter(|ch| !ch.is_control()).take(64).collect()).collect();
+        let extra = status.connected_ports.len().saturating_sub(names.len());
+        let extra_label = if extra > 0 { format!(" (+{extra} more)") } else { String::new() };
+        ui.label(format!("Connected: {}{extra_label}", names.join(", ")));
+    }
+    if let Some(error) = &status.error {
+        ui.colored_label(Tokens::current().rec, format!("MIDI input error: {}", error.chars().take(400).collect::<String>()));
+    }
+    if status.dropped_events > 0 || status.truncated_packets > 0 {
+        ui.colored_label(
+            Tokens::current().rec,
+            format!("MIDI input loss: {} dropped event(s), {} truncated packet(s)", status.dropped_events, status.truncated_packets),
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputScan, rescan: &mut bool) {
     ui.separator();
@@ -532,8 +563,11 @@ fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputSc
             }
         });
     }
+    midi_capture_status(ui, &app.midi_input_status());
     ui.label(
-        egui::RichText::new("Selections are saved with the session. Live MIDI capture, monitoring and track routing are not connected yet.")
+        egui::RichText::new(
+            "Enable a MIDI input and arm a MIDI/instrument track to record. All armed tracks currently share enabled inputs; per-track filtering and live instrument monitoring are not available yet.",
+        )
             .small()
             .color(Tokens::current().text_dim),
     );
@@ -913,7 +947,7 @@ mod midi_input_tests {
         assert!(text.iter().any(|s| s.contains("MIDI input devices")), "MIDI selector unreachable: {text:?}");
         assert!(text.iter().any(|s| s.contains("Studio Keyboard")), "scanned MIDI port not painted: {text:?}");
         assert!(text.iter().any(|s| s.contains("Rescan MIDI inputs")), "refresh action missing: {text:?}");
-        assert!(text.iter().any(|s| s.contains("not connected yet")), "live routing limitation not disclosed: {text:?}");
+        assert!(text.iter().any(|s| s.contains("per-track filtering")), "live routing limitation not disclosed: {text:?}");
         assert!(!app.engine.is_dirty(), "a read-only device scan must not modify the session");
     }
 
@@ -939,6 +973,43 @@ mod midi_input_tests {
             let text = painted_text(&output);
             output.textures_delta.clear();
             assert!(text.iter().any(|s| s.contains(expected)), "missing status {expected}: {text:?}");
+        }
+    }
+
+    #[test]
+    fn capture_status_separates_active_ports_from_enabled_preferences_and_discloses_errors() {
+        let statuses = [
+            (
+                crate::MidiInputStatus {
+                    enabled_ports: vec!["Studio Keyboard".into()],
+                    connected_ports: vec!["Studio Keyboard".into()],
+                    recording: true,
+                    dropped_events: 3,
+                    truncated_packets: 1,
+                    error: None,
+                },
+                ["Recording MIDI from 1 connected", "Connected: Studio Keyboard", "3 dropped event"],
+            ),
+            (
+                crate::MidiInputStatus {
+                    enabled_ports: vec!["Disconnected Controller".into()],
+                    connected_ports: Vec::new(),
+                    recording: false,
+                    dropped_events: 0,
+                    truncated_packets: 0,
+                    error: Some("device unavailable".into()),
+                },
+                ["MIDI capture idle", "MIDI input error: device unavailable", "MIDI capture status"],
+            ),
+        ];
+        for (status, expected) in statuses {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| midi_capture_status(ui, &status));
+            let text = painted_text(&output);
+            output.textures_delta.clear();
+            for label in expected {
+                assert!(text.iter().any(|line| line.contains(label)), "missing {label} from MIDI status: {text:?}");
+            }
         }
     }
 }
