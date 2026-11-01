@@ -262,24 +262,27 @@ fn plain_composable(value: &Value) -> Result<()> {
 
 /// OTIO's time bases can differ from the current session's. Convert every boundary to the
 /// nearest sample (ties away from zero), bounding the result to losslessly representable values.
-fn time_samples(value: &Value, rate: u32) -> Result<i64> {
+/// Only Clip.2's media timecode origins may be negative; durations and native timeline positions
+/// remain nonnegative, and the final decoded-file offset must be checked separately.
+fn time_samples(value: &Value, rate: u32, allow_negative_start: bool) -> Result<i64> {
     expect_schema(value, "RationalTime.1")?;
     let t = value.get("value").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric value"))?;
     let base = value.get("rate").and_then(Value::as_f64).ok_or_else(|| invalid_import("RationalTime has no numeric rate"))?;
-    if !t.is_finite() || !base.is_finite() || t < 0.0 || base <= 0.0 || base > 384_000.0 {
+    if !t.is_finite() || !base.is_finite() || (!allow_negative_start && t < 0.0) || base <= 0.0 || base > 384_000.0 {
         return Err(invalid_import("invalid RationalTime value or rate"));
     }
     let samples = (t * f64::from(rate) / base).round();
-    if !samples.is_finite() || !(0.0..=(MAX_EXACT_SAMPLE as f64)).contains(&samples) {
+    let minimum = if allow_negative_start { -(MAX_EXACT_SAMPLE as f64) } else { 0.0 };
+    if !samples.is_finite() || !(minimum..=(MAX_EXACT_SAMPLE as f64)).contains(&samples) {
         return Err(invalid_import("time is outside the supported sample range"));
     }
     Ok(samples as i64)
 }
 
-fn sample_range(value: &Value, rate: u32) -> Result<(i64, i64)> {
+fn sample_range(value: &Value, rate: u32, allow_negative_start: bool) -> Result<(i64, i64)> {
     expect_schema(value, "TimeRange.1")?;
-    let start = time_samples(value.get("start_time").ok_or_else(|| invalid_import("missing range start"))?, rate)?;
-    let length = time_samples(value.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate)?;
+    let start = time_samples(value.get("start_time").ok_or_else(|| invalid_import("missing range start"))?, rate, allow_negative_start)?;
+    let length = time_samples(value.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate, false)?;
     start.checked_add(length).ok_or_else(|| invalid_import("time range overflows"))?;
     Ok((start, length))
 }
@@ -446,7 +449,7 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
             plain_composable(child)?;
             match child.get("OTIO_SCHEMA").and_then(Value::as_str) {
                 Some("Gap.1") => {
-                    let (_, duration) = sample_range(child.get("source_range").ok_or_else(|| invalid_import("gap has no duration"))?, rate)?;
+                    let (_, duration) = sample_range(child.get("source_range").ok_or_else(|| invalid_import("gap has no duration"))?, rate, false)?;
                     if duration <= 0 {
                         return Err(invalid_import("gap must have a positive duration"));
                     }
@@ -459,7 +462,8 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                     reject_nontrivial_metadata(child)?;
                     clip_count = clip_count.checked_add(1).filter(|n| *n <= MAX_CLIPS).ok_or_else(|| invalid_import("more than 100000 clips"))?;
                     let range = child.get("source_range").ok_or_else(|| invalid_import("clip source trim is required"))?;
-                    let (offset, duration) = sample_range(range, rate)?;
+                    let is_clip_two = child.get("OTIO_SCHEMA").and_then(Value::as_str) == Some("Clip.2");
+                    let (offset, duration) = sample_range(range, rate, is_clip_two)?;
                     if duration <= 0 {
                         return Err(invalid_import("clip must have a positive duration"));
                     }
@@ -475,7 +479,7 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                     // Without this subtraction a valid 01:00:00-origin edit plays the wrong
                     // samples even though every file and JSON range is otherwise well formed.
                     let media_offset = if let Some(available) = available_range.filter(|range| !range.is_null()) {
-                        let (available_start, available_duration) = sample_range(available, rate)?;
+                        let (available_start, available_duration) = sample_range(available, rate, is_clip_two)?;
                         if available_duration <= 0 {
                             return Err(invalid_import("media available range must have a positive duration"));
                         }
@@ -488,6 +492,9 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                     } else {
                         offset
                     };
+                    if media_offset < 0 {
+                        return Err(invalid_import("clip media offset cannot be negative"));
+                    }
                     let referenced = reference_path(url, document)?;
                     let media = crate::io::checked_media_path(&referenced)?;
                     let source = if let Some(&index) = source_index.get(&media) {
@@ -596,6 +603,25 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    // otio_json serialized by the official OpenTimelineIO 0.18.1 Python adapter from two
+    // Audio tracks, a Gap and two Clip.2 instances sharing a stereo ExternalReference.
+    // Source/available starts are negative media timecode; the native file offsets are
+    // positive. This JSON is embedded so CI never depends on Python or network access.
+    const OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"Signed media origins","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Negative lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1200.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Lead","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":12000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-24000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Negative back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Back","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":3000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-46000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":-48000.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
+
+    fn pack_negative_origin_bundle(timeline: &Value, wav: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let manifest = serde_json::to_vec(timeline).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in [("version.txt", b"1.0.0".as_slice()), ("content.otio", manifest.as_slice()), ("media/negative.wav", wav)] {
+            let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
 
     fn fixture() -> (Session, PathBuf) {
         let folder = std::env::temp_dir().join(format!("soundcraft-otio-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
@@ -858,6 +884,114 @@ mod tests {
     }
 
     #[test]
+    fn official_clip_two_negative_timecode_otioz_keeps_stereo_channels_gaps_and_undo() {
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-signed-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("signed-origin.otioz");
+        let timeline: Value = serde_json::from_str(OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO).unwrap();
+        let left = (0..96_000).map(|frame| frame as f32 / 200_000.0).collect::<Vec<_>>();
+        let right = (0..96_000).map(|frame| -0.7 + frame as f32 / 300_000.0).collect::<Vec<_>>();
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+
+        // The official Clip.2 timecode is negative, but without available_range it would
+        // require a negative decoded-file offset and must fail before committing any media.
+        let mut bad = timeline.clone();
+        bad["tracks"]["children"][0]["children"][1]["media_references"]["DEFAULT_MEDIA"]["available_range"] = Value::Null;
+        std::fs::write(&archive, pack_negative_origin_bundle(&bad, &wav)).unwrap();
+        let error = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap_err();
+        assert!(format!("{error}").contains("media offset cannot be negative"), "unexpected error: {error}");
+        assert_eq!(*engine.session(), before);
+        assert!(!engine.can_undo());
+        assert!(!project.join("Audio Files").exists(), "failed bundle import leaked private media");
+
+        std::fs::write(&archive, pack_negative_origin_bundle(&timeline, &wav)).unwrap();
+        let result = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        assert_eq!(result["extracted_media_files"], 1);
+        let lead = engine.session().tracks.iter().find(|t| t.name == "Negative lead").unwrap();
+        let back = engine.session().tracks.iter().find(|t| t.name == "Negative back").unwrap();
+        assert_eq!((lead.clips()[0].start, lead.clips()[0].length), (1_200, 12_000));
+        assert_eq!((back.clips()[0].start, back.clips()[0].length), (0, 3_000));
+        assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 24_000, .. }));
+        assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 2_000, .. }));
+        for (track, position, source_frame) in [(lead.id, 1_200, 24_000), (back.id, 0, 2_000)] {
+            let rendered = soundcraft_mix::render_clips(engine.session(), track, soundcraft_time::Range::new(position, position + 1));
+            assert_eq!(rendered.len(), 2, "official stereo source must retain both distinct channels");
+            assert!((rendered[0][0] - left[source_frame]).abs() < 0.0001, "wrong left waveform or media origin");
+            assert!((rendered[1][0] - right[source_frame]).abs() < 0.0001, "right channel shifted or mixed into left");
+        }
+        assert!(engine.can_undo());
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().sources.len(), 1);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn rejects_unbounded_or_invalid_negative_media_ranges_without_partial_import() {
+        let (_, media) = decodable_fixture();
+        let original_wav = std::fs::read(&media).unwrap();
+        let document = media.with_extension("otio");
+        let mut timeline: Value = serde_json::from_str(OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO).unwrap();
+        let local_url = file_url(&crate::io::checked_media_path(&media).unwrap()).unwrap();
+        for track in timeline["tracks"]["children"].as_array_mut().unwrap() {
+            for clip in track["children"].as_array_mut().unwrap() {
+                if clip["OTIO_SCHEMA"] == "Clip.2" {
+                    clip["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(local_url);
+                }
+            }
+        }
+        let clip_path = "/tracks/children/0/children/1";
+        let mut no_origin = timeline.clone();
+        no_origin.pointer_mut(&format!("{clip_path}/media_references/DEFAULT_MEDIA/available_range")).unwrap().clone_from(&Value::Null);
+        let mut outside_available = timeline.clone();
+        outside_available
+            .pointer_mut(&format!("{clip_path}/media_references/DEFAULT_MEDIA/available_range/start_time/value"))
+            .unwrap()
+            .clone_from(&json!(-20_000.0));
+        let mut negative_duration = timeline.clone();
+        negative_duration.pointer_mut(&format!("{clip_path}/source_range/duration/value")).unwrap().clone_from(&json!(-1.0));
+        let mut excessive_origin = timeline.clone();
+        excessive_origin.pointer_mut(&format!("{clip_path}/source_range/start_time/value")).unwrap().clone_from(&json!(-9_007_199_254_740_992.0));
+        let mut negative_gap = timeline.clone();
+        negative_gap["tracks"]["children"][0]["children"][0]["source_range"]["duration"]["value"] = json!(-1.0);
+        let mut clip_one = timeline.clone();
+        let legacy = clip_one.pointer_mut(clip_path).unwrap();
+        legacy["OTIO_SCHEMA"] = json!("Clip.1");
+        legacy["media_reference"] = legacy["media_references"]["DEFAULT_MEDIA"].clone();
+        let mut global_origin = timeline.clone();
+        global_origin["global_start_time"] = json!({"OTIO_SCHEMA": "RationalTime.1", "value": -1.0, "rate": 48_000.0});
+
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (case, value) in [
+            ("missing media origin", no_origin),
+            ("clip outside available range", outside_available),
+            ("negative duration", negative_duration),
+            ("unbounded origin", excessive_origin),
+            ("negative gap duration", negative_gap),
+            ("signed Clip.1 origin", clip_one),
+            ("global timeline offset", global_origin),
+        ] {
+            let error = import_audio(&mut engine, &document, &serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert_eq!(*engine.session(), before, "{case} mutated the session: {error}");
+            assert!(!engine.can_undo(), "{case} added an undo step");
+            assert_eq!(std::fs::read(&media).unwrap(), original_wav, "{case} altered external media");
+        }
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
     fn inconsistent_media_available_ranges_fail_without_partial_import_or_file_changes() {
         let (session, media) = decodable_fixture();
         let original_media = std::fs::read(&media).unwrap();
@@ -1040,7 +1174,7 @@ mod tests {
         assert!(reference_path("./%2E%2E/file.wav", &document).is_err());
         assert!(reference_path("%2E%2E/file.wav", &document).is_err());
         assert!(reference_path("file:///tmp/a%ZZ.wav", &document).is_err());
-        assert_eq!(time_samples(&json!({"OTIO_SCHEMA": "RationalTime.1", "value": 441.0, "rate": 44100.0}), 48_000).unwrap(), 480);
+        assert_eq!(time_samples(&json!({"OTIO_SCHEMA": "RationalTime.1", "value": 441.0, "rate": 44100.0}), 48_000, false).unwrap(), 480);
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
