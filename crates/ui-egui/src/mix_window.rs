@@ -10,7 +10,6 @@ use crate::widgets::{
 };
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::json;
-use soundcraft_midi::output::MidiOutputPortInfo;
 use soundcraft_model::{ChannelFormat, Route, SurroundPan, Track, TrackId, TrackKind};
 use soundcraft_playback::MeterSnapshot;
 
@@ -1383,7 +1382,9 @@ fn input_route_choices(opened_channels: Option<usize>) -> usize {
 /// or an explicit user request. Never probe as part of painting a closed strip.
 #[derive(Debug, Clone, Default)]
 struct MidiOutputScan {
-    ports: Vec<MidiOutputPortInfo>,
+    /// Only stable, session-persistable port names cross this UI boundary; native driver
+    /// indices/identities have no meaning to a saved track or a WASM build.
+    ports: Vec<String>,
     error: Option<String>,
 }
 
@@ -1394,7 +1395,7 @@ fn output_scan_id() -> egui::Id {
 #[cfg(not(target_arch = "wasm32"))]
 fn discover_output_ports() -> MidiOutputScan {
     match soundcraft_midi::output::output_ports() {
-        Ok(ports) => MidiOutputScan { ports, error: None },
+        Ok(ports) => MidiOutputScan { ports: ports.into_iter().map(|port| port.name).collect(), error: None },
         Err(err) => MidiOutputScan { ports: Vec::new(), error: Some(err.to_string()) },
     }
 }
@@ -1417,7 +1418,7 @@ fn output_scan(ctx: &egui::Context, refresh: bool) -> Arc<MidiOutputScan> {
 /// Display an ambiguous exact port name once, but prevent it from being selected: the
 /// persisted route contains a name, not a transient driver index or device identity.
 fn distinct_output_names(scan: &MidiOutputScan) -> Vec<(&str, bool)> {
-    let mut names: Vec<&str> = scan.ports.iter().map(|port| port.name.as_str()).collect();
+    let mut names: Vec<&str> = scan.ports.iter().map(String::as_str).collect();
     names.sort_unstable();
     let mut unique: Vec<(&str, bool)> = Vec::new();
     for name in names {
@@ -1686,17 +1687,9 @@ mod tests {
         Harness,
         kittest::{NodeT, Queryable},
     };
-    use soundcraft_midi::output::MidiOutputPortInfo;
 
     fn synthetic_outputs(names: &[&str]) -> MidiOutputScan {
-        MidiOutputScan {
-            ports: names
-                .iter()
-                .enumerate()
-                .map(|(index, name)| MidiOutputPortInfo { index, name: (*name).to_string(), id: format!("synthetic-{index}") })
-                .collect(),
-            error: None,
-        }
+        MidiOutputScan { ports: names.iter().map(|name| (*name).to_string()).collect(), error: None }
     }
 
     #[test]
