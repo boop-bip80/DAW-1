@@ -22,7 +22,6 @@ const KNOWN_UNREACHED: &[&str] = &[
     "track.trim_automation_write",
     "transport.pause",
     "transport.status",
-    "video.offset",
 ];
 
 fn ui_source() -> String {
