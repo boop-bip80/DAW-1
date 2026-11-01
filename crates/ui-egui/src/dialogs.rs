@@ -200,6 +200,7 @@ impl Dialogs {
             }
             "file.import_audio" => Dialog::PathPrompt { cmd: id.into(), title: "Import Audio".into(), path: home, key: "path".into() },
             "file.import_midi" => Dialog::PathPrompt { cmd: id.into(), title: "Import MIDI".into(), path: home, key: "path".into() },
+            "file.import_edl" => Dialog::PathPrompt { cmd: id.into(), title: "Import CMX3600 Audio EDL".into(), path: home, key: "path".into() },
             "file.import_otio" => Dialog::PathPrompt { cmd: id.into(), title: "Import OpenTimelineIO Audio".into(), path: home, key: "path".into() },
             "session.open" => Dialog::PathPrompt { cmd: id.into(), title: "Open Session".into(), path: home, key: "path".into() },
             "session.save" if e.path.is_some() => return false,
@@ -344,6 +345,7 @@ fn path_dialog(id: &str, home: &str, name: &str) -> Option<Dialog> {
     let importing = id.contains("import") || id.contains("open");
     let ext = match id {
         "file.export_midi" => ".mid",
+        "file.export_edl" => ".edl",
         "file.export_otio" => ".otio",
         "file.export_sibelius" => ".musicxml",
         "file.print_score" => ".svg",
@@ -585,7 +587,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                 Dialog::PathPrompt { cmd, path, key, .. } => {
                     crate::widgets::named_text_field(ui.add(egui::TextEdit::singleline(path).desired_width(420.0)), "Path");
                     if let Some(pick) = &app.services.pick_open
-                        && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio")
+                        && !matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_edl")
                         && key != "dir"
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, &[])
@@ -600,7 +602,7 @@ pub fn show(app: &mut SoundApp, ctx: &egui::Context) {
                         *path = p;
                     }
                     if let Some(pick) = &app.services.pick_save
-                        && matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio")
+                        && matches!(cmd.as_str(), "session.save_as" | "session.save_copy" | "file.export_otio" | "file.export_edl")
                         && ui.button("Browse…").clicked()
                         && let Some(p) = pick(cmd, path)
                     {
@@ -1188,6 +1190,7 @@ mod tests {
             ("file.export_sibelius", ".musicxml"),
             ("file.print_score", ".svg"),
             ("file.export_clip_groups", ".scgrp"),
+            ("file.export_edl", ".edl"),
             ("file.export_otio", ".otio"),
         ] {
             assert!(takes_path(id), "{id}");
