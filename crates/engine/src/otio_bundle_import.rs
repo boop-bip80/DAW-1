@@ -213,15 +213,22 @@ fn bundled_media_url(url: &str) -> Result<String> {
     if url.len() > 8_192 || !url.starts_with("media/") || url.chars().any(|ch| ch.is_control() || matches!(ch, '?' | '#' | ':' | '\\')) {
         return Err(unsupported("only relative `media/<filename>` audio URLs are permitted"));
     }
-    let mut bytes = Vec::with_capacity(url.len());
-    let mut remaining = url.bytes();
-    while let Some(byte) = remaining.next() {
-        if byte == b'%' {
-            let hi = remaining.next().and_then(hex_digit).ok_or_else(|| unsupported("invalid media URL percent escape"))?;
-            let lo = remaining.next().and_then(hex_digit).ok_or_else(|| unsupported("invalid media URL percent escape"))?;
+    // OpenTimelineIO's official bundle writer can emit a literal '%' in a relative media
+    // filename. Its URL helper accepts both encoded and unencoded paths: decode *valid* %HH
+    // sequences but preserve other percent signs as literal filename bytes. The decoded result
+    // still must be one flat, safe `media/` member and match the audited archive index exactly.
+    let input = url.as_bytes();
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%'
+            && let (Some(hi), Some(lo)) = (input.get(index + 1).and_then(|b| hex_digit(*b)), input.get(index + 2).and_then(|b| hex_digit(*b)))
+        {
             bytes.push((hi << 4) | lo);
+            index += 3;
         } else {
-            bytes.push(byte);
+            bytes.push(input[index]);
+            index += 1;
         }
     }
     let decoded = String::from_utf8(bytes).map_err(|_| unsupported("media URL is not valid UTF-8"))?;
@@ -666,6 +673,52 @@ mod tests {
         for source in engine.session().sources.iter().skip(fixture.session.sources.len()) {
             assert!(Path::new(&source.path).starts_with(fixture.project.join("Audio Files")));
             assert!(Path::new(&source.path).is_file());
+        }
+    }
+
+    #[test]
+    fn accepts_literal_and_encoded_percent_media_urls_without_unsafe_extraction_names() {
+        let fixture = Fixture::new();
+        let original = entries(&fixture.bundle());
+        let original_name = original.iter().find(|(name, _, _)| name.starts_with("media/")).unwrap().0.clone();
+        let bundled_name = "media/take%raw.wav";
+        for target_url in [bundled_name, "media/take%25raw.wav"] {
+            let mut files = original.clone();
+            files.iter_mut().find(|(name, _, _)| *name == original_name).unwrap().0 = bundled_name.to_owned();
+            let (_, content, _) = files.iter_mut().find(|(name, _, _)| name == "content.otio").unwrap();
+            let mut timeline: Value = serde_json::from_slice(content).unwrap();
+            for track in timeline["tracks"]["children"].as_array_mut().unwrap() {
+                for clip in track["children"].as_array_mut().unwrap() {
+                    if clip["OTIO_SCHEMA"] == "Clip.1" && clip["media_reference"]["target_url"].as_str() == Some(original_name.as_str()) {
+                        clip["media_reference"]["target_url"] = Value::String(target_url.to_owned());
+                    }
+                }
+            }
+            *content = serde_json::to_vec(&timeline).unwrap();
+            fixture.write(&pack(&files));
+            let mut engine = fixture.engine();
+            let before = engine.session().clone();
+            let imported = import_command(&mut engine, &fixture.archive).unwrap();
+            assert_eq!(imported["audio_tracks"], 2);
+            assert_eq!(imported["audio_clips"], 4);
+            assert_eq!(imported["media_sources"], 2);
+            for source in engine.session().sources.iter().skip(before.sources.len()) {
+                assert!(Path::new(&source.path).is_file());
+                assert!(!source.path.contains('%'), "archive basenames must never become filesystem names");
+            }
+            assert!(engine.undo());
+            assert_eq!(*engine.session(), before);
+        }
+    }
+
+    #[test]
+    fn literal_percent_compatibility_never_permits_encoded_traversal_or_separators() {
+        assert_eq!(bundled_media_url("media/take%raw.wav").unwrap(), "media/take%raw.wav");
+        assert_eq!(bundled_media_url("media/take%2g.wav").unwrap(), "media/take%2g.wav");
+        assert_eq!(bundled_media_url("media/take%25raw.wav").unwrap(), "media/take%raw.wav");
+        for unsafe_url in ["media/take%2Fraw.wav", "media/take%5Craw.wav", "media/%2e%2e%2Fsecret.wav", "media/C%3Aevil.wav", "media/take%00raw.wav"]
+        {
+            assert!(bundled_media_url(unsafe_url).is_err(), "accepted escaped unsafe media member {unsafe_url}");
         }
     }
 
