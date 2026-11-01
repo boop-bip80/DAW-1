@@ -1,6 +1,6 @@
 # SoundCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (MIDI take bridge, bounded input recording, OTIO audio import and Linux full gate; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (desktop MIDI Record/Stop, linked-stereo CMX3600 EDL and manual recording offset; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Forward-looking plan. Status and numbers: [`../ROADMAP.md`](../ROADMAP.md) and
 [`target-app-parity.md`](target-app-parity.md); the ranked work list: [`gaps.md`](gaps.md).
@@ -10,8 +10,8 @@ Hours are Opus 5.5 agent-hours.
 
 1. **Merge or close the open bug-fix PRs** (#123–#134, #146, #148, #75) and fix the rest of the
    correctness backlog (G-04). ≈ 15–25 h.
-2. **Audio interface completion** (G-01): full physical channel matrix, one-clock duplex monitoring, latency/record offsets and hardware verification. Per-track input choice now rejects invalid routes; device/rate/buffer choice exists. ≈ 15–25 h estimated.
-3. **MIDI devices** (G-02): connect the native input adapter and undoable take bridge to desktop record/stop and instrument monitoring; then output, thru, clock and hardware validation. ≈ 20–35 h.
+2. **Audio interface completion** (G-01): full physical channel matrix, one-clock duplex monitoring, measured latency/automatic offsets and hardware verification. Manual offset, callback drain and bounded per-track input choice exist; device/rate/buffer choice exists. ≈ 15–25 h estimated.
+3. **MIDI devices** (G-02): validate synthetic desktop Record/Stop-to-undoable-take integration on a physical controller, add per-track input routing and live instrument monitoring, then output, thru and clock. ≈ 20–35 h estimate not re-calibrated.
 4. **macOS plugin hosting** (G-05): obtain explicit owner approval for relaxing signed-app library validation to host third-party native plugins; then address AU editors. ≈ 15–25 h, plus a security decision.
 5. **Verify CI execution** (G-14): local Linux `cargo xtask ci` and CLI import/bounce/save/reopen smoke pass; workflows target the default branch on three OSes, but GitHub reports no Actions runs. Enable/verify runners and add hardware/platform smoke tests.
 
@@ -23,12 +23,12 @@ main platform). Any **no** keeps SoundCraft **pre-alpha**, and those rows are th
 
 | Workflow | Works end to end? | Evidence | Hours to pass |
 |---|---|---|---:|
-| Record audio from a chosen interface at a chosen buffer size, monitor, punch, keep the takes | **no** | Playback Engine selects devices, rate and buffer; WAV takes stream to disk. Input-channel bounds are checked before WAV creation and unavailable monitor channels stay silent. Still separate input/output streams, 512-frame mix block, no full physical I/O matrix or verified duplex latency compensation; needs interface tests. | 35–55 |
-| Record MIDI from a controller and play it back through an instrument | **no** | Drawn/imported MIDI works. Native input ports can be discovered/selected and captured; a bounded, undoable bridge converts synthetic events into armed-track MIDI takes. The desktop record/stop lifecycle and instrument audition are not connected, and no physical keyboard test exists (G-02). | 20–35 |
+| Record audio from a chosen interface at a chosen buffer size, monitor, punch, keep the takes | **no** | Playback Engine selects devices, rate, buffer and a bounded manual record offset; WAV takes stream to disk and Stop drains callback audio. Invalid input channels are rejected before take creation. Still separate input/output streams, 512-frame mix block, no full physical I/O matrix or measured duplex latency compensation; needs interface tests. | 35–55 |
+| Record MIDI from a controller and play it back through an instrument | **no** | Drawn/imported MIDI works. Native port selection and desktop Record/Stop-to-armed-track undoable take creation pass synthetic tests, but live instrument audition is not connected and no physical keyboard end-to-end test exists (G-02). | 20–35 |
 | Edit: select, trim, fade, comp playlists, Slip/Shuffle/Grid | yes (rough) | Every Edit menu command; property-tested with undo; open bugs #3, #5, #140 don't block the workflow | — |
 | Mix with built-in and third-party plugins, sends, busses, automation | partial (passes on CLAP/AU) | 27 built-in processors; CLAP and AU host on the signed macOS build, but its missing entitlement blocks third-party VST3 (#153). No AU plugin windows yet; VST3 windows on macOS only | 1–2 (entitlement) |
 | Bounce mix and stems; save and reopen the session | yes (rough) | WAV/BWF/AIFF/FLAC bounce, stems, `.scraft` save/reopen with plugin state; bugs #59, #103 in bus bounce and aux latency (PRs open) | — |
-| Exchange a session with Pro Tools or a picture editor | **no** | Audio-only OTIO import/export works, but no `.ptx`, AAF or OMF interchange (#40, G-03) | 50–90 |
+| Exchange a session with Pro Tools or a picture editor | **no** | Audio-only OTIO and restricted mono/stereo CMX3600 straight-cut EDL import/export work, but no `.ptx`, AAF or OMF interchange (#40, G-03) | 50–90 |
 
 **Result: pre-alpha.** Three workflows fail. Passing them is ~110–180 h, about 70 % of it
 parallelizable (interfaces, MIDI and AAF are independent crates).
@@ -48,7 +48,7 @@ Status: ✅ done · 🟡 in progress · ⬜ not started.
 | M10 | Public releases on all platforms | ✅ v0.3.0 (2026-10-08) and v0.4.0 (2026-10-10) released for every platform | — |
 | M11 | Third-party plugin hosting (CLAP, VST3, AU), video, surround | 🟡 mostly done | 40–60 |
 | M12 | **Hardware**: audio interfaces, MIDI devices, sync, control surfaces | ⬜ | 110–180 |
-| M13 | **Interchange**: AAF/OMF import/export and source streaming/recovery (OTIO audio export and WAV take writing exist) | 🟡 foundation only | 65–115 |
+| M13 | **Interchange**: AAF/OMF import/export and source streaming/recovery (OTIO audio and single-lane CMX3600 EDL import/export, WAV take writing exist) | 🟡 foundation only | 65–115 |
 | M14 | **Fidelity harness** against Pro Tools (null tests, plugin responses) | ⬜ | 20–30 |
 | M15 | **Localization**: catalog, fonts/RTL, the 8 Pro Tools languages first | ⬜ (PRs #141, #143 open) | 70–110 |
 | M16 | Built-in plugin depth, sidechain, ARA | ⬜ | 110–170 |
@@ -89,6 +89,7 @@ There is no `cargo xtask scorecard` in this repo; the measured number is `cargo 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Desktop native MIDI Record/Stop integrated in synthetic tests; manual record offset, callback-drained audio Stop and restricted CMX3600 mono/stereo audio EDL; physical controller and AAF/OMF/PTX alpha blockers remain |
 | 2026-11-01 | minor | Native MIDI take bridge (not app-wired), audio-only OTIO import, bounded audio channel routes, CLI media round-trip and full Linux gate; alpha/physical/CI runner verification remain open |
 | 2026-10-31 | minor | Native MIDI input capture foundation (no track routing), audio-only OTIO export, recording/command-palette safeguards and three-OS CI configuration; alpha gate and physical/runner verification remain open |
 | 2026-10-24 | trivial | 27 built-in processors, as the plugin registry holds; the sampler (#108) is no longer listed under plugin essentials |
