@@ -75,6 +75,9 @@ pub struct ClapPlugin {
     values: Vec<f32>,
     /// Pending events, kept sorted by time (stable for equal times). Never grows past `EVENT_CAP`.
     queue: Vec<Event>,
+    /// Inert per-instance evidence probe. No MixEngine/monitor callback reads this yet.
+    release_probe: Option<ReleaseProbe>,
+    next_release_serial: u64,
     inputs: PortBuffers,
     outputs: PortBuffers,
     in_main: Option<usize>,
@@ -101,6 +104,8 @@ impl ClapPlugin {
             ids,
             values,
             queue: Vec::with_capacity(EVENT_CAP),
+            release_probe: None,
+            next_release_serial: 0,
             inputs: PortBuffers::new(&[], 0),
             outputs: PortBuffers::new(&[], 0),
             in_main: None,
@@ -144,6 +149,31 @@ impl ClapPlugin {
     fn push_release(&mut self, e: Event) -> bool {
         push_sorted(&mut self.queue, e, true)
     }
+
+    /// Inspect **already queued** NoteOff/CC64-off events and arm an inert evidence probe.
+    /// This does not enqueue releases, open hardware, or acknowledge any monitor cleanup.
+    /// Only a future host-aware mixer adapter could use the returned token, and it must
+    /// request the full required release set before calling this method.
+    pub fn arm_release_probe(&mut self, required: &[ReleaseRequirement]) -> Result<ReleaseProbeToken, ReleaseProbeError> {
+        let probe = prepare_release_probe(&self.queue, self.restart_token, self.next_release_serial, required, self.release_probe.as_ref())?;
+        self.next_release_serial = probe.token.serial;
+        let token = probe.token;
+        self.release_probe = Some(probe);
+        Ok(token)
+    }
+
+    /// Read-only observation of a specific native instance and probe serial. A `Delivered`
+    /// observation means the tagged events passed a successful native process callback;
+    /// it does NOT guarantee that third-party synth voices have become silent.
+    pub fn release_probe_evidence(&self, token: ReleaseProbeToken) -> Option<ReleaseEvidence> {
+        self.release_probe.as_ref().filter(|probe| probe.token == token).map(|probe| probe.evidence)
+    }
+
+    fn block_pending_probe(&mut self, reason: ReleaseBlockReason) {
+        if let Some(probe) = &mut self.release_probe {
+            probe.block(reason);
+        }
+    }
 }
 
 /// An idempotent release has a separate identity for each channel/key, plus a
@@ -151,6 +181,179 @@ impl ClapPlugin {
 /// MIDI note-on is also a release. CLAP note events target channel zero.
 const NOTE_RELEASE_IDS: usize = 16 * 128;
 const RELEASE_ID_COUNT: usize = NOTE_RELEASE_IDS + 16;
+const RELEASE_WORDS: usize = RELEASE_ID_COUNT.div_ceil(64);
+
+/// One release identity within the native CLAP queue. Note events emitted by the Plugin
+/// `note_off` interface use MIDI channel zero; raw MIDI note-offs retain their channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseRequirement {
+    NoteOff { channel: u8, pitch: u8 },
+    SustainOff { channel: u8 },
+}
+
+impl ReleaseRequirement {
+    fn index(self) -> Option<usize> {
+        match self {
+            Self::NoteOff { channel, pitch } if channel < 16 && pitch < 128 => Some(usize::from(channel) * 128 + usize::from(pitch)),
+            Self::SustainOff { channel } if channel < 16 => Some(NOTE_RELEASE_IDS + usize::from(channel)),
+            _ => None,
+        }
+    }
+}
+
+/// Issued by one particular CLAP instance; an old serial can never witness new cleanup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleaseProbeToken {
+    instance: u64,
+    serial: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseBlockReason {
+    NativeError,
+    Reset,
+    Suspended,
+    Reprepared,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseEvidence {
+    Pending,
+    Delivered,
+    Blocked(ReleaseBlockReason),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseProbeError {
+    NoInstance,
+    Busy,
+    InvalidRequirements,
+    DuplicateRequirement,
+    MissingQueuedRelease,
+    QueueSaturated,
+    SerialExhausted,
+}
+
+/// A stack-allocated bitset: 2048 note-off identities + 16 pedal-up identities.
+/// Each probe is bounded independently of the native event queue's fixed capacity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReleaseBits([u64; RELEASE_WORDS]);
+
+impl ReleaseBits {
+    const EMPTY: Self = Self([0; RELEASE_WORDS]);
+
+    fn set(&mut self, index: usize) {
+        if let Some(word) = self.0.get_mut(index / 64) {
+            *word |= 1u64 << (index % 64);
+        }
+    }
+
+    fn has(&self, index: usize) -> bool {
+        self.0.get(index / 64).is_some_and(|word| word & (1u64 << (index % 64)) != 0)
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (dst, src) in self.0.iter_mut().zip(other.0) {
+            *dst |= src;
+        }
+    }
+
+    fn covers(&self, required: &Self) -> bool {
+        self.0.iter().zip(required.0).all(|(observed, required)| *observed & required == required)
+    }
+}
+
+struct ReleaseProbe {
+    token: ReleaseProbeToken,
+    required: ReleaseBits,
+    accepted: ReleaseBits,
+    provisional: ReleaseBits,
+    evidence: ReleaseEvidence,
+}
+
+impl ReleaseProbe {
+    fn block(&mut self, reason: ReleaseBlockReason) {
+        if self.evidence == ReleaseEvidence::Pending {
+            self.provisional = ReleaseBits::EMPTY;
+            self.evidence = ReleaseEvidence::Blocked(reason);
+        }
+    }
+
+    /// Called only after a successful native sub-block AND removal from the pending queue.
+    fn accept_chunk(&mut self, releases: ReleaseBits) {
+        if self.evidence == ReleaseEvidence::Pending {
+            self.provisional.merge(releases);
+        }
+    }
+
+    /// A later native error in the same outer process call must not promote provisional data.
+    fn complete_successful_call(&mut self) {
+        if self.evidence == ReleaseEvidence::Pending {
+            self.accepted.merge(self.provisional);
+            self.provisional = ReleaseBits::EMPTY;
+            if self.accepted.covers(&self.required) {
+                self.evidence = ReleaseEvidence::Delivered;
+            }
+        }
+    }
+}
+
+fn prepare_release_probe(
+    queue: &[Event],
+    instance: u64,
+    previous_serial: u64,
+    required: &[ReleaseRequirement],
+    current: Option<&ReleaseProbe>,
+) -> Result<ReleaseProbe, ReleaseProbeError> {
+    if instance == 0 {
+        return Err(ReleaseProbeError::NoInstance);
+    }
+    if current.is_some_and(|probe| probe.evidence == ReleaseEvidence::Pending) {
+        return Err(ReleaseProbeError::Busy);
+    }
+    if required.is_empty() {
+        return Err(ReleaseProbeError::InvalidRequirements);
+    }
+    if required.len() > EVENT_CAP {
+        return Err(ReleaseProbeError::QueueSaturated);
+    }
+    let mut bits = ReleaseBits::EMPTY;
+    for &release in required {
+        let index = release.index().ok_or(ReleaseProbeError::InvalidRequirements)?;
+        if bits.has(index) {
+            return Err(ReleaseProbeError::DuplicateRequirement);
+        }
+        if !queue.iter().any(|event| release_index(event) == Some(index)) {
+            return Err(if queue.len() == EVENT_CAP { ReleaseProbeError::QueueSaturated } else { ReleaseProbeError::MissingQueuedRelease });
+        }
+        bits.set(index);
+    }
+    let serial = previous_serial.checked_add(1).ok_or(ReleaseProbeError::SerialExhausted)?;
+    Ok(ReleaseProbe {
+        token: ReleaseProbeToken { instance, serial },
+        required: bits,
+        accepted: ReleaseBits::EMPTY,
+        provisional: ReleaseBits::EMPTY,
+        evidence: ReleaseEvidence::Pending,
+    })
+}
+
+/// The event references are inspected only after native Ok. Remove first, then publish the
+/// provisional bitset, so merely enqueueing/inspecting does not count as delivery.
+fn consume_successful_chunk(queue: &mut Vec<Event>, count: usize, probe: &mut Option<ReleaseProbe>) {
+    let mut observed = ReleaseBits::EMPTY;
+    if probe.as_ref().is_some_and(|probe| probe.evidence == ReleaseEvidence::Pending) {
+        for event in queue.iter().take(count) {
+            if let Some(index) = release_index(event) {
+                observed.set(index);
+            }
+        }
+    }
+    queue.drain(..count.min(queue.len()));
+    if let Some(probe) = probe {
+        probe.accept_chunk(observed);
+    }
+}
 
 fn release_index(e: &Event) -> Option<usize> {
     match *e {
@@ -262,6 +465,7 @@ impl Plugin for ClapPlugin {
     }
 
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize) {
+        self.block_pending_probe(ReleaseBlockReason::Reprepared);
         let sr = if sample_rate.is_finite() && sample_rate > 0.0 { f64::from(sample_rate) } else { 48_000.0 };
         let mb = max_block.clamp(1, MAX_BLOCK);
         self.channels = channels.clamp(1, MAX_CHANNELS);
@@ -304,11 +508,13 @@ impl Plugin for ClapPlugin {
     }
 
     fn reset(&mut self) {
+        self.block_pending_probe(ReleaseBlockReason::Reset);
         self.inst.reset();
         retain_safe_events_on_reset(&mut self.queue, &mut self.held);
     }
 
     fn suspend(&mut self) {
+        self.block_pending_probe(ReleaseBlockReason::Suspended);
         // Called by the mixer before retirement, on the audio/render thread. Deactivation and
         // destruction remain deferred to the main thread that drops the retired instance.
         self.inst.stop_processing();
@@ -364,7 +570,7 @@ impl Plugin for ClapPlugin {
             self.steady = self.steady.saturating_add(i64::try_from(n).unwrap_or(0));
             match (r, self.out_main) {
                 (Ok(_), Some(p)) => {
-                    self.queue.drain(..k);
+                    consume_successful_chunk(&mut self.queue, k, &mut self.release_probe);
                     let oc = self.outputs.channels(p);
                     for (c, dst) in io.iter_mut().take(ch).enumerate() {
                         let Some(dst) = dst.get_mut(start..start + n) else { continue };
@@ -380,15 +586,19 @@ impl Plugin for ClapPlugin {
                     }
                 }
                 (Ok(_), None) => {
-                    self.queue.drain(..k);
+                    consume_successful_chunk(&mut self.queue, k, &mut self.release_probe);
                 }
                 (Err(e), _) => {
+                    self.block_pending_probe(ReleaseBlockReason::NativeError);
                     retain_idempotent_for_retry(&mut self.queue);
                     log::debug!("{}: {e}", self.info.id);
                     return;
                 }
             }
             start += n;
+        }
+        if let Some(probe) = &mut self.release_probe {
+            probe.complete_successful_call();
         }
     }
 
@@ -535,6 +745,130 @@ impl PluginEditor for ClapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note_off(pitch: u8) -> Event {
+        Event::NoteOff { time: 0, key: pitch }
+    }
+
+    fn pedal_up(channel: u8) -> Event {
+        Event::Midi { time: 0, data: [0xB0 | channel, 64, 0] }
+    }
+
+    fn probe(queue: &[Event], serial: u64, required: &[ReleaseRequirement]) -> ReleaseProbe {
+        prepare_release_probe(queue, 27, serial, required, None).unwrap()
+    }
+
+    #[test]
+    fn native_release_evidence_requires_queue_drain_and_whole_successful_process_call() {
+        let mut queue = Vec::with_capacity(4);
+        queue.extend([note_off(60), pedal_up(2), Event::Param { time: 3, id: 7, value: 0.5 }]);
+        let req = [ReleaseRequirement::NoteOff { channel: 0, pitch: 60 }, ReleaseRequirement::SustainOff { channel: 2 }];
+        let mut active = Some(probe(&queue, 0, &req));
+        let token = active.as_ref().unwrap().token;
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Pending);
+
+        // A synthetic successful native sub-block *itself* is the precondition for consuming
+        // the first release. The evidence remains provisional until the outer call completes.
+        let native = |events: &[Event]| -> Result<(), ()> {
+            assert_eq!(events, &[note_off(60)]);
+            Ok(())
+        };
+        assert!(native(&queue[..1]).is_ok());
+        consume_successful_chunk(&mut queue, 1, &mut active);
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Pending);
+        assert_eq!(queue.len(), 2);
+
+        let native = |events: &[Event]| -> Result<(), ()> {
+            assert_eq!(events, &[pedal_up(2)]);
+            Ok(())
+        };
+        assert!(native(&queue[..1]).is_ok());
+        consume_successful_chunk(&mut queue, 1, &mut active);
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Pending, "both consumed releases are still provisional");
+        active.as_mut().unwrap().complete_successful_call();
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Delivered);
+        assert_eq!(active.as_ref().unwrap().token, token);
+        assert_eq!(queue.len(), 1, "unrelated parameter event is not a cleanup release");
+        assert_eq!(queue.capacity(), 4, "evidence update must not allocate");
+    }
+
+    #[test]
+    fn later_native_failure_discards_prior_successful_chunk_evidence() {
+        let mut queue = vec![note_off(61), pedal_up(3)];
+        let mut active =
+            Some(probe(&queue, 0, &[ReleaseRequirement::NoteOff { channel: 0, pitch: 61 }, ReleaseRequirement::SustainOff { channel: 3 }]));
+        // First native chunk succeeded and was drained.
+        consume_successful_chunk(&mut queue, 1, &mut active);
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Pending);
+        // A later native chunk fails; never commit the earlier provisional delivery.
+        let fake_native = |_events: &[Event]| -> Result<(), ()> { Err(()) };
+        assert!(fake_native(&queue).is_err());
+        active.as_mut().unwrap().block(ReleaseBlockReason::NativeError);
+        retain_idempotent_for_retry(&mut queue);
+        active.as_mut().unwrap().complete_successful_call();
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Blocked(ReleaseBlockReason::NativeError));
+        assert_eq!(queue, vec![pedal_up(3)], "the retry queue retains only the undelivered idempotent release");
+    }
+
+    #[test]
+    fn zero_frame_reset_and_suspend_cannot_produce_delivery_evidence() {
+        let queue = vec![note_off(60), pedal_up(15)];
+        let req = [ReleaseRequirement::NoteOff { channel: 0, pitch: 60 }, ReleaseRequirement::SustainOff { channel: 15 }];
+        let mut pending = probe(&queue, 0, &req);
+        // There was no native process call: zero frames are not accepted evidence.
+        pending.complete_successful_call();
+        assert_eq!(pending.evidence, ReleaseEvidence::Pending);
+        pending.block(ReleaseBlockReason::Reset);
+        pending.complete_successful_call();
+        assert_eq!(pending.evidence, ReleaseEvidence::Blocked(ReleaseBlockReason::Reset));
+
+        let mut parked = probe(&queue, 1, &req);
+        parked.block(ReleaseBlockReason::Suspended);
+        parked.accept_chunk(ReleaseBits::EMPTY);
+        parked.complete_successful_call();
+        assert_eq!(parked.evidence, ReleaseEvidence::Blocked(ReleaseBlockReason::Suspended));
+        assert_ne!(pending.token, parked.token, "probe serial distinguishes rearm on the same native instance");
+    }
+
+    #[test]
+    fn missing_duplicate_and_saturated_release_requirements_fail_closed() {
+        let only_note = [note_off(60)];
+        let note = ReleaseRequirement::NoteOff { channel: 0, pitch: 60 };
+        let missing = ReleaseRequirement::SustainOff { channel: 0 };
+        assert!(matches!(prepare_release_probe(&only_note, 0, 0, &[note], None), Err(ReleaseProbeError::NoInstance)));
+        assert!(matches!(prepare_release_probe(&only_note, 27, 0, &[], None), Err(ReleaseProbeError::InvalidRequirements)));
+        assert!(matches!(prepare_release_probe(&only_note, 27, 0, &[note, note], None), Err(ReleaseProbeError::DuplicateRequirement)));
+        assert!(matches!(prepare_release_probe(&only_note, 27, 0, &[missing], None), Err(ReleaseProbeError::MissingQueuedRelease)));
+        assert!(matches!(
+            prepare_release_probe(&only_note, 27, 0, &[ReleaseRequirement::SustainOff { channel: 16 }], None),
+            Err(ReleaseProbeError::InvalidRequirements)
+        ));
+        assert!(matches!(prepare_release_probe(&only_note, 27, u64::MAX, &[note], None), Err(ReleaseProbeError::SerialExhausted)));
+
+        let mut saturated = Vec::with_capacity(EVENT_CAP);
+        saturated.resize(EVENT_CAP, note_off(60));
+        assert!(matches!(prepare_release_probe(&saturated, 27, 0, &[missing], None), Err(ReleaseProbeError::QueueSaturated)));
+        assert_eq!(saturated.len(), saturated.capacity());
+        let a = probe(&saturated, 0, &[note]);
+        assert!(matches!(prepare_release_probe(&saturated, 27, 1, &[note], Some(&a)), Err(ReleaseProbeError::Busy)));
+    }
+
+    #[test]
+    fn same_channel_key_or_pedal_bits_never_alias_other_release_identities() {
+        let queue = vec![note_off(127), Event::Midi { time: 0, data: [0x8F, 127, 0] }, pedal_up(15)];
+        let required = [
+            ReleaseRequirement::NoteOff { channel: 0, pitch: 127 },
+            ReleaseRequirement::NoteOff { channel: 15, pitch: 127 },
+            ReleaseRequirement::SustainOff { channel: 15 },
+        ];
+        let mut active = Some(probe(&queue, 0, &required));
+        let mut mut_queue = queue;
+        consume_successful_chunk(&mut mut_queue, 3, &mut active);
+        active.as_mut().unwrap().complete_successful_call();
+        assert_eq!(active.as_ref().unwrap().evidence, ReleaseEvidence::Delivered);
+        assert_ne!(required[0].index(), required[1].index());
+        assert_ne!(required[1].index(), required[2].index());
+    }
 
     #[test]
     fn restart_tokens_are_unique_and_fail_closed_at_exhaustion() {
