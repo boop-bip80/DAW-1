@@ -232,6 +232,30 @@ fn keep_releases(notes: &mut Vec<NoteEvent>) {
     }
 }
 
+/// Keep the visible parameter cache and deferred controller-state value in sync with the
+/// actual event queue. A saturated queue must not claim a change the processor will never see.
+fn queue_param_update(
+    pending: &mut Vec<(u32, f64)>,
+    values: &mut [f32],
+    unsynced: &[AtomicU64],
+    index: usize,
+    id: u32,
+    plain: f32,
+    normalized: f64,
+) -> bool {
+    let (Some(slot), Some(u)) = (values.get_mut(index), unsynced.get(index)) else { return false };
+    if let Some(e) = pending.iter_mut().find(|(pid, _)| *pid == id) {
+        e.1 = normalized;
+    } else if pending.len() < pending.capacity() {
+        pending.push((id, normalized));
+    } else {
+        return false;
+    }
+    *slot = plain;
+    u.store(normalized.to_bits(), Ordering::Relaxed);
+    true
+}
+
 impl Plugin for Vst3Plugin {
     fn info(&self) -> &'static PluginInfo {
         self.info
@@ -281,19 +305,8 @@ impl Plugin for Vst3Plugin {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&vid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
         let v = pi.clamp(value);
-        if let Some(slot) = self.values.get_mut(i) {
-            *slot = v;
-        }
-        let Some(n) = self.normalized_from_plain(i, v) else { return true };
-        if let Some(u) = self.unsynced.get(i) {
-            u.store(n.to_bits(), Ordering::Relaxed);
-        }
-        if let Some(e) = self.pending.iter_mut().find(|(pid, _)| *pid == vid) {
-            e.1 = n;
-        } else if self.pending.len() < self.pending.capacity() {
-            self.pending.push((vid, n));
-        }
-        true
+        let Some(n) = self.normalized_from_plain(i, v) else { return false };
+        queue_param_update(&mut self.pending, &mut self.values, self.unsynced.as_ref(), i, vid, v, n)
     }
 
     fn param(&self, id: &str) -> Option<f32> {
@@ -593,6 +606,34 @@ impl PluginEditor for Vst3Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_param_queue_preserves_display_and_unsynced_state_until_retry() {
+        let mut pending = Vec::with_capacity(1);
+        let mut values = [1.0f32, 200.0];
+        let unsynced = [AtomicU64::new(SYNCED), AtomicU64::new(SYNCED)];
+
+        assert!(queue_param_update(&mut pending, &mut values, &unsynced, 0, 7, 1.5, 0.75));
+        assert_eq!(pending.as_slice(), &[(7, 0.75)]);
+        assert_eq!(unsynced[0].load(Ordering::Relaxed), 0.75f64.to_bits());
+
+        assert!(!queue_param_update(&mut pending, &mut values, &unsynced, 1, 12, 300.0, 0.9));
+        assert_eq!(values, [1.5, 200.0], "rejected edit must not alter visible parameters");
+        assert_eq!(unsynced[1].load(Ordering::Relaxed), SYNCED, "rejected edit must not alter state-save bookkeeping");
+        assert_eq!(pending.as_slice(), &[(7, 0.75)]);
+
+        assert!(queue_param_update(&mut pending, &mut values, &unsynced, 0, 7, 2.0, 1.0));
+        assert_eq!(pending.as_slice(), &[(7, 1.0)], "coalesce even at capacity");
+        assert_eq!(values[0], 2.0);
+        assert_eq!(unsynced[0].load(Ordering::Relaxed), 1.0f64.to_bits());
+
+        pending.clear();
+        assert!(queue_param_update(&mut pending, &mut values, &unsynced, 1, 12, 300.0, 0.9), "retry succeeds after drain");
+        assert_eq!(values[1], 300.0);
+        assert_eq!(unsynced[1].load(Ordering::Relaxed), 0.9f64.to_bits());
+        assert_eq!(pending.as_slice(), &[(12, 0.9)]);
+        assert_eq!(pending.capacity(), 1, "no real-time allocation");
+    }
 
     #[test]
     fn failed_state_save_restores_pending_values_but_preserves_newer_edits() {
