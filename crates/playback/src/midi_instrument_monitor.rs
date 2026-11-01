@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn muted_and_unarmed_instruments_never_get_routes() {
-        let (port, _) = monitor_pair();
+        let (port, _receiver) = monitor_pair();
         let (mut s, a, b) = session();
         s.track_mut(a).unwrap().mixer.mute = true;
         s.track_mut(b).unwrap().mixer.record_arm = false;
