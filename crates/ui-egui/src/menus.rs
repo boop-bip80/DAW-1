@@ -66,6 +66,7 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
     ("window.midi_ops", "MIDI Operations", "", None),
     ("window.rtp", "MIDI Real-Time Properties", "", None),
     ("window.playback_engine", "Playback Engine", "", None),
+    ("window.midi_input_filter", "MIDI Input Filter", "", None),
     ("ui.audio_device", "Audio Device", "", None),
     ("window.io_setup", "I/O Setup", "", None),
     ("window.shortcuts", "Keyboard Shortcuts", "", None),
@@ -461,6 +462,8 @@ const MENU_WINDOWS: &[(&str, &str)] = &[
     ("Setup > Playback Engine...", "window.playback_engine"),
     // The menu opens the device picker; direct setup.midi_input_devices calls still edit preferences.
     ("Setup > MIDI > MIDI Input Devices...", "window.playback_engine"),
+    // The filter catalog command mutates preferences; menu invocation opens its real UI instead.
+    ("Setup > MIDI > MIDI Input Filter...", "window.midi_input_filter"),
     ("Setup > I/O...", "window.io_setup"),
     ("Setup > Keyboard Shortcuts...", "window.shortcuts"),
     ("Setup > Session", "setup.session"),
@@ -601,6 +604,7 @@ pub fn run_ui_command(app: &mut SoundApp, id: &str, p: &Value) -> Option<Result<
         "window.midi_ops" => toggle(&mut app.ui.show_midi_ops),
         "window.rtp" => toggle(&mut app.ui.show_rtp),
         "window.playback_engine" => toggle(&mut app.ui.show_playback_engine),
+        "window.midi_input_filter" => toggle(&mut app.ui.show_midi_filter),
         "window.io_setup" => toggle(&mut app.ui.show_io_setup),
         "window.shortcuts" => toggle(&mut app.ui.show_shortcuts),
         "window.color_palette" => toggle(&mut app.ui.show_color_palette),
@@ -860,6 +864,32 @@ mod tests {
         // Re-opening from the menu must not toggle an already-open picker shut.
         invoke_menu(&mut app, &id, PATH);
         assert!(app.ui.show_playback_engine);
+    }
+
+    #[test]
+    fn midi_input_filter_menu_opens_real_controls_without_editing_preferences() {
+        const PATH: &str = "Setup > MIDI > MIDI Input Filter...";
+        let setup = tree().into_iter().find(|node| node.label == "Setup").unwrap();
+        let midi = setup.children.iter().find(|node| node.label == "MIDI").unwrap();
+        let filter = midi.children.iter().find(|node| node.path == PATH).unwrap();
+        let id = command_for_path(&filter.path, &ui_aliases()).unwrap();
+        assert_eq!(id, "window.midi_input_filter");
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        assert_eq!(item_state(&app, PATH, Some(&id)), (true, false));
+        let original = app.engine.session().to_json();
+        invoke_menu(&mut app, &id, PATH);
+        assert!(app.ui.show_midi_filter);
+        assert_eq!(app.engine.session().to_json(), original);
+        assert!(!app.engine.is_dirty());
+        assert!(!app.engine.can_undo());
+        invoke_menu(&mut app, &id, PATH);
+        assert!(app.ui.show_midi_filter, "reinvoking the menu should keep the window open");
+
+        let mut direct = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        direct.run("setup.midi_input_filter", json!({"filter": ["notes"]})).unwrap();
+        assert!(direct.engine.session().edit.flag("midi.filter.notes"));
+        assert!(!direct.ui.show_midi_filter, "programmatic commands must not open modal UI");
     }
 
     #[test]
