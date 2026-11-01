@@ -12,6 +12,7 @@ pub mod clip_group_file;
 pub mod cmd;
 pub mod demo;
 pub mod edit;
+pub mod edl;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
