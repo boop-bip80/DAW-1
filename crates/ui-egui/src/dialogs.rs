@@ -1482,7 +1482,9 @@ mod tests {
         assert_eq!(std::fs::read(&foreign).expect("foreign stem survives"), b"another application's file");
         assert_eq!(occupied.contents().len(), 1, "no private stage, sidecar or second output may be created on collision");
 
-        harness.get_by_label("Browse for stem folder…").click();
+        // The inline error can reposition this modal; a stale pointer-coordinate click may
+        // miss after reflow. Exercise the real accessible Button action instead.
+        harness.get_by_label("Browse for stem folder…").click_accesskit();
         harness.run_steps(2);
         assert_eq!(browse_calls.get(), 1, "folder picker runs only when Browse is clicked");
         assert!(matches!(&harness.state().dialogs.open, Some(Dialog::BounceStems { dir, format, bit_depth, full_session: false, .. })
