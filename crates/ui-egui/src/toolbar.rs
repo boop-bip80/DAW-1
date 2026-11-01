@@ -287,18 +287,20 @@ fn counters(app: &mut SoundApp, ui: &mut Ui) {
     icons::draw(ui.painter(), Rect::from_center_size(pos2(sub_r.max.x - 8.0, sub_r.center().y), vec2(10.0, 10.0)), "triangle_down", t.text_dim);
     egui::Popup::menu(&sub_resp).show(|ui| {
         let default = sub_choice.is_none();
-        if ui.selectable_label(default, "Default (Samples)").clicked() && !default {
-            if let Err(error) = app.run("view.sub_counter", json!({"format": null})) {
-                app.ui.status = format!("Could not reset Sub counter format: {error}");
-            }
+        if ui.selectable_label(default, "Default (Samples)").clicked()
+            && !default
+            && let Err(error) = app.run("view.sub_counter", json!({"format": null}))
+        {
+            app.ui.status = format!("Could not reset Sub counter format: {error}");
         }
         ui.separator();
         for format in TimeFormat::ALL {
             let chosen = sub_choice == Some(format);
-            if ui.selectable_label(chosen, format.label()).clicked() && !chosen {
-                if let Err(error) = app.run("view.sub_counter", json!({"format": format.id()})) {
-                    app.ui.status = format!("Could not change Sub counter format: {error}");
-                }
+            if ui.selectable_label(chosen, format.label()).clicked()
+                && !chosen
+                && let Err(error) = app.run("view.sub_counter", json!({"format": format.id()}))
+            {
+                app.ui.status = format!("Could not change Sub counter format: {error}");
             }
         }
     });
