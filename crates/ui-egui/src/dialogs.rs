@@ -1328,7 +1328,10 @@ fn loop_length(s: &Session, text: &str, format: soundcraft_time::TimeFormat, sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
 
     #[cfg(not(target_arch = "wasm32"))]
     struct StemTestFolder(std::path::PathBuf);
