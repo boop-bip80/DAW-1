@@ -80,6 +80,8 @@ pub const UI_COMMANDS: &[(&str, &str, &str, Option<&str>)] = &[
 /// Extra catalog mappings handled by the UI layer.
 pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     let mut v: Vec<(&str, &str)> = UI_COMMANDS.iter().filter(|c| !c.2.is_empty()).map(|c| (c.2, c.0)).collect();
+    v.push((EDL_IMPORT_MENU, "file.import_edl"));
+    v.push((EDL_EXPORT_MENU, "file.export_edl"));
     v.push((OTIO_IMPORT_MENU, "file.import_otio"));
     v.push((OTIO_EXPORT_MENU, "file.export_otio"));
     v.extend(mix_view_aliases().iter().copied());
@@ -88,7 +90,9 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     v
 }
 
-/// SoundCraft-specific open interchange; the incumbent menu catalog has no OTIO item.
+/// SoundCraft-specific open interchange; the incumbent menu catalog has neither item.
+const EDL_IMPORT_MENU: &str = "File > Import > CMX3600 Audio EDL...";
+const EDL_EXPORT_MENU: &str = "File > Export > CMX3600 Audio EDL...";
 const OTIO_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Audio...";
 const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
 
@@ -211,6 +215,8 @@ pub fn tree() -> Vec<MenuNode> {
     for line in catalog::catalog() {
         insert_path(&mut roots, line);
     }
+    insert_path(&mut roots, EDL_IMPORT_MENU);
+    insert_path(&mut roots, EDL_EXPORT_MENU);
     insert_path(&mut roots, OTIO_IMPORT_MENU);
     insert_path(&mut roots, OTIO_EXPORT_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
@@ -769,6 +775,22 @@ mod tests {
         invoke_menu(&mut app, "file.import_otio", OTIO_IMPORT_MENU);
         assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, title, .. })
             if cmd == "file.import_otio" && title.contains("OpenTimelineIO")));
+    }
+
+    #[test]
+    fn cmx3600_audio_import_export_have_real_file_menu_and_picker_routes() {
+        let file = tree().into_iter().find(|n| n.label == "File").unwrap();
+        for (folder, path, command, title) in
+            [("Import", EDL_IMPORT_MENU, "file.import_edl", "Import CMX3600 Audio EDL"), ("Export", EDL_EXPORT_MENU, "file.export_edl", "Export")]
+        {
+            let group = file.children.iter().find(|n| n.label == folder).unwrap();
+            let edl = group.children.iter().find(|n| n.path == path).unwrap();
+            assert_eq!(command_for_path(&edl.path, &ui_aliases()).as_deref(), Some(command));
+            let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+            invoke_menu(&mut app, command, path);
+            assert!(matches!(&app.dialogs.open, Some(crate::dialogs::Dialog::PathPrompt { cmd, title: t, path: prompt, .. })
+                if cmd == command && t.contains(title) && (folder == "Import" || prompt.ends_with(".edl"))));
+        }
     }
 
     #[test]

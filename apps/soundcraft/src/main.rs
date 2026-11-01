@@ -172,6 +172,7 @@ fn services() -> Services {
             let d = match purpose {
                 "session.open" => d.add_filter("SoundCraft Session", &["scraft"]),
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
+                "file.import_edl" => d.add_filter("CMX3600 EDL", &["edl"]),
                 "file.import_otio" => d.add_filter("OpenTimelineIO", &["otio"]),
                 _ => d.add_filter(
                     "Audio",
@@ -184,6 +185,7 @@ fn services() -> Services {
             let path = std::path::Path::new(default);
             let mut d = match purpose {
                 "file.bounce_mix" => rfd::FileDialog::new().add_filter("Audio", &["wav", "aif", "aiff", "flac"]),
+                "file.export_edl" => rfd::FileDialog::new().add_filter("CMX3600 EDL", &["edl"]),
                 "file.export_otio" => rfd::FileDialog::new().add_filter("OpenTimelineIO", &["otio"]),
                 _ => rfd::FileDialog::new().add_filter("SoundCraft Session", &["scraft"]),
             };

@@ -91,6 +91,27 @@ pub fn specs() -> Vec<CommandSpec> {
             }
         ),
         cmd!(
+            "file.import_edl",
+            "CMX3600 Audio EDL...",
+            ["File", "Import"],
+            None,
+            "{path, fps?: 24|25|30} — append one A1 cut-only EDL with FROM FILE references, whole-frame trims and gaps; defaults to session non-drop timecode rate",
+            always,
+            |e, p| {
+                let path = str_param(p, "path").ok_or_else(|| bad("file.import_edl", "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("edl") {
+                    return Err(bad("file.import_edl", "input path must end in .edl"));
+                }
+                let fps = p.get("fps").map(|v| v.as_u64().ok_or_else(|| bad("file.import_edl", "`fps` must be 24, 25 or 30"))).transpose()?;
+                let rate = crate::edl::frame_rate(e.session(), fps)?;
+                let bytes = crate::io::read_file_limited(&path, crate::edl::MAX_EDL_BYTES)?;
+                let imported = crate::edl::import_audio(e, std::path::Path::new(&path), &bytes, rate)?;
+                Ok(
+                    json!({"path": path, "audio_tracks": imported.tracks, "audio_clips": imported.clips, "media_sources": imported.sources, "fps": rate}),
+                )
+            }
+        ),
+        cmd!(
             "file.import_video",
             "Video...",
             ["File", "Import"],
@@ -142,6 +163,30 @@ pub fn specs() -> Vec<CommandSpec> {
                 crate::io::write_file(&path, &output.json)?;
                 Ok(json!({"path": path, "bytes": output.json.len(), "audio_tracks": output.tracks,
                     "audio_clips": output.clips, "clips_with_nonportable_processing": output.processing_metadata_clips}))
+            }
+        ),
+        cmd!(noundo "file.export_edl", "CMX3600 Audio EDL...", ["File", "Export"], None,
+            "{path, track?: selected mono audio track, fps?: 24|25|30, replace?: false} — frame-aligned A1 cuts only; no overlaps, fades or unrendered clip processing",
+            always, |e, p| {
+                let id = "file.export_edl";
+                let path = str_param(p, "path").ok_or_else(|| bad(id, "`path` required"))?.to_string();
+                if std::path::Path::new(&path).extension().and_then(std::ffi::OsStr::to_str) != Some("edl") {
+                    return Err(bad(id, "output path must end in .edl"));
+                }
+                refuse_replacing(e, id, std::path::Path::new(&path), p)?;
+                let fps = p.get("fps").map(|v| v.as_u64().ok_or_else(|| bad(id, "`fps` must be 24, 25 or 30"))).transpose()?;
+                let rate = crate::edl::frame_rate(e.session(), fps)?;
+                let track = track_param(e, id, p, "track")?.or_else(|| {
+                    let selected = e.session().edit.selected_tracks.to_vec();
+                    (selected.len() == 1).then(|| selected[0])
+                }).or_else(|| {
+                    let audio = e.session().tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect::<Vec<_>>();
+                    (audio.len() == 1).then(|| audio[0].id)
+                }).ok_or_else(|| bad(id, "select exactly one mono audio track or provide `track`"))?;
+                let output = crate::edl::export_audio(e.session(), track, rate)?;
+                crate::io::write_file(&path, &output.bytes)?;
+                Ok(json!({"path": path, "bytes": output.bytes.len(), "edits": output.summary.edits,
+                    "unique_sources": output.summary.unique_sources, "track": track, "fps": rate}))
             }
         ),
         cmd!(noundo "file.export_session_text", "Session Info as Text...", ["File", "Export"], None, "{path?, replace?: false}", always, |e, p| {
