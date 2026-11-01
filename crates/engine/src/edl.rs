@@ -1,9 +1,10 @@
 //! A deliberately narrow CMX 3600 audio Edit Decision List (EDL) interchange.
 //!
 //! CMX 3600 / SMPTE 258M is a *frame*-based cut list, not an audio project file. This module
-//! supports one audio channel (A1), straight cuts, source in/out, record in/out and the common
-//! `FROM FILE` / `FROM CLIP NAME` remarks. Existing audio must be locally accessible. It does
-//! not support video, fades, dissolves, source-speed changes, or multitrack audio. AAF/OMF and
+//! supports one audio lane: mono A1 (`A`) or linked stereo A1+A2 (`AA`), with straight cuts,
+//! source in/out, record in/out and common `FROM FILE` / `FROM CLIP NAME` remarks. Existing
+//! audio must be locally accessible. Separately edited A1/A2 lanes, video, fades, dissolves,
+//! source-speed changes and multitrack audio are not supported. AAF/OMF and
 //! proprietary Pro Tools sessions are different formats and are not handled here.
 
 use crate::{Engine, EngineError, Result};
@@ -90,7 +91,8 @@ fn reject_track_processing(track: &Track) -> Result<()> {
     if mixer.volume_db != 0.0 || mixer.trim_db != 0.0 {
         return Err(unsupported("track fader/trim gain must be 0 dB; render the mixed audio before exporting"));
     }
-    if mixer.phase_invert || mixer.pan.len() != 1 || mixer.pan[0] != 0.0 || mixer.surround.is_some() {
+    let default_pan: &[f32] = if track.channels() == 2 { &[-1.0, 1.0] } else { &[0.0] };
+    if mixer.phase_invert || mixer.pan.as_slice() != default_pan || mixer.surround.is_some() {
         return Err(unsupported("track phase/pan processing is not represented; render or reset it before exporting"));
     }
     if mixer.inserts.iter().any(Option::is_some) || track.instrument.is_some() {
@@ -118,11 +120,13 @@ fn reject_track_processing(track: &Track) -> Result<()> {
 /// buses and plug-in processing are not represented by this edit-decision format.
 pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Export> {
     let track = session.track(track_id).ok_or_else(|| unsupported("selected track does not exist"))?;
-    if track.kind != TrackKind::Audio || track.channels() != 1 || track.inactive {
-        return Err(unsupported("select an active mono audio track (A1) for this EDL"));
+    if track.kind != TrackKind::Audio || !(1..=2).contains(&track.channels()) || track.inactive {
+        return Err(unsupported("select an active mono A1 or linked stereo A1+A2 audio track for this EDL"));
     }
     reject_track_processing(track)?;
     let title = ascii_remark(&session.name, "session title", 72)?;
+    let channels = track.channels();
+    let event_audio = if channels == 2 { "AA" } else { "A" };
     let rate = session.sample_rate.hz();
     let mut clips = track.clips().iter().collect::<Vec<_>>();
     clips.sort_by_key(|c| (c.start, c.id.0));
@@ -155,8 +159,8 @@ pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Ex
         let end = clip.start.checked_add(clip.length).ok_or_else(|| unsupported("record end overflows"))?;
         let source_end = offset.checked_add(clip.length).ok_or_else(|| unsupported("source end overflows"))?;
         let media = session.source(source).ok_or_else(|| unsupported("clip references missing source"))?;
-        if media.channels != 1 || media.sample_rate != rate || u64::try_from(source_end).map_or(true, |n| n > media.frames) {
-            return Err(unsupported(format!("clip `{}` has unavailable mono audio at the session rate", clip.name)));
+        if usize::from(media.channels) != channels || media.sample_rate != rate || u64::try_from(source_end).map_or(true, |n| n > media.frames) {
+            return Err(unsupported(format!("clip `{}` has no matching {channels}-channel media at the session rate", clip.name)));
         }
         let name = ascii_remark(&clip.name, "clip name", 80)?;
         let (source_in, source_out) = (sample_frame(offset, rate, fps)?, sample_frame(source_end, rate, fps)?);
@@ -167,7 +171,7 @@ pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Ex
         let url = crate::otio::media_url(session, media)?;
         writeln!(
             out,
-            "{:03}  {reel} A     C        {} {} {} {}",
+            "{:03}  {reel} {event_audio:<5} C        {} {} {} {}",
             number + 1,
             timecode(source_in, fps),
             timecode(source_out, fps),
@@ -187,6 +191,7 @@ pub fn export_audio(session: &Session, track_id: TrackId, fps: u32) -> Result<Ex
 
 #[derive(Debug)]
 struct Cut {
+    channels: usize,
     reel: String,
     source_in: u64,
     source_out: u64,
@@ -217,15 +222,20 @@ fn parse_cut(line: &str, number: usize, fps: u32) -> Result<Cut> {
     if tokens[1].is_empty() || tokens[1].len() > 8 || !tokens[1].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(unsupported("source reel must be 1..=8 ASCII letters, digits or underscores"));
     }
-    if tokens[2] != "A" || tokens[3] != "C" {
-        return Err(unsupported("only single-channel audio (A1) straight cuts (C) are supported"));
+    let channels = match tokens[2] {
+        "A" => 1,
+        "AA" => 2,
+        _ => return Err(unsupported("only mono A1 (A) or linked stereo A1+A2 (AA) events are supported")),
+    };
+    if tokens[3] != "C" {
+        return Err(unsupported("only straight cuts (C) are supported"));
     }
     let (source_in, source_out) = (read_timecode(tokens[4], fps)?, read_timecode(tokens[5], fps)?);
     let (record_in, record_out) = (read_timecode(tokens[6], fps)?, read_timecode(tokens[7], fps)?);
     if source_out <= source_in || record_out <= record_in || source_out - source_in != record_out - record_in {
         return Err(unsupported("source and record durations must match and be positive"));
     }
-    Ok(Cut { reel: tokens[1].into(), source_in, source_out, record_in, record_out, name: None, media_url: None })
+    Ok(Cut { channels, reel: tokens[1].into(), source_in, source_out, record_in, record_out, name: None, media_url: None })
 }
 
 fn finish_cut(cut: Cut, edits: &mut Vec<Cut>) -> Result<()> {
@@ -233,6 +243,9 @@ fn finish_cut(cut: Cut, edits: &mut Vec<Cut>) -> Result<()> {
         return Err(unsupported("each event requires a `* FROM FILE:` media URL; reel-only EDLs require relinking"));
     }
     if let Some(prior) = edits.last() {
+        if cut.channels != prior.channels {
+            return Err(unsupported("mixed A and AA channel events are not a linked mono/stereo edit; import separate A1/A2 lanes elsewhere"));
+        }
         if cut.record_in < prior.record_out {
             return Err(unsupported("EDL record timecodes overlap or are out of order"));
         }
@@ -251,7 +264,7 @@ fn range(start: u64, duration: u64, fps: u32) -> Value {
     json!({"OTIO_SCHEMA": "TimeRange.1", "start_time": time(start, fps), "duration": time(duration, fps)})
 }
 
-/// Parse a strict frame-based, mono audio CMX3600 cut list, then use the existing OTIO importer
+/// Parse a strict frame-based, mono or linked-stereo CMX3600 cut list, then use the OTIO importer
 /// to authorize paths, bound/fully decode media, and commit the resulting edits atomically.
 /// Unsupported EDL constructs fail before any session change.
 pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32) -> Result<crate::otio::Import> {
@@ -315,6 +328,8 @@ pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32
         return Err(unsupported("EDL contains no valid audio events"));
     }
 
+    let expected_channels = cuts.first().map_or(1, |cut| cut.channels);
+
     let mut children = Vec::with_capacity(cuts.len().saturating_mul(2));
     let mut cursor = 0_u64;
     for cut in cuts {
@@ -335,39 +350,48 @@ pub fn import_audio(engine: &mut Engine, document: &Path, bytes: &[u8], fps: u32
         ]}
     });
     let json = serde_json::to_vec(&timeline).map_err(|err| EngineError::Io(format!("EDL staging failed: {err}")))?;
-    crate::otio::import_audio(engine, document, &json)
+    crate::otio::import_audio_with_channels(engine, document, &json, Some(expected_channels))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use soundcraft_audio_io::{AudioBuffer, EncodeOptions, FileFormat};
-    use soundcraft_model::{AutoParam, AutomationLane, ChannelFormat, Clip, Insert, Mixer, SendSlot, Source, TrackKind};
+    use soundcraft_model::{AutoParam, AutomationLane, ChannelFormat, Clip, Insert, Mixer, SendSlot, Source, SourceAudio, TrackKind};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn fixture() -> (Session, PathBuf, TrackId) {
+        fixture_channels(1)
+    }
+
+    fn fixture_channels(channels: usize) -> (Session, PathBuf, TrackId) {
         let folder = std::env::temp_dir().join(format!("soundcraft-cmx3600-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
         std::fs::create_dir_all(&folder).unwrap();
         let media = folder.join("voice #1.wav");
-        let audio = AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.125; 96_000]] };
+        let audio = AudioBuffer {
+            sample_rate: 48_000,
+            channels: if channels == 2 { vec![vec![0.22; 96_000], vec![-0.47; 96_000]] } else { vec![vec![0.125; 96_000]] },
+        };
         std::fs::write(&media, soundcraft_audio_io::encode(&audio, &EncodeOptions::default()).unwrap()).unwrap();
         let mut session = Session { name: "SoundCraft test".into(), folder: Some(folder), ..Session::default() };
         let sid = SourceId(session.alloc());
+        session.pool.insert(sid, Arc::new(SourceAudio::new(audio)));
         session.sources.push(Source {
             id: sid,
             name: "Voice".into(),
             path: media.to_str().unwrap().into(),
-            channels: 1,
+            channels: channels as u16,
             frames: 96_000,
             sample_rate: 48_000,
             format: FileFormat::Wav,
             time_reference: 0,
             unsaved: false,
         });
-        let tid = session.add_track(TrackKind::Audio, ChannelFormat::Mono, Some("VO"));
+        let tid = session.add_track(TrackKind::Audio, ChannelFormat::for_channels(channels), Some("VO"));
         let first = session.new_clip_id();
         session.track_mut(tid).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(first, "Voice 1", sid, 2_000, 0, 4_000));
         let second = session.new_clip_id();
@@ -414,6 +438,78 @@ mod tests {
         assert_eq!(*engine.session(), before);
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn stereo_aa_roundtrip_keeps_separate_left_and_right_without_gain_or_channel_duplication() {
+        let (session, media, track) = fixture_channels(2);
+        let original = soundcraft_mix::render_clips(&session, track, soundcraft_time::Range::new(0, 8_000));
+        assert_eq!(original.len(), 2);
+        assert!((original[0][0] - 0.22).abs() < 0.00001);
+        assert!((original[1][0] + 0.47).abs() < 0.00001);
+        assert_eq!(original[0][5_000], 0.0, "one-frame editorial gap must be silent");
+        assert_eq!(original[1][5_000], 0.0);
+
+        let exported = export_audio(&session, track, 24).unwrap();
+        let text = String::from_utf8(exported.bytes.clone()).unwrap();
+        assert!(text.contains("001  SC000001 AA    C"));
+        assert!(text.contains("002  SC000001 AA    C"));
+        let url = crate::otio::media_url(&session, &session.sources[0]).unwrap();
+        assert_eq!(text.replace(&url, "file:///tmp/golden-stereo.wav"), include_str!("../tests/fixtures/cmx3600_stereo.edl"));
+
+        let document = media.with_extension("edl");
+        std::fs::write(&document, exported.bytes).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        let result = engine.execute("file.import_edl", &json!({"path": document.to_str().unwrap(), "fps":24})).unwrap();
+        assert_eq!(result["audio_tracks"], 1, "one AA event list is one linked stereo track, never two doubled tracks");
+        assert_eq!(result["audio_clips"], 2);
+        assert_eq!(result["media_sources"], 1);
+        let imported_track = engine.session().tracks.iter().find(|t| t.name == "SoundCraft test").unwrap();
+        assert_eq!(imported_track.format, ChannelFormat::Stereo);
+        assert_eq!(imported_track.clips()[0].gain_db, 0.0);
+        assert_eq!(imported_track.clips()[1].gain_db, 0.0);
+        assert_eq!(imported_track.clips()[1].start, 6_000);
+        let imported = soundcraft_mix::render_clips(engine.session(), imported_track.id, soundcraft_time::Range::new(0, 8_000));
+        assert_eq!(imported.len(), original.len());
+        for (channel, (was, now)) in original.iter().zip(imported.iter()).enumerate() {
+            assert_eq!(was.len(), now.len());
+            for (sample, (&a, &b)) in was.iter().zip(now.iter()).enumerate() {
+                assert!((a - b).abs() < 0.00001, "channel {channel} sample {sample}: {a} changed to {b}");
+            }
+        }
+        assert!(engine.can_undo());
+        engine.undo();
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn stereo_and_mono_channel_flags_require_matching_media_before_mutation() {
+        for channels in [1, 2] {
+            let (session, media, track) = fixture_channels(channels);
+            let document = media.with_extension("edl");
+            let good = String::from_utf8(export_audio(&session, track, 24).unwrap().bytes).unwrap();
+            let mismatch = if channels == 1 { good.replace(" A     C ", " AA    C ") } else { good.replace(" AA    C ", " A     C ") };
+            let mut engine = Engine::default();
+            let before = engine.session().clone();
+            let err = import_audio(&mut engine, &document, mismatch.as_bytes(), 24).unwrap_err();
+            assert!(format!("{err}").contains("requires exactly"), "channel mismatch error: {err}");
+            assert_eq!(*engine.session(), before);
+            assert!(!engine.can_undo());
+
+            let mixed = if channels == 1 {
+                good.replace("002  SC000001 A     C", "002  SC000001 AA    C")
+            } else {
+                good.replace("002  SC000001 AA    C", "002  SC000001 A     C")
+            };
+            let err = import_audio(&mut engine, &document, mixed.as_bytes(), 24).unwrap_err();
+            assert!(format!("{err}").contains("mixed A and AA"), "mixed lanes error: {err}");
+            assert_eq!(*engine.session(), before);
+            assert!(!engine.can_undo());
+            std::fs::remove_file(media).unwrap();
+        }
     }
 
     #[test]
