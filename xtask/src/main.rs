@@ -7,8 +7,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+/// Resolve from the invoking checkout, never the directory embedded in a cached `xtask`
+/// executable. Different Git worktrees can share one Cargo target directory.
+fn workspace_root_from(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find(|dir| dir.join("Cargo.toml").is_file() && dir.join("xtask/Cargo.toml").is_file()).map(Path::to_path_buf)
+}
+
+fn root() -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("get current directory: {e}"))?;
+    workspace_root_from(&cwd).ok_or_else(|| format!("not inside a SoundCraft workspace: {}", cwd.display()))
 }
 
 fn cargo_bin() -> String {
@@ -16,7 +23,7 @@ fn cargo_bin() -> String {
 }
 
 fn cargo(args: &[&str]) -> Result<(), String> {
-    let st = Command::new(cargo_bin()).args(args).current_dir(root()).status().map_err(|e| e.to_string())?;
+    let st = Command::new(cargo_bin()).args(args).current_dir(root()?).status().map_err(|e| e.to_string())?;
     if st.success() { Ok(()) } else { Err(format!("cargo {} failed", args.join(" "))) }
 }
 
@@ -44,7 +51,7 @@ const EXEMPT: &[&str] = &["soundcraft", "soundcraft-cli", "soundcraft-web", "xta
 
 fn layers() -> Result<(), String> {
     let out =
-        Command::new("cargo").args(["metadata", "--format-version", "1", "--no-deps"]).current_dir(root()).output().map_err(|e| e.to_string())?;
+        Command::new("cargo").args(["metadata", "--format-version", "1", "--no-deps"]).current_dir(root()?).output().map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
     let mut problems = Vec::new();
     for p in v["packages"].as_array().cloned().unwrap_or_default() {
@@ -90,11 +97,11 @@ const ASSET_EXT: &[&str] =
 fn assets() -> Result<(), String> {
     let out = Command::new("git")
         .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .current_dir(root())
+        .current_dir(root()?)
         .output()
         .map_err(|e| e.to_string())?;
     let files = String::from_utf8_lossy(&out.stdout).to_string();
-    let attribution = std::fs::read_to_string(root().join("ATTRIBUTION.md")).map_err(|e| format!("ATTRIBUTION.md: {e}"))?;
+    let attribution = std::fs::read_to_string(root()?.join("ATTRIBUTION.md")).map_err(|e| format!("ATTRIBUTION.md: {e}"))?;
     let mut missing = Vec::new();
     for f in files.lines() {
         let ext = Path::new(f).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase();
@@ -141,7 +148,7 @@ fn wasm() -> Result<(), String> {
         args.push("-p");
         args.push(c);
     }
-    if root().join("apps/soundcraft-web/Cargo.toml").exists() {
+    if root()?.join("apps/soundcraft-web/Cargo.toml").exists() {
         args.push("-p");
         args.push("soundcraft-web");
     }
@@ -159,8 +166,11 @@ fn nextest_available() -> bool {
 /// `[[test]]` targets with `harness = false`, as (package, target). Their own `main` cannot answer
 /// nextest's `--list`, so they run under `cargo test`.
 fn own_main_tests() -> Result<Vec<(String, String)>, String> {
-    let out =
-        Command::new(cargo_bin()).args(["metadata", "--format-version", "1", "--no-deps"]).current_dir(root()).output().map_err(|e| e.to_string())?;
+    let out = Command::new(cargo_bin())
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root()?)
+        .output()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
     let mut found = Vec::new();
     for p in v["packages"].as_array().cloned().unwrap_or_default() {
@@ -268,6 +278,16 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn workspace_root_uses_the_invoking_checkout_even_from_a_nested_crate() {
+        let workspace = super::root().expect("tests run inside their source workspace");
+        assert_eq!(super::workspace_root_from(&workspace.join("xtask/src")), Some(workspace.clone()));
+        assert_eq!(super::workspace_root_from(&workspace.join("crates/playback/src")), Some(workspace));
+        assert_eq!(super::workspace_root_from(Path::new("/not-a-soundcraft-workspace")), None);
+    }
+
     #[test]
     fn harness_false_tests_are_found_by_table() {
         let manifest = "[package]\nname = \"x\"\n\n[[test]]\nname = \"own_main\"\nharness = false\n\n[[test]]\nname = \"plain\"\n\n[[test]]\nharness = false\nname = \"second\"\n\n[dependencies]\nharness = false\n";
