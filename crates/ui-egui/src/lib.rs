@@ -1300,9 +1300,22 @@ impl SoundApp {
             }
             return;
         };
+        // `stop_play` finalizes the WAVs and reports any recoverable *unimported* files, but
+        // the generic input trouble status below used to overwrite that report immediately.
+        // Only capture the status when there was an audio take plan to finalize: otherwise it
+        // could be an unrelated stale status from before Record.
+        let had_audio_take = recording && self.take_plan.is_some();
         if recording {
             self.stop_play();
         }
+        let finalization = had_audio_take.then(|| self.ui.status.clone());
+        self.report_input_trouble(trouble, recording, finalization);
+    }
+
+    /// Keep both the stop reason and the completed/failed WAV finalization details. A failed
+    /// zero-frame WAV can be left on disk for manual recovery without becoming a session clip;
+    /// never claim all attempted takes were imported or kept as completed takes.
+    fn report_input_trouble(&mut self, trouble: Trouble, recording: bool, finalization: Option<String>) {
         let (what, then) = match trouble {
             Trouble::Device(what) => {
                 self.recorder = None;
@@ -1312,7 +1325,12 @@ impl SoundApp {
             Trouble::Disk(what) => (what, "Check the disk, then record again."),
         };
         self.ui.status = if recording {
-            format!("Recording stopped: {what}. The take is kept up to there. {then}")
+            let mut status = format!("Recording stopped: {what}. {then}");
+            if let Some(summary) = finalization.filter(|summary| !summary.is_empty()) {
+                status.push_str(" Finalization: ");
+                status.push_str(&summary);
+            }
+            status
         } else {
             format!("Audio input: {what}. {then}")
         };
@@ -2260,9 +2278,34 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Services, SoundApp, automation_step_due};
+    use super::{Services, SoundApp, Trouble, automation_step_due};
     use serde_json::json;
     use soundcraft_model::TrackId;
+
+    /// No physical input is needed: a zero-frame failed WAV is intentionally not imported into
+    /// the session, but its path survives in the recorder's finalization summary (#94). The
+    /// automatic disk-error status must retain that summary alongside the actual stop reason.
+    #[test]
+    fn automatic_input_failure_status_keeps_recoverable_unimported_wav_paths() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        assert!(app.player.is_none() && app.recorder.is_none());
+        let (first, second) = ("Audio Files/FailedVox.wav", "Audio Files/FailedGuitar.wav");
+        let finalized = format!(
+            "Recorded 0 clip(s); audio input: synthetic disk full; 2 failed WAV file(s) were left on disk for possible manual recovery \
+             (not added to the session): {first:?}, {second:?}"
+        );
+        app.report_input_trouble(Trouble::Disk("synthetic disk full".into()), true, Some(finalized));
+        assert!(app.ui.status.contains("Recording stopped: synthetic disk full"), "stop cause was lost: {}", app.ui.status);
+        assert!(app.ui.status.contains("Check the disk"));
+        assert!(app.ui.status.contains(first) && app.ui.status.contains(second), "recoverable paths were lost: {}", app.ui.status);
+        assert!(app.ui.status.contains("Recorded 0 clip(s)") && app.ui.status.contains("not added to the session"));
+        assert!(!app.ui.status.contains("take is kept up to there"), "a failed zero-frame take was not imported");
+
+        // A non-recording input error must not attach a previous take's recovery details.
+        app.report_input_trouble(Trouble::Disk("input still unavailable".into()), false, Some("stale take path".into()));
+        assert!(app.ui.status.starts_with("Audio input: input still unavailable"));
+        assert!(!app.ui.status.contains("stale take path"));
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
