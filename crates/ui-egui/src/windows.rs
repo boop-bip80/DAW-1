@@ -573,7 +573,7 @@ fn midi_input_controls(ui: &mut egui::Ui, app: &mut SoundApp, scan: &MidiInputSc
     midi_capture_status(ui, &app.midi_input_status());
     ui.label(
         egui::RichText::new(
-            "Enable an input and arm a MIDI/instrument track to record. Individual tracks can filter the input port and channel in their Mix/Edit input menus. Software-instrument audition is not yet available; external MIDI thru has a separate opt-in below.",
+            "Enable an input and arm a MIDI/instrument track to record. Use per-track filtering for the input port and channel in each track's Mix/Edit input menus. Software-instrument audition is not yet available; external MIDI thru has a separate opt-in below.",
         )
             .small()
             .color(Tokens::current().text_dim),
