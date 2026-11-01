@@ -204,10 +204,10 @@ impl Shared {
     }
 
     fn fail(&self, reason: String) {
-        if let Ok(mut error) = self.last_error.lock() {
-            if error.is_none() {
-                *error = Some(reason);
-            }
+        if let Ok(mut error) = self.last_error.lock()
+            && error.is_none()
+        {
+            *error = Some(reason);
         }
         self.worker.store(MidiOutputWorkerState::Failed as u8, Ordering::Release);
     }
