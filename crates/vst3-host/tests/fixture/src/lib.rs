@@ -325,9 +325,10 @@ impl IEditControllerTrait for GainController {
         let Some(s) = (unsafe { ComRef::from_raw(state) }) else { return kInvalidArgument };
         let mut bytes = [0u8; 8];
         let mut n = 0;
-        if unsafe { s.read(bytes.as_mut_ptr().cast(), 8, &mut n) } == kResultOk && n == 8 {
-            self.freq.store(f64::from_le_bytes(bytes).clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        if unsafe { s.read(bytes.as_mut_ptr().cast(), 8, &mut n) } != kResultOk || n != 8 {
+            return kResultFalse;
         }
+        self.freq.store(f64::from_le_bytes(bytes).clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
         kResultOk
     }
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
