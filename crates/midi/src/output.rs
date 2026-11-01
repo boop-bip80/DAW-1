@@ -9,7 +9,8 @@
 //!
 //! A shared reservation limit bounds the *sum* of packets in the channel and
 //! the worker heap, including with far-future deadlines. A failed or unplugged
-//! device stops the worker and reports loss; callers must handle note cleanup.
+//! device stops the worker and reports loss. The worker attempts priority
+//! note cleanup on cancel and shutdown; unplugged hardware cannot guarantee it.
 //! This module deliberately does not route DAW tracks or playback to hardware.
 
 use std::{
@@ -76,6 +77,8 @@ pub enum MidiOutputSendError {
     TooFarAhead,
     #[error("MIDI output queue and schedule are full")]
     Full,
+    #[error("MIDI output packet belonged to a cancelled generation")]
+    Cancelled,
     #[error("MIDI output worker is not connected")]
     Disconnected,
 }
@@ -104,6 +107,10 @@ impl MidiOutputWorkerState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiOutputStatus {
     pub worker: MidiOutputWorkerState,
+    /// Latest requested cancellation generation; a worker acknowledges it only
+    /// after discarding older packets and attempting note cleanup.
+    pub generation: u64,
+    pub acknowledged_generation: u64,
     /// Reserved events across both the channel and the worker's scheduling heap.
     pub in_flight: usize,
     pub accepted: u64,
@@ -115,12 +122,18 @@ pub struct MidiOutputStatus {
     pub sent_late: u64,
     pub send_errors: u64,
     pub cancelled: u64,
+    /// Successfully sent individual note-offs on cancellation/stream close.
+    pub released_notes: u64,
+    /// A failed priority note-off/All Notes Off: hardware may still be sounding.
+    pub release_errors: u64,
     pub last_error: Option<String>,
 }
 
 struct Shared {
     capacity: usize,
     in_flight: AtomicUsize,
+    generation: AtomicU64,
+    acknowledged_generation: AtomicU64,
     shutdown: AtomicBool,
     worker: AtomicU8,
     accepted: AtomicU64,
@@ -132,6 +145,8 @@ struct Shared {
     sent_late: AtomicU64,
     send_errors: AtomicU64,
     cancelled: AtomicU64,
+    released_notes: AtomicU64,
+    release_errors: AtomicU64,
     last_error: Mutex<Option<String>>,
 }
 
@@ -140,6 +155,8 @@ impl Shared {
         Self {
             capacity,
             in_flight: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
+            acknowledged_generation: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             worker: AtomicU8::new(state as u8),
             accepted: AtomicU64::new(0),
@@ -151,6 +168,8 @@ impl Shared {
             sent_late: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
             cancelled: AtomicU64::new(0),
+            released_notes: AtomicU64::new(0),
+            release_errors: AtomicU64::new(0),
             last_error: Mutex::new(None),
         }
     }
@@ -186,7 +205,9 @@ impl Shared {
 
     fn fail(&self, reason: String) {
         if let Ok(mut error) = self.last_error.lock() {
-            *error = Some(reason);
+            if error.is_none() {
+                *error = Some(reason);
+            }
         }
         self.worker.store(MidiOutputWorkerState::Failed as u8, Ordering::Release);
     }
@@ -194,6 +215,8 @@ impl Shared {
     fn snapshot(&self) -> MidiOutputStatus {
         MidiOutputStatus {
             worker: self.state(),
+            generation: self.generation.load(Ordering::Acquire),
+            acknowledged_generation: self.acknowledged_generation.load(Ordering::Acquire),
             in_flight: self.in_flight.load(Ordering::Acquire),
             accepted: self.accepted.load(Ordering::Relaxed),
             sent: self.sent.load(Ordering::Relaxed),
@@ -204,6 +227,8 @@ impl Shared {
             sent_late: self.sent_late.load(Ordering::Relaxed),
             send_errors: self.send_errors.load(Ordering::Relaxed),
             cancelled: self.cancelled.load(Ordering::Relaxed),
+            released_notes: self.released_notes.load(Ordering::Relaxed),
+            release_errors: self.release_errors.load(Ordering::Relaxed),
             last_error: self.last_error.lock().ok().and_then(|error| error.clone()),
         }
     }
@@ -212,6 +237,7 @@ impl Shared {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ScheduledPacket {
     deadline_micros: u64,
+    generation: u64,
     sequence: u64,
     bytes: [u8; 3],
     len: u8,
@@ -273,6 +299,7 @@ impl MidiOutputSender {
         if self.state.state() != MidiOutputWorkerState::Running {
             return Err(MidiOutputSendError::Disconnected);
         }
+        let generation = self.state.generation.load(Ordering::Acquire);
         let (data, len) = match validate_short_packet(bytes) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -293,9 +320,14 @@ impl MidiOutputSender {
             self.state.release_one();
             return Err(MidiOutputSendError::Disconnected);
         }
+        if self.state.generation.load(Ordering::Acquire) != generation {
+            self.state.release_one();
+            self.state.cancelled.fetch_add(1, Ordering::Relaxed);
+            return Err(MidiOutputSendError::Cancelled);
+        }
         // The worker assigns sequence order at channel receive time, so
         // concurrently cloned producers cannot generate reversed tie-breaks.
-        let packet = ScheduledPacket { deadline_micros, sequence: 0, bytes: data, len };
+        let packet = ScheduledPacket { deadline_micros, generation, sequence: 0, bytes: data, len };
         match self.sender.try_send(packet) {
             Ok(()) => {
                 self.state.accepted.fetch_add(1, Ordering::Relaxed);
@@ -322,6 +354,21 @@ impl MidiOutputSender {
     /// The origin precedes OS connection setup and does not track playback time.
     pub fn now_micros(&self) -> u64 {
         elapsed_micros(self.origin)
+    }
+
+    /// Asynchronously cancel pending messages and request high-priority release
+    /// of notes already sent by this stream. A full ordinary MIDI queue cannot
+    /// block the request. The worker must acknowledge the returned generation
+    /// before note release can be considered attempted; hardware may still
+    /// fail or unplug before it receives the cleanup messages.
+    ///
+    /// Use on Stop, Seek, Loop or explicit All Notes Off. It never waits for
+    /// `midir` or allocates, and it does not modify any DAW track or session.
+    pub fn cancel_and_release(&self) -> Result<u64, MidiOutputSendError> {
+        if self.state.state() != MidiOutputWorkerState::Running {
+            return Err(MidiOutputSendError::Disconnected);
+        }
+        Ok(self.state.generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1))
     }
 
     pub fn status(&self) -> MidiOutputStatus {
@@ -360,21 +407,107 @@ impl MidiClock for MonotonicClock {
     }
 }
 
+/// What this connection actually sent, not merely what its producer queued.
+/// Fixed-size so cancelled/closed generations can release notes even when the
+/// ordinary queue and scheduling heap are completely full.
+struct HeldNotes {
+    notes: [[bool; 128]; 16],
+    used_channels: u16,
+}
+
+impl HeldNotes {
+    fn new() -> Self {
+        Self { notes: [[false; 128]; 16], used_channels: 0 }
+    }
+
+    fn observe_sent(&mut self, packet: ScheduledPacket) {
+        let status = packet.bytes[0];
+        if !(0x80..=0xEF).contains(&status) {
+            return;
+        }
+        let channel = usize::from(status & 0x0F);
+        match status & 0xF0 {
+            0x90 => {
+                let held = packet.bytes[2] != 0;
+                self.notes[channel][usize::from(packet.bytes[1])] = held;
+                if held {
+                    self.used_channels |= 1u16 << channel;
+                }
+            }
+            0x80 => self.notes[channel][usize::from(packet.bytes[1])] = false,
+            // A sustained note may continue ringing after its NoteOff. Never
+            // send cleanup to a channel that only received program changes,
+            // pitch bend, or unrelated controller messages.
+            0xB0 if packet.bytes[1] == 64 && packet.bytes[2] >= 64 => {
+                self.used_channels |= 1u16 << channel;
+            }
+            _ => {}
+        }
+    }
+
+    fn release(&mut self, sink: &mut impl MidiSink, state: &Shared) -> bool {
+        for channel in 0u8..16 {
+            if self.used_channels & (1u16 << channel) == 0 {
+                continue;
+            }
+            if let Some(notes) = self.notes.get_mut(usize::from(channel)) {
+                for (pitch, held) in notes.iter_mut().enumerate() {
+                    if !*held {
+                        continue;
+                    }
+                    let bytes = [0x80 | channel, u8::try_from(pitch).unwrap_or(127), 0];
+                    if !send_priority(sink, &bytes, state) {
+                        return false;
+                    }
+                    *held = false;
+                    state.released_notes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            // Sustain Off before All Notes Off ensures controllers do not keep
+            // notes ringing after an ordinary NoteOff. Normal Stop never sends
+            // CC120 All Sound Off, which could hard-silence shared external gear.
+            for controller in [64, 123] {
+                if !send_priority(sink, &[0xB0 | channel, controller, 0], state) {
+                    return false;
+                }
+            }
+        }
+        self.used_channels = 0;
+        true
+    }
+}
+
+fn send_priority(sink: &mut impl MidiSink, bytes: &[u8; 3], state: &Shared) -> bool {
+    if let Err(reason) = sink.send(bytes) {
+        state.release_errors.fetch_add(1, Ordering::Relaxed);
+        state.fail(format!("external MIDI note cleanup failed: {reason}"));
+        return false;
+    }
+    true
+}
+
 struct OutputScheduler {
     heap: BinaryHeap<Reverse<ScheduledPacket>>,
+    generation: u64,
+    held: HeldNotes,
     last_sent: Option<(u64, u64)>,
     next_sequence: u64,
 }
 
 impl OutputScheduler {
     fn new(capacity: usize) -> Self {
-        Self { heap: BinaryHeap::with_capacity(capacity), last_sent: None, next_sequence: 0 }
+        Self { heap: BinaryHeap::with_capacity(capacity), generation: 0, held: HeldNotes::new(), last_sent: None, next_sequence: 0 }
     }
 
     fn push(&mut self, mut packet: ScheduledPacket, state: &Shared) {
+        if packet.generation != state.generation.load(Ordering::Acquire) {
+            state.cancelled.fetch_add(1, Ordering::Relaxed);
+            state.release_one();
+            return;
+        }
         packet.sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
-        if self.last_sent.is_some_and(|last| packet.order() <= last) {
+        if packet.generation == self.generation && self.last_sent.is_some_and(|last| packet.order() <= last) {
             state.dropped_out_of_order.fetch_add(1, Ordering::Relaxed);
             state.release_one();
         } else {
@@ -383,8 +516,38 @@ impl OutputScheduler {
         }
     }
 
+    /// A generation change is a priority control operation, independent of the
+    /// bounded data channel. Drop stale heap entries, release emitted notes,
+    /// and reset timestamp ordering before any message from the new transport
+    /// position can reach the device.
+    fn sync_generation(&mut self, sink: &mut impl MidiSink, state: &Shared) -> bool {
+        let requested = state.generation.load(Ordering::Acquire);
+        if requested == self.generation {
+            return true;
+        }
+        self.heap.retain(|Reverse(packet)| {
+            if packet.generation == requested {
+                true
+            } else {
+                state.cancelled.fetch_add(1, Ordering::Relaxed);
+                state.release_one();
+                false
+            }
+        });
+        if !self.held.release(sink, state) {
+            return false;
+        }
+        self.generation = requested;
+        self.last_sent = None;
+        state.acknowledged_generation.store(requested, Ordering::Release);
+        true
+    }
+
     fn flush_due(&mut self, clock: &impl MidiClock, sink: &mut impl MidiSink, state: &Shared) -> bool {
         loop {
+            if !self.sync_generation(sink, state) {
+                return false;
+            }
             let now = clock.now_micros();
             let Some(Reverse(packet)) = self.heap.peek().copied() else {
                 return true;
@@ -393,6 +556,11 @@ impl OutputScheduler {
                 return true;
             }
             let _ = self.heap.pop();
+            if packet.generation != state.generation.load(Ordering::Acquire) {
+                state.cancelled.fetch_add(1, Ordering::Relaxed);
+                state.release_one();
+                continue;
+            }
             if self.last_sent.is_some_and(|last| packet.order() <= last) {
                 state.dropped_out_of_order.fetch_add(1, Ordering::Relaxed);
                 state.release_one();
@@ -405,6 +573,7 @@ impl OutputScheduler {
                 return false;
             }
             self.last_sent = Some(packet.order());
+            self.held.observe_sent(packet);
             state.sent.fetch_add(1, Ordering::Relaxed);
             if now > packet.deadline_micros {
                 state.sent_late.fetch_add(1, Ordering::Relaxed);
@@ -422,6 +591,9 @@ impl OutputScheduler {
 fn run_worker(mut sink: impl MidiSink, clock: impl MidiClock, receiver: Receiver<ScheduledPacket>, state: Arc<Shared>) {
     let mut scheduler = OutputScheduler::new(state.capacity);
     while !state.shutdown.load(Ordering::Acquire) && state.state() == MidiOutputWorkerState::Running {
+        if !scheduler.sync_generation(&mut sink, &state) {
+            break;
+        }
         // Bound each drain pass so a fast producer cannot starve due sends.
         for _ in 0..state.capacity {
             match receiver.try_recv() {
@@ -441,6 +613,13 @@ fn run_worker(mut sink: impl MidiSink, clock: impl MidiClock, receiver: Receiver
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
+    // Cleanup is independent of the ordinary queue and also runs on stream
+    // Drop and on a send failure. OS/hardware errors can defeat note release;
+    // they remain visible as Failed and release_errors in the status snapshot.
+    if state.state() != MidiOutputWorkerState::Failed {
+        let _ = scheduler.sync_generation(&mut sink, &state);
+    }
+    let _ = scheduler.held.release(&mut sink, &state);
     if state.state() != MidiOutputWorkerState::Failed {
         state.worker.store(MidiOutputWorkerState::Stopped as u8, Ordering::Release);
     }
@@ -789,6 +968,161 @@ mod tests {
         assert_eq!(sender.status().worker, MidiOutputWorkerState::Stopped);
         assert_eq!(sender.status().in_flight, 0);
         assert_eq!(sender.status().cancelled, 1);
+    }
+
+    #[test]
+    fn priority_cancel_releases_held_notes_even_when_heap_is_full() {
+        let (sender, receiver) = fake_output(3);
+        let mut scheduler = OutputScheduler::new(3);
+        let clock = FakeClock::default();
+        let mut sink = FakeSink::default();
+
+        assert_eq!(sender.try_send_at(0, &[0x92, 60, 95]), Ok(()));
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+        assert_eq!(sink.packets, vec![vec![0x92, 60, 95]]);
+        for pitch in [61, 62, 63] {
+            assert_eq!(sender.try_send_at(50_000_000, &[0x92, pitch, 90]), Ok(()));
+        }
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        assert_eq!(sender.try_send_at(1, &[0x82, 60, 0]), Err(MidiOutputSendError::Full));
+
+        // A Stop/Seek panic never waits for a slot, even when all reservations
+        // are held by distant deadlines already removed from the channel.
+        let Ok(generation) = sender.cancel_and_release() else { panic!("live fake output") };
+        assert_eq!(generation, 1);
+        assert_eq!(sender.status().acknowledged_generation, 0);
+        assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+        assert_eq!(sink.packets, vec![vec![0x92, 60, 95], vec![0x82, 60, 0], vec![0xB2, 64, 0], vec![0xB2, 123, 0]]);
+        let status = sender.status();
+        assert_eq!(status.generation, status.acknowledged_generation);
+        assert_eq!(status.cancelled, 3);
+        assert_eq!(status.in_flight, 0);
+        assert_eq!(status.released_notes, 1);
+        assert_eq!(status.release_errors, 0);
+        // Repositioning the transport may start a fresh timestamp sequence.
+        assert_eq!(sender.try_send_at(0, &[0x92, 64, 77]), Ok(()));
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+        assert_eq!(sink.packets.last(), Some(&vec![0x92, 64, 77]));
+        assert_eq!(sender.status().dropped_out_of_order, 0);
+    }
+
+    #[test]
+    fn repeated_stop_seek_loop_generations_discard_stale_packets_and_do_not_cross_release() {
+        let (sender, receiver) = fake_output(4);
+        let mut scheduler = OutputScheduler::new(4);
+        let clock = FakeClock::default();
+        let mut sink = FakeSink::default();
+
+        // The queued NoteOn was submitted before Seek and must never be sent.
+        assert_eq!(sender.try_send_at(10, &[0x90, 55, 100]), Ok(()));
+        assert_eq!(sender.cancel_and_release(), Ok(1));
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        clock.set(10);
+        assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+        assert!(sink.packets.is_empty());
+        assert_eq!(sender.status().cancelled, 1);
+
+        for (generation, pitch) in [(2, 60), (3, 61)] {
+            assert_eq!(sender.try_send_at(10, &[0x91, pitch, 99]), Ok(()));
+            drain_to_heap(&receiver, &mut scheduler, &sender.state);
+            assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+            assert_eq!(sender.cancel_and_release(), Ok(generation));
+            assert!(scheduler.flush_due(&clock, &mut sink, &sender.state));
+        }
+        assert_eq!(
+            sink.packets,
+            vec![
+                vec![0x91, 60, 99],
+                vec![0x81, 60, 0],
+                vec![0xB1, 64, 0],
+                vec![0xB1, 123, 0],
+                vec![0x91, 61, 99],
+                vec![0x81, 61, 0],
+                vec![0xB1, 64, 0],
+                vec![0xB1, 123, 0],
+            ]
+        );
+        assert_eq!(sender.status().released_notes, 2);
+        assert_eq!(sender.status().in_flight, 0);
+        assert_eq!(sender.status().acknowledged_generation, 3);
+    }
+
+    #[test]
+    fn cleanup_only_touches_owned_note_or_sustain_channels_and_handles_velocity_zero() {
+        let (sender, receiver) = fake_output(5);
+        for message in [
+            &[0xC0, 12][..], // Program change alone does not own channel 1.
+            &[0x90, 60, 100][..],
+            &[0x90, 60, 0][..],   // A NoteOn with zero velocity is NoteOff.
+            &[0xB2, 64, 127][..], // Sustain can keep voices ringing.
+            &[0xE3, 0, 64][..],   // Bend alone does not own channel 4.
+        ] {
+            assert_eq!(sender.try_send_at(0, message), Ok(()));
+        }
+        let mut scheduler = OutputScheduler::new(5);
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        let mut sink = FakeSink::default();
+        assert!(scheduler.flush_due(&FakeClock::default(), &mut sink, &sender.state));
+        assert_eq!(sender.cancel_and_release(), Ok(1));
+        assert!(scheduler.flush_due(&FakeClock::default(), &mut sink, &sender.state));
+        assert_eq!(&sink.packets[5..], &[vec![0xB0, 64, 0], vec![0xB0, 123, 0], vec![0xB2, 64, 0], vec![0xB2, 123, 0]]);
+        assert_eq!(sender.status().released_notes, 0);
+    }
+
+    #[test]
+    fn priority_cleanup_failure_remains_visible_and_never_acknowledges_cancel() {
+        let (sender, receiver) = fake_output(2);
+        assert_eq!(sender.try_send_at(0, &[0x90, 60, 100]), Ok(()));
+        let mut scheduler = OutputScheduler::new(2);
+        drain_to_heap(&receiver, &mut scheduler, &sender.state);
+        let mut sink = FakeSink { packets: Vec::new(), fail_after: Some(1) };
+        assert!(scheduler.flush_due(&FakeClock::default(), &mut sink, &sender.state));
+        assert_eq!(sender.cancel_and_release(), Ok(1));
+        assert!(!scheduler.flush_due(&FakeClock::default(), &mut sink, &sender.state));
+        let status = sender.status();
+        assert_eq!(status.worker, MidiOutputWorkerState::Failed);
+        assert_eq!(status.generation, 1);
+        assert_eq!(status.acknowledged_generation, 0);
+        assert_eq!(status.released_notes, 0);
+        assert_eq!(status.release_errors, 1);
+        assert_eq!(status.last_error.as_deref(), Some("external MIDI note cleanup failed: fake device unplugged"));
+        assert_eq!(sender.try_send_now(&[0x80, 60, 0]), Err(MidiOutputSendError::Disconnected));
+    }
+
+    #[test]
+    fn shutdown_on_worker_thread_sends_priority_note_cleanup_before_exit() {
+        struct SignallingSink {
+            packets: Vec<Vec<u8>>,
+            first_sent: std::sync::mpsc::Sender<()>,
+        }
+
+        impl MidiSink for SignallingSink {
+            fn send(&mut self, packet: &[u8]) -> Result<(), String> {
+                self.packets.push(packet.to_vec());
+                if self.packets.len() == 1 {
+                    let _ = self.first_sent.send(());
+                }
+                Ok(())
+            }
+        }
+
+        let (sender, receiver) = fake_output(2);
+        let (notify, ready) = std::sync::mpsc::channel();
+        assert_eq!(sender.try_send_at(0, &[0x95, 70, 100]), Ok(()));
+        let state = Arc::clone(&sender.state);
+        let worker = thread::spawn(move || {
+            let mut sink = SignallingSink { packets: Vec::new(), first_sent: notify };
+            run_worker(&mut sink, FakeClock::default(), receiver, state);
+            sink
+        });
+        assert!(ready.recv_timeout(Duration::from_secs(2)).is_ok());
+        sender.state.shutdown.store(true, Ordering::Release);
+        let Ok(sink) = worker.join() else { panic!("synthetic worker must not panic") };
+        assert_eq!(sink.packets, vec![vec![0x95, 70, 100], vec![0x85, 70, 0], vec![0xB5, 64, 0], vec![0xB5, 123, 0]]);
+        assert_eq!(sender.status().worker, MidiOutputWorkerState::Stopped);
+        assert_eq!(sender.status().released_notes, 1);
     }
 
     #[test]
