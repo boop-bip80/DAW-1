@@ -382,25 +382,12 @@ fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
                 crate::widgets::meter(ui, Rect::from_min_size(pos2(r.min.x + 12.0, r.min.y), vec2(10.0, 26.0)), m.level[1], m.hold[1], m.clip);
             }
         });
-        let s = app.engine.session();
-        let fmt = |x: i64| s.format_position(x, s.edit.main_counter);
         if flags.contains("view.transport.counters") || expanded || flags.is_empty() {
-            ui.label(egui::RichText::new(fmt(app.position())).font(mono(20.0)).color(t.counter_text));
+            let s = app.engine.session();
+            ui.label(egui::RichText::new(s.format_position(app.position(), s.edit.main_counter)).font(mono(20.0)).color(t.counter_text));
         }
         if expanded {
-            let e = s.edit.clone();
-            egui::Grid::new("tx_exp").num_columns(4).show(ui, |ui| {
-                ui.label("Start");
-                ui.label(egui::RichText::new(fmt(e.selection.start)).font(mono(11.0)));
-                ui.label("Pre-roll");
-                ui.label(egui::RichText::new(format!("{:.2} s", s.sample_rate.seconds(e.pre_roll))).font(mono(11.0)));
-                ui.end_row();
-                ui.label("End");
-                ui.label(egui::RichText::new(fmt(e.selection.end)).font(mono(11.0)));
-                ui.label("Post-roll");
-                ui.label(egui::RichText::new(format!("{:.2} s", s.sample_rate.seconds(e.post_roll))).font(mono(11.0)));
-                ui.end_row();
-            });
+            transport_roll_controls(app, ui);
         }
         if flags.contains("view.transport.midi_controls") || expanded {
             let (click, countoff, merge, loop_rec, prepost) = {
@@ -420,13 +407,119 @@ fn transport_window(app: &mut SoundApp, ctx: &egui::Context) {
                     }
                 }
             });
-            let tick = app.engine.session().tempo.samples_to_ticks(app.position(), app.engine.session().sample_rate);
-            let bpm = app.engine.session().tempo.tempo_at_tick(tick);
-            let m = app.engine.session().tempo.meter_at_tick(tick);
+            let s = app.engine.session();
+            let tick = s.tempo.samples_to_ticks(app.position(), s.sample_rate);
+            let bpm = s.tempo.tempo_at_tick(tick);
+            let m = s.tempo.meter_at_tick(tick);
             ui.label(egui::RichText::new(format!("♩ = {bpm:.2}   {}/{}", m.numerator, m.denominator)).font(mono(12.0)).color(t.counter_text));
         }
     });
     app.ui.show_transport = open;
+}
+
+/// A visible, editable pre/post-roll amount for audio punch and selection playback. The engine
+/// exposes non-undoable session settings, so setting a genuinely different value is the only
+/// path that calls a command; merely showing a rounded seconds value never changes the document.
+#[derive(Clone, Copy)]
+enum TransportRoll {
+    Pre,
+    Post,
+}
+
+impl TransportRoll {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pre => "Pre-roll",
+            Self::Post => "Post-roll",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Pre => "options.pre_roll",
+            Self::Post => "options.post_roll",
+        }
+    }
+
+    fn samples(self, app: &SoundApp) -> i64 {
+        let edit = &app.engine.session().edit;
+        match self {
+            Self::Pre => edit.pre_roll,
+            Self::Post => edit.post_roll,
+        }
+    }
+}
+
+const MAX_ROLL_SECONDS: f64 = 600.0;
+
+fn set_transport_roll(app: &mut SoundApp, roll: TransportRoll, seconds: f64) {
+    if app.engine.transport.recording {
+        return;
+    }
+    if !seconds.is_finite() {
+        app.ui.status = format!("{} must be a finite duration.", roll.label());
+        return;
+    }
+    let samples = app.engine.session().sample_rate.samples(seconds.clamp(0.0, MAX_ROLL_SECONDS));
+    if samples != roll.samples(app)
+        && let Err(error) = app.run(roll.command(), json!({"length": samples}))
+    {
+        app.ui.status = format!("Could not change {}: {error}", roll.label());
+    }
+}
+
+fn transport_roll_field(app: &mut SoundApp, ui: &mut Ui, roll: TransportRoll) {
+    let saved_samples = roll.samples(app);
+    let rate = app.engine.session().sample_rate;
+    let mut seconds = rate.seconds(saved_samples);
+    let recording = app.engine.transport.recording;
+    ui.horizontal(|ui| {
+        let field = ui
+            .add_enabled(!recording, egui::DragValue::new(&mut seconds).speed(0.05).fixed_decimals(3).suffix(" s"))
+            .accessible_name(format!("{} duration (seconds)", roll.label()))
+            .on_hover_text("Drag or double-click to enter seconds, 0–600 s (up to ten minutes)");
+        if field.changed() {
+            set_transport_roll(app, roll, seconds);
+        }
+        ui.add_enabled_ui(!recording, |ui| {
+            ui.menu_button("Presets", |ui| {
+                for (label, seconds) in [("0 s", 0.0), ("1 s", 1.0), ("2 s", 2.0), ("5 s", 5.0), ("10 s", 10.0), ("30 s", 30.0)] {
+                    let chosen = rate.samples(seconds) == saved_samples;
+                    if ui.selectable_label(chosen, format!("{} {label}", roll.label())).clicked() {
+                        set_transport_roll(app, roll, seconds);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .accessible_name(format!("{} presets", roll.label()));
+        });
+    });
+}
+
+fn transport_roll_controls(app: &mut SoundApp, ui: &mut Ui) {
+    let (start, end) = {
+        let s = app.engine.session();
+        (s.format_position(s.edit.selection.start, s.edit.main_counter), s.format_position(s.edit.selection.end, s.edit.main_counter))
+    };
+    egui::Grid::new("tx_exp").num_columns(4).show(ui, |ui| {
+        ui.label("Start");
+        ui.label(egui::RichText::new(start).font(mono(11.0)));
+        ui.label("Pre-roll");
+        transport_roll_field(app, ui, TransportRoll::Pre);
+        ui.end_row();
+        ui.label("End");
+        ui.label(egui::RichText::new(end).font(mono(11.0)));
+        ui.label("Post-roll");
+        transport_roll_field(app, ui, TransportRoll::Post);
+        ui.end_row();
+    });
+    if app.engine.transport.recording {
+        ui.small("Stop recording before changing pre/post-roll durations.");
+    }
+    ui.label(
+        egui::RichText::new("Pre/Post-roll applies to playback and audio punch recording. MIDI time-range recording is not supported yet.").small(),
+    );
 }
 
 fn big_counter(app: &mut SoundApp, ctx: &egui::Context) {
@@ -797,7 +890,90 @@ fn preset_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
     use soundcraft_model::{ChannelFormat, Clip, Session, TrackKind};
+
+    fn transport_harness(mut app: SoundApp) -> Harness<'static, SoundApp> {
+        app.ui.show_transport = true;
+        app.engine.session_mut().edit.set_flag("view.transport.expanded", true);
+        app.engine.mark_clean();
+        Harness::builder()
+            .with_size(vec2(1000.0, 800.0))
+            .with_context_setup(crate::fonts::install)
+            .build_ui_state(|ui, app: &mut SoundApp| transport_window(app, ui.ctx()), app)
+    }
+
+    #[test]
+    fn expanded_transport_roll_controls_are_accessible_and_read_only_on_paint() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.session_mut().edit.pre_roll = 1; // one sample rounds to 0.000 s in the display
+        app.engine.session_mut().edit.post_roll = 96_000;
+        let mut h = transport_harness(app);
+        h.run_steps(3);
+        assert!(h.get_by_label("Pre-roll duration (seconds)").rect().width() > 0.0);
+        assert!(h.get_by_label("Post-roll duration (seconds)").rect().width() > 0.0);
+        assert!(h.get_by_label("Pre-roll presets").rect().width() > 0.0);
+        assert!(h.get_by_label("Post-roll presets").rect().width() > 0.0);
+        assert!(h.query_by_label_contains("MIDI time-range recording is not supported yet").is_some());
+        assert_eq!(h.state().engine.session().edit.pre_roll, 1, "painting a rounded value must not quantize a saved sample");
+        assert_eq!(h.state().engine.session().edit.post_roll, 96_000);
+        assert!(!h.state().engine.is_dirty(), "opening Transport must not change the session");
+    }
+
+    #[test]
+    fn roll_presets_execute_real_commands_only_when_values_change() {
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let mut h = transport_harness(app);
+        h.run_steps(3);
+        let undo_before = h.state().engine.undo_history().len();
+        h.get_by_label("Pre-roll presets").click();
+        h.run_steps(2);
+        h.get_by_label("Pre-roll 2 s").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.pre_roll, 96_000, "Pre-roll command saves selected two-second duration");
+        assert_eq!(h.state().engine.session().edit.post_roll, 0, "changing pre-roll cannot alter post-roll");
+        assert!(h.state().engine.is_dirty(), "user-selected roll duration must persist in the document");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before, "engine roll settings are intentionally non-undoable");
+
+        h.state_mut().engine.mark_clean();
+        h.get_by_label("Pre-roll presets").click();
+        h.run_steps(2);
+        h.get_by_label("Pre-roll 2 s").click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty(), "reselecting saved duration must not mutate document");
+
+        h.get_by_label("Post-roll presets").click();
+        h.run_steps(2);
+        h.get_by_label("Post-roll 5 s").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.post_roll, 240_000);
+        assert!(h.state().engine.is_dirty());
+    }
+
+    #[test]
+    fn roll_controls_are_disabled_during_recording_and_limits_are_enforced() {
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let sr = app.engine.session().sample_rate;
+        set_transport_roll(&mut app, TransportRoll::Pre, 60_000.0);
+        assert_eq!(app.engine.session().edit.pre_roll, sr.samples(MAX_ROLL_SECONDS), "clamp oversized edited seconds to ten minutes");
+        app.engine.mark_clean();
+        set_transport_roll(&mut app, TransportRoll::Post, f64::NAN);
+        assert_eq!(app.engine.session().edit.post_roll, 0);
+        assert!(!app.engine.is_dirty(), "invalid duration must not change session");
+        app.engine.transport.recording = true;
+        let mut h = transport_harness(app);
+        h.run_steps(3);
+        assert!(h.get_by_label("Pre-roll duration (seconds)").accesskit_node().is_disabled());
+        assert!(h.get_by_label("Post-roll presets").accesskit_node().is_disabled());
+        assert!(h.query_by_label_contains("Stop recording before changing pre/post-roll").is_some());
+        h.get_by_label("Pre-roll presets").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().edit.pre_roll, sr.samples(MAX_ROLL_SECONDS));
+        assert!(!h.state().engine.is_dirty());
+    }
 
     #[test]
     fn clip_rows_list_every_clip_in_track_order_and_filter_by_name() {
