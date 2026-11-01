@@ -693,11 +693,7 @@ mod tests {
         retain_safe_events_on_reset(&mut queue, &mut held);
         assert_eq!(
             queue,
-            vec![
-                Event::Param { time: 0, id: 7, value: 0.25 },
-                Event::NoteOff { time: 0, key: 60 },
-                Event::Midi { time: 0, data: [0xB2, 64, 0] },
-            ],
+            vec![Event::Param { time: 0, id: 7, value: 0.25 }, Event::NoteOff { time: 0, key: 60 }, Event::Midi { time: 0, data: [0xB2, 64, 0] }],
             "reset must preserve idempotent releases for plugins without a native reset callback"
         );
         assert!(held.iter().all(|is_held| !*is_held), "reset cancels local held-note state");
