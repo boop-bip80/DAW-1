@@ -1799,7 +1799,7 @@ mod tests {
         h.run_steps(3);
         let safe = h.get_by_label("Solo safe for Backing Vox");
         assert!(safe.rect().width() >= 80.0, "Solo Safe must be visible in the default regular-width Mix strip");
-        assert_eq!(safe.accesskit_node().is_selected(), Some(false), "Solo Safe must announce its initially off state");
+        assert_eq!(safe.accesskit_node().toggled(), Some(egui::accesskit::Toggled::False), "Solo Safe must announce its initially off state");
         assert!(!h.state().engine.session().track(id).expect("track").mixer.solo_safe);
         assert!(!h.state().engine.is_dirty(), "painting Solo Safe must not edit the document");
         let undo_before = h.state().engine.undo_history().len();
@@ -1807,7 +1807,7 @@ mod tests {
         h.get_by_label("Solo safe for Backing Vox").click();
         h.run_steps(2);
         assert!(h.state().engine.session().track(id).expect("track").mixer.solo_safe);
-        assert_eq!(h.get_by_label("Solo safe for Backing Vox").accesskit_node().is_selected(), Some(true));
+        assert_eq!(h.get_by_label("Solo safe for Backing Vox").accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
         assert!(h.state().engine.is_dirty());
         assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "one click must create one undoable command");
 
