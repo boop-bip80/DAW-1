@@ -133,6 +133,107 @@ pub(crate) fn write_path(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> Res
     std::fs::write(path, bytes).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
 }
 
+/// Open a regular interchange archive for random-access streaming, without loading its bytes.
+/// The open file handle keeps a stable inode while ZIP member headers and contents are read.
+pub(crate) fn open_regular_limited(path: impl AsRef<Path>, limit: u64) -> Result<std::fs::File> {
+    let path = path.as_ref();
+    crate::file_access::check_read(path).map_err(EngineError::Io)?;
+    let err = |why: std::io::Error| EngineError::Io(format!("{}: {why}", path.display()));
+    let file = std::fs::File::open(path).map_err(err)?;
+    let meta = file.metadata().map_err(err)?;
+    if !meta.is_file() || meta.len() > limit {
+        return Err(EngineError::Io(format!("{}: archive must be a regular file of at most {limit} bytes", path.display())));
+    }
+    Ok(file)
+}
+
+/// Reserve a previously nonexistent private import directory. Never reuse an existing path.
+/// Returning `false` for a collision lets the caller generate a new unpredictable name.
+pub(crate) fn create_private_dir(dir: &Path) -> Result<bool> {
+    crate::file_access::check_write(dir).map_err(EngineError::Io)?;
+    match std::fs::create_dir(dir) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(EngineError::Io(format!("{}: {err}", dir.display()))),
+    }
+}
+
+/// A portable import may create private media only alongside its saved session file. Session
+/// metadata is editable, so do not trust its `folder` field without checking the document path.
+/// In particular, never follow an existing `Audio Files` symlink when allocating imported media.
+pub(crate) fn private_session_audio_dir(e: &Engine) -> Result<(PathBuf, bool)> {
+    let file = e.path.as_deref().ok_or_else(|| EngineError::Unsupported("save the session before importing bundled audio media".into()))?;
+    let folder = e.session().folder.as_deref().ok_or_else(|| EngineError::Unsupported("session has no media folder; save it first".into()))?;
+    if !same_path(folder, Path::new(file).parent().unwrap_or(Path::new(""))) {
+        return Err(EngineError::Unsupported("session media folder differs from the saved session location".into()));
+    }
+    let audio_dir = folder.join("Audio Files");
+    crate::file_access::check_write(&audio_dir).map_err(EngineError::Io)?;
+    let ensure_plain_directory = || -> Result<()> {
+        match std::fs::symlink_metadata(&audio_dir) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                Err(EngineError::Unsupported("Audio Files must be a regular directory, not a symlink".into()))
+            }
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(EngineError::Io(format!("{}: {err}", audio_dir.display()))),
+        }
+    };
+    ensure_plain_directory()?;
+    // `create_dir` (not recursive create_dir_all) tells us whether this operation truly created
+    // the parent, so failed imports never remove a directory owned by somebody else.
+    let newly_created = match std::fs::create_dir(&audio_dir) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(err) => return Err(EngineError::Io(format!("{}: {err}", audio_dir.display()))),
+    };
+    ensure_plain_directory()?;
+    Ok((audio_dir, newly_created))
+}
+
+/// Copy one bounded ZIP member to a brand-new session-owned file in fixed-size IO buffers.
+/// A truncated, oversized or CRC-failing member leaves no partial file behind. `create_new`
+/// prevents a racing symlink or another process's media file from being overwritten.
+pub(crate) fn copy_new_file_limited(path: &Path, reader: &mut impl std::io::Read, expected: u64, limit: u64) -> Result<u64> {
+    if expected > limit {
+        return Err(EngineError::Io(format!("{}: archive media exceeds the extraction limit", path.display())));
+    }
+    crate::file_access::check_write(path).map_err(EngineError::Io)?;
+    let err = |why: std::io::Error| EngineError::Io(format!("{}: {why}", path.display()));
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
+    let mut file = file;
+    let mut bounded = std::io::Read::take(reader, limit.saturating_add(1));
+    let write_result = std::io::copy(&mut bounded, &mut file).map_err(err).and_then(|written| {
+        if written != expected {
+            Err(EngineError::Io(format!("{}: archive member length mismatch or exceeded extraction limit", path.display())))
+        } else {
+            Ok(written)
+        }
+    });
+    drop(file);
+    if write_result.is_err() {
+        // This exact path was created with O_EXCL by this operation. Never delete a pre-existing file.
+        let _ = std::fs::remove_file(path);
+    }
+    write_result
+}
+
+/// Remove only a file created by the current private extraction, never traverse directories.
+pub(crate) fn remove_created_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        crate::file_access::check_write(parent).map_err(EngineError::Io)?;
+    }
+    std::fs::remove_file(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
+/// Remove only a known-empty import staging directory; never recursively delete user data.
+pub(crate) fn remove_created_empty_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        crate::file_access::check_write(parent).map_err(EngineError::Io)?;
+    }
+    std::fs::remove_dir(path).map_err(|err| EngineError::Io(format!("{}: {err}", path.display())))
+}
+
 /// A relative `Audio Files/` path no other source in `s` already uses.
 fn unique_audio_rel(s: &Session, stem: &str) -> String {
     let stem = sanitize_name(stem);
