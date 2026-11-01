@@ -1,6 +1,6 @@
 # SoundCraft roadmap: milestones and what's next
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (portable audio-only OTIOZ import/export, saved MIDI output routing and worker safety, independent clock diagnostics and CLI regressions; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (separate per-launch native MIDI transport output/UI, recording/export preservation, official OTIO timecode and CLAP lifecycle safety; alpha gate still fails) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Forward-looking plan. Status and numbers: [`../ROADMAP.md`](../ROADMAP.md) and
 [`target-app-parity.md`](target-app-parity.md); the ranked work list: [`gaps.md`](gaps.md).
@@ -11,7 +11,7 @@ Hours are Opus 5.5 agent-hours.
 1. **Merge or close the open bug-fix PRs** (#123–#134, #146, #148, #75) and fix the rest of the
    correctness backlog (G-04). ≈ 15–25 h.
 2. **Audio interface completion** (G-01): full physical channel matrix, one-clock duplex monitoring, measured latency/automatic offsets and hardware verification. Manual offset, callback drain and bounded per-track input choice exist; device/rate/buffer choice exists. ≈ 15–25 h estimated.
-3. **MIDI devices** (G-02): validate synthetic desktop Record/Stop and saved per-track input-port/channel routing on a physical controller; opt-in external output-port/channel routes and an off-callback worker with cancellation now exist, but track/transport scheduling, live instrument monitoring, thru and clock still need wiring. ≈ 20–35 h estimate not re-calibrated.
+3. **MIDI devices** (G-02): validate synthetic desktop Record/Stop and the separately enabled transport-driven native MIDI output path on physical hardware, calibrate jitter/latency, then add live instrument audition/monitoring, thru and clock. Saved routes remain inert until the per-launch opt-in switch is used. ≈ 20–35 h estimate not re-calibrated.
 4. **macOS plugin hosting** (G-05): obtain explicit owner approval for relaxing signed-app library validation to host third-party native plugins; then address AU editors. ≈ 15–25 h, plus a security decision.
 5. **Verify CI execution** (G-14): local Linux `cargo xtask ci` and public CLI audio/OTIOZ/MIDI import-export-reopen smoke tests pass; workflows target the default branch on three OSes, and release packaging depends on a three-OS quality job, but GitHub reports no Actions runs. Enable/verify runners and add hardware/platform smoke tests.
 
@@ -89,6 +89,7 @@ There is no `cargo xtask scorecard` in this repo; the measured number is `cargo 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Added per-launch disabled-by-default native MIDI output path and UI with fake-sink validation, export no-clobber and recording recovery safeguards, official OTIO signed origins and CLAP restart observation; pre-alpha, AAF/OMF/PTX, physical timing and hosted CI unchanged |
 | 2026-11-01 | minor | OTIOZ audio bundle import/export, opt-in MIDI output routing/worker safety, CPAL drift diagnostics, Transport roll controls and public CLI OTIOZ/SMF roundtrips verified locally; AAF/OMF/PTX, physical tests and hosted CI still block alpha |
 | 2026-11-01 | minor | OTIOZ portable audio export-only and MIDI Input Filter/output worker foundations recognized; release quality dependency configured, hosted CI and physical MIDI/playback still unverified, alpha gate unchanged |
 | 2026-11-01 | minor | Per-track MIDI named-port/channel selectors and synthetic route filtering landed; independent two-mono-lane A1/A2 CMX3600 EDL cuts landed; physical MIDI/live audition and AAF/OMF/PTX alpha gate unchanged |
