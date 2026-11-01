@@ -1,6 +1,6 @@
 # Plugin parity: built-in processors and plugin hosting
 
-> **Last reviewed:** 2026-10-31 · **Last updated:** 2026-10-31 · **Change:** trivial (CLAP/VST3 MIDI release-queue and transport-stop reliability; catalog breadth unchanged) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** trivial (CLAP/VST3 bundle scanners fail closed on ambiguous executables; catalog unchanged) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 Pro Tools users live in plugins: the bundled set covers everyday mixing, and third-party plugins
 cover the rest. This doc tracks both. Our plugins have our own names and are written from
@@ -35,6 +35,8 @@ User report #152: a saved instrument level does not reach the bounce.
 
 ## Third-party plugin hosting
 
+**Scan safety (2026-11-01):** CLAP/VST3 bundle scanners prefer the named executable and accept a fallback only when a single regular candidate exists. Ambiguous helper/resource directories fail closed, with synthetic tests on macOS/Windows/Linux paths. No entitlement or hosted-plugin support broadening occurred.
+
 **Reliability update (2026-10-31):** The CLAP and VST3 event queues now prioritize note releases under saturation, preserve held-note bookkeeping and prevent scheduled notes from retriggering after transport stop. Regression tests cover these cases. A native MIDI device-capture API exists, but it is not connected to plugin instruments; real-world plugin compatibility and AU editor gaps remain. The macOS library-validation entitlement needed for third-party VST3 hosting is pending an explicit owner security decision.
 
 | Feature | Pro Tools | SoundCraft | Notes |
@@ -60,6 +62,7 @@ User report #152: a saved instrument level does not reach the bounce.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | trivial | CLAP/VST3 scanner ambiguity now fails closed; synthetic bundle/symlink/nonregular tests; no hosting breadth change |
 | 2026-10-31 | trivial | CLAP/VST3 release priority, held notes and transport-stop regressions; breadth unchanged |
 | 2026-10-25 | trivial | Auto Pan: constant-power balance of the left and right channels; stereo passes unchanged at the center |
 | 2026-10-24 | minor | AudioSuite speed ramps (`speed_ramp`): down to a stop and up from one, Fit To or Extend, fades on or off |
