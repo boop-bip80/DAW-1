@@ -1437,11 +1437,8 @@ pub fn replace_file(tmp: &Path, file: &Path, bytes: &[u8]) -> Result<()> {
     crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
     // A pre-existing .scraft.tmp may hold crash-recovery data (or be a symlink). Never
     // truncate, follow or unlink it: only this call's newly reserved staging file is ours.
-    let mut staged = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)
-        .map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
+    let mut staged =
+        std::fs::OpenOptions::new().write(true).create_new(true).open(tmp).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
     let written = staged.write_all(bytes).and_then(|()| staged.sync_all());
     drop(staged);
     replace_with(tmp, file, written)
