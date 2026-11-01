@@ -646,29 +646,41 @@ unsafe extern "C" fn in_events_get(list: *const clap_input_events, index: u32) -
     v.and_then(|v| v.get(index as usize)).map_or(std::ptr::null(), RawEvent::header)
 }
 
+/// Accept only parameter events that actually fit in the preallocated output buffer. CLAP
+/// plugins can retry when `try_push` reports false; silently dropping an edit loses automation.
+fn queue_output_param(out: &mut Vec<(u32, f64)>, id: u32, value: f64) -> bool {
+    if !value.is_finite() || out.len() >= out.capacity() {
+        return false;
+    }
+    out.push((id, value));
+    true
+}
+
 unsafe extern "C" fn out_events_try_push(list: *const clap_output_events, event: *const clap_event_header) -> bool {
-    // Plugin → host events are accepted. Parameter values (typically edits in the plugin's GUI)
-    // are kept, while there is room, so the UI can write them into the session; the rest is
-    // ignored.
+    // Ignore unrelated well-formed events, but never tell a plugin we accepted a parameter
+    // change that we could not actually enqueue.
     if list.is_null() || event.is_null() {
-        return true;
+        return false;
     }
     // SAFETY: CLAP passes a valid event header for the duration of the call.
     let h = unsafe { &*event };
-    if h.space_id != CLAP_CORE_EVENT_SPACE_ID || h.type_ != CLAP_EVENT_PARAM_VALUE || (h.size as usize) < size_of::<clap_event_param_value>() {
+    if (h.size as usize) < size_of::<clap_event_header>() {
+        return false;
+    }
+    if h.space_id != CLAP_CORE_EVENT_SPACE_ID || h.type_ != CLAP_EVENT_PARAM_VALUE {
         return true;
+    }
+    if (h.size as usize) < size_of::<clap_event_param_value>() {
+        return false;
     }
     // SAFETY: the header says this is a complete `clap_event_param_value` (type and size checked).
     let e = unsafe { &*event.cast::<clap_event_param_value>() };
     // SAFETY: `ctx` is null or the instance's preallocated `out_params` Vec, which `process`
     // borrows exclusively for the duration of the plugin call.
-    if let Some(v) = unsafe { ((*list).ctx as *mut Vec<(u32, f64)>).as_mut() }
-        && v.len() < v.capacity()
-        && e.value.is_finite()
-    {
-        v.push((e.param_id, e.value));
+    match unsafe { ((*list).ctx as *mut Vec<(u32, f64)>).as_mut() } {
+        Some(out) => queue_output_param(out, e.param_id, e.value),
+        None => false,
     }
-    true
 }
 
 // ---- state streams -------------------------------------------------------------------------
@@ -1650,6 +1662,24 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_param_events_report_backpressure_and_accept_retries() {
+        // A tiny injected queue covers acceptance/failure without a large real-time buffer.
+        let mut out = Vec::with_capacity(1);
+        assert!(queue_output_param(&mut out, 7, 0.25));
+        assert!(!queue_output_param(&mut out, 3, 0.5), "a full queue cannot accept another plugin edit");
+        assert_eq!(out.as_slice(), &[(7, 0.25)]);
+        assert_eq!(out.capacity(), 1, "the callback must never grow its preallocated buffer");
+
+        out.clear();
+        assert!(!queue_output_param(&mut out, 3, f64::NAN));
+        assert!(!queue_output_param(&mut out, 3, f64::INFINITY));
+        assert!(out.is_empty(), "invalid values are never forwarded to the session");
+        assert!(queue_output_param(&mut out, 3, 0.5), "the plugin can retry when space becomes available");
+        assert_eq!(out.as_slice(), &[(3, 0.5)]);
+        assert!(!queue_output_param(&mut Vec::new(), 9, 0.75), "zero capacity is rejected too");
+    }
 
     #[test]
     fn state_input_uses_the_same_size_cap_as_state_saving() {
