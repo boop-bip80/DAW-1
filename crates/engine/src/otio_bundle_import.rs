@@ -9,7 +9,7 @@
 use crate::{Engine, EngineError, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const MAX_ARCHIVE_BYTES: u64 = 517 * 1024 * 1024;
@@ -20,6 +20,45 @@ const MAX_TOTAL_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MEDIA_FILES: usize = 1024;
 const MAX_ARCHIVE_ENTRIES: usize = MAX_MEDIA_FILES + 3;
 const MAX_MEMBER_NAME_BYTES: usize = 256;
+
+/// Read only the bounded ZIP end record and optional comment before asking the ZIP library to
+/// allocate its central-directory index. ZIP64 and split archives are unnecessary for this
+/// small, audio-only subset and would weaken our fixed entry-count allocation bound.
+fn preflight_entry_count<R: Read + Seek>(reader: &mut R) -> Result<()> {
+    const END_RECORD_BYTES: usize = 22;
+    const MAX_COMMENT_BYTES: usize = u16::MAX as usize;
+    let io_error = |err: std::io::Error| EngineError::Io(format!("OpenTimelineIO bundle ZIP end record: {err}"));
+    let file_size = reader.seek(SeekFrom::End(0)).map_err(io_error)?;
+    let tail_len = file_size.min((END_RECORD_BYTES + MAX_COMMENT_BYTES) as u64) as usize;
+    if tail_len < END_RECORD_BYTES {
+        return Err(unsupported("missing ZIP end-of-central-directory record"));
+    }
+    reader.seek(SeekFrom::End(-(tail_len as i64))).map_err(io_error)?;
+    let mut tail = vec![0u8; tail_len];
+    reader.read_exact(&mut tail).map_err(io_error)?;
+    for at in (0..=tail_len - END_RECORD_BYTES).rev() {
+        if &tail[at..at + 4] != b"PK\x05\x06" {
+            continue;
+        }
+        let word = |offset: usize| u16::from_le_bytes([tail[at + offset], tail[at + offset + 1]]);
+        let dword = |offset: usize| u32::from_le_bytes([tail[at + offset], tail[at + offset + 1], tail[at + offset + 2], tail[at + offset + 3]]);
+        if at + END_RECORD_BYTES + usize::from(word(20)) != tail_len {
+            continue;
+        }
+        let entries = word(10);
+        if word(4) != 0 || word(6) != 0 || word(8) != entries {
+            return Err(unsupported("multidisk ZIP bundles are not supported"));
+        }
+        if entries == u16::MAX || dword(12) == u32::MAX || dword(16) == u32::MAX {
+            return Err(unsupported("ZIP64 bundles are outside the bounded audio subset"));
+        }
+        if usize::from(entries) > MAX_ARCHIVE_ENTRIES {
+            return Err(unsupported("ZIP contains too many entries"));
+        }
+        return Ok(());
+    }
+    Err(unsupported("missing ZIP end-of-central-directory record"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Import {
@@ -250,6 +289,9 @@ fn rewrite_manifest(content: &[u8], index: &ArchiveIndex) -> Result<(Vec<u8>, BT
 /// cleanup. On success the media remains in the session so undo can be redone without relinking.
 struct StagedMedia {
     root: PathBuf,
+    parent: PathBuf,
+    parent_created: bool,
+    root_created: bool,
     files: Vec<PathBuf>,
     media_dir: bool,
     committed: bool,
@@ -270,24 +312,30 @@ impl Drop for StagedMedia {
         {
             log::warn!("OTIOZ media directory cleanup: {err}");
         }
-        if let Err(err) = crate::io::remove_created_empty_dir(&self.root) {
+        if self.root_created
+            && let Err(err) = crate::io::remove_created_empty_dir(&self.root)
+        {
             log::warn!("OTIOZ private directory cleanup: {err}");
+        }
+        if self.parent_created
+            && let Err(err) = crate::io::remove_created_empty_dir(&self.parent)
+        {
+            log::warn!("OTIOZ new Audio Files directory cleanup: {err}");
         }
     }
 }
 
 fn private_destination(engine: &Engine) -> Result<StagedMedia> {
-    if engine.path.is_none() {
-        return Err(unsupported("save the session before importing bundled audio media"));
-    }
-    let folder = engine.session().folder.as_ref().ok_or_else(|| unsupported("session has no media folder; save it first"))?;
-    let parent = folder.join("Audio Files");
-    crate::io::make_dir(&parent)?;
+    let (parent, parent_created) = crate::io::private_session_audio_dir(engine)?;
+    let mut staged =
+        StagedMedia { root: parent.clone(), parent, parent_created, root_created: false, files: Vec::new(), media_dir: false, committed: false };
     for _ in 0..64 {
         let unique = crate::new_scheme_id(engine.session());
-        let root = parent.join(format!("OTIOZ-import-{unique:016x}"));
+        let root = staged.parent.join(format!("OTIOZ-import-{unique:016x}"));
         if crate::io::create_private_dir(&root)? {
-            return Ok(StagedMedia { root, files: Vec::new(), media_dir: false, committed: false });
+            staged.root = root;
+            staged.root_created = true;
+            return Ok(staged);
         }
     }
     Err(unsupported("could not allocate a unique import media directory"))
@@ -295,8 +343,13 @@ fn private_destination(engine: &Engine) -> Result<StagedMedia> {
 
 pub fn import_audio(engine: &mut Engine, archive_path: &Path) -> Result<Import> {
     // Read the ZIP central directory from a checked file handle without loading the archive.
-    let file = crate::io::open_regular_limited(archive_path, MAX_ARCHIVE_BYTES)?;
+    let mut file = crate::io::open_regular_limited(archive_path, MAX_ARCHIVE_BYTES)?;
+    preflight_entry_count(&mut file)?;
     let mut archive = zip::ZipArchive::new(file).map_err(zerr)?;
+    // ZIP 9 indexes central-directory entries by filename and de-duplicates them in `len()`.
+    // Its explicit consistency check detects raw duplicate entries, header mismatches and
+    // overlapping byte ranges before our own visible-entry audit or filesystem mutation.
+    archive.validate_header_consistency().map_err(zerr)?;
     let index = audit_archive(&mut archive)?;
     let version = read_small(&mut archive, index.version, MAX_VERSION_BYTES)?;
     if version != b"1.0.0" && version != b"1.0.0\n" {
@@ -495,6 +548,22 @@ mod tests {
         bytes
     }
 
+    /// ZIP 9's safe writer refuses duplicate names. Produce a deliberately hostile fixture by
+    /// renaming a same-length entry in both ZIP local and central headers after writing it.
+    fn duplicate_version_name(mut bytes: Vec<u8>) -> Vec<u8> {
+        let old = b"version.txu";
+        let new = b"version.txt";
+        let mut changed = 0;
+        for start in 0..=bytes.len() - old.len() {
+            if &bytes[start..start + old.len()] == old {
+                bytes[start..start + old.len()].copy_from_slice(new);
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 2, "fixture must mutate exactly one local and one central ZIP entry name");
+        bytes
+    }
+
     fn import_command(engine: &mut Engine, path: &Path) -> Result<Value> {
         engine.execute("file.import_otioz", &json!({"path": path.to_str().unwrap()}))
     }
@@ -575,29 +644,63 @@ mod tests {
         assert_eq!(fixture.owned_import_dirs().len(), 1);
     }
 
+    /// Opt-in external compatibility oracle: point this at an archive emitted by the official
+    /// `opentimelineio.adapters.otioz` writer (0.18+). CI's synthetic fixtures always run, while
+    /// this test deliberately reports a skip unless an independently generated file is supplied.
+    #[test]
+    fn official_open_timeline_io_generated_fixture_when_supplied() {
+        let Some(path) = std::env::var_os("SOUNDCRAFT_OFFICIAL_OTIOZ_FIXTURE") else {
+            eprintln!("SKIP official OpenTimelineIO OTIOZ fixture: set SOUNDCRAFT_OFFICIAL_OTIOZ_FIXTURE to an independently generated .otioz");
+            return;
+        };
+        let fixture = Fixture::new();
+        let mut engine = fixture.engine();
+        let imported = import_command(&mut engine, Path::new(&path)).expect("official OTIOZ 0.18 archive must import");
+        assert_eq!(imported["audio_tracks"], 2);
+        assert_eq!(imported["audio_clips"], 4);
+        assert_eq!(imported["media_sources"], 2);
+        assert_eq!(imported["extracted_media_files"], 2);
+        assert_eq!(fixture.owned_import_dirs().len(), 1);
+        for source in engine.session().sources.iter().skip(fixture.session.sources.len()) {
+            assert!(Path::new(&source.path).starts_with(fixture.project.join("Audio Files")));
+            assert!(Path::new(&source.path).is_file());
+        }
+    }
+
+    #[test]
+    fn accepts_case_insensitive_bundle_extension_without_relaxing_archive_validation() {
+        let fixture = Fixture::new();
+        let upper = fixture.folder.join("Portable.OTIOZ");
+        std::fs::write(&upper, fixture.bundle()).unwrap();
+        let mut engine = fixture.engine();
+        let imported = import_command(&mut engine, &upper).unwrap();
+        assert_eq!(imported["audio_tracks"], 2);
+        assert_eq!(fixture.owned_import_dirs().len(), 1);
+    }
+
     #[test]
     fn rejects_traversal_duplicate_entry_and_bad_manifest_without_session_or_filesystem_mutation() {
         let fixture = Fixture::new();
         let base = entries(&fixture.bundle());
-        let mut cases = Vec::<Vec<Entry>>::new();
+        let mut cases = Vec::<Vec<u8>>::new();
         for malicious in
             ["../escape.wav", "media/../secret.wav", "media/nested/secret.wav", "media\\bad.wav", "/media/abs.wav", "C:/root.wav", "media/x.exe"]
         {
             let mut items = base.clone();
             items.push((malicious.into(), b"evil".to_vec(), zip::CompressionMethod::Stored));
-            cases.push(items);
+            cases.push(pack(&items));
         }
         let mut duplicate = base.clone();
-        duplicate.push(base[0].clone());
-        cases.push(duplicate);
+        duplicate.push(("version.txu".into(), b"1.0.0".to_vec(), zip::CompressionMethod::Stored));
+        cases.push(duplicate_version_name(pack(&duplicate)));
         let mut wrong_version = base.clone();
         wrong_version.iter_mut().find(|(name, _, _)| name == "version.txt").unwrap().1 = b"2.0.0".to_vec();
-        cases.push(wrong_version);
+        cases.push(pack(&wrong_version));
         let mut missing_media = base.clone();
         missing_media.retain(|(name, _, _)| !name.starts_with("media/"));
-        cases.push(missing_media);
+        cases.push(pack(&missing_media));
         for (number, case) in cases.into_iter().enumerate() {
-            fixture.write(&pack(&case));
+            fixture.write(&case);
             let mut engine = fixture.engine();
             let before = engine.session().clone();
             assert!(import_command(&mut engine, &fixture.archive).is_err(), "accepted archive case {number}");
@@ -637,6 +740,7 @@ mod tests {
         assert_eq!(*engine.session(), before);
         assert!(!engine.can_undo());
         assert!(fixture.owned_import_dirs().is_empty(), "decoder failure must remove every privately staged media file");
+        assert!(!fixture.project.join("Audio Files").exists(), "a failed import must remove its newly created empty Audio Files directory");
     }
 
     #[test]
@@ -663,6 +767,39 @@ mod tests {
     }
 
     #[test]
+    fn refuses_excessive_entries_before_zip_directory_index_allocation() {
+        let fixture = Fixture::new();
+        let mut entries = entries(&fixture.bundle());
+        for number in 0..=MAX_ARCHIVE_ENTRIES {
+            entries.push((format!("extra-{number:04}.wav"), vec![number as u8], zip::CompressionMethod::Stored));
+        }
+        let excessive = pack(&entries);
+        assert!(matches!(
+            preflight_entry_count(&mut Cursor::new(&excessive)),
+            Err(EngineError::Unsupported(message)) if message.contains("too many entries")
+        ));
+        fixture.write(&excessive);
+        let mut engine = fixture.engine();
+        let before = engine.session().clone();
+        assert!(import_command(&mut engine, &fixture.archive).is_err());
+        assert_eq!(*engine.session(), before);
+        assert!(!fixture.project.join("Audio Files").exists());
+
+        // The cheap preflight must also reject a forged ZIP directory entry count without
+        // passing an attacker-controlled huge count into the ZIP parser.
+        let mut forged = fixture.bundle();
+        let end = forged.len() - 22;
+        assert_eq!(&forged[end..end + 4], b"PK\x05\x06");
+        let large = u16::try_from(MAX_ARCHIVE_ENTRIES + 1).unwrap().to_le_bytes();
+        forged[end + 8..end + 10].copy_from_slice(&large);
+        forged[end + 10..end + 12].copy_from_slice(&large);
+        assert!(matches!(
+            preflight_entry_count(&mut Cursor::new(&forged)),
+            Err(EngineError::Unsupported(message)) if message.contains("too many entries")
+        ));
+    }
+
+    #[test]
     fn requires_saved_session_and_respects_checked_write_roots() {
         let fixture = Fixture::new();
         fixture.write(&fixture.bundle());
@@ -681,6 +818,50 @@ mod tests {
         let result = crate::file_access::confine(Some(&roots), || import_command(&mut engine, &fixture.archive));
         assert!(result.is_err(), "importer must not create media outside a permitted write root");
         assert_eq!(*engine.session(), fixture.session);
+        assert!(fixture.owned_import_dirs().is_empty());
+    }
+
+    #[test]
+    fn never_trusts_a_session_folder_disagreeing_with_its_saved_document_path() {
+        let fixture = Fixture::new();
+        fixture.write(&fixture.bundle());
+        let other_folder = fixture.folder.join("unrelated");
+        std::fs::create_dir(&other_folder).unwrap();
+        let mut engine = fixture.engine();
+        engine.session_mut().folder = Some(other_folder.clone());
+        let before = engine.session().clone();
+        assert!(matches!(
+            import_command(&mut engine, &fixture.archive),
+            Err(EngineError::Unsupported(message)) if message.contains("differs from the saved session")
+        ));
+        assert_eq!(*engine.session(), before);
+        assert!(!other_folder.join("Audio Files").exists());
+        assert!(fixture.owned_import_dirs().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audio_files_symlink_outside_write_root_is_never_followed_or_removed() {
+        let fixture = Fixture::new();
+        fixture.write(&fixture.bundle());
+        let external = fixture.folder.join("external-media");
+        std::fs::create_dir(&external).unwrap();
+        let sentinel = external.join("do-not-delete.txt");
+        std::fs::write(&sentinel, "untouched user data").unwrap();
+        std::os::unix::fs::symlink(&external, fixture.project.join("Audio Files")).unwrap();
+        let mut engine = fixture.engine();
+        let before = engine.session().clone();
+        // The engine must refuse a symlink even with no explicit automation root.
+        assert!(import_command(&mut engine, &fixture.archive).is_err());
+        assert_eq!(*engine.session(), before);
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "untouched user data");
+        assert!(fixture.owned_import_dirs().is_empty());
+
+        // And it must not escape a checked write root via the same link.
+        let roots = crate::file_access::AutomationRoots::new(&[fixture.folder.as_path()], &[fixture.project.as_path()]).unwrap().unwrap();
+        assert!(crate::file_access::confine(Some(&roots), || import_command(&mut engine, &fixture.archive)).is_err());
+        assert_eq!(*engine.session(), before);
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "untouched user data");
         assert!(fixture.owned_import_dirs().is_empty());
     }
 }
