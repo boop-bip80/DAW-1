@@ -26,14 +26,14 @@ pub fn start(app: &mut SoundApp, params: &Value) {
 /// Start an incremental native stem export only after the user confirms the export dialog.
 /// Merely opening or painting that dialog never touches the filesystem or command journal.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_stems(app: &mut SoundApp, dir: &str, range: Range, options: &EncodeOptions, fold_stereo: bool) {
+pub fn start_stems(app: &mut SoundApp, dir: &str, range: Range, options: &EncodeOptions, fold_stereo: bool) -> Result<(), String> {
     if app.bounce.is_some() || stem_running(app) {
         app.ui.status = "Finish or cancel the current bounce first".into();
-        return;
+        return Err(app.ui.status.clone());
     }
     if app.engine.transport.recording {
         app.ui.status = "Stop recording before exporting stems".into();
-        return;
+        return Err(app.ui.status.clone());
     }
     // Plugin state is captured only on an explicit Start click, never on dialog paint.
     app.capture_plugin_states();
@@ -42,8 +42,12 @@ pub fn start_stems(app: &mut SoundApp, dir: &str, range: Range, options: &Encode
             let count = job.total_stems();
             app.dialogs.stem_bounce = Some(job);
             app.ui.status = format!("Exporting {count} stems…");
+            Ok(())
         }
-        Err(error) => app.ui.status = error.to_string(),
+        Err(error) => {
+            app.ui.status = error.to_string();
+            Err(app.ui.status.clone())
+        }
     }
 }
 
@@ -234,7 +238,7 @@ mod tests {
         let folder = TestFolder::new();
         let mut app = app();
         let undo_before = app.engine.undo_history().len();
-        start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false);
+        start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false).expect("start stem export");
         assert!(app.dialogs.stem_bounce.is_some());
         assert!(app.engine.journal.is_empty(), "Start only allocates a job; publication has not completed");
         let ctx = egui::Context::default();
@@ -261,7 +265,10 @@ mod tests {
         let folder = TestFolder::new();
         let mut app = app();
         let previous = app.engine.session().to_json();
-        start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false);
+        start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false).expect("start stem export");
+        let repeated = start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false)
+            .expect_err("a running stem export must refuse a second export");
+        assert!(repeated.contains("Finish or cancel"), "{repeated}");
         let error = app.run("session.new", json!({"name": "New Session"})).expect_err("cannot replace session during stem export");
         assert!(error.contains("Finish or cancel"), "{error}");
         assert_eq!(app.engine.session().to_json(), previous);
@@ -272,6 +279,15 @@ mod tests {
         app.dialogs.stem_bounce = None;
         assert!(folder.contents().is_empty(), "cancel cleans the partially reserved stem batch");
         assert!(app.engine.journal.is_empty());
+
+        start(&mut app, &json!({"path": folder.0.join("mix.wav").to_string_lossy(), "start": 0, "end": 4_800}));
+        assert!(app.bounce.is_some(), "mix bounce fixture must start");
+        let refused = start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false)
+            .expect_err("stem export must refuse to run concurrently with mix bounce");
+        assert!(refused.contains("Finish or cancel"), "{refused}");
+        assert!(app.dialogs.stem_bounce.is_none());
+        app.bounce = None;
+        assert!(folder.contents().is_empty(), "cancelling the mix bounce cleans its owned sidecar");
     }
 
     #[test]
@@ -279,7 +295,9 @@ mod tests {
         let folder = TestFolder::new();
         let mut app = app();
         app.engine.transport.recording = true;
-        start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false);
+        let error = start_stems(&mut app, &folder.path(), Range::new(0, 4_800), &EncodeOptions::default(), false)
+            .expect_err("recording must refuse a new stem export");
+        assert!(error.contains("Stop recording"), "{error}");
         assert!(app.dialogs.stem_bounce.is_none());
         assert!(folder.contents().is_empty());
         assert!(app.engine.journal.is_empty());
