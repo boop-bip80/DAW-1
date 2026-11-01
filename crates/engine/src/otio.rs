@@ -557,6 +557,12 @@ fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
         // alternate-stream syntax on *every* platform, not just the current OS.
         return Err(invalid_import("relative media URL decodes to an absolute or drive path"));
     }
+    if !explicit_file_url && cfg!(windows) && path.split('/').any(crate::file_access::nonportable_windows_component) {
+        // Win32 may strip leading/trailing ASCII spaces or trailing periods from path
+        // components. Reserved DOS names (including COM¹/LPT²) can resolve as devices.
+        // Keep Unix's valid filenames unchanged while refusing ambiguous Windows media.
+        return Err(invalid_import("relative media URL contains a nonportable Windows filename component"));
+    }
     #[cfg(windows)]
     let path = if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') { &path[1..] } else { path.as_str() };
     let referenced = Path::new(&path);
@@ -2141,6 +2147,30 @@ mod tests {
             assert_eq!(engine.session().markers.len(), 2);
         }
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn portable_windows_name_checks_preserve_ordinary_relative_media_urls() {
+        let document = Path::new("project/timeline.otio");
+        for url in ["media/take%20one.wav", "media/mix.v2.wav", "media/.hidden.wav", "./media/take.wav"] {
+            assert!(reference_path(url, document).is_ok(), "legitimate local media URL `{url}` was rejected");
+        }
+        // The same decoded-component validator runs in Linux unit tests even though
+        // Windows-only restrictions are applied by reference_path only on Windows.
+        for url in [
+            "media/NUL.wav",
+            "media/COM%C2%B9.wav",
+            "media/LPT%C2%B2.wav",
+            "media/take%2E",
+            "media/take%20",
+            "media/%20take.wav",
+            "media/..%20/take.wav",
+        ] {
+            #[cfg(windows)]
+            assert!(reference_path(url, document).is_err(), "unsafe Windows media URL `{url}` was accepted");
+            #[cfg(not(windows))]
+            assert!(reference_path(url, document).is_ok(), "legitimate Unix media URL `{url}` was rejected");
+        }
     }
 
     #[test]

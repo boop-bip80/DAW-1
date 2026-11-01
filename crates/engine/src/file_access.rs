@@ -274,11 +274,21 @@ fn same_component(a: Component, b: Component) -> bool {
     }
 }
 
-/// A Windows device name (`CON`, `NUL`, `COM1`… also with an extension), which names no file.
-fn is_device_name(component: &str) -> bool {
+/// A Windows device name (`CON`, `NUL`, `COM1`, `COM¹`… also with an extension), which
+/// names no regular file. Windows also reserves superscript ¹²³ for COM/LPT ports.
+pub(crate) fn is_device_name(component: &str) -> bool {
     let stem = component.split('.').next().unwrap_or(component).trim_end_matches(' ').to_ascii_uppercase();
-    let numbered = |prefix: &str| stem.strip_prefix(prefix).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+    let numbered =
+        |prefix: &str| stem.strip_prefix(prefix).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT")
+}
+
+/// Relative media components that Windows may normalize into another filename or treat as a
+/// special device. The check is portable so its exact decisions can be tested on Unix too;
+/// callers apply it only where Windows path semantics are relevant. A literal `.` component
+/// retains its ordinary current-directory meaning; parent `..` is rejected by callers.
+pub(crate) fn nonportable_windows_component(component: &str) -> bool {
+    component != "." && (component.starts_with(' ') || component.ends_with(' ') || component.ends_with('.') || is_device_name(component))
 }
 
 #[cfg(test)]
@@ -499,11 +509,21 @@ mod tests {
 
     #[test]
     fn device_names() {
-        for d in ["CON", "nul", "Com1", "LPT9.txt", "aux.scraft", "NUL "] {
+        for d in ["CON", "nul", "Com1", "LPT9.txt", "aux.scraft", "NUL ", "COM¹.wav", "com²", "CoM³.raw", "LPT¹", "lpt².wav", "Lpt³.txt"] {
             assert!(is_device_name(d), "{d}");
         }
-        for f in ["console", "com10", "COM0", "lpt", "a.scraft", "nul-x"] {
+        for f in ["console", "com10", "COM0", "lpt", "a.scraft", "nul-x", "COM⁴.wav", "LPT₁.wav"] {
             assert!(!is_device_name(f), "{f}");
+        }
+    }
+
+    #[test]
+    fn windows_relative_media_component_rules_are_deterministic_on_every_host() {
+        for name in ["NUL.wav", "CON", "com¹.wav", "LPT².wav", "foo.", "foo ", " foo.wav", ".. ", "...", "cover .wav "] {
+            assert!(nonportable_windows_component(name), "Windows must reject ambiguous component `{name}`");
+        }
+        for name in [".", "take one.wav", ".hidden.wav", "com10.wav", "LPT0.wav", "mix.v2.wav", "a..b", "NUL-x.wav"] {
+            assert!(!nonportable_windows_component(name), "legitimate component `{name}` was rejected");
         }
     }
 
