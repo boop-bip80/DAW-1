@@ -184,6 +184,8 @@ enum Cmd {
         from: Samples,
         end: Option<Samples>,
         looped: Option<Range>,
+        /// Only a stopped-transport recording requests this one-shot input callback gate.
+        capture_start: Option<record::CaptureStartTicket>,
     },
     Stop,
     Locate(Samples),
@@ -410,6 +412,9 @@ impl AudioState {
 
     fn drain(&mut self) {
         let mut changed = false;
+        // Only the Play left active after this callback's complete command batch can start
+        // capture. Play followed by Stop before any output is rendered must not ACK a take.
+        let mut pending_capture_start = None;
         while let Ok(c) = self.rx.try_recv() {
             match c {
                 Cmd::Input(r) => self.input = Some(r),
@@ -468,7 +473,8 @@ impl AudioState {
                     let _ = self.mix.resume_external_for_restart(track, slot, token);
                 }
                 Cmd::OldSessions(tx) => self.old_sessions = Some(tx),
-                Cmd::Play { from, end, looped } => {
+                Cmd::Play { from, end, looped, capture_start } => {
+                    pending_capture_start = capture_start;
                     self.cancel_midi_monitor();
                     self.pos = from;
                     self.end = end;
@@ -479,6 +485,7 @@ impl AudioState {
                     self.mix.reset();
                 }
                 Cmd::Stop => {
+                    pending_capture_start = None;
                     self.cancel_midi_monitor();
                     self.playing = false;
                     self.end = None;
@@ -486,6 +493,7 @@ impl AudioState {
                     self.mix.reset();
                 }
                 Cmd::Locate(at) => {
+                    pending_capture_start = None;
                     self.cancel_midi_monitor();
                     self.pos = at;
                     self.pending_len = 0;
@@ -503,6 +511,13 @@ impl AudioState {
             // Place adopted instances now (not only once playback starts), so editors see them;
             // `sync` creates no third-party plugins here.
             self.mix.ensure_synced(&self.session);
+        }
+        // `Cmd::Input` is queued before Record's Play by the UI. Never ACK if that Play was
+        // superseded by a stop/seek or another Play in this same output callback.
+        if self.playing
+            && let (Some(ticket), Some(input)) = (pending_capture_start, &self.input)
+        {
+            input.acknowledge_capture_start(ticket);
         }
         self.send_garbage();
         self.shared.playing.store(self.playing, Ordering::Relaxed);
@@ -1268,12 +1283,39 @@ impl Player {
 
     /// Start playback at `from`, stopping at `end`, or looping `looped`.
     pub fn play(&self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        let _ = self.enqueue_play(from, end, looped, None);
+    }
+
+    /// Native Record only: acknowledge the matching input take from the *output callback*
+    /// after it accepts Play. If the command receiver has gone away, the input remains gated
+    /// and the UI must stop/finalize the not-started take. No cross-stream timestamps are used.
+    pub fn play_with_capture_start(
+        &self,
+        from: Samples,
+        end: Option<Samples>,
+        looped: Option<Range>,
+        ticket: record::CaptureStartTicket,
+    ) -> Result<(), String> {
+        self.enqueue_play(from, end, looped, Some(ticket)).map_err(|()| "audio output cannot accept the recording start request".into())
+    }
+
+    fn enqueue_play(
+        &self,
+        from: Samples,
+        end: Option<Samples>,
+        looped: Option<Range>,
+        capture_start: Option<record::CaptureStartTicket>,
+    ) -> Result<(), ()> {
         #[cfg(not(target_arch = "wasm32"))]
         self.disable_midi_instrument_monitor();
         self.shared.position.store(from, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
         self.shared.invalidate_transport();
-        let _ = self.tx.send(Cmd::Play { from, end, looped });
+        self.tx.send(Cmd::Play { from, end, looped, capture_start }).map_err(|_| {
+            // Don't claim playback started when its command receiver has stopped.
+            self.shared.playing.store(false, Ordering::Relaxed);
+            self.shared.invalidate_transport();
+        })
     }
 
     /// Feed live input (from a `record::Recorder`) into the mix for input monitoring.
@@ -1639,6 +1681,66 @@ fn pick_output_config(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    /// The control-thread Play request by itself must not arm stopped-transport WAV capture.
+    /// The output callback can ACK only the current input stream and matching take epoch.
+    #[test]
+    fn stopped_capture_ack_requires_output_play_acceptance() {
+        let (player, commands) = observer_test_player();
+        let mut output = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(2, 48_000);
+        let ticket = ring.prepare_capture_gate(true).unwrap();
+        player.set_input(Arc::clone(&ring));
+        player.play_with_capture_start(0, None, None, ticket).unwrap();
+        assert_eq!(ring.capture_gate_snapshot() & 1, 0, "queuing Play must not start disk capture");
+
+        let mut buffer = [0.0; 128];
+        output.fill(&mut buffer, 2);
+        assert!(ring.capture_allowed_from(ring.capture_gate_snapshot()), "the output callback accepted Play and ACKed this take");
+        assert!(output.playing);
+    }
+
+    #[test]
+    fn output_play_then_stop_before_render_never_acks_capture() {
+        let (player, commands) = observer_test_player();
+        let mut output = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        let ticket = ring.prepare_capture_gate(true).unwrap();
+        player.set_input(Arc::clone(&ring));
+        player.play_with_capture_start(0, None, None, ticket).unwrap();
+        player.stop();
+        let mut buffer = [0.0; 128];
+        output.fill(&mut buffer, 2);
+        assert!(!output.playing);
+        assert_eq!(ring.capture_gate_snapshot() & 1, 0, "a canceled Play never rendered output and must not open the input gate");
+
+        let newer = ring.prepare_capture_gate(true).unwrap();
+        player.play_with_capture_start(0, None, None, ticket).unwrap();
+        output.fill(&mut buffer, 2);
+        assert_eq!(ring.capture_gate_snapshot() & 1, 0, "a queued old ticket must not open the rearmed take");
+        player.play_with_capture_start(0, None, None, newer).unwrap();
+        output.fill(&mut buffer, 2);
+        assert!(ring.capture_allowed_from(ring.capture_gate_snapshot()));
+    }
+
+    #[test]
+    fn stopped_capture_does_not_ack_without_input_or_when_output_is_disconnected() {
+        let (player, commands) = observer_test_player();
+        let mut output = AudioState::new(commands, Arc::clone(&player.shared), Arc::new(Session::default()), 48_000.0, channel().0);
+        let ring = record::InputRing::new(1, 48_000);
+        let ticket = ring.prepare_capture_gate(true).unwrap();
+        player.play_with_capture_start(0, None, None, ticket).unwrap();
+        let mut buffer = [0.0; 128];
+        output.fill(&mut buffer, 2);
+        assert_eq!(ring.capture_gate_snapshot() & 1, 0, "no input stream attached means no capture starts");
+
+        let (disconnected, receiver) = observer_test_player();
+        drop(receiver);
+        let error = disconnected.play_with_capture_start(0, None, None, ticket).unwrap_err();
+        assert!(error.contains("cannot accept"));
+        assert!(!disconnected.shared.playing.load(Ordering::Relaxed), "rejected Play must restore stopped state");
+        assert_eq!(ring.capture_gate_snapshot() & 1, 0, "a rejected command cannot open any capture gate");
+    }
 
     /// Exercise the real Player control API without opening an audio device or
     /// starting a silent-clock thread. The queued commands can be delivered to
@@ -2315,7 +2417,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         (shared, st, tx, t)
     }
 
@@ -2376,7 +2478,7 @@ mod tests {
         assert_eq!(gone, vec![t]);
         tx.send(Cmd::Session(Arc::new(empty), Vec::new())).unwrap();
         tx.send(Cmd::Forget(gone)).unwrap();
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         st.fill(&mut out, 2);
         assert!(!shared.meters.lock().unwrap().tracks.contains_key(&t));
         assert!(!st.unsent.tracks.contains_key(&t) && !st.mix.meters.contains_key(&t));
@@ -2465,7 +2567,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: Some(1000), looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: Some(1000), looped: None, capture_start: None }).unwrap();
         let mut out = vec![0.0f32; 4096];
         st.fill(&mut out, 2);
         assert!(shared.position.load(Ordering::Relaxed) >= 1000);
@@ -2484,7 +2586,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         let mut out = vec![0.0f32; 2 * 64];
         st.fill(&mut out, 2);
         assert_eq!(shared.position.load(Ordering::Relaxed), 64);
@@ -2509,7 +2611,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let st = AudioState::new(rx, shared, Arc::new(s), 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         st
     }
 
@@ -2617,7 +2719,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&s), 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         // An 8-channel device: channels in order, the rest silent.
         let mut out = vec![0.0f32; 8 * 256];
         st.fill(&mut out, 8);
@@ -2823,7 +2925,7 @@ mod tests {
         });
         let (tx, rx) = channel();
         let mut st = AudioState::new(rx, Arc::clone(&shared), s, 48_000.0, channel().0);
-        tx.send(Cmd::Play { from: 0, end: None, looped: Some(Range::new(0, 1000)) }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: Some(Range::new(0, 1000)), capture_start: None }).unwrap();
         let mut out = vec![0.0f32; 20_000];
         st.fill(&mut out, 2);
         let p = shared.position.load(Ordering::Relaxed);
@@ -2859,7 +2961,7 @@ mod tests {
             });
             let (tx, rx) = channel();
             let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
-            tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+            tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
             let mut out = vec![0.0f32; 2 * 512];
             let mut before = 0.0f32;
             for _ in 0..9 {
@@ -2892,7 +2994,7 @@ mod tests {
         let mut st = AudioState::new(rx, Arc::clone(&shared), Arc::new(s), 48_000.0, channel().0);
         let ring = record::InputRing::new(1, 48_000);
         tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
-        tx.send(Cmd::Play { from: 0, end: Some(1000), looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: Some(1000), looped: None, capture_start: None }).unwrap();
         let mut out = vec![0.0f32; 4096];
         st.fill(&mut out, 2);
         assert!(!shared.playing.load(Ordering::Relaxed));
@@ -2985,7 +3087,7 @@ mod tests {
         let mut st = AudioState::new(rx, shared, Arc::new(s.clone()), 48_000.0, channel().0);
         let ring = record::InputRing::new(1, 48_000);
         tx.send(Cmd::Input(Arc::clone(&ring))).unwrap();
-        tx.send(Cmd::Play { from: 0, end: None, looped: None }).unwrap();
+        tx.send(Cmd::Play { from: 0, end: None, looped: None, capture_start: None }).unwrap();
         let mut out = vec![0.0f32; 2 * BLOCK];
         for _ in 0..10 {
             ring.push(&[0.125; BLOCK]);
