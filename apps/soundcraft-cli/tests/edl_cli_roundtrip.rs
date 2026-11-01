@@ -14,14 +14,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soundcraft-cmx3600-cli-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("soundcraft-cmx3600-cli-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -56,10 +50,7 @@ fn success(label: &str, output: &Output) {
 fn command_result(output: &Output, command: &str) -> serde_json::Value {
     let text = String::from_utf8_lossy(&output.stdout);
     let prefix = format!("{command}: ");
-    let json = text
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or_else(|| panic!("{command} had no result in stdout: {text}"));
+    let json = text.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap_or_else(|| panic!("{command} had no result in stdout: {text}"));
     serde_json::from_str(json).unwrap()
 }
 
@@ -69,12 +60,7 @@ fn original_audio(path: &Path) {
         let angle = std::f64::consts::TAU * 400.0 * i as f64 / f64::from(RATE);
         *sample = 0.3 * angle.sin() as f32;
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     std::fs::write(path, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
 }
 
@@ -84,14 +70,8 @@ fn read_mix(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, RATE, "unexpected mix sample rate");
     assert_eq!(audio.frames(), FRAMES, "unexpected bounced duration");
     assert_eq!(audio.num_channels(), 2, "main mix must be stereo");
-    assert!(
-        audio.channels.iter().flatten().all(|sample| sample.is_finite()),
-        "EDL roundtrip produced a non-finite audio sample"
-    );
-    assert!(
-        audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01),
-        "EDL roundtrip produced silence"
-    );
+    assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()), "EDL roundtrip produced a non-finite audio sample");
+    assert!(audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01), "EDL roundtrip produced silence");
     audio
 }
 
@@ -111,18 +91,9 @@ fn edl_export_import_preserves_frame_aligned_audio_and_rejects_drop_frame() {
     // At 48 kHz and 24 fps each frame is exactly 2,000 samples. Splitting
     // after 12,000 samples produces two six-frame cuts from the same source.
     assert_eq!(RATE as usize / 24 * 6, FRAME_BOUNDARY);
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"path": original.to_string_lossy()})
-    );
-    let save = format!(
-        "session.save={}",
-        serde_json::json!({"path": project.to_string_lossy()})
-    );
-    let export = format!(
-        "file.export_edl={}",
-        serde_json::json!({"path": edl.to_string_lossy(), "track": "Voice", "fps": 24})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"path": original.to_string_lossy()}));
+    let save = format!("session.save={}", serde_json::json!({"path": project.to_string_lossy()}));
+    let export = format!("file.export_edl={}", serde_json::json!({"path": edl.to_string_lossy(), "track": "Voice", "fps": 24}));
     let exported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .args(["--cmd", r#"edit.select={"tracks":["Voice"]}"#])
@@ -143,17 +114,12 @@ fn edl_export_import_preserves_frame_aligned_audio_and_rejects_drop_frame() {
     let text = std::fs::read_to_string(&edl).unwrap();
     assert!(text.contains("FCM: NON-DROP FRAME"), "EDL is not non-drop");
     assert_eq!(
-        text.lines()
-            .filter(|line| line.starts_with("00") && line.contains(" A     C "))
-            .count(),
+        text.lines().filter(|line| line.starts_with("00") && line.contains(" A     C ")).count(),
         2,
         "EDL did not write exactly two A1 straight-cut events"
     );
 
-    let import_edl = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path": edl.to_string_lossy(), "fps": 24})
-    );
+    let import_edl = format!("file.import_edl={}", serde_json::json!({"path": edl.to_string_lossy(), "fps": 24}));
     let imported = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_edl])
         .arg("--bounce")
@@ -171,10 +137,7 @@ fn edl_export_import_preserves_frame_aligned_audio_and_rejects_drop_frame() {
     let b = read_mix(&after);
     for (left, right) in a.channels.iter().zip(&b.channels) {
         for (x, y) in left.iter().zip(right) {
-            assert!(
-                (x - y).abs() < 0.001,
-                "CMX3600 export/import changed a bounced sample"
-            );
+            assert!((x - y).abs() < 0.001, "CMX3600 export/import changed a bounced sample");
         }
     }
 
@@ -182,10 +145,7 @@ fn edl_export_import_preserves_frame_aligned_audio_and_rejects_drop_frame() {
     let broken = text.replace("FCM: NON-DROP FRAME", "FCM: DROP FRAME");
     assert_ne!(broken, text, "malformed fixture did not alter the EDL");
     std::fs::write(&invalid, broken).unwrap();
-    let import_bad = format!(
-        "file.import_edl={}",
-        serde_json::json!({"path": invalid.to_string_lossy(), "fps": 24})
-    );
+    let import_bad = format!("file.import_edl={}", serde_json::json!({"path": invalid.to_string_lossy(), "fps": 24}));
     let rejected = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import_bad])
         .arg("--bounce")
