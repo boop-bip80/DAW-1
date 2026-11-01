@@ -248,12 +248,7 @@ fn supersede_sustain_release(sustain_release: &mut Option<u32>, id: u32) {
 /// Queue mapped MIDI without allocating. Pedal-up can replace the last queued
 /// controller point when saturated; ordinary controllers cannot evict releases.
 /// Only a truly accepted CC64=0 establishes retry provenance.
-fn queue_mapped_control(
-    controls: &mut Vec<(u32, u32, f64)>,
-    sustain_release: &mut Option<u32>,
-    control: (u32, u32, f64),
-    sustain_off: bool,
-) -> bool {
+fn queue_mapped_control(controls: &mut Vec<(u32, u32, f64)>, sustain_release: &mut Option<u32>, control: (u32, u32, f64), sustain_off: bool) -> bool {
     if controls.len() >= controls.capacity() {
         if !sustain_off || controls.is_empty() {
             return false;
@@ -769,7 +764,8 @@ mod tests {
 
     #[test]
     fn reset_retains_only_distinct_note_offs_and_the_last_mapped_sustain_up() {
-        let mut notes = vec![NoteEvent::On { time: 1, key: 60, velocity: 0.8 }, NoteEvent::Off { time: 2, key: 60 }, NoteEvent::Off { time: 3, key: 60 }];
+        let mut notes =
+            vec![NoteEvent::On { time: 1, key: 60, velocity: 0.8 }, NoteEvent::Off { time: 2, key: 60 }, NoteEvent::Off { time: 3, key: 60 }];
         let mut controls = Vec::with_capacity(4);
         let mut sustain_release = None;
         assert!(queue_mapped_control(&mut controls, &mut sustain_release, (1, 3, 0.9), false));
