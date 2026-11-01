@@ -357,7 +357,7 @@ unsafe fn state<'a>(host: *const clap_host) -> Option<&'a HostState> {
 unsafe extern "C" fn host_request_restart(host: *const clap_host) {
     // SAFETY: the plugin passes back the host pointer we gave it.
     if let Some(s) = unsafe { state(host) } {
-        s.restart.store(true, Ordering::Relaxed);
+        s.restart.store(true, Ordering::Release);
     }
 }
 
@@ -1204,6 +1204,12 @@ impl Instance {
         &self.state
     }
 
+    /// An observation-only reference to host callbacks, independent of clap.state/clap.gui.
+    /// It owns no native plugin pointer and remains safe after the instance is destroyed.
+    pub fn restart_state(&self) -> Arc<HostState> {
+        Arc::clone(&self.state)
+    }
+
     /// The editor link shared with editor handles (`None` when the plugin has no `clap.gui`).
     pub fn gui(&self) -> Option<Arc<GuiLink>> {
         self.gui.available().then(|| Arc::clone(&self.gui))
@@ -1675,6 +1681,29 @@ mod hostwin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fake_native_restart_callback_sets_a_pending_host_signal_without_state_extension() {
+        // The request is a core clap_host callback, not a clap.state or clap.gui feature.
+        // A fake host is enough to exercise the exact native callback without loading a plugin.
+        let state = Arc::new(HostState::default());
+        let host = clap_host {
+            clap_version: CLAP_VERSION,
+            host_data: Arc::as_ptr(&state).cast_mut().cast::<c_void>(),
+            name: c"test".as_ptr(),
+            vendor: c"test".as_ptr(),
+            url: c"test".as_ptr(),
+            version: c"1".as_ptr(),
+            get_extension: None,
+            request_restart: Some(host_request_restart),
+            request_process: None,
+            request_callback: None,
+        };
+        assert!(!state.restart.load(Ordering::Acquire));
+        // SAFETY: the fake host and its Arc-backed HostState remain alive for this callback.
+        unsafe { host_request_restart(&host) };
+        assert!(state.restart.load(Ordering::Acquire));
+    }
 
     #[test]
     fn failed_or_invalid_process_cannot_publish_partial_parameter_edits() {
