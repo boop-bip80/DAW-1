@@ -508,31 +508,54 @@ fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
     if uri.len() > MAX_PATH_BYTES || uri.is_empty() || uri.chars().any(|c| matches!(c, '?' | '#' | '\0')) {
         return Err(invalid_import("media URL is empty, too long or has a query/fragment"));
     }
-    let text = if let Some(path) = uri.strip_prefix("file://") {
+    // Remember the original URL category: a relative URL must *stay* relative after
+    // decoding. Otherwise `%2Ftmp/outside.wav` could become an absolute host path.
+    let (text, explicit_file_url) = if let Some(path) = uri.strip_prefix("file://") {
         if !path.starts_with('/') || path.starts_with("//") {
             return Err(invalid_import("remote media authorities are not supported"));
         }
-        path
+        (path, true)
     } else {
         if uri.contains("://") || uri.starts_with("file:") || uri.contains(':') {
             return Err(invalid_import("only local file URLs are supported"));
         }
-        uri
+        (uri, false)
     };
-    let mut decoded = Vec::with_capacity(text.len());
-    let mut input = text.bytes();
-    while let Some(b) = input.next() {
-        if b == b'%' {
-            let hi = input.next().and_then(hex_digit).ok_or_else(|| invalid_import("invalid media URL escape"))?;
-            let lo = input.next().and_then(hex_digit).ok_or_else(|| invalid_import("invalid media URL escape"))?;
-            decoded.push((hi << 4) | lo);
-        } else {
-            decoded.push(b);
+    // OpenTimelineIO 0.18.1's official otio_json writer also emits raw '%' in local
+    // relative filenames. Decode complete %HH escapes, but preserve stray percent signs
+    // only for relative references. Explicit file:// URLs retain strict URI escapes.
+    // Never decode a second time or skip the final path-safety validation.
+    let input = text.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            if let (Some(hi), Some(lo)) = (input.get(index + 1).and_then(|b| hex_digit(*b)), input.get(index + 2).and_then(|b| hex_digit(*b))) {
+                decoded.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+            if explicit_file_url {
+                return Err(invalid_import("invalid media URL escape"));
+            }
         }
+        decoded.push(input[index]);
+        index += 1;
     }
     let path = String::from_utf8(decoded).map_err(|_| invalid_import("media URL is not UTF-8"))?;
     if path.contains('\0') || path.len() > MAX_PATH_BYTES {
         return Err(invalid_import("invalid or too long decoded media path"));
+    }
+    if explicit_file_url {
+        // `file:///%2Fserver/share` must not turn into a network authority; likewise a
+        // backslash-encoded Windows UNC path cannot be accepted as a local file URL.
+        if path.starts_with("//") || path.starts_with("/\\") || path.starts_with("\\\\") || (cfg!(windows) && path.contains('\\')) {
+            return Err(invalid_import("remote or UNC media file URLs are not supported"));
+        }
+    } else if path.starts_with('/') || path.starts_with('\\') || path.contains(':') || path.contains('\\') {
+        // Reject Unix absolute paths, encoded Windows drive prefixes, UNC and NTFS
+        // alternate-stream syntax on *every* platform, not just the current OS.
+        return Err(invalid_import("relative media URL decodes to an absolute or drive path"));
     }
     #[cfg(windows)]
     let path = if path.starts_with('/') && path.as_bytes().get(2) == Some(&b':') { &path[1..] } else { path.as_str() };
@@ -540,10 +563,13 @@ fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
     if referenced.components().any(|part| part == Component::ParentDir) {
         return Err(invalid_import("media path contains parent directory traversal"));
     }
-    if referenced.is_absolute() {
+    if explicit_file_url {
+        if !referenced.is_absolute() {
+            return Err(invalid_import("explicit file URL did not resolve to an absolute path"));
+        }
         return Ok(referenced.to_path_buf());
     }
-    if referenced.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
+    if referenced.is_absolute() || referenced.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir)) {
         return Err(invalid_import("relative media path escapes the timeline directory"));
     }
     let parent = document.parent().unwrap_or_else(|| Path::new("."));
@@ -1940,6 +1966,85 @@ mod tests {
         std::fs::remove_file(allowed_document).unwrap();
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn encoded_absolute_drive_unc_and_parent_relative_media_urls_fail_atomically() {
+        let (session, media) = decodable_fixture();
+        let document = write_interchange(&session, &media);
+        let original: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+
+        // This is a valid on-disk audio path, but disguising it as a relative URL by
+        // encoding its leading '/' must not let it escape the document directory.
+        let hidden_absolute = media.to_str().unwrap().replace('/', "%2F");
+        let hostile = [
+            hidden_absolute.as_str(),
+            "%2F%2Fremote/share.wav",
+            "C%3A/remote/take.wav",
+            "%5C%5Cremote%5Cshare%5Ctake.wav",
+            "media/%2E%2E/%2E%2E/take.wav",
+            "file:///%2Fremote/share.wav",
+            "file:///%5C%5Cremote/share.wav",
+        ];
+        for url in hostile {
+            let mut invalid = original.clone();
+            invalid["tracks"]["children"][0]["children"][1]["media_reference"]["target_url"] = json!(url);
+            std::fs::write(&document, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains("OpenTimelineIO audio import"), "wrong error for {url}: {error}");
+            assert_eq!(*engine.session(), before, "URL {url} mutated the session");
+            assert!(!engine.can_undo(), "URL {url} added an undo step");
+        }
+        assert_eq!(reference_path(&file_url(&media).unwrap(), &document).unwrap(), media);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn official_literal_percent_relative_media_url_keeps_audio_markers_and_undo() {
+        // OpenTimelineIO 0.18.1's official otio_json writer and reader preserve
+        // `media/100%wet.wav` verbatim in ExternalReference.target_url. Encoded `%25`
+        // variants must continue resolving to the same file as the literal-percent URL.
+        let (mut session, media) = decodable_fixture();
+        let folder = media.parent().unwrap();
+        let media_dir = folder.join("media");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let renamed = media_dir.join("100%wet.wav");
+        std::fs::rename(&media, &renamed).unwrap();
+        session.sources[0].path = "media/100%wet.wav".into();
+        let document = folder.join("percent.otio");
+        let mut timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        timeline["tracks"]["markers"] = serde_json::from_str(OFFICIAL_STACK_MARKERS).unwrap();
+
+        for reference in ["media/100%wet.wav", "media/100%25wet.wav"] {
+            let mut variant = timeline.clone();
+            for track in variant["tracks"]["children"].as_array_mut().unwrap() {
+                for item in track["children"].as_array_mut().unwrap() {
+                    if item["OTIO_SCHEMA"] == "Clip.1" {
+                        item["media_reference"]["target_url"] = json!(reference);
+                    }
+                }
+            }
+            std::fs::write(&document, serde_json::to_vec(&variant).unwrap()).unwrap();
+            let mut engine = Engine::default();
+            let before = engine.session().clone();
+            let report = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+            assert_eq!(report["audio_tracks"], 2);
+            assert_eq!(report["audio_clips"], 2);
+            assert_eq!(report["media_sources"], 1);
+            assert_eq!(engine.session().markers.len(), 2);
+            assert_eq!((engine.session().markers[1].start, engine.session().markers[1].end), (1602, 3203));
+            let percussion = engine.session().tracks.iter().find(|track| track.name == "Percussion").unwrap();
+            let rendered = soundcraft_mix::render_clips(engine.session(), percussion.id, soundcraft_time::Range::new(48_000, 48_001));
+            assert!((rendered[0][0] - 0.125).abs() < 0.0001, "literal % media reference changed the signal");
+            assert!(engine.undo());
+            assert_eq!(*engine.session(), before);
+            assert!(engine.redo());
+            assert_eq!(engine.session().markers.len(), 2);
+        }
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
