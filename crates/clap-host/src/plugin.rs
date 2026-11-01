@@ -133,6 +133,20 @@ fn push_sorted(queue: &mut Vec<Event>, e: Event, prioritize_release: bool) -> bo
     true
 }
 
+/// Accept a host parameter change only when it can reach the plugin. A saturated event queue
+/// must not make the cached session value diverge from the plugin's actual parameter.
+fn queue_param_update(queue: &mut Vec<Event>, values: &mut [f32], index: usize, id: u32, value: f32) -> bool {
+    let Some(current) = values.get_mut(index) else { return false };
+    // An existing change can always be coalesced, even when the queue is full.
+    if let Some(Event::Param { value: pending, .. }) = queue.iter_mut().find(|e| matches!(e, Event::Param { id: queued, .. } if *queued == id)) {
+        *pending = f64::from(value);
+    } else if !push_sorted(queue, Event::Param { time: 0, id, value: f64::from(value) }, false) {
+        return false;
+    }
+    *current = value;
+    true
+}
+
 fn pick_main(ports: &[crate::ffi::PortInfo]) -> Option<usize> {
     ports.iter().position(|p| p.main && p.channels > 0).or_else(|| ports.iter().position(|p| p.channels > 0))
 }
@@ -201,17 +215,7 @@ impl Plugin for ClapPlugin {
     fn set_param(&mut self, id: &str, value: f32) -> bool {
         let Some(i) = self.info.params.iter().position(|p| p.id == id) else { return false };
         let (Some(pi), Some(&cid)) = (self.info.params.get(i), self.ids.get(i)) else { return false };
-        let v = pi.clamp(value);
-        if let Some(slot) = self.values.get_mut(i) {
-            *slot = v;
-        }
-        // Coalesce with a pending change of the same parameter.
-        if let Some(Event::Param { value, .. }) = self.queue.iter_mut().find(|e| matches!(e, Event::Param { id, .. } if *id == cid)) {
-            *value = f64::from(v);
-        } else {
-            self.push(Event::Param { time: 0, id: cid, value: f64::from(v) });
-        }
-        true
+        queue_param_update(&mut self.queue, &mut self.values, i, cid, pi.clamp(value))
     }
 
     fn param(&self, id: &str) -> Option<f32> {
@@ -415,6 +419,27 @@ impl PluginEditor for ClapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturated_queue_rejects_new_param_without_diverging_and_coalesces_pending_param() {
+        let mut queue = Vec::with_capacity(2);
+        let mut values = [1.0f32, 0.25];
+        assert!(push_sorted(&mut queue, Event::Midi { time: 0, data: [0xB0, 7, 64] }, false));
+        assert!(push_sorted(&mut queue, Event::NoteOn { time: 1, key: 60, velocity: 0.5 }, false));
+        assert!(!queue_param_update(&mut queue, &mut values, 0, 7, 2.0), "full queue cannot deliver a new parameter event");
+        assert_eq!(values, [1.0, 0.25], "failed update must leave cached values unchanged");
+        assert_eq!(queue.len(), queue.capacity());
+
+        queue.remove(0);
+        assert!(queue_param_update(&mut queue, &mut values, 0, 7, 1.5), "retry works after capacity is freed");
+        assert_eq!(values, [1.5, 0.25]);
+        assert_eq!(queue.len(), queue.capacity());
+        assert!(queue_param_update(&mut queue, &mut values, 0, 7, 0.5), "coalescing a queued parameter needs no extra slot");
+        assert!(!queue_param_update(&mut queue, &mut values, 1, 3, 1.0), "an unrelated new parameter still cannot fit");
+        assert_eq!(values, [0.5, 0.25]);
+        assert_eq!(queue.iter().filter(|e| matches!(e, Event::Param { id: 7, value, .. } if *value == 0.5)).count(), 1);
+        assert_eq!(queue.len(), queue.capacity(), "updates never grow the real-time queue");
+    }
 
     #[test]
     fn queued_note_off_evicts_an_on_without_allocating_or_reordering() {
