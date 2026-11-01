@@ -752,7 +752,10 @@ impl SoundApp {
     /// autosave that plan with the session.
     fn plan_recording(&mut self, takes: Vec<soundcraft_engine::io::Take>, pass: Option<Samples>) {
         let rate = self.recorder.as_ref().map_or(0, |r| r.sample_rate);
-        self.take_plan = Some(soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, takes });
+        self.take_plan = Some(
+            soundcraft_engine::io::Recording { start: self.record_start, pass, punch: self.punch, rate, offset_samples: None, takes }
+                .with_session_offset(self.engine.session()),
+        );
         if let Some(root) = self.autosave_dir.clone() {
             self.queue_autosave(root);
         }
@@ -1145,6 +1148,7 @@ impl SoundApp {
             pass: None,
             punch: self.punch,
             rate: 0,
+            offset_samples: None,
             takes: Vec::new(),
         });
         self.punch = None;
