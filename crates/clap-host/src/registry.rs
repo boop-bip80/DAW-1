@@ -148,10 +148,27 @@ fn param_info(inst: &Instance, p: &RawParam) -> Option<ParamInfo> {
     Some(ParamInfo { id: leak(p.id.to_string()), name: leak(name), min, max, default, unit, taper: Taper::Linear, choices })
 }
 
+/// Preserves one unambiguous public parameter per CLAP id, in declaration order.
+/// A malformed/unsupported first entry must not hide a later valid one. Check before
+/// converting so duplicate choices cannot trigger repeated plugin calls or leaked labels.
+fn unique_exposed_params<T>(raw: &[RawParam], mut convert: impl FnMut(&RawParam) -> Option<T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    raw.iter()
+        .filter(|p| p.flags & (CLAP_PARAM_IS_HIDDEN | CLAP_PARAM_IS_READONLY) == 0)
+        .filter_map(|p| {
+            if seen.contains(&p.id) {
+                return None;
+            }
+            let info = convert(p)?;
+            seen.insert(p.id);
+            Some(info)
+        })
+        .collect()
+}
+
 /// Builds and leaks the `PluginInfo` for one plugin type. Called at most once per id (cached).
 fn build_info(d: &ClapDescriptor, inst: &Instance) -> &'static PluginInfo {
-    let params: Vec<ParamInfo> =
-        inst.params().iter().filter(|p| p.flags & (CLAP_PARAM_IS_HIDDEN | CLAP_PARAM_IS_READONLY) == 0).filter_map(|p| param_info(inst, p)).collect();
+    let params: Vec<ParamInfo> = unique_exposed_params(&inst.params(), |p| param_info(inst, p));
     let short: String = d.name.chars().take(8).collect();
     Box::leak(Box::new(PluginInfo {
         id: leak(d.id.clone()),
@@ -224,6 +241,51 @@ mod tests {
 
     fn raw(min: f64, max: f64, default: f64) -> RawParam {
         RawParam { id: 7, name: "range".into(), module: String::new(), flags: 0, min, max, default }
+    }
+
+    fn named(id: u32, name: &str, min: f64, max: f64, flags: u32) -> RawParam {
+        RawParam { id, name: name.into(), module: String::new(), flags, min, max, default: min }
+    }
+
+    #[test]
+    fn duplicate_ids_expose_first_valid_entry_without_shifting_other_parameters() {
+        let raw = [
+            named(42, "first", 0.0, 1.0, 0),
+            named(42, "duplicate", 0.0, 1.0, 0),
+            named(7, "unrepresentable", 0.0, f64::MAX, 0),
+            named(7, "valid after bad", 0.0, 1.0, 0),
+            named(9, "hidden", 0.0, 1.0, CLAP_PARAM_IS_HIDDEN),
+            named(9, "valid after hidden", 0.0, 1.0, 0),
+            named(11, "read only", 0.0, 1.0, CLAP_PARAM_IS_READONLY),
+            named(11, "valid after read only", 0.0, 1.0, 0),
+            named(3, "independent", 0.0, 1.0, 0),
+        ];
+        let mut converted = Vec::new();
+        let exposed = unique_exposed_params(&raw, |p| {
+            converted.push(p.name.clone());
+            finite_f32_bounds(p).map(|_| (p.id, p.name.clone()))
+        });
+        assert_eq!(
+            exposed,
+            vec![
+                (42, "first".to_string()),
+                (7, "valid after bad".to_string()),
+                (9, "valid after hidden".to_string()),
+                (11, "valid after read only".to_string()),
+                (3, "independent".to_string()),
+            ]
+        );
+        assert_eq!(
+            converted.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["first", "unrepresentable", "valid after bad", "valid after hidden", "valid after read only", "independent"],
+            "invalid and hidden metadata may not reserve ids; already valid duplicate ids must not be converted twice"
+        );
+    }
+
+    #[test]
+    fn unique_parameter_ids_preserve_their_original_order() {
+        let raw = [named(8, "b", 0.0, 1.0, 0), named(1, "a", 0.0, 1.0, 0), named(4, "c", 0.0, 1.0, 0)];
+        assert_eq!(unique_exposed_params(&raw, |p| Some(p.id)), vec![8, 1, 4]);
     }
 
     #[test]
