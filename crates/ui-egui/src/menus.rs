@@ -87,6 +87,8 @@ pub fn ui_aliases() -> Vec<(&'static str, &'static str)> {
     v.push((OTIOZ_IMPORT_MENU, "file.import_otioz"));
     v.push((OTIO_EXPORT_MENU, "file.export_otio"));
     v.push((OTIOZ_EXPORT_MENU, "file.export_otioz"));
+    v.push((PASTE_CLIP_GAIN_MENU, "edit.paste_clip_gain"));
+    v.push((PASTE_CLIP_EFFECTS_MENU, "edit.paste_clip_effects"));
     v.extend(mix_view_aliases().iter().copied());
     v.extend(AUDIOSUITE.iter().map(|(p, _)| (*p, "audiosuite.process")));
     v.extend(MENU_WINDOWS.iter().copied());
@@ -100,6 +102,10 @@ const OTIO_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Audio...";
 const OTIOZ_IMPORT_MENU: &str = "File > Import > OpenTimelineIO Bundle…";
 const OTIO_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Audio...";
 const OTIOZ_EXPORT_MENU: &str = "File > Export > OpenTimelineIO Bundle…";
+/// SoundCraft additions: clipboard operations exist in the engine, but the observed catalog has
+/// no corresponding menu leaves. Keep them next to the other Paste Special operations.
+const PASTE_CLIP_GAIN_MENU: &str = "Edit > Paste Special > Clip Gain";
+const PASTE_CLIP_EFFECTS_MENU: &str = "Edit > Paste Special > Clip Effects";
 
 /// Mix-view menu paths, allocated once. Rebuilding them on every menu draw leaked a copy per frame.
 fn mix_view_aliases() -> &'static [(&'static str, &'static str)] {
@@ -226,6 +232,8 @@ pub fn tree() -> Vec<MenuNode> {
     insert_path(&mut roots, OTIOZ_IMPORT_MENU);
     insert_path(&mut roots, OTIO_EXPORT_MENU);
     insert_path(&mut roots, OTIOZ_EXPORT_MENU);
+    insert_path(&mut roots, PASTE_CLIP_GAIN_MENU);
+    insert_path(&mut roots, PASTE_CLIP_EFFECTS_MENU);
     insert_path(&mut roots, "Window > Reset Panel Layout");
     // Not in the observed catalog either; Pro Tools lists it right under Identify Sync Point.
     if let Some(clip) = roots.iter_mut().find(|n| n.label == "Clip") {
@@ -759,6 +767,49 @@ mod tests {
         let b = second.iter().find(|(path, _)| path.contains("Mix Window Views > All")).map(|(path, _)| *path).unwrap();
         assert!(std::ptr::eq(a, b));
         assert_eq!(first.iter().filter(|(path, _)| path.contains("Mix Window Views")).count(), 14);
+    }
+
+    #[test]
+    fn paste_special_gain_and_effects_are_menu_reachable_and_clipboard_gated() {
+        let edit = tree().into_iter().find(|node| node.label == "Edit").unwrap();
+        let paste = edit.children.iter().find(|node| node.label == "Paste Special").unwrap();
+        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        for (path, command) in [(PASTE_CLIP_GAIN_MENU, "edit.paste_clip_gain"), (PASTE_CLIP_EFFECTS_MENU, "edit.paste_clip_effects")] {
+            let item = paste.children.iter().find(|node| node.path == path).unwrap();
+            assert_eq!(command_for_path(&item.path, &ui_aliases()).as_deref(), Some(command));
+            assert_eq!(item_state(&app, path, Some(command)), (false, false), "empty clipboard must disable {command}");
+        }
+    }
+
+    #[test]
+    fn paste_special_menu_invokes_real_clip_gain_and_effects_commands() {
+        let mut app = SoundApp::new(soundcraft_engine::demo::demo_engine(), None, Services::default());
+        let (track, clip, start, end) = app
+            .engine
+            .session()
+            .tracks
+            .iter()
+            .find_map(|track| track.clips().iter().find(|clip| clip.is_audio()).map(|clip| (track.id.0, clip.id.0, clip.start, clip.end())))
+            .unwrap();
+        app.engine.execute("edit.select", &json!({"tracks": [track], "clips": [clip], "start": start, "end": end})).unwrap();
+
+        app.engine.execute("clip.gain", &json!({"clip": clip, "db": -9.0})).unwrap();
+        app.engine.execute("edit.copy_clip_gain", &json!({})).unwrap();
+        assert_eq!(item_state(&app, PASTE_CLIP_GAIN_MENU, Some("edit.paste_clip_gain")), (true, false));
+        app.engine.execute("clip.gain", &json!({"clip": clip, "db": 0.0})).unwrap();
+        invoke_menu(&mut app, "edit.paste_clip_gain", PASTE_CLIP_GAIN_MENU);
+        assert_eq!(app.engine.undo_label(), Some("Paste Clip Gain"));
+        let pasted = app.engine.session().find_clip(soundcraft_model::ClipId(clip)).unwrap().1;
+        assert!((pasted.gain_db + 9.0).abs() < 1e-3, "a flat pasted gain is stored as static gain, not a redundant envelope");
+
+        let key = format!("clip_fx.{clip}.unit-test-param");
+        app.engine.session_mut().edit.values.insert(key.clone(), 0.75);
+        app.engine.execute("edit.copy_clip_effects", &json!({"clips": [clip]})).unwrap();
+        assert_eq!(item_state(&app, PASTE_CLIP_EFFECTS_MENU, Some("edit.paste_clip_effects")), (true, false));
+        app.engine.session_mut().edit.values.remove(&key);
+        invoke_menu(&mut app, "edit.paste_clip_effects", PASTE_CLIP_EFFECTS_MENU);
+        assert_eq!(app.engine.undo_label(), Some("Paste Clip Effects"));
+        assert_eq!(app.engine.session().edit.values.get(&key), Some(&0.75));
     }
 
     #[test]

@@ -11,8 +11,6 @@ use std::path::Path;
 /// Known gaps: commands with no menu, shortcut or literal reference in the UI source today.
 /// Give each one a UI path and remove it from this list; don't add to it.
 const KNOWN_UNREACHED: &[&str] = &[
-    "edit.paste_clip_effects",
-    "edit.paste_clip_gain",
     "event.midi_note",
     "file.bounce_stems",
     "markers.next",
