@@ -88,6 +88,7 @@ pub enum ReceiptError {
     CleanupInProgress,
     StaleTicket,
     StaleAttempt,
+    InvalidObservation,
     AlreadyDelivered,
     RetiredUnverified,
     AttemptExhausted,
@@ -225,8 +226,9 @@ impl CleanupReceiptBook {
 
     /// A skipped or retired instance invalidates any outstanding queue attempt.
     pub fn note_unavailable(&mut self, ticket: CleanupTicket, readiness: InstanceReadiness) -> Result<(), ReceiptError> {
+        let _ = self.entry(ticket)?;
         if readiness == InstanceReadiness::Active {
-            return Ok(());
+            return Err(ReceiptError::InvalidObservation);
         }
         let _ = self.observe_queue(ticket, readiness, QueueObservation::Unsupported)?;
         Ok(())
@@ -351,6 +353,7 @@ mod tests {
         let ticket = book.ticket(a).unwrap();
         let first = queued(&mut book, ticket);
         book.note_unavailable(ticket, InstanceReadiness::Parked).unwrap();
+        assert_eq!(book.note_unavailable(ticket, InstanceReadiness::Active), Err(ReceiptError::InvalidObservation));
         assert_eq!(book.observe_process(first, 64, ProcessObservation::AcceptedAllReleases), Err(ReceiptError::StaleAttempt));
         let second = queued(&mut book, ticket);
         assert_ne!(first, second);
