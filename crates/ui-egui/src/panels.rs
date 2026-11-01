@@ -925,7 +925,8 @@ mod tests {
 
     #[test]
     fn roll_presets_execute_real_commands_only_when_values_change() {
-        let app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.session_mut().edit.pre_roll = 0; // make selecting the 2 s preset a genuine edit, regardless of engine defaults
         let mut h = transport_harness(app);
         h.run_steps(3);
         let undo_before = h.state().engine.undo_history().len();
