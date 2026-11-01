@@ -1337,6 +1337,7 @@ mod tests {
     struct StemTestFolder(std::path::PathBuf);
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::expect_used)]
     impl StemTestFolder {
         fn new() -> Self {
             use std::sync::atomic::{AtomicU64, Ordering};
@@ -1414,6 +1415,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    #[allow(clippy::expect_used)]
     fn stem_dialog_disables_export_with_no_signal_tracks_and_rejects_float_flac() {
         let mut app = SoundApp::new(Engine::default(), None, crate::Services::default());
         assert!(app.dialogs.open_for_command(&app.engine, "file.bounce_stems"));

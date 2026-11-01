@@ -930,6 +930,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    #[allow(clippy::expect_used)]
     fn file_bounce_stems_menu_opens_incremental_options_without_export_or_document_mutation() {
         let file = tree().into_iter().find(|node| node.label == "File").unwrap();
         let stems_at = file.children.iter().position(|node| node.path == STEMS_MENU).expect("native File > Bounce Stems leaf");

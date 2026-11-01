@@ -185,6 +185,7 @@ fn show_stems(app: &mut SoundApp, ctx: &egui::Context) {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use serde_json::json;
