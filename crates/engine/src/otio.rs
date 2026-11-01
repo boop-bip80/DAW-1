@@ -8,8 +8,8 @@
 use crate::{Engine, EngineError, Result};
 use serde_json::{Value, json};
 use soundcraft_audio_io::{AudioBuffer, FileFormat};
-use soundcraft_model::{ChannelFormat, Clip, ClipContent, Session, Source, TrackKind};
-use std::collections::BTreeMap;
+use soundcraft_model::{ChannelFormat, Clip, ClipContent, MarkerKind, Session, Source, TrackKind};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 // OTIO RationalTime uses floating-point values. Integers through 2^53 are exact; larger sample
@@ -23,6 +23,86 @@ const MAX_MEDIA_BYTES: usize = 256 * 1024 * 1024;
 const MAX_TOTAL_MEDIA_BYTES: usize = 512 * 1024 * 1024;
 const MAX_TOTAL_SAMPLES: usize = 64 * 1024 * 1024;
 const MAX_SOURCES: usize = 1_024;
+const MAX_MARKERS: usize = 1_024;
+const MAX_MARKER_NAME_BYTES: usize = 256;
+const MAX_MARKER_NAME_CHARS: usize = 128;
+const MAX_MARKER_COMMENT_BYTES: usize = 1_024;
+const MAX_MARKER_COMMENT_CHARS: usize = 512;
+
+// OTIO Marker.2 has named palette colors rather than RGB. The names below are the official
+// 0.18.1 MarkerColor enum; the RGB values are a deterministic display palette for foreign
+// files, not colors specified by OTIO itself. SoundCraft's exact RGB is round-tripped in
+// metadata.soundcraft.rgb while other OTIO readers can still show a standard palette color.
+const MARKER_COLORS: [(&str, [u8; 3]); 11] = [
+    ("BLACK", [0, 0, 0]),
+    ("BLUE", [0, 0, 255]),
+    ("CYAN", [0, 255, 255]),
+    ("GREEN", [0, 255, 0]),
+    ("MAGENTA", [255, 0, 255]),
+    ("ORANGE", [255, 165, 0]),
+    ("PINK", [255, 192, 203]),
+    ("PURPLE", [128, 0, 128]),
+    ("RED", [255, 0, 0]),
+    ("WHITE", [255, 255, 255]),
+    ("YELLOW", [255, 255, 0]),
+];
+
+fn otio_marker_color(rgb: Option<[u8; 3]>) -> &'static str {
+    let Some(rgb) = rgb else { return "RED" };
+    MARKER_COLORS
+        .iter()
+        .min_by_key(|(_, candidate)| {
+            (0..3).map(|index| i32::from(rgb[index]) - i32::from(candidate[index])).map(|distance| (distance * distance) as u32).sum::<u32>()
+        })
+        .map_or("RED", |(name, _)| *name)
+}
+
+fn checked_marker_text<'a>(text: &'a str, label: &str, max_bytes: usize, max_chars: usize) -> Result<&'a str> {
+    if text.len() > max_bytes || text.chars().count() > max_chars || text.contains('\0') {
+        return Err(invalid_import(format!("marker {label} is too long or contains NUL")));
+    }
+    Ok(text)
+}
+
+fn export_marker_text(text: &str, label: &str, max_bytes: usize, max_chars: usize) -> Result<()> {
+    checked_marker_text(text, label, max_bytes, max_chars).map_err(|_| unsupported(format!("marker {label} is too long or contains NUL")))?;
+    Ok(())
+}
+
+fn export_timeline_markers(session: &Session, rate: u32) -> Result<Vec<Value>> {
+    if session.markers.len() > MAX_MARKERS {
+        return Err(unsupported("more than 1024 timeline markers"));
+    }
+    let mut sorted = session.markers.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|marker| (marker.start, marker.end, marker.number, marker.id.0));
+    let mut seen = BTreeSet::new();
+    let mut markers = Vec::with_capacity(sorted.len());
+    for marker in sorted {
+        if marker.track.is_some() || marker.ruler != 1 || marker.kind == MarkerKind::None {
+            return Err(unsupported(format!("memory location `{}` is not a supported global timeline marker", marker.name)));
+        }
+        if marker.start < 0
+            || marker.end < marker.start
+            || (marker.kind == MarkerKind::Marker && marker.end != marker.start)
+            || (marker.kind == MarkerKind::Selection && marker.end == marker.start)
+        {
+            return Err(unsupported(format!("memory location `{}` has an invalid point/range", marker.name)));
+        }
+        if !seen.insert((&marker.name, marker.start, marker.end)) {
+            return Err(unsupported("duplicate timeline marker name and range"));
+        }
+        export_marker_text(&marker.name, "name", MAX_MARKER_NAME_BYTES, MAX_MARKER_NAME_CHARS)?;
+        export_marker_text(&marker.comments, "comment", MAX_MARKER_COMMENT_BYTES, MAX_MARKER_COMMENT_CHARS)?;
+        rational_time(marker.end, rate)?;
+        let length = marker.end - marker.start;
+        markers.push(json!({
+            "OTIO_SCHEMA": "Marker.2", "name": marker.name, "comment": marker.comments,
+            "color": otio_marker_color(marker.color), "marked_range": range(marker.start, length, rate)?,
+            "metadata": {"soundcraft": {"rgb": marker.color}},
+        }));
+    }
+    Ok(markers)
+}
 
 /// Completed JSON and a truthful summary of what it contains.
 pub struct Export {
@@ -198,7 +278,7 @@ pub fn export_audio(session: &Session) -> Result<Export> {
         "metadata": {"soundcraft": {"sample_rate": rate, "audio_only": true}},
         "tracks": {
             "OTIO_SCHEMA": "Stack.1", "name": "tracks", "children": tracks,
-            "effects": [], "markers": [], "source_range": null, "metadata": {},
+            "effects": [], "markers": export_timeline_markers(session, rate)?, "source_range": null, "metadata": {},
         },
     });
     let json = serde_json::to_vec_pretty(&timeline).map_err(|e| EngineError::Io(format!("OTIO serialization failed: {e}")))?;
@@ -234,6 +314,15 @@ struct ImportedTrack {
     inactive: bool,
     clips: Vec<ImportedClip>,
     channels: usize,
+}
+
+struct ImportedMarker {
+    name: String,
+    comment: String,
+    color: Option<[u8; 3]>,
+    kind: MarkerKind,
+    start: i64,
+    end: i64,
 }
 
 fn invalid_import(message: impl Into<String>) -> EngineError {
@@ -289,6 +378,87 @@ fn sample_range(value: &Value, rate: u32, allow_negative_start: bool) -> Result<
     let length = time_samples(value.get("duration").ok_or_else(|| invalid_import("missing range duration"))?, rate, false)?;
     start.checked_add(length).ok_or_else(|| invalid_import("time range overflows"))?;
     Ok((start, length))
+}
+
+/// Timeline-wide OTIO Marker.2 objects live on Timeline.tracks (a Stack.1), not on
+/// Timeline.1 itself. A range's *absolute end* must be rounded, not its duration separately:
+/// at 30000/1001 fps, frame 1..2 maps to samples 1602..3203 (1601 samples).
+fn import_timeline_markers(value: Option<&Value>, rate: u32) -> Result<Vec<ImportedMarker>> {
+    let Some(value) = value else { return Ok(Vec::new()) };
+    let entries = value.as_array().ok_or_else(|| invalid_import("stack markers must be an array"))?;
+    if entries.len() > MAX_MARKERS {
+        return Err(invalid_import("more than 1024 timeline markers"));
+    }
+    let mut markers = Vec::with_capacity(entries.len());
+    let mut seen = BTreeSet::new();
+    for value in entries {
+        expect_schema(value, "Marker.2")?;
+        let name = match value.get("name") {
+            None => "",
+            Some(Value::String(name)) => name.as_str(),
+            _ => return Err(invalid_import("marker name must be a string")),
+        };
+        let name = checked_marker_text(name, "name", MAX_MARKER_NAME_BYTES, MAX_MARKER_NAME_CHARS)?;
+        let comment = match value.get("comment") {
+            None => "",
+            Some(Value::String(comment)) => comment.as_str(),
+            _ => return Err(invalid_import("marker comment must be a string")),
+        };
+        let comment = checked_marker_text(comment, "comment", MAX_MARKER_COMMENT_BYTES, MAX_MARKER_COMMENT_CHARS)?;
+        let color_name = match value.get("color") {
+            None => "RED", // Marker.2's official default.
+            Some(Value::String(name)) => name.as_str(),
+            _ => return Err(invalid_import("marker color must be an OTIO palette name")),
+        };
+        let palette = MARKER_COLORS.iter().find(|(name, _)| *name == color_name).ok_or_else(|| invalid_import("unrecognized OTIO marker color"))?.1;
+        let marked = expect_schema(value.get("marked_range").ok_or_else(|| invalid_import("marker has no marked_range"))?, "TimeRange.1")?;
+        let start_exact = time_samples_unrounded(marked.get("start_time").ok_or_else(|| invalid_import("marker has no start_time"))?, rate, false)?;
+        let duration_exact = time_samples_unrounded(marked.get("duration").ok_or_else(|| invalid_import("marker has no duration"))?, rate, false)?;
+        let end_exact = start_exact + duration_exact;
+        if !end_exact.is_finite() || end_exact > MAX_EXACT_SAMPLE as f64 {
+            return Err(invalid_import("marker end is outside the supported sample range"));
+        }
+        let start = start_exact.round() as i64;
+        let end = end_exact.round() as i64;
+        if end < start || (duration_exact > 0.0 && start == end) {
+            return Err(invalid_import("marker range rounds to zero or negative samples"));
+        }
+        if !seen.insert((name.to_owned(), start, end)) {
+            return Err(invalid_import("duplicate timeline marker name and range"));
+        }
+        let color = match value.get("metadata").and_then(|metadata| metadata.get("soundcraft")) {
+            None => Some(palette),
+            Some(own) => {
+                if !own.is_object() {
+                    return Err(invalid_import("SoundCraft marker metadata must be an object"));
+                }
+                match own.get("rgb") {
+                    None => Some(palette),
+                    Some(Value::Null) => None,
+                    Some(Value::Array(values)) if values.len() == 3 => {
+                        let mut rgb = [0_u8; 3];
+                        for (channel, value) in rgb.iter_mut().zip(values) {
+                            *channel = value
+                                .as_u64()
+                                .and_then(|value| u8::try_from(value).ok())
+                                .ok_or_else(|| invalid_import("SoundCraft marker RGB must contain three integers from 0 to 255"))?;
+                        }
+                        Some(rgb)
+                    }
+                    _ => return Err(invalid_import("SoundCraft marker RGB must be null or three integer channels")),
+                }
+            }
+        };
+        markers.push(ImportedMarker {
+            name: name.to_owned(),
+            comment: comment.to_owned(),
+            color,
+            kind: if end == start { MarkerKind::Marker } else { MarkerKind::Selection },
+            start,
+            end,
+        });
+    }
+    Ok(markers)
 }
 
 /// Sequential OTIO items share one continuous record timeline. Rounding each fractional
@@ -446,7 +616,9 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
         return Err(invalid_import("global timeline offsets are not supported"));
     }
     let stack = expect_schema(timeline.get("tracks").ok_or_else(|| invalid_import("timeline has no tracks"))?, "Stack.1")?;
-    plain_composable(stack)?;
+    if stack.get("effects").is_some_and(|v| v.as_array().is_none_or(|items| !items.is_empty())) {
+        return Err(invalid_import("stack effects are not supported"));
+    }
     if stack.get("source_range").is_some_and(|v| !v.is_null()) {
         return Err(invalid_import("stack trims are not supported"));
     }
@@ -457,6 +629,12 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
     let rate = engine.session().sample_rate.hz();
     if rate == 0 {
         return Err(invalid_import("session sample rate is zero"));
+    }
+    let imported_markers = import_timeline_markers(stack.get("markers"), rate)?;
+    if engine.session().markers.len().checked_add(imported_markers.len()).is_none_or(|count| count > MAX_MARKERS)
+        || engine.session().markers.iter().any(|marker| marker.number == u32::MAX)
+    {
+        return Err(invalid_import("session cannot accept more timeline markers"));
     }
 
     let mut sources = Vec::<ImportedSource>::new();
@@ -649,6 +827,14 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
             session.track_mut(id).and_then(|t| t.playlist_mut()).ok_or_else(|| invalid_import("new playlist missing"))?.clips.push(native);
         }
     }
+    for marker in imported_markers {
+        let id = session.add_marker(&marker.name, marker.kind, marker.start, marker.end);
+        // Session::add_marker sorts by position. A pre-existing later marker may remain
+        // last, so always resolve the newly allocated id before applying its metadata.
+        let native = session.markers.iter_mut().find(|native| native.id == id).ok_or_else(|| invalid_import("new marker missing"))?;
+        native.color = marker.color;
+        native.comments = marker.comment;
+    }
     Ok(Import { tracks: track_count, clips: clip_count, sources: source_count })
 }
 
@@ -676,6 +862,17 @@ mod tests {
     // The first Clip.2 starts at frame 2 and its media begins at frame 1. Their exact
     // *difference* is one video frame (1601.6 samples at 48k), not 3203-1602=1601 samples.
     const OFFICIAL_FRACTIONAL_ORIGIN_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"29.97 source-relative origin","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Fractional lead","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Gap.1","metadata":{},"name":"","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":0.0}},"effects":[],"markers":[],"enabled":true,"color":null},{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"One-frame offset","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":2.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":5.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Fractional back","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Two-frame offset","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":3.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":5.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
+
+    // Both Marker.2 objects below were serialized independently by OpenTimelineIO 0.18.1's
+    // otio_json writer, including its precise 30000/1001-fps RationalTime values and the
+    // arbitrary third-party metadata. The source timeline uses a real Stack.1.markers list.
+    const OFFICIAL_STACK_MARKERS: &str = r#"[{"OTIO_SCHEMA":"Marker.2","metadata":{"foreign_editor":{"flag":true}},"name":"Beat","color":"CYAN","marked_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":0.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"comment":"point"},{"OTIO_SCHEMA":"Marker.2","metadata":{"soundcraft":{"rgb":[12,34,56]}},"name":"Passage","color":"PURPLE","marked_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"comment":"one frame"}]"#;
+
+    fn official_marked_timeline() -> Value {
+        let mut timeline: Value = serde_json::from_str(OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO).unwrap();
+        timeline["tracks"]["markers"] = serde_json::from_str(OFFICIAL_STACK_MARKERS).unwrap();
+        timeline
+    }
 
     fn pack_negative_origin_bundle(timeline: &Value, wav: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
@@ -1002,6 +1199,204 @@ mod tests {
         assert!(engine.redo());
         assert_eq!(engine.session().sources.len(), 1);
         std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn official_stack_markers_keep_absolute_2997_ranges_colors_stereo_and_undo() {
+        let folder =
+            std::env::temp_dir().join(format!("soundcraft-otio-markers-{}-{}", std::process::id(), NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("markers.otioz");
+        let document = folder.join("roundtrip.otio");
+        let left = (0..96_000).map(|frame| frame as f32 / 200_000.0).collect::<Vec<_>>();
+        let right = (0..96_000).map(|frame| -0.7 + frame as f32 / 300_000.0).collect::<Vec<_>>();
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        std::fs::write(&archive, pack_negative_origin_bundle(&official_marked_timeline(), &wav)).unwrap();
+
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let report = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!((report["audio_tracks"].as_u64(), report["audio_clips"].as_u64()), (Some(2), Some(2)));
+        let markers = engine.session().markers.clone();
+        assert_eq!(markers.len(), 2);
+        assert_eq!((&*markers[0].name, markers[0].kind, markers[0].start, markers[0].end), ("Beat", MarkerKind::Marker, 1602, 1602));
+        assert_eq!(markers[0].color, Some([0, 255, 255]));
+        assert_eq!(markers[0].comments, "point");
+        // Frame 1..2 is [1602,3203] samples, i.e. length 1601, not 1602.
+        assert_eq!((&*markers[1].name, markers[1].kind, markers[1].start, markers[1].end), ("Passage", MarkerKind::Selection, 1602, 3203));
+        assert_eq!(markers[1].color, Some([12, 34, 56]));
+        assert_eq!(markers[1].comments, "one frame");
+        for (name, position, source_frame) in [("Negative lead", 1200, 24_000), ("Negative back", 0, 2_000)] {
+            let track = engine.session().tracks.iter().find(|track| track.name == name).unwrap();
+            let rendered = soundcraft_mix::render_clips(engine.session(), track.id, soundcraft_time::Range::new(position, position + 1));
+            assert_eq!(rendered.len(), 2);
+            assert!((rendered[0][0] - left[source_frame]).abs() < 0.0001);
+            assert!((rendered[1][0] - right[source_frame]).abs() < 0.0001);
+        }
+
+        // Bundle-imported sources are initially in-memory and intentionally marked
+        // unsaved. Persist the fixture before exporting absolute references.
+        let saved = project.join("project.scraft");
+        crate::io::save_session(&mut engine, saved.to_str().unwrap()).unwrap();
+        let exported = export_audio(engine.session()).unwrap();
+        let exported_json: Value = serde_json::from_slice(&exported.json).unwrap();
+        assert_eq!(exported_json["tracks"]["markers"][0]["OTIO_SCHEMA"], "Marker.2");
+        assert_eq!(exported_json["tracks"]["markers"][0]["color"], "CYAN");
+        assert_eq!(exported_json["tracks"]["markers"][1]["metadata"]["soundcraft"]["rgb"], json!([12, 34, 56]));
+        std::fs::write(&document, exported.json).unwrap();
+        let mut reimported = Engine::default();
+        reimported.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        for (original, again) in markers.iter().zip(&reimported.session().markers) {
+            assert_eq!(
+                (&original.name, original.kind, original.start, original.end, original.color, &original.comments),
+                (&again.name, again.kind, again.start, again.end, again.color, &again.comments),
+            );
+        }
+        assert_eq!(reimported.session().tracks.len(), 2);
+
+        assert!(engine.can_undo());
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().markers.len(), 2);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn markers_reject_malformed_duplicate_overlimit_and_attached_items_atomically() {
+        let folder = std::env::temp_dir().join(format!(
+            "soundcraft-otio-marker-errors-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("invalid-markers.otioz");
+        let wav = soundcraft_audio_io::encode(
+            &AudioBuffer { sample_rate: 48_000, channels: vec![vec![0.1; 96_000], vec![-0.1; 96_000]] },
+            &EncodeOptions::default(),
+        )
+        .unwrap();
+        let valid = official_marked_timeline();
+        let mut variants = Vec::<(&str, Value)>::new();
+
+        let mut duplicate = valid.clone();
+        let repeated = duplicate["tracks"]["markers"][0].clone();
+        duplicate["tracks"]["markers"].as_array_mut().unwrap().push(repeated);
+        variants.push(("duplicate", duplicate));
+
+        let mut negative = valid.clone();
+        negative["tracks"]["markers"][0]["marked_range"]["start_time"]["value"] = json!(-1);
+        variants.push(("negative", negative));
+
+        let mut overflowing = valid.clone();
+        overflowing["tracks"]["markers"][1]["marked_range"]["duration"]["value"] = json!(MAX_EXACT_SAMPLE);
+        variants.push(("overflow", overflowing));
+
+        let mut tiny = valid.clone();
+        tiny["tracks"]["markers"][1]["marked_range"]["duration"] = json!({"OTIO_SCHEMA": "RationalTime.1", "rate": 384000.0, "value": 1.0});
+        variants.push(("subsample range", tiny));
+
+        let mut bad_color = valid.clone();
+        bad_color["tracks"]["markers"][0]["color"] = json!("NOT_AN_OTIO_COLOR");
+        variants.push(("unknown color", bad_color));
+
+        let mut bad_rgb = valid.clone();
+        bad_rgb["tracks"]["markers"][1]["metadata"]["soundcraft"]["rgb"] = json!([12, 256, 56]);
+        variants.push(("invalid RGB", bad_rgb));
+
+        let mut huge_name = valid.clone();
+        huge_name["tracks"]["markers"][0]["name"] = json!("🟦".repeat(MAX_MARKER_NAME_CHARS + 1));
+        variants.push(("oversize name", huge_name));
+
+        let mut huge_comment = valid.clone();
+        huge_comment["tracks"]["markers"][0]["comment"] = json!("x".repeat(MAX_MARKER_COMMENT_BYTES + 1));
+        variants.push(("oversize comment", huge_comment));
+
+        let mut too_many = valid.clone();
+        let prototype = too_many["tracks"]["markers"][0].clone();
+        too_many["tracks"]["markers"] = Value::Array(
+            (0..=MAX_MARKERS)
+                .map(|index| {
+                    let mut marker = prototype.clone();
+                    marker["name"] = json!(format!("Cue {index}"));
+                    marker
+                })
+                .collect(),
+        );
+        variants.push(("too many", too_many));
+
+        let mut track_attached = valid.clone();
+        track_attached["tracks"]["children"][0]["markers"] = json!([prototype.clone()]);
+        variants.push(("track-attached", track_attached));
+
+        let mut clip_attached = valid.clone();
+        clip_attached["tracks"]["children"][0]["children"][1]["markers"] = json!([prototype]);
+        variants.push(("clip-attached", clip_attached));
+
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        for (case, invalid) in variants {
+            std::fs::write(&archive, pack_negative_origin_bundle(&invalid, &wav)).unwrap();
+            let error = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains("OpenTimelineIO"), "unexpected error for {case}: {error}");
+            assert_eq!(*engine.session(), before, "{case} mutated the session");
+            assert!(!engine.can_undo(), "{case} added an undo step");
+            assert!(!project.join("Audio Files").exists(), "{case} leaked privately extracted media");
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn marker_export_fails_closed_on_unsupported_or_duplicate_native_locations() {
+        let (mut session, media) = fixture();
+        let first = session.add_marker("Verse", MarkerKind::Marker, 100, 100);
+        session.markers.last_mut().unwrap().color = None;
+        let timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        assert_eq!(timeline["tracks"]["markers"][0]["metadata"]["soundcraft"]["rgb"], Value::Null);
+        assert_eq!(timeline["tracks"]["markers"][0]["color"], "RED");
+        session.markers.last_mut().unwrap().kind = MarkerKind::None;
+        assert!(matches!(export_audio(&session), Err(EngineError::Unsupported(message)) if message.contains("global timeline marker")));
+        let marker = session.markers.iter_mut().find(|marker| marker.id == first).unwrap();
+        marker.kind = MarkerKind::Marker;
+        marker.track = Some(session.tracks[0].id);
+        assert!(matches!(export_audio(&session), Err(EngineError::Unsupported(message)) if message.contains("global timeline marker")));
+        session.markers.last_mut().unwrap().track = None;
+        session.add_marker("Verse", MarkerKind::Marker, 100, 100);
+        assert!(matches!(export_audio(&session), Err(EngineError::Unsupported(message)) if message.contains("duplicate timeline marker")));
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn incoming_marker_metadata_is_attached_by_id_after_native_time_sort() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut timeline: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        timeline["tracks"]["markers"] = serde_json::from_str(OFFICIAL_STACK_MARKERS).unwrap();
+        std::fs::write(&document, serde_json::to_vec(&timeline).unwrap()).unwrap();
+
+        let mut engine = Engine::default();
+        let id = engine.session_mut().add_marker("Later", MarkerKind::Marker, 10_000, 10_000);
+        let later = engine.session_mut().markers.iter_mut().find(|marker| marker.id == id).unwrap();
+        later.comments = "keep existing comment".into();
+        later.color = Some([90, 80, 70]);
+        let before = engine.session().clone();
+        engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+
+        let imported = &engine.session().markers;
+        assert_eq!(imported.len(), 3);
+        assert_eq!((&*imported[0].name, imported[0].comments.as_str(), imported[0].color), ("Beat", "point", Some([0, 255, 255])));
+        assert_eq!((&*imported[1].name, imported[1].comments.as_str(), imported[1].color), ("Passage", "one frame", Some([12, 34, 56])));
+        assert_eq!((&*imported[2].name, imported[2].comments.as_str(), imported[2].color), ("Later", "keep existing comment", Some([90, 80, 70])));
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
     }
 
     #[test]
