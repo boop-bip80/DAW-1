@@ -849,11 +849,7 @@ fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str)
         .iter()
         .zip(names)
         .map(|((id, _), name)| {
-            let suffix = if counts.get(&name.to_lowercase()).copied().unwrap_or_default() > 1 {
-                format!("~{:016x}", id.0)
-            } else {
-                String::new()
-            };
+            let suffix = if counts.get(&name.to_lowercase()).copied().unwrap_or_default() > 1 { format!("~{:016x}", id.0) } else { String::new() };
             let filename = format!("{prefix} - {name}{suffix}.{ext}");
             // Common cross-platform component ceilings: UTF-8 bytes on Unix
             // and UTF-16 code units on Windows. A too-long name is an error
@@ -865,10 +861,7 @@ fn stem_output_names(session_name: &str, stems: &[(TrackId, String)], ext: &str)
                 ));
             }
             if !seen.insert(filename.to_lowercase()) {
-                return Err(EngineError::BadParams(
-                    "file.bounce_stems".into(),
-                    "stem names collide after filename conversion".into(),
-                ));
+                return Err(EngineError::BadParams("file.bounce_stems".into(), "stem names collide after filename conversion".into()));
             }
             Ok(filename)
         })
@@ -2762,13 +2755,7 @@ mod stem_tests {
             }
             let source = add_source(&mut session, "fixture", buffer, None, FileFormat::Wav);
             let clip_id = session.new_clip_id();
-            session
-                .track_mut(track)
-                .unwrap()
-                .playlist_mut()
-                .unwrap()
-                .clips
-                .push(Clip::audio(clip_id, "fixture", source, 0, 0, FRAMES as i64));
+            session.track_mut(track).unwrap().playlist_mut().unwrap().clips.push(Clip::audio(clip_id, "fixture", source, 0, 0, FRAMES as i64));
         }
         // Noncolliding names retain the historical filename contract.
         assert_eq!(
@@ -2780,8 +2767,7 @@ mod stem_tests {
         assert_ne!(case_names[0].to_lowercase(), case_names[1].to_lowercase());
         assert!(stem_output_names("Stems", &[(first, "あ".repeat(100))], "wav").is_err());
 
-        let expected_names =
-            stem_output_names(&session.name, &[(first, "Kick/Room".into()), (second, "Kick?Room".into())], "wav").unwrap();
+        let expected_names = stem_output_names(&session.name, &[(first, "Kick/Room".into()), (second, "Kick?Room".into())], "wav").unwrap();
         assert_eq!(expected_names.len(), 2);
         assert_ne!(expected_names[0], expected_names[1]);
         assert!(expected_names[0].contains(&format!("~{:016x}", first.0)));
@@ -2791,12 +2777,7 @@ mod stem_tests {
         let root = std::env::temp_dir().join(format!("soundcraft-stem-collision-{}-{nonce}", std::process::id()));
         let dir = root.join("rendered");
         let engine = Engine::new(session);
-        let opts = EncodeOptions {
-            format: FileFormat::Wav,
-            bit_depth: soundcraft_audio_io::BitDepth::Float32,
-            dither: false,
-            bwf: None,
-        };
+        let opts = EncodeOptions { format: FileFormat::Wav, bit_depth: soundcraft_audio_io::BitDepth::Float32, dither: false, bwf: None };
         let paths = bounce_stems_with(&engine, &dir.to_string_lossy(), Range::new(0, FRAMES as i64), &opts, false).unwrap();
         assert_eq!(paths.len(), 2);
         assert_ne!(paths[0], paths[1], "colliding names overwrote a previous stem");
