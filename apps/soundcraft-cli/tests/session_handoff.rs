@@ -13,14 +13,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soundcraft-session-handoff-{}-{nonce}",
-            std::process::id()
-        ));
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("soundcraft-session-handoff-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -58,12 +52,7 @@ fn tone(path: &Path, frequency: f64) {
         let phase = std::f64::consts::TAU * frequency * i as f64 / f64::from(RATE);
         *sample = 0.18 * phase.sin() as f32;
     }
-    let options = EncodeOptions {
-        format: FileFormat::Wav,
-        bit_depth: BitDepth::Int16,
-        dither: false,
-        bwf: None,
-    };
+    let options = EncodeOptions { format: FileFormat::Wav, bit_depth: BitDepth::Int16, dither: false, bwf: None };
     std::fs::write(path, soundcraft_audio_io::encode(&audio, &options).unwrap()).unwrap();
 }
 
@@ -73,14 +62,8 @@ fn bounce(path: &Path) -> AudioBuffer {
     assert_eq!(info.sample_rate, RATE, "unexpected mix sample rate");
     assert_eq!(audio.frames(), FRAMES, "unexpected mix duration");
     assert_eq!(audio.num_channels(), 2, "expected the stereo main bus");
-    assert!(
-        audio.channels.iter().flatten().all(|sample| sample.is_finite()),
-        "mix contains non-finite samples"
-    );
-    assert!(
-        audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01),
-        "mix is unexpectedly silent"
-    );
+    assert!(audio.channels.iter().flatten().all(|sample| sample.is_finite()), "mix contains non-finite samples");
+    assert!(audio.channels.iter().flatten().any(|sample| sample.abs() > 0.01), "mix is unexpectedly silent");
     audio
 }
 
@@ -109,10 +92,7 @@ fn save_session_copy_is_portable_and_refuses_unrequested_overwrite() {
     let original_mix = tmp.path("baseline.wav");
     let copied_mix = tmp.path("handoff-mix.wav");
 
-    let import = format!(
-        "file.import_audio={}",
-        serde_json::json!({"paths": [voice.to_string_lossy(), music.to_string_lossy()]})
-    );
+    let import = format!("file.import_audio={}", serde_json::json!({"paths": [voice.to_string_lossy(), music.to_string_lossy()]}));
     let initial = cli()
         .args(["run", "--cmd", "session.new", "--cmd", &import])
         .arg("--bounce")
@@ -126,18 +106,8 @@ fn save_session_copy_is_portable_and_refuses_unrequested_overwrite() {
     assert!(project.is_file(), "working session was not saved");
     assert_eq!(audio_files(&original_dir), 2, "working session lost source audio");
 
-    let copy_command = format!(
-        "session.save_copy={}",
-        serde_json::json!({"path": copy.to_string_lossy()})
-    );
-    let copy_result = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&project)
-        .arg("--cmd")
-        .arg(&copy_command)
-        .output()
-        .unwrap();
+    let copy_command = format!("session.save_copy={}", serde_json::json!({"path": copy.to_string_lossy()}));
+    let copy_result = cli().arg("run").arg("--in").arg(&project).arg("--cmd").arg(&copy_command).output().unwrap();
     success("save project copy", &copy_result);
     assert!(copy.is_file(), "session copy was not created");
     assert_eq!(audio_files(&handoff_dir), 2, "session copy omitted or duplicated media");
@@ -145,37 +115,15 @@ fn save_session_copy_is_portable_and_refuses_unrequested_overwrite() {
     // A second Save Copy to an existing destination must refuse replacement
     // without an explicit opt-in, leaving the handed-off project untouched.
     let copy_before = std::fs::read(&copy).unwrap();
-    let replace_attempt = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&project)
-        .arg("--cmd")
-        .arg(&copy_command)
-        .output()
-        .unwrap();
-    assert!(
-        !replace_attempt.status.success(),
-        "Save Copy silently overwrote an existing project"
-    );
-    assert_eq!(
-        std::fs::read(&copy).unwrap(),
-        copy_before,
-        "failed Save Copy modified the existing session"
-    );
+    let replace_attempt = cli().arg("run").arg("--in").arg(&project).arg("--cmd").arg(&copy_command).output().unwrap();
+    assert!(!replace_attempt.status.success(), "Save Copy silently overwrote an existing project");
+    assert_eq!(std::fs::read(&copy).unwrap(), copy_before, "failed Save Copy modified the existing session");
 
     // Remove both imported recordings and the entire original project folder.
     // Only the copy in the independently generated handoff directory remains.
     std::fs::remove_dir_all(&import_dir).unwrap();
     std::fs::remove_dir_all(&original_dir).unwrap();
-    let reopened = cli()
-        .arg("run")
-        .arg("--in")
-        .arg(&copy)
-        .arg("--bounce")
-        .arg(&copied_mix)
-        .args(["--start", "0", "--end", "0.25"])
-        .output()
-        .unwrap();
+    let reopened = cli().arg("run").arg("--in").arg(&copy).arg("--bounce").arg(&copied_mix).args(["--start", "0", "--end", "0.25"]).output().unwrap();
     success("reopen handed-off project", &reopened);
     assert!(
         !String::from_utf8_lossy(&reopened.stderr).contains("warning: missing media"),
@@ -186,10 +134,7 @@ fn save_session_copy_is_portable_and_refuses_unrequested_overwrite() {
     let after = bounce(&copied_mix);
     for (original_channel, copied_channel) in before.channels.iter().zip(&after.channels) {
         for (a, b) in original_channel.iter().zip(copied_channel) {
-            assert!(
-                (a - b).abs() < 0.001,
-                "handoff changed the decoded mix samples"
-            );
+            assert!((a - b).abs() < 0.001, "handoff changed the decoded mix samples");
         }
     }
 }
