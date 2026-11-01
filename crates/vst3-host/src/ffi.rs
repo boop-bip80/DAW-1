@@ -1739,15 +1739,27 @@ impl Drop for Instance {
 }
 
 /// Splits a state blob into (component, controller) parts. A blob without SoundCraft's container
-/// header is taken as a bare component state.
+/// header is taken as a bare component state, capped to the same size as `getState` output.
 fn split_state(data: &[u8]) -> Option<(&[u8], &[u8])> {
-    if data.len() > MAX_STATE_BYTES.saturating_mul(2) {
+    split_state_bounded(data, MAX_STATE_BYTES)
+}
+
+/// Exact byte limits for both formats. A framed blob may carry TWO individually capped states
+/// plus its 4-byte magic and two 4-byte length fields; a bare blob carries only ONE state.
+/// Kept parameterized so regressions can test boundaries without allocating 128 MiB.
+fn split_state_bounded(data: &[u8], max_state_bytes: usize) -> Option<(&[u8], &[u8])> {
+    let header_bytes = STATE_MAGIC.len() + 2 * std::mem::size_of::<u32>();
+    let max_framed_bytes = max_state_bytes.checked_mul(2)?.checked_add(header_bytes)?;
+    if data.len() > max_framed_bytes {
         return None;
     }
-    let Some(rest) = data.strip_prefix(STATE_MAGIC) else { return (!data.is_empty()).then_some((data, &[][..])) };
+    let Some(rest) = data.strip_prefix(STATE_MAGIC) else {
+        return (!data.is_empty() && data.len() <= max_state_bytes).then_some((data, &[][..]));
+    };
     let take = |b: &[u8]| -> Option<(usize, usize)> {
         let n = u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
-        (n <= MAX_STATE_BYTES && b.len() >= 4 + n).then_some((4, 4 + n))
+        let end = 4usize.checked_add(n)?;
+        (n <= max_state_bytes && b.len() >= end).then_some((4, end))
     };
     let (a, b) = take(rest)?;
     let comp = rest.get(a..b)?;
@@ -2450,6 +2462,34 @@ mod tests {
         huge.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(split_state(&huge), None);
         assert_eq!(split_state(b"SCV3"), None);
+    }
+
+    #[test]
+    fn state_limits_allow_full_framing_but_never_oversized_bare_data() {
+        // Avoid allocating near the real 64 MiB cap while checking the exact arithmetic.
+        const CAP: usize = 3;
+        let mut max_blob = b"SCV3".to_vec();
+        max_blob.extend_from_slice(&3u32.to_le_bytes());
+        max_blob.extend_from_slice(b"abc");
+        max_blob.extend_from_slice(&3u32.to_le_bytes());
+        max_blob.extend_from_slice(b"xyz");
+        assert_eq!(max_blob.len(), 2 * CAP + 12);
+        assert_eq!(split_state_bounded(&max_blob, CAP), Some((&b"abc"[..], &b"xyz"[..])));
+        assert_eq!(split_state_bounded(b"abc", CAP), Some((&b"abc"[..], &[][..])));
+        assert_eq!(split_state_bounded(b"abcd", CAP), None, "bare state must use one cap, not two");
+        assert_eq!(split_state_bounded(b"", CAP), None);
+
+        let mut over_component = b"SCV3".to_vec();
+        over_component.extend_from_slice(&4u32.to_le_bytes());
+        over_component.extend_from_slice(b"abcd");
+        over_component.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(split_state_bounded(&over_component, CAP), None);
+
+        let mut trailing = max_blob.clone();
+        trailing.push(0);
+        assert_eq!(split_state_bounded(&trailing, CAP), None);
+        assert_eq!(split_state_bounded(&max_blob[..max_blob.len() - 1], CAP), None);
+        assert_eq!(split_state_bounded(&max_blob, usize::MAX), None, "overflowed caps fail closed");
     }
 
     #[test]
