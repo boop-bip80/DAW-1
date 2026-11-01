@@ -1479,6 +1479,11 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
     let mut s = session.clone();
     let from = s.folder.clone();
     let same_dir = from.as_deref().is_some_and(|f| same_path(f, &dir));
+    // Reserve the recovery sidecar before store_wav can create any source media.
+    // Keep the exact exclusive file handle until the fully resolved session is serialized.
+    let tmp = p.with_extension("scraft.tmp");
+    make_dir(&dir)?;
+    let mut stage = ReservedSessionStage::reserve(&tmp, &p)?;
     let mut written = 0;
     // A file can stay put for all the sources that name it, unless their audio differs.
     let shared_paths: Vec<bool> = {
@@ -1544,18 +1549,64 @@ fn write_session(session: &Session, path: &str, overwrite: bool) -> Result<(Sess
         s.name = stem.to_string();
     }
     let text = s.to_json().map_err(|err| EngineError::Io(err.to_string()))?;
-    make_dir(&dir)?;
-    // Reserve, write and sync the new project before touching the existing backup set.
-    // A stale .scraft.tmp (including a symlink) fails without rotating any backups.
-    let tmp = p.with_extension("scraft.tmp");
-    stage_file(&tmp, &p, text.as_bytes())?;
+    // Finish the already-exclusive stage before backup rotation or project replacement.
+    stage.write_and_sync(text.as_bytes(), &p)?;
     let pending_backup = if !overwrite && read_file(&p).is_ok_and(|old| old != text.as_bytes()) { back_up(&p) } else { None };
-    replace_with(&tmp, &p, Ok(()))?;
+    stage.publish(&p)?;
     // Retention pruning is a consequence of a committed save, never a failed attempt.
     if let Some(backup) = pending_backup {
         backup.prune();
     }
     Ok((s, written, p))
+}
+
+/// A session-save staging file reserved before any new source media is written.
+/// The original exclusive handle is kept for serialization; a failure only cleans up
+/// a sidecar that this save successfully created.
+struct ReservedSessionStage {
+    tmp: Option<PathBuf>,
+    file: Option<std::fs::File>,
+}
+
+impl ReservedSessionStage {
+    fn reserve(tmp: &Path, file: &Path) -> Result<Self> {
+        crate::file_access::check_write(file).map_err(EngineError::Io)?;
+        crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
+        let staged =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(tmp).map_err(|err| EngineError::Io(format!("{}: {err}", tmp.display())))?;
+        Ok(Self { tmp: Some(tmp.to_path_buf()), file: Some(staged) })
+    }
+
+    fn write_and_sync(&mut self, bytes: &[u8], file: &Path) -> Result<()> {
+        use std::io::Write as _;
+
+        let staged = self.file.as_mut().ok_or_else(|| EngineError::Io("session stage file is closed".into()))?;
+        staged.write_all(bytes).and_then(|()| staged.sync_all()).map_err(|err| EngineError::Io(format!("{}: {err}", file.display())))
+    }
+
+    fn publish(mut self, file: &Path) -> Result<()> {
+        let tmp = self.tmp.as_deref().ok_or_else(|| EngineError::Io("session stage path missing".into()))?;
+        // Authorization may have changed while large source WAVs were prepared.
+        // Recheck near commit, as stage_file did before this early reservation.
+        crate::file_access::check_write(file).map_err(EngineError::Io)?;
+        crate::file_access::check_write(tmp).map_err(EngineError::Io)?;
+        // Windows cannot rename an open file. Closing the handle never reopens the
+        // sidecar by path, and a failed rename still leaves cleanup to our guard.
+        drop(self.file.take());
+        std::fs::rename(tmp, file).map_err(|err| EngineError::Io(format!("{}: {err}", file.display())))?;
+        self.tmp = None;
+        sync_dir(file.parent().unwrap_or(Path::new("")));
+        Ok(())
+    }
+}
+
+impl Drop for ReservedSessionStage {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if let Some(tmp) = self.tmp.take() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
 }
 
 /// Write `bytes` to `tmp`, flush it to disk and rename it over `file`, so `file` holds either the
@@ -2645,6 +2696,86 @@ mod save_tests {
         second.execute("session.save_as", &json!({"path": path, "replace": true})).unwrap();
         let r = reopen(&path);
         assert_eq!(r.session().pool.get(r.session().sources[0].id).unwrap().buffer.channels[0][0], -0.25);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn occupied_session_stage_rejects_new_media_before_creating_any_wav() {
+        let dir = std::env::temp_dir().join(format!("soundcraft-stage-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Song.scraft");
+        let path_str = path.to_string_lossy().into_owned();
+        let mut e = Engine::default();
+        e.execute("session.save_as", &json!({"path": path_str})).unwrap();
+        let committed = std::fs::read(&path).unwrap();
+        let audio_dir = dir.join("Audio Files");
+        assert!(!audio_dir.exists(), "the original project has no imported sources");
+
+        e.execute("track.new", &json!({"name": "Fresh stereo", "format": "stereo"})).unwrap();
+        let track = e.session().track_by_name("Fresh stereo").unwrap().id;
+        assert_eq!(e.session().sample_rate.hz(), 48_000);
+        let signal = vec![vec![0.25; 128], vec![-0.5; 128]];
+        let s = e.session_mut();
+        let src = add_source(s, "New media", AudioBuffer { sample_rate: 48_000, channels: signal.clone() }, None, FileFormat::Wav);
+        let id = s.new_clip_id();
+        crate::edit::place_clip(s, track, Clip::audio(id, "New media", src, 0, 0, 128));
+        assert!(e.is_dirty());
+        let live = e.session().clone();
+
+        let backups = dir.join("Backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let original_backups: Vec<_> = (1..=10)
+            .map(|n| {
+                let path = backups.join(format!("Song backup {n}.scraft"));
+                let bytes = format!("protected backup {n}").into_bytes();
+                std::fs::write(&path, &bytes).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let assert_no_side_effects = |e: &Engine| {
+            assert_eq!(std::fs::read(&path).unwrap(), committed, "existing project was replaced");
+            assert_eq!(*e.session(), live, "failed save mutated the live session");
+            assert!(e.is_dirty(), "failed save marked the document clean");
+            assert!(!audio_dir.exists(), "occupied .scraft.tmp must fail before writing new source WAV files");
+            assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 10);
+            for (file, bytes) in &original_backups {
+                assert_eq!(&std::fs::read(file).unwrap(), bytes, "failed save changed an existing backup");
+            }
+        };
+
+        let staging = path.with_extension("scraft.tmp");
+        let marker = b"previous crash recovery bytes";
+        std::fs::write(&staging, marker).unwrap();
+        let err = e.execute("session.save", &json!({})).unwrap_err();
+        assert!(err.to_string().contains("scraft.tmp"), "{err}");
+        assert_eq!(std::fs::read(&staging).unwrap(), marker);
+        assert_no_side_effects(&e);
+        std::fs::remove_file(&staging).unwrap();
+
+        #[cfg(unix)]
+        {
+            let absent_target = dir.join("outside-nonexistent-file");
+            std::os::unix::fs::symlink(&absent_target, &staging).unwrap();
+            let err = e.execute("session.save", &json!({})).unwrap_err();
+            assert!(err.to_string().contains("scraft.tmp"), "{err}");
+            assert_eq!(std::fs::read_link(&staging).unwrap(), absent_target);
+            assert!(!absent_target.exists());
+            assert_no_side_effects(&e);
+            std::fs::remove_file(&staging).unwrap();
+        }
+
+        e.execute("session.save", &json!({})).unwrap();
+        assert!(!e.is_dirty());
+        assert!(!staging.exists());
+        assert_eq!(std::fs::read_dir(&audio_dir).unwrap().count(), 1);
+        let reopened = reopen(&path_str);
+        assert_eq!(reopened.session().sources.len(), 1);
+        let source = reopened.session().sources[0].id;
+        assert_eq!(reopened.session().pool.get(source).unwrap().buffer.channels, signal);
+        assert!(reopened.session().track_by_name("Fresh stereo").is_some());
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 10);
+        assert!(!original_backups[0].0.exists(), "only a successful save rotates backups");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
