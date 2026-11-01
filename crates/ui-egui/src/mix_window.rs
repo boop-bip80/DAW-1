@@ -773,7 +773,10 @@ pub(crate) fn insert_slot(app: &mut SoundApp, ui: &mut Ui, track: &Track, slot: 
     // keyboard Menu key or Shift+F10 opens the same popup anchored to the insert widget.
     let keyboard_menu =
         resp.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Menu) || (input.modifiers.shift && input.key_pressed(egui::Key::F10)));
-    let popup = if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp).anchor_widget(menu_resp.id) };
+    // A pointer-fixed context menu cannot be opened without a cursor. Use the insert's own
+    // position so the keyboard path has a valid anchor on every subsequent frame as well.
+    let popup =
+        if ins.is_none() { egui::Popup::menu(&menu_resp) } else { egui::Popup::context_menu(&menu_resp).at_position(menu_resp.rect.left_bottom()) };
     let popup = if keyboard_menu { popup.open_memory(egui::SetOpenCommand::Bool(true)) } else { popup };
     let popup = popup.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     popup.show(|ui| plugin_menu(app, ui, id, slot, ins.is_some()));
