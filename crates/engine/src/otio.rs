@@ -552,7 +552,7 @@ fn reference_path(uri: &str, document: &Path) -> Result<PathBuf> {
         if path.starts_with("//") || path.starts_with("/\\") || path.starts_with("\\\\") || (cfg!(windows) && path.contains('\\')) {
             return Err(invalid_import("remote or UNC media file URLs are not supported"));
         }
-    } else if path.starts_with('/') || path.starts_with('\\') || path.contains(':') || path.contains('\\') {
+    } else if path.starts_with('/') || path.contains(':') || path.contains('\\') {
         // Reject Unix absolute paths, encoded Windows drive prefixes, UNC and NTFS
         // alternate-stream syntax on *every* platform, not just the current OS.
         return Err(invalid_import("relative media URL decodes to an absolute or drive path"));
