@@ -1,11 +1,11 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (per-track MIDI input port/channel selectors and synthetic filtering/preflight tests; no physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (MIDI input filter UI and bounded native MIDI output worker foundation; no routed playback or physical validation) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 A DAW is judged by how it drives audio interfaces, MIDI gear, control surfaces and sync. This is
 SoundCraft's weakest dimension. Ours is measured from `crates/playback` (cpal), the MIDI input-capture adapter and
-per-track MIDI input route code, and the absence of external MIDI output/sync/control-surface
-support; Pro Tools' from its documentation and Setup menus.
+per-track input routing and bounded native output scheduler, and the absence of wired DAW MIDI
+output playback/sync/control-surface support; Pro Tools' from its documentation and Setup menus.
 
 **Hardware: ~12 % ready** (estimated). **Performance: ~35 %** (estimated; nothing benchmarked
 against Pro Tools). Remaining ≈ 110–180 h for hardware, 40–70 h for performance.
@@ -30,13 +30,14 @@ Legend: ✅ works · 🟡 partial · ❌ missing.
 
 ## MIDI
 
-A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. The desktop Record/Stop lifecycle opens selected native inputs, drains callbacks and commits tempo-mapped, undoable MIDI takes to armed MIDI/instrument tracks; synthetic tests cover MIDI-only recording, timestamp normalization and Stop draining. Per-track named input ports and all/1–16 channel filters are persisted and selectable in the Mix/Edit track popups; route changes are undoable, and disconnected or ambiguous named ports fail recording preflight. These checks are synthetic, **not physical controller validation**. Live instrument audition, MIDI thru/output, and sync remain missing; Web has no native adapter. Hardware readiness percentages remain unchanged.
+A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input queue exist (`soundcraft-midi::live` and `device`, Linux/macOS/Windows). Setup › Playback Engine can rescan and save native MIDI input selections. The desktop Record/Stop lifecycle opens selected native inputs, drains callbacks and commits tempo-mapped, undoable MIDI takes to armed MIDI/instrument tracks; synthetic tests cover MIDI-only recording, timestamp normalization and Stop draining. Per-track named input ports and all/1–16 channel filters are persisted and selectable in the Mix/Edit track popups; route changes are undoable, and disconnected or ambiguous named ports fail recording preflight. Setup › MIDI › MIDI Input Filter exposes eight persisted event-kind flags read at Record start, though SysEx is not decoded. The native output layer can discover ports and queue short messages to an off-callback worker; fake-sink tests cover scheduling, capacity and errors, but no DAW track/transport playback or physical-output test exists. These checks are synthetic, **not physical controller validation**. Live instrument audition, MIDI thru/output playback and sync remain missing; Web has no native adapter. Hardware readiness percentages remain unchanged.
 
 | Feature | Pro Tools | SoundCraft (all platforms) |
 |---|---|---|
 | MIDI input devices (keyboards, pads) | ✅ | 🟡 desktop Record/Stop plus per-track named input-port/channel selectors and filtering tested synthetically; no physical keyboard or live audition verified |
-| MIDI output to external gear | ✅ | ❌ |
-| MIDI Thru, input filter | ✅ | ❌ (stored flags only) |
+| MIDI output to external gear | ✅ | ❌ no DAW playback; bounded native device/worker foundation exists, fake-sink tested only |
+| MIDI Thru | ✅ | ❌ no routed MIDI thru |
+| MIDI input filter | ✅ | 🟡 Setup › MIDI › MIDI Input Filter stores per-kind flags sampled by Record; SysEx not decoded, UI tested synthetically without hardware |
 | MIDI Beat Clock out, MTC generate/chase | ✅ | ❌ |
 | MIDI learn / controller mapping | ✅ (via surfaces and plug-in maps) | ❌ |
 | Virtual MIDI keyboard | ✅ (MIDI Keyboard window) | 🟡 window exists, no live audition path |
@@ -75,6 +76,7 @@ A bounded MIDI 1.0 decoder, timestamped take assembler and native `midir` input 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | Native MIDI output scheduler/discovery has bounded fake-sink tests but no track/transport playback; Setup MIDI Input Filter exposes persisted flags, with no physical controller verification |
 | 2026-11-01 | minor | Persistent per-track MIDI named-port/channel input routing and Mix/Edit selectors passed synthetic tests; disconnected/ambiguous-port preflight fails closed, but physical devices/live audition remain unverified |
 | 2026-11-01 | minor | Desktop Record/Stop now drives native MIDI input and undoable armed-track takes in synthetic tests; manual ±500 ms recording offset and callback-drain safeguards, no measured duplex latency or physical keyboard evidence |
 | 2026-11-01 | minor | Bounded recording routes avoid wrong-channel capture; native MIDI selector and synthetic recording bridge added, still not wired to app transport; no physical or duplex validation |

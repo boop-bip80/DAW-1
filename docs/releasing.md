@@ -1,7 +1,7 @@
 # Releasing SoundCraft
 
-Every push to the `release` branch runs `.github/workflows/release.yml`. The workflow builds
-signed installers for macOS, Windows, Linux, FreeBSD and the web, then creates or updates a
+Every push to the `release` branch is configured to request `.github/workflows/release.yml`.
+After the required quality job succeeds, the workflow builds signed installers for macOS, Windows, Linux, FreeBSD and the web, then creates or updates a
 **draft** GitHub Release named `SoundCraft v<version>`. Nobody sees a draft until a maintainer
 publishes it.
 
@@ -293,6 +293,15 @@ It needs `resvg`, plus `iconutil` on macOS. The outputs are committed, so packag
 those tools. `apps/soundcraft/src/main.rs` sets the runtime window/Dock/taskbar icon from them.
 
 ## Checks
+
+**Configured release quality dependency (2026-11-01; NOT HOSTED-VERIFIED):**
+`.github/workflows/release.yml` first calls the same reusable `cargo xtask ci` gate on Linux,
+macOS and Windows, with read-only permissions. Its `release` packaging/signing/draft job has
+`needs: quality`, so those downstream jobs cannot start after a failing quality leg. This is an
+additional three-OS run beyond the separate CI workflow on `release` pushes; manual version
+overrides are applied by packaging afterward and are not separately gate-tested. **GitHub Actions
+still reports zero workflow runs** for this repository; no hosted quality or release outcome is
+claimed.
 
 `.github/workflows/packaging-lint.yml` runs in seconds on any change to `packaging/`, the
 workflows or the icons: actionlint, shellcheck, a PowerShell parse, xmllint (WiX, plists,

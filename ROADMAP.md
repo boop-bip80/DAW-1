@@ -2,7 +2,7 @@
 
 **Stage: pre-alpha** · next: alpha, ~5% and ~110–180 h away (the alpha gate's three failing workflows)
 
-> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (per-track MIDI input routes and independent A1/A2 EDL cuts; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
+> **Last reviewed:** 2026-11-01 · **Last updated:** 2026-11-01 · **Change:** minor (portable OTIOZ export, MIDI filter/output worker foundations and release quality dependency; alpha blockers remain) · **Target:** Avid Pro Tools Ultimate 2026.4.1
 
 SoundCraft is a clean-room, pure-Rust digital audio workstation that aims at full parity with
 Avid Pro Tools, and then beyond it: faster, open, scriptable and agent-controllable. This page is
@@ -40,10 +40,12 @@ rather than silently wrapping to the wrong mic. A single-clock duplex path, comp
 and measured latency compensation remain incomplete; a bounded *manual* record offset exists.
 Native MIDI input capture code and an undoable armed-track take bridge are connected to desktop
 Record/Stop. Saved, named per-track input ports and all/1–16 channel filters are selectable in
-Mix/Edit and pass synthetic tests; physical keyboard capture and live instrument audition remain
-unverified. Audio-only OpenTimelineIO and restricted mono `A`, linked-stereo `AA`, and two
-independently edited mono `A1`/`A2` CMX3600 EDL lanes work; AAF, OMF and `.ptx` interchange
-with Pro Tools remain absent.
+Mix/Edit and pass synthetic tests; a Setup MIDI Input Filter window exposes saved event-kind
+flags. Native MIDI output discovery and a bounded worker exist, but are not wired to track or
+transport playback; physical keyboard capture and live instrument audition remain unverified.
+Audio-only OpenTimelineIO `.otio` import/export, portable `.otioz` **export only**, and restricted
+mono `A`, linked-stereo `AA`, and two independent mono `A1`/`A2` CMX3600 EDL lanes work;
+AAF, OMF and `.ptx` interchange with Pro Tools remain absent.
 Readiness (~40 %) sits right at the alpha bar, but a gate failure keeps the app pre-alpha. The
 2026-10-07 estimate ("~65 % overall, 110–150 h to 100 %") counted feature presence. This one
 measures readiness and adds hardware, localization and field bug reports.
@@ -109,11 +111,11 @@ Other languages shipped: 0. Detail: [localization-parity.md](docs/localization-p
 Ranked; the alpha gate, the alpha checklist and the beta plan are in [docs/roadmap.md](docs/roadmap.md).
 
 1. **Alpha blocker:** audio interfaces: full physical-channel I/O matrix, one-clock duplex monitoring, measured latency compensation and hardware testing (G-01); manual record offset, per-track input bounds and take-to-disk now work, source streaming/recovery remain separate (G-06). Estimated gate 35–55 h, not re-calibrated.
-2. **Alpha blocker:** verify native MIDI Record/Stop and per-track port/channel input routing with a physical keyboard, then add live instrument playback, MIDI output, thru and clock (G-02). 20–35 h, not re-calibrated.
+2. **Alpha blocker:** verify native MIDI Record/Stop and per-track port/channel input routing with a physical keyboard, then add live instrument playback, track/transport output through the device-level MIDI worker, thru and clock (G-02). 20–35 h, not re-calibrated.
 3. **Alpha blocker:** AAF/OMF import and export (G-03). 50–90 h.
 4. Obtain explicit owner approval for macOS third-party native-plugin library-validation entitlement (#153), then AU editors (G-05). 15–25 h plus the security decision.
 5. Land the open bug-fix PRs and clear the correctness backlog (G-04). 15–25 h.
-6. Enable and verify the three-OS PR CI in this fork; GitHub still reports no Actions runs. A headless audio import/bounce/save/reopen CLI smoke test now passes on Linux; macOS/Windows startup and hardware checks remain (G-14).
+6. Enable and verify the three-OS CI in this fork; release packaging now depends on the same quality gate, but GitHub still reports no Actions runs. A headless audio import/bounce/save/reopen CLI smoke test now passes on Linux; macOS/Windows startup and hardware checks remain (G-14).
 7. Fidelity harness against Pro Tools (G-07). 20–30 h.
 
 ## Robustness
@@ -128,6 +130,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 ## Progress log
 
+- **2026-11-01:** `file.export_otioz` and the File-menu bundle path now export portable, media-inclusive audio-only OTIOZ archives (no `.otioz` import). Setup has a persistent MIDI Input Filter window; a bounded native MIDI output-port worker exists without DAW track playback or physical testing. Release packaging is configured to wait on three-OS `cargo xtask ci`, but no GitHub Actions runs have occurred. Pre-alpha readiness, estimates and AAF/OMF/PTX blockers unchanged.
 - **2026-11-01:** Named per-track MIDI input ports and channel filters are saved and selectable in Mix/Edit, with synthetic routing and fail-closed port-preflight tests. CMX3600 additionally supports two independently edited mono `A1`/`A2` lanes with overlapping record times across lanes and strict processing validation; this is not arbitrary multitrack interchange. Hardware controller/live audition and AAF/OMF/PTX remain unverified or absent; the alpha gate and estimates are unchanged.
 - **2026-11-01:** A third integration slice connects desktop MIDI Record/Stop to armed-track undoable takes in synthetic tests, adds audio Stop callback draining, manual ±500 ms recording offset, and restricted frame-exact CMX3600 mono `A`/linked stereo `AA` EDL import/export. A public CLI stereo EDL waveform roundtrip passes. The manual offset is not a measured duplex correction, live instrument audition and physical keyboard capture remain unverified, and EDL does not replace AAF/OMF/PTX. Readiness and alpha gate unchanged.
 - **2026-11-01:** A second integration slice adds an audio-only OpenTimelineIO importer (official Clip.2 fixture, media/source bounds, atomic undo, File menu path), native MIDI device selection in Setup, and a transport-aware capture-to-armed-track take bridge with synthetic tests. Multichannel audio recording now refuses invalid physical input routes before WAV creation and silences unavailable monitor channels. CLAP/VST3 scans fail closed on ambiguous bundle executables. A hardware-free CLI import→bounce→save→reopen→bounce test passes. The complete Linux `cargo xtask ci` gate, including WebAssembly, passed on the exact GitHub tree at that point; there are still no GitHub Actions runs and no new hardware/macOS/Windows validation. Readiness and alpha gate unchanged.
@@ -185,6 +188,7 @@ mutated and truncated movies. Field reports from the first public week are track
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-01 | minor | OTIOZ audio export-only, Setup MIDI Input Filter, device-only MIDI output scheduler, and release quality-job dependency documented; no hosted CI/hardware evidence or readiness change |
 | 2026-11-01 | minor | Desktop MIDI Record/Stop, manual recording offset, callback-drained audio Stop, frame-exact mono/linked-stereo EDL and hardware-free CLI EDL roundtrip; alpha/hardware blockers remain |
 | 2026-11-01 | minor | Audio-only OTIO import/export, MIDI recording bridge and Setup selector, bounded input routing, plugin scan safety and Linux full-gate/smoke evidence; pre-alpha gate still fails |
 | 2026-10-31 | minor | Stabilization and interchange work logged; corrected stale assertions about device selection and recording-to-disk; alpha gate still fails |
