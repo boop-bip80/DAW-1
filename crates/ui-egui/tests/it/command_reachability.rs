@@ -21,7 +21,6 @@ const KNOWN_UNREACHED: &[&str] = &[
     "track.load_preset",
     "track.pin",
     "track.trim_automation_write",
-    "track.vca",
     "transport.pause",
     "transport.status",
     "video.offset",
