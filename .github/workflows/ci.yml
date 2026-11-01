@@ -5,7 +5,7 @@ name: CI
 # filters aligned so an ordinary commit to the active branch actually runs CI.
 on:
   push:
-    branches: [build/craft-update-495e597]
+    branches: [build/craft-update-495e597, release]
   pull_request:
     branches: [build/craft-update-495e597]
   workflow_dispatch:
