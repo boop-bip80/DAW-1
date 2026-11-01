@@ -3,9 +3,12 @@ use super::{CommandSpec, always, bad, clip_id, has_tracks, i64_or, range_param, 
 
 use crate::{Engine, Result, cmd};
 use serde_json::{Value, json};
-use soundcraft_midi::{Note, Sequence};
-use soundcraft_model::{Clip, ClipContent, ClipId};
-use soundcraft_time::TICKS_PER_QUARTER;
+use soundcraft_midi::{CtrlKind, Note, Sequence, live::MAX_LIVE_TAKE_EVENTS};
+use soundcraft_model::{Clip, ClipContent, ClipId, TrackId};
+use soundcraft_time::{MAX_POSITION, TICKS_PER_QUARTER};
+use std::collections::HashSet;
+
+const MAX_RECORDED_TRACKS: usize = 64;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -23,7 +26,93 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("midi.note_edit", "Edit Note", [], None, "{clip, index, pitch?, start_ticks?, length_ticks?, velocity?}", always, note_edit),
         cmd!("midi.note_delete", "Delete Notes", [], None, "{clip, indices: [n]}", always, note_delete),
         cmd!("midi.notes_move", "Move Notes", [], None, "{clip, indices: [n], ticks?: 0, semitones?: 0}", always, notes_move),
+        // A single undo step for every track in a recording pass. The large sample payload is
+        // deliberately excluded from the command journal (the undo snapshot already owns it).
+        cmd!(@spec false, true, false;
+            "midi.record_take", "Commit MIDI Recording", [], None,
+            "{start, end, takes: [{track, sequence: {notes, ctrls}}]} — validated MIDI takes in samples",
+            always, record_take),
     ]
+}
+
+/// A completed live MIDI pass is inserted atomically across tracks. All input is validated
+/// before the first document mutation, so malformed controller values or an invalid track
+/// cannot silently leave half a multi-track performance behind.
+fn record_take(e: &mut Engine, p: &Value) -> Result<Value> {
+    const CMD: &str = "midi.record_take";
+    let start = p.get("start").and_then(Value::as_i64).ok_or_else(|| bad(CMD, "start sample required"))?;
+    let end = p.get("end").and_then(Value::as_i64).ok_or_else(|| bad(CMD, "end sample required"))?;
+    if !(0..MAX_POSITION).contains(&start) || end <= start || end > MAX_POSITION {
+        return Err(bad(CMD, "invalid MIDI recording sample range"));
+    }
+    let raw_takes = p.get("takes").and_then(Value::as_array).ok_or_else(|| bad(CMD, "takes array required"))?;
+    if raw_takes.is_empty() || raw_takes.len() > MAX_RECORDED_TRACKS {
+        return Err(bad(CMD, "expected 1..=64 MIDI tracks"));
+    }
+
+    let s = e.session();
+    let start_tick = s.tempo.samples_to_ticks(start, s.sample_rate);
+    let end_tick = s.tempo.samples_to_ticks(end, s.sample_rate);
+    let length_ticks = end_tick.saturating_sub(start_tick).max(1);
+    let mut seen = HashSet::new();
+    let mut parsed = Vec::with_capacity(raw_takes.len());
+    let mut total_events = 0usize;
+    for raw in raw_takes {
+        let id = TrackId(raw.get("track").and_then(Value::as_u64).ok_or_else(|| bad(CMD, "take track id required"))?);
+        if !seen.insert(id) {
+            return Err(bad(CMD, "a recording contains duplicate track ids"));
+        }
+        let track = s.track(id).ok_or_else(|| bad(CMD, "record target track no longer exists"))?;
+        if !track.kind.is_midi() || track.inactive {
+            return Err(bad(CMD, "recording target must be an active MIDI or instrument track"));
+        }
+        let raw_seq = raw.get("sequence").ok_or_else(|| bad(CMD, "sequence required"))?;
+        let notes_len = raw_seq.get("notes").and_then(Value::as_array).map(Vec::len).ok_or_else(|| bad(CMD, "notes array required"))?;
+        let ctrls_len = raw_seq.get("ctrls").and_then(Value::as_array).map(Vec::len).ok_or_else(|| bad(CMD, "ctrls array required"))?;
+        total_events = total_events.saturating_add(notes_len).saturating_add(ctrls_len);
+        if total_events > MAX_LIVE_TAKE_EVENTS {
+            return Err(bad(CMD, "MIDI take exceeds the supported event limit"));
+        }
+        let sequence: Sequence = serde_json::from_value(raw_seq.clone()).map_err(|_| bad(CMD, "invalid MIDI take sequence"))?;
+        for n in &sequence.notes {
+            if n.pitch > 127
+                || n.channel > 15
+                || !(1..=127).contains(&n.velocity)
+                || n.release_velocity > 127
+                || n.start < 0
+                || n.length <= 0
+                || n.end() > length_ticks
+            {
+                return Err(bad(CMD, "invalid MIDI note or out-of-range note time"));
+            }
+        }
+        for c in &sequence.ctrls {
+            if c.channel > 15 || c.tick < 0 || c.tick >= length_ticks || !valid_recorded_ctrl(c.kind, c.value) {
+                return Err(bad(CMD, "invalid MIDI controller or out-of-range event time"));
+            }
+        }
+        parsed.push((id, sequence));
+    }
+
+    let s = e.session_mut();
+    let mut ids = Vec::with_capacity(parsed.len());
+    for (track, mut sequence) in parsed {
+        sequence.sort();
+        let id = s.new_clip_id();
+        let name = s.track(track).map(|t| format!("{} Take", t.name)).unwrap_or_else(|| "MIDI Take".into());
+        crate::edit::place_clip(s, track, Clip::midi(id, name, start, end.saturating_sub(start), sequence));
+        ids.push(id.0);
+    }
+    Ok(json!({"clips": ids, "start": start, "end": end}))
+}
+
+fn valid_recorded_ctrl(kind: CtrlKind, value: i32) -> bool {
+    match kind {
+        CtrlKind::Cc(n) => n < 128 && (0..=127).contains(&value),
+        CtrlKind::PitchBend => (-8192..=8191).contains(&value),
+        CtrlKind::ChannelPressure | CtrlKind::Program => (0..=127).contains(&value),
+        CtrlKind::PolyPressure(n) => n < 128 && (0..=127).contains(&value),
+    }
 }
 
 fn seq_mut<'a>(e: &'a mut Engine, id: ClipId, cmd: &str) -> Result<&'a mut Sequence> {
@@ -202,5 +291,40 @@ mod tests {
         let mut e = Engine::default();
         let t = e.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, None);
         assert!(e.execute("midi.new_clip", &json!({"track": t.0})).is_err());
+    }
+
+    #[test]
+    fn recorded_multitrack_take_validates_atomically_and_undoes_together() {
+        let mut e = Engine::default();
+        let first = e.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let second = e.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("MIDI"));
+        let audio = e.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, Some("Not MIDI"));
+        let one_note = json!({"notes": [{
+            "pitch": 60, "velocity": 100, "release_velocity": 64,
+            "channel": 0, "start": 0, "length": 480
+        }], "ctrls": []});
+        let takes = json!({"start": 0, "end": 48_000, "takes": [
+            {"track": first.0, "sequence": one_note},
+            {"track": audio.0, "sequence": {"notes": [], "ctrls": []}}
+        ]});
+        assert!(e.execute("midi.record_take", &takes).is_err());
+        assert!(e.session().track(first).is_some_and(|t| t.clips().is_empty()));
+        assert!(e.session().track(audio).is_some_and(|t| t.clips().is_empty()));
+
+        let result = e
+            .execute(
+                "midi.record_take",
+                &json!({"start": 0, "end": 48_000, "takes": [
+                    {"track": first.0, "sequence": one_note},
+                    {"track": second.0, "sequence": {"notes": [], "ctrls": []}}
+                ]}),
+            )
+            .unwrap();
+        assert_eq!(result["clips"].as_array().map(Vec::len), Some(2));
+        assert_eq!(e.session().track(first).map(|t| t.clips().len()), Some(1));
+        assert_eq!(e.session().track(second).map(|t| t.clips().len()), Some(1));
+        assert!(e.undo());
+        assert!(e.session().track(first).is_some_and(|t| t.clips().is_empty()));
+        assert!(e.session().track(second).is_some_and(|t| t.clips().is_empty()));
     }
 }

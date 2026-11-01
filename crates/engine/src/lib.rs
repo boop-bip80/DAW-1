@@ -15,6 +15,7 @@ pub mod edit;
 pub mod file_access;
 pub mod inspect;
 pub mod io;
+pub mod midi_record;
 pub mod otio;
 pub mod score;
 
