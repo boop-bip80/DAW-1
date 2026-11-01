@@ -983,18 +983,14 @@ fn process_strip(
     let transport = transport_at(s, pos, !live.monitor_only, live.recording);
     match t.kind {
         TrackKind::Audio if !live.input.is_empty() && (t.mixer.input_monitor || (t.mixer.record_arm && (live.monitor_only || live.recording))) => {
-            // Input monitoring: the track hears its hardware input instead of its clips.
-            let first = match &t.mixer.input {
-                Route::Hardware(h) => {
-                    h.trim_start_matches("In ").split(['-', ' ']).next().and_then(|n| n.parse::<usize>().ok()).map_or(0, |n| n.saturating_sub(1))
-                }
-                _ => 0,
-            };
-            let n_in = live.input.len().max(1);
-            for (k, dst) in strip.buf.iter_mut().enumerate() {
-                if let Some(src) = live.input.get((first + k) % n_in) {
-                    for (d, x) in dst.iter_mut().zip(src.iter()).take(frames) {
-                        *d = *x;
+            // Input monitoring: each channel hears only its selected physical input.
+            // A missing or malformed input route is silence, never a wrap to input 1.
+            if let Some(first) = t.mixer.input.recording_input_start() {
+                for (k, dst) in strip.buf.iter_mut().enumerate() {
+                    if let Some(src) = first.checked_add(k).and_then(|i| live.input.get(i)) {
+                        for (d, x) in dst.iter_mut().zip(src.iter()).take(frames) {
+                            *d = *x;
+                        }
                     }
                 }
             }
@@ -3462,6 +3458,33 @@ mod tests {
         s.track_mut(t).unwrap().mixer.input_monitor = false;
         eng.render(&s, 1024, 512, &mut out);
         assert!(out[0][100].abs() < 1e-6, "stopped, unmonitored: silence");
+    }
+
+    #[test]
+    fn multichannel_monitoring_never_wraps_unavailable_inputs() {
+        let mut s = Session::default();
+        let t = s.add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Stereo Mic"));
+        s.track_mut(t).unwrap().mixer.input_monitor = true;
+        let mut eng = MixEngine::new(48_000.0, 128);
+        eng.input = vec![vec![0.25; 128], vec![0.5; 128]];
+        eng.monitor_only = true;
+        let mut out = vec![vec![0.0; 128]; 2];
+
+        // In 2 on a two-input interface feeds the track's left side, but the missing
+        // third physical channel is silent rather than wrapping to physical input 1.
+        s.track_mut(t).unwrap().mixer.input = Route::Hardware("In 2".into());
+        eng.render(&s, 0, 128, &mut out);
+        assert!(out[0][20] > 0.1, "available input 2 must be heard");
+        assert!(out[1][20].abs() < 1e-6, "missing input 3 must be silent");
+
+        s.track_mut(t).unwrap().mixer.input = Route::Hardware("In 3".into());
+        eng.render(&s, 128, 128, &mut out);
+        assert!(out.iter().all(|ch| ch[20].abs() < 1e-6), "the whole out-of-range route must be silent");
+
+        // Legacy sessions with an unset input continue monitoring physical input 1.
+        s.track_mut(t).unwrap().mixer.input = Route::None;
+        eng.render(&s, 256, 128, &mut out);
+        assert!(out[0][20] > 0.1 && out[1][20] > 0.1);
     }
 
     #[test]
