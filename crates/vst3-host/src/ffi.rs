@@ -1374,7 +1374,8 @@ impl Instance {
 
     /// Restores a [`EditorLink::save_state`] blob (or a bare component state): component
     /// `setState`, then the controller's `setComponentState` and `setState`. `false` when the
-    /// blob is malformed or the component refuses it.
+    /// blob is malformed or either state-bearing interface refuses its state. A failed
+    /// controller restore may leave the component partially restored.
     pub fn load_state(&self, data: &[u8]) -> bool {
         let Some((comp, ctrl)) = split_state(data) else { return false };
         let stream = MemoryStream::new(comp.to_vec());
@@ -1389,9 +1390,10 @@ impl Instance {
             unsafe { c.setComponentState(s.as_ptr()) };
             if !ctrl.is_empty() {
                 let cs = MemoryStream::new(ctrl.to_vec());
-                if let Some(r) = cs.as_com_ref::<sb::IBStream>() {
-                    // SAFETY: valid controller; the stream lives on this frame for the call.
-                    unsafe { c.setState(r.as_ptr()) };
+                let Some(r) = cs.as_com_ref::<sb::IBStream>() else { return false };
+                // SAFETY: valid controller; the stream lives on this frame for the call.
+                if !ok(unsafe { c.setState(r.as_ptr()) }) {
+                    return false;
                 }
             }
         }
