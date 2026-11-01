@@ -47,7 +47,7 @@ use soundcraft_playback::midi_live_thru::MidiThruPhase;
 use soundcraft_playback::midi_out_runtime::{MidiOutputRuntime, MidiOutputRuntimePhase, MidiOutputRuntimeStatus};
 #[cfg(not(target_arch = "wasm32"))]
 use soundcraft_playback::midi_thru_runtime::MidiThruRuntimeStatus;
-use soundcraft_playback::record::Trouble;
+use soundcraft_playback::record::{MonitorFifoHealth, Trouble};
 use soundcraft_playback::{OutputTrouble, Player};
 use soundcraft_time::{Range, Samples};
 use std::collections::{HashMap, VecDeque};
@@ -273,6 +273,79 @@ pub enum Gesture {
     ZoomBox { start: f32 },
 }
 
+/// UI-thread-only monitor warning state. The monitor FIFO's counters stay cumulative across
+/// Record/Stop for Session Audio Health; only this warning baseline changes with a take or route.
+/// It never compares input and output clocks or implies WAV capture lost the same input frames.
+#[derive(Default)]
+struct MonitorNoticeState {
+    active: bool,
+    last_reported: MonitorFifoHealth,
+    last_notice: Option<web_time::Instant>,
+}
+
+impl MonitorNoticeState {
+    const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn begin(&mut self, snapshot: MonitorFifoHealth) {
+        self.active = true;
+        self.last_reported = snapshot;
+        self.last_notice = None;
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// No automatic warning from output silence: playback can drain the monitor FIFO with no
+    /// audible monitoring, and a freshly enabled monitor needs two frames to interpolate.
+    /// Limit repeated real input-queue loss notices to one per five seconds.
+    fn observe(&mut self, now: web_time::Instant, monitoring_and_recording: bool, health: MonitorFifoHealth) -> Option<String> {
+        if !monitoring_and_recording {
+            self.clear();
+            return None;
+        }
+        if !self.active
+            || health.skipped_input_frames < self.last_reported.skipped_input_frames
+            || health.evicted_oldest_frames < self.last_reported.evicted_oldest_frames
+        {
+            // A monitor toggle, reconnect or explicit counter reset begins a fresh interval.
+            self.begin(health);
+            return None;
+        }
+        let skipped = health.skipped_input_frames - self.last_reported.skipped_input_frames;
+        let evicted = health.evicted_oldest_frames - self.last_reported.evicted_oldest_frames;
+        if skipped == 0 && evicted == 0 {
+            return None;
+        }
+        if self.last_notice.is_some_and(|last| now >= last && now.duration_since(last) < Self::MIN_INTERVAL) {
+            return None;
+        }
+        self.last_notice = Some(now);
+        self.last_reported = health;
+        let detail = match (skipped > 0, evicted > 0) {
+            (true, true) => {
+                format!("{skipped} input frame(s) skipped when the monitor queue was busy; {evicted} older frame(s) evicted when it filled")
+            }
+            (true, false) => format!("{skipped} input frame(s) skipped because the monitor queue was busy"),
+            (false, true) => format!("{evicted} older input frame(s) evicted because the monitor queue was full"),
+            (false, false) => return None,
+        };
+        Some(format!(
+            "Live input monitoring glitch: {detail}. Check CPU load and audio buffer settings. Recording-to-disk loss is reported separately."
+        ))
+    }
+}
+
+/// A damaged WAV capture is more important than the separate monitoring path; once a take has
+/// lost captured input, don't overwrite that warning later with a mere monitoring glitch.
+fn prefer_recording_capture_notice(capture: Option<String>, monitor: Option<String>, earlier_capture_loss: bool) -> Option<String> {
+    match (capture, earlier_capture_loss) {
+        (Some(warning), _) => Some(warning),
+        (None, true) => None,
+        (None, false) => monitor,
+    }
+}
+
 pub struct SoundApp {
     pub engine: Engine,
     /// The session path as of the last frame, and whether the recent list changed since the host
@@ -303,6 +376,8 @@ pub struct SoundApp {
     affected_frames_shown: u64,
     /// An approaching-full ring is reported once per take, before any actual dropout.
     pressure_warned: bool,
+    /// Warning cooldown/baseline; distinct from cumulative monitor FIFO diagnostics.
+    monitor_notice: MonitorNoticeState,
     /// Where the takes being recorded go, autosaved with the session so a crash can't lose them.
     take_plan: Option<soundcraft_engine::io::Recording>,
     pub ui: UiState,
@@ -540,6 +615,7 @@ impl SoundApp {
             recorder_failed: false,
             affected_frames_shown: 0,
             pressure_warned: false,
+            monitor_notice: MonitorNoticeState::default(),
             take_plan: None,
             ui: UiState::default(),
             audio_health_report: None,
@@ -847,6 +923,7 @@ impl SoundApp {
     }
 
     fn stop_play(&mut self) {
+        self.monitor_notice.clear();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(output) = &self.midi_output {
             let _ = output.set_thru_enabled(false);
@@ -966,6 +1043,7 @@ impl SoundApp {
         };
         self.affected_frames_shown = 0;
         self.pressure_warned = false;
+        self.monitor_notice.clear();
         self.take_plan = None;
         self.midi_status = MidiInputStatus::default();
         if let Some(p) = &self.player {
@@ -1012,6 +1090,14 @@ impl SoundApp {
                     self.ui.status = format!("Cannot begin MIDI recording: {err}");
                 }
             }
+        }
+        // Physical monitor counters remain cumulative for Session Audio Health. Start a fresh
+        // *notice* baseline at Record, before the first UI poll can miss an input-queue glitch.
+        if audio_armed
+            && self.engine.transport.recording
+            && let Some(r) = &self.recorder
+        {
+            self.monitor_notice.begin(r.monitor.health());
         }
     }
 
@@ -1371,28 +1457,57 @@ impl SoundApp {
         };
     }
 
+    /// Actual live audio monitoring requires a real output, and an active audio track listening
+    /// to hardware input. MIDI track arming and silent-clock playback are not audio monitoring.
+    pub(crate) fn live_audio_monitor_enabled(&self) -> bool {
+        self.player.as_ref().is_some_and(|player| !player.silent)
+            && self
+                .engine
+                .session()
+                .tracks
+                .iter()
+                .any(|track| track.kind == TrackKind::Audio && !track.inactive && (track.mixer.input_monitor || track.mixer.record_arm))
+    }
+
+    /// Called only after the Audio Health panel explicitly reset cumulative FIFO counters.
+    /// Rebase warning state too, so a counter reset never creates a stale/negative delta.
+    pub(crate) fn monitor_health_counters_reset(&mut self) {
+        if let Some(recorder) = &self.recorder {
+            self.monitor_notice.begin(recorder.monitor.health());
+        } else {
+            self.monitor_notice.clear();
+        }
+    }
+
     /// Stop recording, keeping the take, when the input device or the disk fails, and say as soon
     /// as a slow disk loses input.
     fn watch_input(&mut self) {
         let recording = self.engine.transport.recording;
         let recording_audio = recording && self.take_plan.is_some();
-        let Some(r) = &mut self.recorder else { return };
+        let monitor_active = recording_audio && self.live_audio_monitor_enabled();
+        let now = self.clock_now();
+        let Some(r) = &mut self.recorder else {
+            self.monitor_notice.clear();
+            return;
+        };
         let Some(trouble) = r.trouble() else {
             let pressure = r.capture_pressure();
+            let mut capture_notice = None;
             if recording_audio && pressure.affected_frames > self.affected_frames_shown {
                 self.affected_frames_shown = pressure.affected_frames;
                 self.pressure_warned = true;
-                if let Some(warning) = pressure.warning(r.sample_rate) {
-                    self.ui.status = warning;
-                }
+                capture_notice = pressure.warning(r.sample_rate);
             } else if recording_audio && !self.pressure_warned && pressure.peak_percent >= 80 {
                 self.pressure_warned = true;
-                if let Some(warning) = pressure.warning(r.sample_rate) {
-                    self.ui.status = warning;
-                }
+                capture_notice = pressure.warning(r.sample_rate);
+            }
+            let monitor_notice = self.monitor_notice.observe(now, monitor_active, r.monitor.health());
+            if let Some(warning) = prefer_recording_capture_notice(capture_notice, monitor_notice, self.affected_frames_shown > 0) {
+                self.ui.status = warning;
             }
             return;
         };
+        self.monitor_notice.clear();
         // `stop_play` finalizes the WAVs and reports any recoverable *unimported* files, but
         // the generic input trouble status below used to overwrite that report immediately.
         // Only capture the status when there was an audio take plan to finalize: otherwise it
@@ -1460,6 +1575,7 @@ impl SoundApp {
 
     /// Reopen the audio devices, keeping a take in progress.
     pub fn reconnect_audio(&mut self) {
+        self.monitor_notice.clear();
         if self.is_playing() || self.engine.transport.recording {
             self.stop_play();
         }
@@ -2387,9 +2503,92 @@ fn failed_plugin_status(s: &soundcraft_model::Session, track: TrackId, slot: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Services, SoundApp, Trouble, automation_step_due};
+    use super::{MonitorFifoHealth, MonitorNoticeState, Services, SoundApp, Trouble, automation_step_due, prefer_recording_capture_notice};
     use serde_json::json;
     use soundcraft_model::TrackId;
+
+    /// Synthetic monotonic UI ticks only: no CPAL device is opened and no audio callback runs.
+    /// A naturally empty output monitor is not a failed WAV take or a monitor-input lock loss.
+    #[test]
+    fn monitor_notice_is_input_only_rate_limited_and_rebaselines_without_erasing_health() {
+        use std::time::Duration;
+
+        let mut state = MonitorNoticeState::default();
+        let at = web_time::Instant::now();
+        let mut health = MonitorFifoHealth::default();
+        assert_eq!(state.observe(at, false, health), None);
+        assert_eq!(state.observe(at, true, health), None, "new monitor intervals establish a baseline");
+
+        health.silent_output_frames = 48_000;
+        assert_eq!(state.observe(at + Duration::from_secs(1), true, health), None, "output interpolation silence alone never warns");
+        health.skipped_input_frames = 1;
+        let first = state.observe(at + Duration::from_secs(2), true, health).expect("one real skipped input frame is actionable");
+        assert!(first.contains("Live input monitoring glitch") && first.contains("1 input frame(s) skipped"), "{first}");
+        assert!(first.contains("Recording-to-disk loss is reported separately"), "{first}");
+
+        health.skipped_input_frames = 3;
+        assert_eq!(state.observe(at + Duration::from_secs(3), true, health), None, "new glitches inside 5s must be coalesced");
+        let second = state.observe(at + Duration::from_secs(8), true, health).expect("new input loss after 5s is reported");
+        assert!(second.contains("2 input frame(s) skipped"), "{second}");
+        assert_eq!(state.observe(at + Duration::from_secs(14), true, health), None, "unchanged counters cannot repeat a warning");
+
+        health.evicted_oldest_frames = 2;
+        let old = state.observe(at + Duration::from_secs(15), true, health).expect("older frames evicted from full FIFO");
+        assert!(old.contains("2 older input frame(s) evicted"), "{old}");
+        assert_eq!(state.observe(at + Duration::from_secs(16), false, health), None);
+        assert_eq!(state.observe(at + Duration::from_secs(17), true, health), None, "re-entering monitoring must not replay old losses");
+        health.skipped_input_frames = 4;
+        assert!(state.observe(at + Duration::from_secs(18), true, health).is_some(), "new interval loss still warns promptly");
+
+        health.skipped_input_frames = 0;
+        health.evicted_oldest_frames = 0;
+        assert_eq!(state.observe(at + Duration::from_secs(19), true, health), None, "explicit hardware counter reset re-baselines notices");
+        health.skipped_input_frames = 1;
+        assert!(state.observe(at + Duration::from_secs(20), true, health).is_some(), "post-reset loss is not hidden by earlier counts");
+    }
+
+    #[test]
+    fn wav_capture_loss_and_stop_recovery_always_take_priority_over_monitor_glitches() {
+        let monitor = "Live monitoring buffer missed input".to_string();
+        let capture = "Recording buffer overrun: 1 input frame had missing samples".to_string();
+        assert_eq!(prefer_recording_capture_notice(Some(capture.clone()), Some(monitor.clone()), false), Some(capture));
+        assert_eq!(prefer_recording_capture_notice(None, Some(monitor.clone()), true), None, "a previously damaged WAV stays higher priority");
+        assert_eq!(prefer_recording_capture_notice(None, Some(monitor.clone()), false), Some(monitor));
+
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, Services::default());
+        app.report_input_trouble(
+            Trouble::Disk("synthetic disk full".into()),
+            true,
+            Some("2 failed WAV paths left on disk for manual recovery; not imported".into()),
+        );
+        let finalization = app.ui.status.clone();
+        let mut notice = MonitorNoticeState::default();
+        let mut health = MonitorFifoHealth::default();
+        health.skipped_input_frames = 10;
+        assert_eq!(notice.observe(web_time::Instant::now(), false, health), None);
+        assert_eq!(app.ui.status, finalization, "a stopped/recoverable take cannot be overwritten by monitor telemetry");
+        assert!(finalization.contains("synthetic disk full") && finalization.contains("not imported"));
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo());
+    }
+
+    #[test]
+    fn audio_track_arming_without_a_real_output_device_cannot_raise_monitor_warnings() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+
+        let mut engine = soundcraft_engine::Engine::default();
+        let id = engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Mono, None);
+        engine.session_mut().track_mut(id).unwrap().mixer.record_arm = true;
+        engine.mark_clean();
+        let mut app = SoundApp::new(engine, None, Services::default());
+        assert!(app.recorder.is_none() && app.player.is_none());
+        let active = app.live_audio_monitor_enabled();
+        assert!(!active, "track arming without an output device is not audible monitoring");
+        let health = MonitorFifoHealth { skipped_input_frames: 512, evicted_oldest_frames: 128, ..MonitorFifoHealth::default() };
+        let now = app.clock_now();
+        assert_eq!(app.monitor_notice.observe(now, active, health), None);
+        assert!(app.ui.status.is_empty());
+        assert!(!app.engine.is_dirty() && !app.engine.can_undo(), "monitor diagnostics must never enter session undo");
+    }
 
     /// No physical input is needed: a zero-frame failed WAV is intentionally not imported into
     /// the session, but its path survives in the recorder's finalization summary (#94). The
