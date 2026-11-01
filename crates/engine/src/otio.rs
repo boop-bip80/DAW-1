@@ -580,8 +580,20 @@ fn clip_media(clip: &Value) -> Result<(&str, Option<&Value>)> {
     let media = match clip.get("OTIO_SCHEMA").and_then(Value::as_str) {
         Some("Clip.1") => clip.get("media_reference"),
         Some("Clip.2") => {
-            let key = clip.get("active_media_reference_key").and_then(Value::as_str).unwrap_or("DEFAULT_MEDIA");
-            clip.get("media_references").and_then(|refs| refs.get(key))
+            let references =
+                clip.get("media_references").and_then(Value::as_object).ok_or_else(|| invalid_import("Clip.2 media references must be an object"))?;
+            // Importing only the active proxy and silently discarding alternate source
+            // references loses original edit metadata on the very next OTIO export.
+            // Portable OTIOZ already rejects this unsupported multi-reference case.
+            if references.len() > 1 {
+                return Err(invalid_import("Clip.2 alternate media references are not supported; flatten to one reference before import"));
+            }
+            let key = match clip.get("active_media_reference_key") {
+                None => "DEFAULT_MEDIA", // Compatible with the default of the OTIO Clip.2 schema.
+                Some(Value::String(key)) if !key.is_empty() => key.as_str(),
+                _ => return Err(invalid_import("Clip.2 active media reference key must be a nonempty string")),
+            };
+            references.get(key)
         }
         _ => return Err(invalid_import("only Clip.1 and Clip.2 are supported")),
     }
@@ -894,6 +906,12 @@ mod tests {
     // arbitrary third-party metadata. The source timeline uses a real Stack.1.markers list.
     const OFFICIAL_STACK_MARKERS: &str = r#"[{"OTIO_SCHEMA":"Marker.2","metadata":{"foreign_editor":{"flag":true}},"name":"Beat","color":"CYAN","marked_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":0.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"comment":"point"},{"OTIO_SCHEMA":"Marker.2","metadata":{"soundcraft":{"rgb":[12,34,56]}},"name":"Passage","color":"PURPLE","marked_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":29.97002997002997,"value":1.0}},"comment":"one frame"}]"#;
 
+    // This complete Clip.2 payload was serialized by OpenTimelineIO 0.18.1 after calling
+    // `Clip.set_media_references({"DEFAULT_MEDIA": primary, "Proxy": proxy}, "DEFAULT_MEDIA")`.
+    // The official adapter preserves both keys; SoundCraft has no native representation for
+    // alternate media, so a plain OTIO import must reject this instead of silently dropping it.
+    const OFFICIAL_ALTERNATE_MEDIA_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Alternate edit","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":4000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/primary.wav"},"Proxy":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":4000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/proxy.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}"#;
+
     fn official_marked_timeline() -> Value {
         let mut timeline: Value = serde_json::from_str(OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO).unwrap();
         timeline["tracks"]["markers"] = serde_json::from_str(OFFICIAL_STACK_MARKERS).unwrap();
@@ -1101,6 +1119,84 @@ mod tests {
         let percussion = engine.session().tracks.iter().find(|t| t.name == "Percussion").unwrap();
         assert!(percussion.inactive);
         assert!(percussion.clips()[0].muted);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn official_clip_two_alternate_references_and_invalid_active_keys_fail_atomically() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut original: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let mut official: Value = serde_json::from_str(OFFICIAL_ALTERNATE_MEDIA_CLIP_TWO).unwrap();
+        official["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(file_url(&media).unwrap());
+        original["tracks"]["children"][0]["children"][1] = official;
+
+        let mut variants = Vec::<(&str, Value, &str)>::new();
+        variants.push(("alternate proxy", original.clone(), "alternate media references"));
+        let mut numeric_key = original.clone();
+        numeric_key["tracks"]["children"][0]["children"][1]["media_references"].as_object_mut().unwrap().remove("Proxy");
+        numeric_key["tracks"]["children"][0]["children"][1]["active_media_reference_key"] = json!(3);
+        variants.push(("numeric active key", numeric_key, "active media reference key"));
+        let mut null_key = original.clone();
+        null_key["tracks"]["children"][0]["children"][1]["media_references"].as_object_mut().unwrap().remove("Proxy");
+        null_key["tracks"]["children"][0]["children"][1]["active_media_reference_key"] = Value::Null;
+        variants.push(("null active key", null_key, "active media reference key"));
+        let mut missing_key = original.clone();
+        missing_key["tracks"]["children"][0]["children"][1]["media_references"].as_object_mut().unwrap().remove("Proxy");
+        missing_key["tracks"]["children"][0]["children"][1]["active_media_reference_key"] = json!("Absent");
+        variants.push(("missing active reference", missing_key, "no active media reference"));
+        let mut missing_map = original.clone();
+        missing_map["tracks"]["children"][0]["children"][1]["media_references"] = json!([]);
+        variants.push(("nonobject references", missing_map, "media references must be an object"));
+
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (case, variant, reason) in variants {
+            std::fs::write(&document, serde_json::to_vec(&variant).unwrap()).unwrap();
+            let error = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{error}").contains(reason), "{case} silently lost alternate media or accepted malformed metadata: {error}");
+            assert_eq!(*engine.session(), before, "{case} modified the session");
+            assert!(!engine.can_undo(), "{case} introduced an undo step");
+        }
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn official_clip_two_single_active_reference_keeps_audio_and_undo() {
+        let (session, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut original: Value = serde_json::from_slice(&export_audio(&session).unwrap().json).unwrap();
+        let mut official: Value = serde_json::from_str(OFFICIAL_ALTERNATE_MEDIA_CLIP_TWO).unwrap();
+        official["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(file_url(&media).unwrap());
+        official["media_references"].as_object_mut().unwrap().remove("Proxy");
+
+        for active_key in ["DEFAULT_MEDIA", "Proxy"] {
+            let mut clip = official.clone();
+            if active_key == "Proxy" {
+                let primary = clip["media_references"].as_object_mut().unwrap().remove("DEFAULT_MEDIA").unwrap();
+                clip["media_references"] = json!({"Proxy": primary});
+                clip["active_media_reference_key"] = json!("Proxy");
+            }
+            original["tracks"]["children"][0]["children"][1] = clip;
+            std::fs::write(&document, serde_json::to_vec(&original).unwrap()).unwrap();
+            let mut engine = Engine::default();
+            let before = engine.session().clone();
+            let result = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+            assert_eq!(result["audio_tracks"], 2);
+            assert_eq!(result["audio_clips"], 2);
+            assert_eq!(result["media_sources"], 1);
+            let percussion = engine.session().tracks.iter().find(|track| track.name == "Percussion").unwrap();
+            let first = &percussion.clips()[0];
+            assert_eq!((first.start, first.length), (48_000, 1_000));
+            assert!(matches!(&first.content, ClipContent::Audio { offset: 1_000, .. }));
+            let rendered = soundcraft_mix::render_clips(engine.session(), percussion.id, soundcraft_time::Range::new(48_000, 48_001));
+            assert!((rendered[0][0] - 0.125).abs() < 0.0001, "active `{active_key}` changed the WAV samples");
+            assert!(engine.can_undo());
+            assert!(engine.undo());
+            assert_eq!(*engine.session(), before);
+        }
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
     }
