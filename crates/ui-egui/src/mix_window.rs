@@ -48,6 +48,7 @@ pub fn separate_closed(app: &mut SoundApp) {
 /// Draw the horizontal Mix window strips for visible non-video tracks, scroll one requested strip into view and open
 /// New Tracks when the space past the last strip is double-clicked.
 pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
+    mix_action_header(app, ui);
     let ids: Vec<TrackId> = app.engine.session().tracks.iter().filter(|x| !x.hidden && x.kind != TrackKind::Video).map(|x| x.id).collect();
     // Per-channel peaks for multichannel meters, from the snapshot `logic` takes from the player
     // (taking them here too would split each period's peaks between two readers).
@@ -67,6 +68,26 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// Session-wide Mix actions stay above the horizontally scrolling strips. Count hidden tracks as
+/// well: the engine command clears all solos, not just the subset currently visible on screen.
+fn mix_action_header(app: &mut SoundApp, ui: &mut Ui) {
+    let soloed = app.engine.session().tracks.iter().filter(|track| track.mixer.solo).count();
+    ui.horizontal(|ui| {
+        let button = ui
+            .add_enabled(soloed > 0, egui::Button::new("Clear all solos"))
+            .on_hover_text("Clear all soloed tracks, including hidden tracks. Undo restores their previous solo states.");
+        if button.clicked() {
+            let _ = app.run("mix.clear_solos", json!({}));
+        }
+        if soloed == 0 {
+            ui.weak("No tracks soloed");
+        } else {
+            ui.weak(format!("{soloed} soloed"));
+        }
+    });
+    ui.separator();
 }
 
 /// Format of the destination a track's output feeds (the main mix, a bus, or stereo).
@@ -1842,6 +1863,81 @@ mod tests {
         assert!(solo.width() >= 24.0 && mute.width() >= 24.0, "narrow Solo/Mute hit targets must not shrink: {solo:?} {mute:?}");
         assert!(safe.width() >= 50.0 && safe.min.y >= solo.max.y, "narrow Safe button must be full-width and below Solo/Mute: {safe:?}");
         assert!(!h.state().engine.is_dirty(), "narrow default Mix paint must not edit the session");
+    }
+
+    #[test]
+    fn clear_all_solos_header_is_disabled_and_read_only_with_no_solos() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(920.0, 820.0))
+            .build_ui_state(|ui, app: &mut crate::SoundApp| super::content(app, ui), app);
+
+        h.run_steps(3);
+        assert!(
+            h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear all solos").accesskit_node().is_disabled(),
+            "clear button should be visible but disabled with no soloed tracks"
+        );
+        h.get_by_label("No tracks soloed");
+        assert!(!h.state().engine.is_dirty(), "painting Mix header must not journal a command");
+        let undo_before = h.state().engine.undo_history().len();
+
+        h.get_by_label("Clear all solos").click();
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "clicking disabled Clear all solos must remain a no-op");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before);
+    }
+
+    #[test]
+    fn clear_all_solos_keyboard_action_clears_hidden_tracks_and_undoes() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let guitar = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        let hidden = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Hidden MIDI"));
+        app.engine.session_mut().track_mut(guitar).expect("guitar").mixer.solo = true;
+        let hidden_track = app.engine.session_mut().track_mut(hidden).expect("midi");
+        hidden_track.mixer.solo = true;
+        hidden_track.hidden = true;
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(920.0, 820.0))
+            .build_ui_state(|ui, app: &mut crate::SoundApp| super::content(app, ui), app);
+
+        h.run_steps(3);
+        h.get_by_label("2 soloed");
+        assert!(!h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear all solos").accesskit_node().is_disabled());
+        assert!(!h.state().engine.is_dirty(), "Mix header render must not change solo states");
+        let undo_before = h.state().engine.undo_history().len();
+
+        h.get_by_label("Clear all solos").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        for id in [guitar, hidden] {
+            assert!(!h.state().engine.session().track(id).expect("track").mixer.solo, "clear must include hidden tracks");
+        }
+        assert!(h.state().engine.is_dirty(), "keyboard activation must persist an actual change");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "one clear action must journal once");
+        assert!(h.get_by_label("Clear all solos").accesskit_node().is_disabled(), "clear must disable once solos are cleared");
+
+        h.state_mut().run("edit.undo", serde_json::json!({})).expect("undo clear solos");
+        h.run_steps(2);
+        for id in [guitar, hidden] {
+            assert!(h.state().engine.session().track(id).expect("track").mixer.solo, "undo must restore both solos");
+        }
+        h.state_mut().run("edit.redo", serde_json::json!({})).expect("redo clear solos");
+        h.run_steps(2);
+        for id in [guitar, hidden] {
+            assert!(!h.state().engine.session().track(id).expect("track").mixer.solo);
+        }
+        h.state_mut().engine.mark_clean();
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "repainting a disabled clear button must never issue a second command");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
     }
 
     fn synthetic_outputs(names: &[&str]) -> MidiOutputScan {
