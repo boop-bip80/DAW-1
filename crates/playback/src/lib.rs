@@ -25,6 +25,8 @@
 mod clock;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod midi_instrument_monitor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod midi_live_thru;
 pub mod midi_out;
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,7 +38,11 @@ pub mod record;
 
 pub use devices::AudioConfig;
 
+#[cfg(not(target_arch = "wasm32"))]
+use midi_instrument_monitor::{MAX_MONITOR_EVENTS, MonitorError, MonitorPort, MonitorReader, MonitorRouter, monitor_pair};
 use soundcraft_dsp::{Plugin, PluginEditor, PluginRestartReader, PluginStateReader};
+#[cfg(not(target_arch = "wasm32"))]
+use soundcraft_mix::LiveInstrumentEvent;
 use soundcraft_mix::{MAX_CHANNELS, MixEngine, PreparedInstance, StripMeter, itu_stereo_fold, main_channels};
 use soundcraft_model::{Session, TrackId};
 use soundcraft_time::{Range, Samples};
@@ -325,6 +331,12 @@ struct AudioState {
     read: f64,
     device_rate: f64,
     input: Option<Arc<record::InputRing>>,
+    /// Created before the state reaches the callback; never installed via Cmd or allocated by
+    /// realtime processing. The control handle only routes fake/preflighted source packets.
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_monitor_port: MonitorPort,
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_monitor_reader: MonitorReader,
     /// Silent output has not needed input since the last monitor/transport activation.
     input_was_idle: bool,
     recording: bool,
@@ -349,6 +361,8 @@ impl AudioState {
     fn new(rx: Receiver<Cmd>, shared: Arc<Shared>, session: Arc<Session>, device_rate: f64, garbage: Sender<Vec<Box<dyn Plugin>>>) -> Self {
         let sr = session.sample_rate.as_f64() as f32;
         let nch = main_channels(&session);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (midi_monitor_port, midi_monitor_reader) = monitor_pair();
         AudioState {
             garbage,
             old_sessions: None,
@@ -366,10 +380,29 @@ impl AudioState {
             read: 0.0,
             device_rate,
             input: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_monitor_port,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_monitor_reader,
             input_was_idle: true,
             recording: false,
             unsent: MeterSnapshot::default(),
             forget_shared: Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn monitor_port(&self) -> MonitorPort {
+        self.midi_monitor_port.clone()
+    }
+
+    fn cancel_midi_monitor(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.midi_monitor_port.invalidate();
+            self.mix.panic_live_notes();
+            self.pending_len = 0;
+            self.read = 0.0;
         }
     }
 
@@ -387,8 +420,14 @@ impl AudioState {
                     }
                     self.forget_meters();
                 }
-                Cmd::Recording(r) => self.recording = r,
+                Cmd::Recording(r) => {
+                    if self.recording != r {
+                        self.cancel_midi_monitor();
+                    }
+                    self.recording = r;
+                }
                 Cmd::Session(s, instances) => {
+                    self.cancel_midi_monitor();
                     changed = true;
                     if (s.sample_rate.as_f64() - self.session.sample_rate.as_f64()).abs() > 0.5 {
                         let mut old = std::mem::replace(&mut self.mix, new_engine(s.sample_rate.as_f64() as f32));
@@ -428,6 +467,7 @@ impl AudioState {
                 }
                 Cmd::OldSessions(tx) => self.old_sessions = Some(tx),
                 Cmd::Play { from, end, looped } => {
+                    self.cancel_midi_monitor();
                     self.pos = from;
                     self.end = end;
                     self.looped = looped.filter(|r| r.len() > 64);
@@ -437,12 +477,14 @@ impl AudioState {
                     self.mix.reset();
                 }
                 Cmd::Stop => {
+                    self.cancel_midi_monitor();
                     self.playing = false;
                     self.end = None;
                     self.looped = None;
                     self.mix.reset();
                 }
                 Cmd::Locate(at) => {
+                    self.cancel_midi_monitor();
                     self.pos = at;
                     self.pending_len = 0;
                     self.read = 0.0;
@@ -510,6 +552,13 @@ impl AudioState {
         }
         self.mix.monitor_only = !self.playing;
         self.mix.recording = self.recording;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut midi = [LiveInstrumentEvent::EMPTY; MAX_MONITOR_EVENTS];
+            let count = self.midi_monitor_reader.drain(&mut midi);
+            self.mix.render_with_live(&self.session, self.pos, n, &mut self.pending, &midi[..count], self.midi_monitor_reader.enabled());
+        }
+        #[cfg(target_arch = "wasm32")]
         self.mix.render(&self.session, self.pos, n, &mut self.pending);
         self.send_garbage();
         self.pending_len = n;
@@ -519,6 +568,7 @@ impl AudioState {
             self.shared.position.store(self.pos, Ordering::Relaxed);
             if loop_wrapped {
                 self.shared.invalidate_transport();
+                self.cancel_midi_monitor();
             }
         }
     }
@@ -547,8 +597,26 @@ impl AudioState {
     /// Fill an interleaved device buffer.
     fn fill(&mut self, out: &mut [f32], channels: usize) {
         self.drain();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // An epoch change is a priority All Notes Off, independent of queue capacity.
+            // Check even when the transport is stopped and this callback will emit silence.
+            if self.midi_monitor_reader.epoch_changed() {
+                self.mix.panic_live_notes();
+                self.pending_len = 0;
+                self.read = 0.0;
+            }
+            if !self.midi_monitor_reader.enabled() {
+                let mut stale = [LiveInstrumentEvent::EMPTY; MAX_MONITOR_EVENTS];
+                let _ = self.midi_monitor_reader.drain(&mut stale);
+            }
+        }
         let channels = channels.max(1);
-        let monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        let audio_monitoring = self.input.is_some() && self.session.tracks.iter().any(|t| t.mixer.input_monitor || t.mixer.record_arm);
+        #[cfg(not(target_arch = "wasm32"))]
+        let monitoring = audio_monitoring || self.midi_monitor_reader.enabled();
+        #[cfg(target_arch = "wasm32")]
+        let monitoring = audio_monitoring;
         if !self.playing && !monitoring {
             // The input device keeps running while monitoring is off. Without this discard,
             // rearming later plays up to half a second of old audio from its monitor ring.
@@ -754,6 +822,8 @@ fn silent_clock_loop(mut state: AudioState, stop: &AtomicBool, fault: &Fault) ->
 /// The transport and audio device.
 pub struct Player {
     shared: Arc<Shared>,
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_monitor_port: Option<MonitorPort>,
     fault: Arc<Fault>,
     /// The block count last seen while playing, and since when.
     #[cfg(not(target_arch = "wasm32"))]
@@ -790,6 +860,10 @@ fn stop_output_stream_before_collecting_retired<S>(stream: S, side: &Mutex<Side>
 
 impl Drop for Player {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(port) = &self.midi_monitor_port {
+            port.invalidate();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(clock) = self.silent_clock.take() {
             // Join before Side's garbage receiver is dropped. The worker suspends native
@@ -829,6 +903,28 @@ impl Player {
         // Hand the initial session's third-party plugins over.
         p.update_session(session);
         p
+    }
+
+    /// Explicit, hardware-free control-thread preflight for native software-instrument audition.
+    /// Returns an input-worker router only while stopped. Nothing starts automatically from
+    /// a persisted track route; future OS integration must verify the actual open input port
+    /// identities before sending its packets into this router. This is not sample accurate.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn arm_midi_instrument_monitor(&self, session: &Session, connected_enabled_sources: &[String]) -> Result<MonitorRouter, MonitorError> {
+        if self.shared.playing.load(Ordering::Acquire) {
+            return Err(MonitorError::Invalidated);
+        }
+        let Some(port) = &self.midi_monitor_port else { return Err(MonitorError::Invalidated) };
+        port.arm(session, connected_enabled_sources)
+    }
+
+    /// Live-note priority release, even if the normal event queue is saturated. Re-arming
+    /// requires a fresh route preflight. No device connection is closed by this operation.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn disable_midi_instrument_monitor(&self) {
+        if let Some(port) = &self.midi_monitor_port {
+            port.invalidate();
+        }
     }
 
     /// What stopped the audio output, once: a bug in the engine, or the device went away or
@@ -889,18 +985,37 @@ impl Player {
                         let (tx, rx) = channel();
                         let (gtx, grx) = channel();
                         let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let midi_monitor_port = state.monitor_port();
                         let fault = Arc::new(Fault::default());
                         let stream = match format {
                             cpal::SampleFormat::I32 => build_output::<i32>(&device, *config, state, channels, &fault, &shared),
                             cpal::SampleFormat::I16 => build_output::<i16>(&device, *config, state, channels, &fault, &shared),
                             _ => build_output::<f32>(&device, *config, state, channels, &fault, &shared),
                         }?;
-                        Ok(Opened { stream, tx, grx, fault })
+                        Ok(Opened {
+                            stream,
+                            tx,
+                            grx,
+                            fault,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            midi_monitor_port,
+                        })
                     },
                     |opened| start_stream(&opened.stream),
                 );
                 match opened {
-                    Some((config, Opened { stream, tx, grx, fault })) => {
+                    Some((
+                        config,
+                        Opened {
+                            stream,
+                            tx,
+                            grx,
+                            fault,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            midi_monitor_port,
+                        },
+                    )) => {
                         let rate = config.sample_rate;
                         let channels = usize::from(config.channels);
                         let buffer = match config.buffer_size {
@@ -913,6 +1028,8 @@ impl Player {
                         );
                         Player {
                             shared,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            midi_monitor_port: Some(midi_monitor_port),
                             fault,
                             #[cfg(not(target_arch = "wasm32"))]
                             watch: Mutex::new(None),
@@ -968,6 +1085,7 @@ impl Player {
     ) -> Player {
         let rate = session.sample_rate.hz();
         let state = AudioState::new(rx, Arc::clone(&shared), session, f64::from(rate), gtx);
+        let midi_monitor_port = state.monitor_port();
         let fault = Arc::new(Fault::default());
         let failed = Arc::clone(&fault);
         let stop = Arc::new(AtomicBool::new(false));
@@ -983,6 +1101,7 @@ impl Player {
         };
         Player {
             shared,
+            midi_monitor_port: Some(midi_monitor_port),
             fault,
             watch: Mutex::new(None),
             tx,
@@ -1023,6 +1142,8 @@ impl Player {
     /// Sends a new session snapshot to the audio thread, with freshly created (state-restored,
     /// prepared) instances of any third-party plugin it newly needs. Call on the UI thread.
     pub fn update_session(&self, s: Arc<Session>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disable_midi_instrument_monitor();
         let (instances, gone) = {
             let mut side = self.side();
             (side.prepare(&s), side.gone_tracks(&s))
@@ -1145,6 +1266,8 @@ impl Player {
 
     /// Start playback at `from`, stopping at `end`, or looping `looped`.
     pub fn play(&self, from: Samples, end: Option<Samples>, looped: Option<Range>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disable_midi_instrument_monitor();
         self.shared.position.store(from, Ordering::Relaxed);
         self.shared.playing.store(true, Ordering::Relaxed);
         self.shared.invalidate_transport();
@@ -1157,16 +1280,22 @@ impl Player {
     }
 
     pub fn set_recording(&self, on: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disable_midi_instrument_monitor();
         let _ = self.tx.send(Cmd::Recording(on));
     }
 
     pub fn stop(&self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disable_midi_instrument_monitor();
         self.shared.playing.store(false, Ordering::Relaxed);
         self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Stop);
     }
 
     pub fn locate(&self, at: Samples) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.disable_midi_instrument_monitor();
         self.shared.position.store(at, Ordering::Relaxed);
         self.shared.invalidate_transport();
         let _ = self.tx.send(Cmd::Locate(at));
@@ -1176,6 +1305,8 @@ impl Player {
         let v = if speed.is_finite() { (speed.clamp(0.1, 4.0) * 1000.0) as u32 } else { 1000 };
         if self.shared.speed.swap(v, Ordering::Relaxed) != v {
             self.shared.invalidate_transport();
+            #[cfg(not(target_arch = "wasm32"))]
+            self.disable_midi_instrument_monitor();
         }
     }
 
@@ -1356,6 +1487,8 @@ struct Opened {
     tx: Sender<Cmd>,
     grx: Receiver<Vec<Box<dyn Plugin>>>,
     fault: Arc<Fault>,
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_monitor_port: MonitorPort,
 }
 
 /// Build and start the attempts in order; the first that builds and starts wins. A build error or
@@ -1521,6 +1654,8 @@ mod tests {
         (
             Player {
                 shared,
+                #[cfg(not(target_arch = "wasm32"))]
+                midi_monitor_port: None,
                 fault: Arc::new(Fault::default()),
                 #[cfg(not(target_arch = "wasm32"))]
                 watch: Mutex::new(None),

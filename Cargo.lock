@@ -4256,6 +4256,7 @@ name = "soundcraft-playback"
 version = "0.13.1"
 dependencies = [
  "cpal",
+ "crossbeam-channel",
  "log",
  "serde",
  "serde_json",
