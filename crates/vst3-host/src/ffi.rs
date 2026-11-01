@@ -1341,6 +1341,16 @@ pub(crate) struct Instance {
 // thread; they may then happen on the audio thread).
 unsafe impl Send for Instance {}
 
+/// Native VST3 bus metadata must fit the buffers we provide. Truncating a plugin's declared
+/// layout would let its processor index buses/channels that the host never allocated.
+fn checked_layout_count(value: i32, max: i32, kind: &str) -> Result<i32, Vst3Error> {
+    if (0..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(Vst3Error::Process(format!("{kind} {value} outside supported range 0..={max}")))
+    }
+}
+
 impl Instance {
     fn processor(&self) -> Option<&ComPtr<sv::IAudioProcessor>> {
         self.processor.as_ref()
@@ -1504,9 +1514,10 @@ impl Instance {
         self.active
     }
 
-    fn bus_count(&self, media: sv::MediaTypes, dir: sv::BusDirections) -> i32 {
+    fn bus_count(&self, media: sv::MediaTypes, dir: sv::BusDirections, kind: &str) -> Result<i32, Vst3Error> {
         // SAFETY: valid component.
-        unsafe { self.component.getBusCount(media as sv::MediaType, dir as sv::BusDirection) }.clamp(0, MAX_BUSES)
+        let n = unsafe { self.component.getBusCount(media as sv::MediaType, dir as sv::BusDirection) };
+        checked_layout_count(n, MAX_BUSES, kind)
     }
 
     fn arrangement(&self, dir: sv::BusDirections, index: i32) -> Option<sv::SpeakerArrangement> {
@@ -1516,18 +1527,18 @@ impl Instance {
         ok(unsafe { p.getBusArrangement(dir as sv::BusDirection, index, &mut arr) }).then_some(arr)
     }
 
-    fn bus_channels(&self, dir: sv::BusDirections, index: i32) -> u32 {
+    fn bus_channels(&self, dir: sv::BusDirections, index: i32) -> Result<u32, Vst3Error> {
         if let Some(arr) = self.arrangement(dir, index) {
-            return arr.count_ones().min(MAX_BUS_CHANNELS);
+            return Ok(arr.count_ones());
         }
         // SAFETY: plain data; all-zero is valid.
         let mut info: sv::BusInfo = unsafe { std::mem::zeroed() };
         // SAFETY: valid component; index below the bus count; `info` is writable.
-        if ok(unsafe { self.component.getBusInfo(sv::MediaTypes_::kAudio as sv::MediaType, dir as sv::BusDirection, index, &mut info) }) {
-            u32::try_from(info.channelCount).unwrap_or(0).min(MAX_BUS_CHANNELS)
-        } else {
-            0
+        if !ok(unsafe { self.component.getBusInfo(sv::MediaTypes_::kAudio as sv::MediaType, dir as sv::BusDirection, index, &mut info) }) {
+            return Err(Vst3Error::Process(format!("audio bus {index} has no readable channel layout")));
         }
+        let n = checked_layout_count(info.channelCount, i32::try_from(MAX_BUS_CHANNELS).unwrap_or(i32::MAX), "audio bus channel count")?;
+        Ok(u32::try_from(n).unwrap_or(0))
     }
 
     /// Stops processing, deactivates, negotiates the bus layout (main buses mono or stereo as
@@ -1538,8 +1549,8 @@ impl Instance {
         let audio = sv::MediaTypes_::kAudio;
         let event = sv::MediaTypes_::kEvent;
         let (din, dout) = (sv::BusDirections_::kInput, sv::BusDirections_::kOutput);
-        let nin = self.bus_count(audio, din);
-        let nout = self.bus_count(audio, dout);
+        let nin = self.bus_count(audio, din, "audio input bus count")?;
+        let nout = self.bus_count(audio, dout, "audio output bus count")?;
         let current = |s: &Self, dir: sv::BusDirections, n: i32| -> Vec<sv::SpeakerArrangement> {
             (0..n).map(|i| s.arrangement(dir, i).unwrap_or(sv::SpeakerArr::kStereo)).collect()
         };
@@ -1569,9 +1580,9 @@ impl Instance {
             log::debug!("vst3: plugin refused mono/stereo bus arrangements; using its own");
         }
         let layout = Layout {
-            inputs: (0..nin).map(|i| self.bus_channels(din, i)).collect(),
-            outputs: (0..nout).map(|i| self.bus_channels(dout, i)).collect(),
-            event_input: self.bus_count(event, din) > 0,
+            inputs: (0..nin).map(|i| self.bus_channels(din, i)).collect::<Result<Vec<_>, _>>()?,
+            outputs: (0..nout).map(|i| self.bus_channels(dout, i)).collect::<Result<Vec<_>, _>>()?,
+            event_input: self.bus_count(event, din, "event input bus count")? > 0,
         };
         // Main buses on, aux buses off (VST3 still gets buffers for every bus).
         for (dir, n) in [(din, nin), (dout, nout)] {
@@ -2449,6 +2460,19 @@ mod tests {
         assert_eq!((c.projectTimeSamples, c.projectTimeMusic, c.barPositionMusic), (96_000, 3.5, 3.0));
         apply_transport(&mut c, &Transport { playing: false, ..t });
         assert_eq!(c.state & playing, 0);
+    }
+
+    #[test]
+    fn bus_layout_limits_reject_truncation_and_negative_metadata() {
+        assert_eq!(checked_layout_count(0, MAX_BUSES, "buses"), Ok(0));
+        assert_eq!(checked_layout_count(MAX_BUSES, MAX_BUSES, "buses"), Ok(MAX_BUSES));
+        assert!(checked_layout_count(MAX_BUSES + 1, MAX_BUSES, "buses").is_err(), "17 buses cannot become 16");
+        assert!(checked_layout_count(-1, MAX_BUSES, "buses").is_err(), "negative counts are invalid");
+        let max_channels = i32::try_from(MAX_BUS_CHANNELS).unwrap();
+        assert_eq!(checked_layout_count(max_channels, max_channels, "channels"), Ok(max_channels));
+        assert!(checked_layout_count(max_channels + 1, max_channels, "channels").is_err(), "65 channels cannot become 64");
+        assert!(checked_layout_count(-1, max_channels, "channels").is_err());
+        assert!(checked_layout_count(i32::MAX, max_channels, "channels").is_err());
     }
 
     #[test]
