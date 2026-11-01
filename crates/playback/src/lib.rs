@@ -25,6 +25,8 @@
 mod clock;
 pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod midi_instrument_input_runtime;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod midi_instrument_monitor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod midi_live_thru;
@@ -337,6 +339,10 @@ struct AudioState {
     midi_monitor_port: MonitorPort,
     #[cfg(not(target_arch = "wasm32"))]
     midi_monitor_reader: MonitorReader,
+    /// `all_notes_off` may only enqueue CLAP/VST3 notes. ACK is delayed until a subsequent
+    /// real `plugin.process` block has consumed those releases, even while transport is idle.
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_panic_flush_pending: bool,
     /// Silent output has not needed input since the last monitor/transport activation.
     input_was_idle: bool,
     recording: bool,
@@ -384,6 +390,8 @@ impl AudioState {
             midi_monitor_port,
             #[cfg(not(target_arch = "wasm32"))]
             midi_monitor_reader,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_panic_flush_pending: false,
             input_was_idle: true,
             recording: false,
             unsent: MeterSnapshot::default(),
@@ -556,7 +564,20 @@ impl AudioState {
         {
             let mut midi = [LiveInstrumentEvent::EMPTY; MAX_MONITOR_EVENTS];
             let count = self.midi_monitor_reader.drain(&mut midi);
-            self.mix.render_with_live(&self.session, self.pos, n, &mut self.pending, &midi[..count], self.midi_monitor_reader.enabled());
+            self.mix.render_with_live(
+                &self.session,
+                self.pos,
+                n,
+                &mut self.pending,
+                &midi[..count],
+                self.midi_monitor_reader.enabled() || self.midi_panic_flush_pending,
+            );
+            if self.midi_panic_flush_pending {
+                // CLAP/VST3 all_notes_off commonly queues note-offs; only a completed
+                // processing block establishes that the plugin consumed them.
+                self.midi_monitor_reader.acknowledge_cleanup();
+                self.midi_panic_flush_pending = false;
+            }
         }
         #[cfg(target_arch = "wasm32")]
         self.mix.render(&self.session, self.pos, n, &mut self.pending);
@@ -603,6 +624,7 @@ impl AudioState {
             // Check even when the transport is stopped and this callback will emit silence.
             if self.midi_monitor_reader.epoch_changed() {
                 self.mix.panic_live_notes();
+                self.midi_panic_flush_pending = true;
                 self.pending_len = 0;
                 self.read = 0.0;
             }
@@ -618,6 +640,15 @@ impl AudioState {
         #[cfg(target_arch = "wasm32")]
         let monitoring = audio_monitoring;
         if !self.playing && !monitoring {
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.midi_panic_flush_pending {
+                // The normal stopped path emits silence and would never service queued CLAP
+                // note-offs. Process one bounded monitor-only block without timeline notes,
+                // discard its audio, then ACK only after processing really returned.
+                self.render_next(BLOCK);
+                self.pending_len = 0;
+                self.read = 0.0;
+            }
             // The input device keeps running while monitoring is off. Without this discard,
             // rearming later plays up to half a second of old audio from its monitor ring.
             if let Some(input) = &self.input {
