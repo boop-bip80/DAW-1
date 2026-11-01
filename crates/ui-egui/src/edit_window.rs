@@ -1593,6 +1593,9 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
     if app.engine.session().track(id).is_some_and(|track| track.folder.is_some()) && ui.button("Remove from Folder").clicked() {
         let _ = app.run("track.remove_from_folder", json!({"tracks": selection}));
     }
+    // Assignment is shared by Edit and Mix track headers. Only valid signal-bearing targets
+    // receive a VCA; a mixed selection is one undoable command, never a change during paint.
+    vca_assignment_menu(app, ui, &selection);
     // Only the track clicked: the command has one target, and the selection stays as it is.
     if ui.button("Scroll Into View").clicked() {
         let _ = app.run("view.scroll_into_view", json!({"track": id.0}));
@@ -1613,6 +1616,61 @@ pub(crate) fn track_context_menu(app: &mut SoundApp, ui: &mut Ui, id: TrackId) {
             ui.painter().rect_filled(r, 2.0, rgb(*c));
             if resp.clicked() {
                 let _ = app.run("track.color", json!({"tracks": selection, "color": i}));
+            }
+        }
+    });
+}
+
+/// VCA fader/mute membership for audio-signal tracks, shared by the Edit and Mix context menus.
+/// A missing VCA can always be removed; only currently available masters can be assigned.
+fn vca_assignment_menu(app: &mut SoundApp, ui: &mut Ui, tracks: &[u64]) {
+    let session = app.engine.session();
+    let eligible = !tracks.is_empty()
+        && tracks.iter().all(|&id| {
+            session
+                .track(TrackId(id))
+                .is_some_and(|track| matches!(track.kind, TrackKind::Audio | TrackKind::Instrument | TrackKind::Midi | TrackKind::Aux))
+        });
+    let masters: Vec<(u64, String)> =
+        session.tracks.iter().filter(|track| track.kind == TrackKind::Vca).map(|track| (track.id.0, track.name.clone())).collect();
+    // Some(None) means every track has no VCA; None means mixed or invalid targets.
+    let shared: Option<Option<u64>> = tracks
+        .first()
+        .and_then(|&id| session.track(TrackId(id)).map(|track| track.mixer.vca))
+        .filter(|route| tracks.iter().all(|&id| session.track(TrackId(id)).is_some_and(|track| track.mixer.vca == *route)));
+    let master_label = |id| {
+        masters
+            .iter()
+            .find(|(candidate, _)| *candidate == id)
+            .map(|(_, name)| if masters.iter().filter(|(_, other)| other == name).count() > 1 { format!("{name} (#{id})") } else { name.clone() })
+    };
+    let current = match shared {
+        Some(None) => "None".to_owned(),
+        Some(Some(id)) => master_label(id).unwrap_or_else(|| format!("Unavailable (#{id})")),
+        None => "Mixed".to_owned(),
+    };
+    if !eligible {
+        ui.add_enabled(false, egui::Button::new("Assign to VCA (audio/MIDI tracks only)"))
+            .on_disabled_hover_text("VCA members must all be audio, instrument, MIDI or aux tracks");
+        return;
+    }
+    if masters.is_empty() && shared == Some(None) {
+        ui.add_enabled(false, egui::Button::new("Assign to VCA (create a VCA Master first)"))
+            .on_disabled_hover_text("Create a VCA Master track before assigning members");
+        return;
+    }
+    ui.menu_button(format!("Assign to VCA: {current}"), |ui| {
+        let already_none = shared == Some(None);
+        if ui.add_enabled(!already_none, egui::Button::new("No VCA").selected(already_none)).clicked() {
+            let _ = app.run("track.vca", json!({"tracks": tracks, "vca": null}));
+            ui.close();
+        }
+        for (id, _) in &masters {
+            let already_assigned = shared == Some(Some(*id));
+            let label = format!("VCA Master: {}", master_label(*id).unwrap_or_else(|| format!("#{id}")));
+            if ui.add_enabled(!already_assigned, egui::Button::new(label).selected(already_assigned)).clicked() {
+                let _ = app.run("track.vca", json!({"tracks": tracks, "vca": id}));
+                ui.close();
             }
         }
     });
@@ -3031,7 +3089,114 @@ mod universe_tests {
 mod tests {
     use super::*;
     use egui::accesskit::Role;
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
+
+    fn vca_context_harness(app: SoundApp, clicked: TrackId) -> Harness<'static, SoundApp> {
+        Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(760.0, 820.0))
+            .build_ui_state(move |ui, app: &mut SoundApp| track_context_menu(app, ui, clicked), app)
+    }
+
+    #[test]
+    fn vca_context_menu_disables_missing_masters_and_invalid_track_kinds_without_dirtying() {
+        use soundcraft_model::ChannelFormat;
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let audio = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        app.engine.mark_clean();
+        let mut h = vca_context_harness(app, audio);
+        h.run_steps(3);
+        let missing = h.get_by_label("Assign to VCA (create a VCA Master first)");
+        assert!(missing.accesskit_node().is_disabled());
+        missing.click();
+        h.run_steps(2);
+        assert!(!h.state().engine.is_dirty());
+        assert!(h.state().engine.journal.is_empty());
+
+        for kind in [TrackKind::Vca, TrackKind::Master] {
+            let mut invalid_app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+            invalid_app.engine.session_mut().add_track(TrackKind::Vca, ChannelFormat::Stereo, Some("Drums VCA"));
+            let clicked = invalid_app.engine.session_mut().add_track(kind, ChannelFormat::Stereo, Some("Invalid member"));
+            invalid_app.engine.mark_clean();
+            let mut invalid = vca_context_harness(invalid_app, clicked);
+            invalid.run_steps(2);
+            assert!(invalid.get_by_label("Assign to VCA (audio/MIDI tracks only)").accesskit_node().is_disabled());
+            assert!(!invalid.state().engine.is_dirty());
+        }
+    }
+
+    #[test]
+    fn vca_context_menu_keyboard_assignment_is_one_undoable_edit_and_repaint_is_read_only() {
+        use soundcraft_model::ChannelFormat;
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let guitar = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        let drums = app.engine.session_mut().add_track(TrackKind::Vca, ChannelFormat::Stereo, Some("Drums"));
+        app.engine.mark_clean();
+        let mut h = vca_context_harness(app, guitar);
+        h.run_steps(3);
+        let undo_before = h.state().engine.undo_history().len();
+        let journal_before = h.state().engine.journal.len();
+        assert!(!h.state().engine.is_dirty());
+        h.get_by_label("Assign to VCA: None").click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.journal.len(), journal_before, "opening the menu must not execute a command");
+        h.get_by_label("VCA Master: Drums").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, Some(drums.0));
+        assert!(h.state().engine.is_dirty());
+        assert_eq!(h.state().engine.journal.len(), journal_before + 1);
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
+        h.get_by_label("Assign to VCA: Drums").click();
+        h.run_steps(2);
+        let assigned = h.get_by_label("VCA Master: Drums");
+        assert!(assigned.accesskit_node().is_disabled(), "the active assignment must be a no-op");
+        assert_eq!(assigned.accesskit_node().toggled(), Some(egui::accesskit::Toggled::True));
+        assigned.click();
+        h.run_steps(3);
+        assert_eq!(h.state().engine.journal.len(), journal_before + 1, "repainting or choosing the active assignment must not run a command");
+        assert!(h.state_mut().engine.undo());
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, None);
+        assert!(h.state_mut().engine.redo());
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, Some(drums.0));
+    }
+
+    #[test]
+    fn vca_context_menu_mixed_multi_track_selection_can_clear_and_restore_exact_routes() {
+        use soundcraft_model::ChannelFormat;
+        let mut app = SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let guitar = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        let keys = app.engine.session_mut().add_track(TrackKind::Instrument, ChannelFormat::Stereo, Some("Keys"));
+        let drums = app.engine.session_mut().add_track(TrackKind::Vca, ChannelFormat::Stereo, Some("Drums"));
+        let synths = app.engine.session_mut().add_track(TrackKind::Vca, ChannelFormat::Stereo, Some("Synths"));
+        app.engine.session_mut().track_mut(guitar).expect("Guitar").mixer.vca = Some(drums.0);
+        app.engine.session_mut().track_mut(keys).expect("Keys").mixer.vca = Some(synths.0);
+        app.engine.session_mut().edit.selected_tracks = vec![guitar, keys];
+        app.engine.mark_clean();
+        let mut h = vca_context_harness(app, guitar);
+        h.run_steps(3);
+        let journal_before = h.state().engine.journal.len();
+        assert!(!h.state().engine.is_dirty());
+        h.get_by_label("Assign to VCA: Mixed").click();
+        h.run_steps(2);
+        let clear = h.get_by_label("No VCA");
+        assert!(!clear.accesskit_node().is_disabled());
+        clear.click();
+        h.run_steps(2);
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, None);
+        assert_eq!(h.state().engine.session().track(keys).expect("Keys").mixer.vca, None);
+        assert_eq!(h.state().engine.journal.len(), journal_before + 1, "both tracks update in one command");
+        assert!(h.state_mut().engine.undo());
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, Some(drums.0));
+        assert_eq!(h.state().engine.session().track(keys).expect("Keys").mixer.vca, Some(synths.0));
+        assert!(h.state_mut().engine.redo());
+        assert_eq!(h.state().engine.session().track(guitar).expect("Guitar").mixer.vca, None);
+        assert_eq!(h.state().engine.session().track(keys).expect("Keys").mixer.vca, None);
+    }
 
     /// The painted header selectors are interactive controls; their accessible name is the field
     /// they edit, not the short value text ("Read", "Waveform") painted inside them.
