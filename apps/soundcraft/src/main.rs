@@ -172,6 +172,7 @@ fn services() -> Services {
             let d = match purpose {
                 "session.open" => d.add_filter("SoundCraft Session", &["scraft"]),
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
+                "file.import_otio" => d.add_filter("OpenTimelineIO", &["otio"]),
                 _ => d.add_filter(
                     "Audio",
                     &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
