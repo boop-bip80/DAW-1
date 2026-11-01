@@ -349,6 +349,16 @@ fn plain_composable(value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// All OTIO Composable.enabled flags default to true when omitted. An explicitly malformed
+/// flag must not silently become audible audio, which `Value::as_bool() == Some(false)` does.
+fn composable_enabled(value: &Value, label: &str) -> Result<bool> {
+    match value.get("enabled") {
+        None => Ok(true),
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        _ => Err(invalid_import(format!("{label} enabled must be a boolean"))),
+    }
+}
+
 /// OTIO's time bases can differ from the current session's. Convert every boundary to the
 /// nearest sample (ties away from zero), bounding the result to losslessly representable values.
 /// Only Clip.2's media timecode origins may be negative; durations and native timeline positions
@@ -660,6 +670,9 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
         return Err(invalid_import("global timeline offsets are not supported"));
     }
     let stack = expect_schema(timeline.get("tracks").ok_or_else(|| invalid_import("timeline has no tracks"))?, "Stack.1")?;
+    if !composable_enabled(stack, "Stack.1")? {
+        return Err(invalid_import("a disabled Stack.1 is not supported; enable or render the composition before import"));
+    }
     if stack.get("effects").is_some_and(|v| v.as_array().is_none_or(|items| !items.is_empty())) {
         return Err(invalid_import("stack effects are not supported"));
     }
@@ -696,9 +709,10 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
         if value.get("source_range").is_some_and(|v| !v.is_null()) {
             return Err(invalid_import("track trims are not supported"));
         }
+        let track_enabled = composable_enabled(value, "Track.1")?;
         let mut track = ImportedTrack {
             name: value.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or("OTIO Audio").to_owned(),
-            inactive: value.get("enabled").and_then(Value::as_bool) == Some(false),
+            inactive: !track_enabled,
             clips: Vec::new(),
             channels: 1,
         };
@@ -715,6 +729,7 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                     cursor.advance(range.get("duration").ok_or_else(|| invalid_import("gap has no duration"))?, rate)?;
                 }
                 Some("Clip.1" | "Clip.2") => {
+                    let clip_enabled = composable_enabled(child, "Clip")?;
                     reject_nontrivial_metadata(child)?;
                     clip_count = clip_count.checked_add(1).filter(|n| *n <= MAX_CLIPS).ok_or_else(|| invalid_import("more than 100000 clips"))?;
                     let is_clip_two = child.get("OTIO_SCHEMA").and_then(Value::as_str) == Some("Clip.2");
@@ -838,7 +853,7 @@ pub(crate) fn import_audio_with_channels(engine: &mut Engine, document: &Path, b
                         offset: media_offset,
                         start,
                         length: duration,
-                        muted: child.get("enabled").and_then(Value::as_bool) == Some(false),
+                        muted: !clip_enabled,
                     });
                 }
                 _ => return Err(invalid_import("only sequential audio clips and gaps are supported (no transitions or nested compositions)")),
@@ -917,6 +932,12 @@ mod tests {
     // The official adapter preserves both keys; SoundCraft has no native representation for
     // alternate media, so a plain OTIO import must reject this instead of silently dropping it.
     const OFFICIAL_ALTERNATE_MEDIA_CLIP_TWO: &str = r#"{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Alternate edit","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":1000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":4000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/primary.wav"},"Proxy":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":4000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/proxy.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}"#;
+
+    // Full two-track stereo Clip.2 timeline serialized independently with OpenTimelineIO
+    // 0.18.1's otio_json writer after `timeline.tracks.enabled = False`; reading it with
+    // the same official adapter also returns `tracks.enabled == False`. Both child audio
+    // tracks and clips remain enabled, so discarding only the Stack flag makes audio audible.
+    const OFFICIAL_DISABLED_AUDIO_STACK: &str = r#"{"OTIO_SCHEMA":"Timeline.1","metadata":{},"name":"Disabled audio stack","global_start_time":null,"tracks":{"OTIO_SCHEMA":"Stack.1","metadata":{},"name":"tracks","source_range":null,"effects":[],"markers":[],"enabled":false,"color":null,"children":[{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Left and right one","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Lead","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":12000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":24000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"},{"OTIO_SCHEMA":"Track.1","metadata":{},"name":"Left and right two","source_range":null,"effects":[],"markers":[],"enabled":true,"color":null,"children":[{"OTIO_SCHEMA":"Clip.2","metadata":{},"name":"Back","source_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":3000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":2000.0}},"effects":[],"markers":[],"enabled":true,"color":null,"media_references":{"DEFAULT_MEDIA":{"OTIO_SCHEMA":"ExternalReference.1","metadata":{},"name":"","available_range":{"OTIO_SCHEMA":"TimeRange.1","duration":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":96000.0},"start_time":{"OTIO_SCHEMA":"RationalTime.1","rate":48000.0,"value":0.0}},"available_image_bounds":null,"target_url":"media/negative.wav"}},"active_media_reference_key":"DEFAULT_MEDIA"}],"kind":"Audio"}]}}"#;
 
     fn official_marked_timeline() -> Value {
         let mut timeline: Value = serde_json::from_str(OFFICIAL_NEGATIVE_ORIGIN_CLIP_TWO).unwrap();
@@ -1127,6 +1148,136 @@ mod tests {
         assert!(percussion.clips()[0].muted);
         std::fs::remove_file(document).unwrap();
         std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn official_disabled_stack_and_malformed_enabled_flags_fail_plain_otio_atomically() {
+        let (_, media) = decodable_fixture();
+        let document = media.with_extension("otio");
+        let mut official: Value = serde_json::from_str(OFFICIAL_DISABLED_AUDIO_STACK).unwrap();
+        let uri = file_url(&media).unwrap();
+        for track in official["tracks"]["children"].as_array_mut().unwrap() {
+            track["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"] = json!(uri);
+        }
+        let mut cases = Vec::<(&str, Value, &str)>::new();
+        cases.push(("official disabled stack", official.clone(), "disabled Stack.1"));
+        let mut bad_stack = official.clone();
+        bad_stack["tracks"]["enabled"] = json!("false");
+        cases.push(("malformed stack", bad_stack, "Stack.1 enabled must be a boolean"));
+        let mut null_track = official.clone();
+        null_track["tracks"]["enabled"] = json!(true);
+        null_track["tracks"]["children"][0]["enabled"] = Value::Null;
+        cases.push(("null track enabled", null_track, "Track.1 enabled must be a boolean"));
+        let mut bad_clip = official.clone();
+        bad_clip["tracks"]["enabled"] = json!(true);
+        bad_clip["tracks"]["children"][1]["children"][0]["enabled"] = json!("false");
+        cases.push(("malformed clip", bad_clip, "Clip enabled must be a boolean"));
+
+        let mut engine = Engine::default();
+        let before = engine.session().clone();
+        for (case, invalid, expected) in cases {
+            std::fs::write(&document, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let err = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{err}").contains(expected), "unexpected error for {case}: {err}");
+            assert_eq!(*engine.session(), before, "{case} changed the native session");
+            assert!(!engine.can_undo(), "{case} introduced an undo step");
+        }
+
+        // Valid child flags remain meaningful; omitted enabled fields retain OTIO's true default.
+        let mut active = official.clone();
+        active["tracks"]["enabled"] = json!(true);
+        active["tracks"]["children"][0]["enabled"] = json!(false);
+        active["tracks"]["children"][1]["children"][0]["enabled"] = json!(false);
+        std::fs::write(&document, serde_json::to_vec(&active).unwrap()).unwrap();
+        let result = engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert_eq!(result["audio_tracks"], 2);
+        assert_eq!(result["audio_clips"], 2);
+        assert!(engine.session().tracks.iter().find(|track| track.name == "Left and right one").unwrap().inactive);
+        assert!(engine.session().tracks.iter().find(|track| track.name == "Left and right two").unwrap().clips()[0].muted);
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+
+        for track in active["tracks"]["children"].as_array_mut().unwrap() {
+            track.as_object_mut().unwrap().remove("enabled");
+            track["children"][0].as_object_mut().unwrap().remove("enabled");
+        }
+        active["tracks"].as_object_mut().unwrap().remove("enabled");
+        std::fs::write(&document, serde_json::to_vec(&active).unwrap()).unwrap();
+        engine.execute("file.import_otio", &json!({"path": document.to_str().unwrap()})).unwrap();
+        assert!(engine.session().tracks.iter().all(|track| !track.inactive && track.clips().iter().all(|clip| !clip.muted)));
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        std::fs::remove_file(document).unwrap();
+        std::fs::remove_file(media).unwrap();
+    }
+
+    #[test]
+    fn official_disabled_stack_otioz_rejects_without_leaking_staged_media_and_keeps_valid_audio() {
+        let folder = std::env::temp_dir().join(format!(
+            "soundcraft-otio-stack-enabled-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let project = folder.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let archive = folder.join("disabled.otioz");
+        let official: Value = serde_json::from_str(OFFICIAL_DISABLED_AUDIO_STACK).unwrap();
+        let left = (0..96_000).map(|frame| frame as f32 / 200_000.0).collect::<Vec<_>>();
+        let right = (0..96_000).map(|frame| -0.7 + frame as f32 / 300_000.0).collect::<Vec<_>>();
+        let wav =
+            soundcraft_audio_io::encode(&AudioBuffer { sample_rate: 48_000, channels: vec![left.clone(), right.clone()] }, &EncodeOptions::default())
+                .unwrap();
+        let mut engine = Engine::new(Session { folder: Some(project.clone()), ..Session::default() });
+        engine.path = Some(project.join("project.scraft").to_str().unwrap().to_owned());
+        let before = engine.session().clone();
+        let mut variants = Vec::<(&str, Value, &str)>::new();
+        variants.push(("official disabled", official.clone(), "disabled Stack.1"));
+        let mut malformed_stack = official.clone();
+        malformed_stack["tracks"]["enabled"] = Value::Null;
+        variants.push(("null stack", malformed_stack, "Stack.1 enabled must be a boolean"));
+        let mut malformed_track = official.clone();
+        malformed_track["tracks"]["enabled"] = json!(true);
+        malformed_track["tracks"]["children"][1]["enabled"] = json!("true");
+        variants.push(("string track", malformed_track, "Track.1 enabled must be a boolean"));
+        let mut malformed_clip = official.clone();
+        malformed_clip["tracks"]["enabled"] = json!(true);
+        malformed_clip["tracks"]["children"][0]["children"][0]["enabled"] = json!(0);
+        variants.push(("number clip", malformed_clip, "Clip enabled must be a boolean"));
+        for (case, invalid, expected) in variants {
+            std::fs::write(&archive, pack_negative_origin_bundle(&invalid, &wav)).unwrap();
+            let err = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap_err();
+            assert!(format!("{err}").contains(expected), "unexpected error for {case}: {err}");
+            assert_eq!(*engine.session(), before, "{case} mutated the native session");
+            assert!(!engine.can_undo(), "{case} introduced an undo step");
+            assert!(!project.join("Audio Files").exists(), "{case} leaked privately extracted media");
+        }
+
+        let mut active = official;
+        active["tracks"]["enabled"] = json!(true);
+        active["tracks"]["children"][0]["enabled"] = json!(false);
+        active["tracks"]["children"][1]["children"][0]["enabled"] = json!(false);
+        std::fs::write(&archive, pack_negative_origin_bundle(&active, &wav)).unwrap();
+        let report = engine.execute("file.import_otioz", &json!({"path": archive.to_str().unwrap()})).unwrap();
+        assert_eq!((report["audio_tracks"].as_u64(), report["audio_clips"].as_u64()), (Some(2), Some(2)));
+        let lead = engine.session().tracks.iter().find(|track| track.name == "Left and right one").unwrap();
+        let back = engine.session().tracks.iter().find(|track| track.name == "Left and right two").unwrap();
+        assert!(lead.inactive);
+        assert!(back.clips()[0].muted);
+        assert!(matches!(&lead.clips()[0].content, ClipContent::Audio { offset: 24_000, .. }));
+        assert!(matches!(&back.clips()[0].content, ClipContent::Audio { offset: 2_000, .. }));
+        let source = engine
+            .session()
+            .source(match &lead.clips()[0].content {
+                ClipContent::Audio { source, .. } => *source,
+                _ => unreachable!(),
+            })
+            .unwrap();
+        assert_eq!(source.channels, 2, "asymmetric stereo media must not become mono");
+        assert!(engine.undo());
+        assert_eq!(*engine.session(), before);
+        assert!(engine.redo());
+        assert_eq!(engine.session().tracks.len(), 2);
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
