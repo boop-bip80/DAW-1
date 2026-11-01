@@ -18,7 +18,6 @@ const KNOWN_UNREACHED: &[&str] = &[
     "markers.next",
     "markers.previous",
     "mix.clear_mutes",
-    "mix.clear_solos",
     "mix.insert_move",
     "mix.send_surround_pan",
     "setup.hardware",        // menu opens the Playback Engine window, which doesn't run it
