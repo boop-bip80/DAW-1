@@ -21,7 +21,6 @@ const KNOWN_UNREACHED: &[&str] = &[
     "mix.clear_solos",
     "mix.insert_move",
     "mix.send_surround_pan",
-    "mix.solo_safe",
     "setup.hardware",        // menu opens the Playback Engine window, which doesn't run it
     "setup.playback_engine", // same
     "setup.reset_edit_state",
