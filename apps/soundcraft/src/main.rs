@@ -174,6 +174,7 @@ fn services() -> Services {
                 "file.import_midi" => d.add_filter("MIDI", &["mid", "midi", "smf"]),
                 "file.import_edl" => d.add_filter("CMX3600 EDL", &["edl"]),
                 "file.import_otio" => d.add_filter("OpenTimelineIO", &["otio"]),
+                "file.import_otioz" => d.add_filter("OpenTimelineIO Bundle", &["otioz"]),
                 _ => d.add_filter(
                     "Audio",
                     &["wav", "wave", "bwf", "aif", "aiff", "aifc", "flac", "mp3", "ogg", "oga", "m4a", "m4b", "aac", "mp4", "caf", "mkv", "webm"],
