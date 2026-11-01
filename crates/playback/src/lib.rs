@@ -24,11 +24,11 @@
 
 mod clock;
 pub mod devices;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod midi_live_thru;
 pub mod midi_out;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod midi_out_runtime;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod midi_live_thru;
 pub mod record;
 
 pub use devices::AudioConfig;
