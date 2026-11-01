@@ -71,10 +71,11 @@ pub(crate) fn content(app: &mut SoundApp, ui: &mut Ui) {
 }
 
 /// Session-wide Mix actions stay above the horizontally scrolling strips. Count hidden tracks as
-/// well: the engine command clears all solos, not just the subset currently visible on screen.
+/// well: the engine commands clear all solos or mutes, not just the subset visible on screen.
 fn mix_action_header(app: &mut SoundApp, ui: &mut Ui) {
     let soloed = app.engine.session().tracks.iter().filter(|track| track.mixer.solo).count();
-    ui.horizontal(|ui| {
+    let muted = app.engine.session().tracks.iter().filter(|track| track.mixer.mute).count();
+    ui.horizontal_wrapped(|ui| {
         let button = ui
             .add_enabled(soloed > 0, egui::Button::new("Clear all solos"))
             .on_hover_text("Clear all soloed tracks, including hidden tracks. Undo restores their previous solo states.");
@@ -85,6 +86,18 @@ fn mix_action_header(app: &mut SoundApp, ui: &mut Ui) {
             ui.weak("No tracks soloed");
         } else {
             ui.weak(format!("{soloed} soloed"));
+        }
+        ui.separator();
+        let button = ui
+            .add_enabled(muted > 0, egui::Button::new("Clear all mutes"))
+            .on_hover_text("Clear all muted tracks, including hidden tracks. Undo restores their previous mute states.");
+        if button.clicked() {
+            let _ = app.run("mix.clear_mutes", json!({}));
+        }
+        if muted == 0 {
+            ui.weak("No tracks muted");
+        } else {
+            ui.weak(format!("{muted} muted"));
         }
     });
     ui.separator();
@@ -1937,6 +1950,90 @@ mod tests {
         h.state_mut().engine.mark_clean();
         h.run_steps(3);
         assert!(!h.state().engine.is_dirty(), "repainting a disabled clear button must never issue a second command");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
+    }
+
+    #[test]
+    fn clear_all_mutes_is_disabled_without_muted_tracks_and_does_not_clear_solos() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let guitar = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Guitar"));
+        app.engine.session_mut().track_mut(guitar).expect("guitar").mixer.solo = true;
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(920.0, 820.0))
+            .build_ui_state(|ui, app: &mut crate::SoundApp| super::content(app, ui), app);
+
+        h.run_steps(3);
+        h.get_by_label("No tracks muted");
+        assert!(
+            h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear all mutes").accesskit_node().is_disabled(),
+            "Clear all mutes must be visible but disabled if nothing is muted"
+        );
+        assert!(!h.state().engine.is_dirty(), "Mix header paint is read-only");
+        let undo_before = h.state().engine.undo_history().len();
+        h.get_by_label("Clear all mutes").click();
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "disabled Clear all mutes must not create a no-op edit");
+        assert_eq!(h.state().engine.undo_history().len(), undo_before);
+        assert!(h.state().engine.session().track(guitar).expect("guitar").mixer.solo, "unrelated solo must remain set");
+    }
+
+    #[test]
+    fn clear_all_mutes_keyboard_undo_redo_preserves_solo_and_solo_safe() {
+        use soundcraft_model::{ChannelFormat, TrackKind};
+        let mut app = crate::SoundApp::new(soundcraft_engine::Engine::default(), None, crate::Services::default());
+        let lead = app.engine.session_mut().add_track(TrackKind::Audio, ChannelFormat::Stereo, Some("Lead"));
+        let hidden = app.engine.session_mut().add_track(TrackKind::Midi, ChannelFormat::Stereo, Some("Hidden Keys"));
+        let lead_track = app.engine.session_mut().track_mut(lead).expect("lead");
+        lead_track.mixer.mute = true;
+        lead_track.mixer.solo = true;
+        lead_track.mixer.solo_safe = true;
+        let hidden_track = app.engine.session_mut().track_mut(hidden).expect("hidden keys");
+        hidden_track.mixer.mute = true;
+        hidden_track.hidden = true;
+        app.engine.mark_clean();
+        let mut h = Harness::builder()
+            .with_context_setup(crate::fonts::install)
+            .with_size(vec2(920.0, 820.0))
+            .build_ui_state(|ui, app: &mut crate::SoundApp| super::content(app, ui), app);
+
+        h.run_steps(3);
+        h.get_by_label("2 muted");
+        assert!(!h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear all mutes").accesskit_node().is_disabled());
+        assert!(!h.state().engine.is_dirty(), "paint must not change any mute");
+        let undo_before = h.state().engine.undo_history().len();
+
+        h.get_by_label("Clear all mutes").focus();
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        for id in [lead, hidden] {
+            assert!(!h.state().engine.session().track(id).expect("track").mixer.mute, "hidden and visible mutes must both clear");
+        }
+        assert!(h.state().engine.is_dirty());
+        assert_eq!(h.state().engine.undo_history().len(), undo_before + 1, "one keyboard action must be one undoable command");
+        assert!(h.get_by_label("Clear all mutes").accesskit_node().is_disabled(), "button must disable when mutes are cleared");
+        let lead_after = h.state().engine.session().track(lead).expect("lead");
+        assert!(lead_after.mixer.solo && lead_after.mixer.solo_safe, "Clearing mutes must preserve Solo and Solo Safe");
+        assert!(!h.get_by_label("Clear all solos").accesskit_node().is_disabled(), "solo must remain independently clearable");
+
+        h.state_mut().run("edit.undo", serde_json::json!({})).expect("undo clear mutes");
+        h.run_steps(2);
+        for id in [lead, hidden] {
+            assert!(h.state().engine.session().track(id).expect("track").mixer.mute, "undo must restore both mutes");
+        }
+        h.state_mut().run("edit.redo", serde_json::json!({})).expect("redo clear mutes");
+        h.run_steps(2);
+        for id in [lead, hidden] {
+            assert!(!h.state().engine.session().track(id).expect("track").mixer.mute);
+        }
+        let lead_after = h.state().engine.session().track(lead).expect("lead");
+        assert!(lead_after.mixer.solo && lead_after.mixer.solo_safe, "undo/redo must not change independent solo settings");
+        h.state_mut().engine.mark_clean();
+        h.run_steps(3);
+        assert!(!h.state().engine.is_dirty(), "repainting the disabled button must not reissue Clear all mutes");
         assert_eq!(h.state().engine.undo_history().len(), undo_before + 1);
     }
 
